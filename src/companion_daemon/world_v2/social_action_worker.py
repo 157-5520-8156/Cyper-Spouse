@@ -14,7 +14,6 @@ from .accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from .errors import ConcurrencyConflict
 from .event_identity import domain_idempotency_key
 from .expression_plan_acceptance import ExpressionPlanAcceptanceError
-from .pinned_turn import PinnedTurnCompiler
 from .proposal_audit_schemas import ProposalAuditProjection
 from .proposal_envelope import DecisionProposal, MinimalProposal, validate_proposal_envelope
 from .schema_core import FrozenModel
@@ -62,13 +61,17 @@ class SocialActionRunResult(FrozenModel):
 
 
 class SocialActionWorker:
-    """Audit a pinned observation, then accept only a source-bound defer."""
+    """Consume the unified inbound audit and accept a source-bound defer.
+
+    This downstream authority never owns a character model or PinnedTurn.  A
+    missing audit is upstream technical state, not permission to open a second
+    semantic turn for the same Observation.
+    """
 
     def __init__(
         self,
         *,
         ledger,
-        pinned_turn: PinnedTurnCompiler | None,
         batch_issuer: AcceptedLedgerBatchIssuer,
         policy: SocialDeferredPolicy,
         actor: str = "actor:companion",
@@ -77,7 +80,6 @@ class SocialActionWorker:
         if not actor or not source:
             raise ValueError("social action worker authority metadata is required")
         self._ledger = ledger
-        self._turn = pinned_turn
         self._recorder = SocialDeferredAtomicRecorder(batch_issuer=batch_issuer)
         self._threads = DeferredThreadProposalCompiler(ledger=ledger)
         self._policy = policy
@@ -109,13 +111,12 @@ class SocialActionWorker:
             # Production reuses the already-audited main reply proposal.  A
             # missing/failed main audit is not work for this lane and must not
             # consume one background unit forever on every scheduler pass.
-            if self._turn is None:
-                resolution = self._resolve_audit(
-                    projection=projection,
-                    trigger_ref=observation[1].event_id,
-                )
-                if resolution.audit is None or resolution.choice != "defer":
-                    continue
+            resolution = self._resolve_audit(
+                projection=projection,
+                trigger_ref=observation[1].event_id,
+            )
+            if resolution.audit is None or resolution.choice != "defer":
+                continue
             return await self.run_observation(source.observation_id)
         return SocialActionRunResult(status="idle")
 
@@ -136,34 +137,10 @@ class SocialActionWorker:
                 reason_code=resolution.reason_code,
             )
         if audit is None:
-            cursor = ProjectionCursor(world_revision=projection.world_revision,
-                deliberation_revision=projection.deliberation_revision,
-                ledger_sequence=projection.ledger_sequence)
-            if self._turn is None:
-                return SocialActionRunResult(
-                    status="unavailable", reason_code="social_action.shared_audit_unavailable"
-                )
-            try:
-                await self._turn.audit_observation(
-                    observation=observation,
-                    observation_event=observation_event,
-                    cursor=cursor,
-                )
-            except ConcurrencyConflict:
-                return SocialActionRunResult(status="stale", reason_code="social_action.cursor_stale")
-            projection = self._ledger.project()
-            resolution = self._resolve_audit(
-                projection=projection,
-                trigger_ref=observation_event.event_id,
+            return SocialActionRunResult(
+                status="unavailable",
+                reason_code="social_action.shared_audit_unavailable",
             )
-            audit = resolution.audit
-            if audit is None and resolution.reason_code is not None:
-                return SocialActionRunResult(
-                    status="unavailable",
-                    reason_code=resolution.reason_code,
-                )
-        if audit is None:
-            return SocialActionRunResult(status="unavailable", reason_code="social_action.model_terminal_failure")
         proposal = validate_proposal_envelope(json.loads(audit.proposal_json))
         if not (
             isinstance(proposal, MinimalProposal)

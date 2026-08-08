@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-import hashlib
 import json
 from types import SimpleNamespace
 
@@ -9,20 +8,12 @@ import pytest
 
 from companion_daemon.world_v2.external_world_perception.contracts import (
     CharacterAttentionContext,
-    CharacterAttentionRequest,
-    CharacterAttentionResult,
-    PerceptionWindow,
     LiveCharacterAttentionContext,
-    LiveCharacterAttentionRequest,
-    LiveCharacterAttentionResult,
-    LivePerceptionWindow,
     PerceptionChannelProof,
 )
 from companion_daemon.world_v2.external_world_perception.production_attention import (
     CapsuleBackedLiveAttentionContextPort,
     CapsuleBackedShadowAttentionContextPort,
-    ChatCompletionLiveAttentionModel,
-    ChatCompletionShadowAttentionModel,
     LedgerPublicInformationChannelPort,
     StaticLiveAttentionChannelPort,
     public_information_capability_id,
@@ -34,10 +25,6 @@ from companion_daemon.world_v2.schemas import ProjectionCursor
 
 NOW = datetime(2026, 8, 3, 4, 0, tzinfo=UTC)
 REGISTRY_HASH = "sha256:" + "a" * 64
-
-
-def _hash_text(value: str) -> str:
-    return hashlib.sha256(value.encode()).hexdigest()
 
 
 def _world() -> WorldLedger:
@@ -71,9 +58,15 @@ class _ForbiddenUserSlicesCapsule:
 
     def __init__(self) -> None:
         source = SimpleNamespace(ref="event:self:1")
+        value = {"values": {"slow_evolving": {"activity": "在窗边整理东西"}}}
         item = SimpleNamespace(
             item_ref="self:1",
-            payload_json='{"activity":"在窗边整理东西"}',
+            payload_json=json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
             source_bindings=(source,),
         )
         self.character_core = SimpleNamespace(items=(item,))
@@ -84,6 +77,38 @@ class _ForbiddenUserSlicesCapsule:
         self.appraisals = SimpleNamespace(items=())
         self.open_threads = SimpleNamespace(items=())
         self.recent_experiences = SimpleNamespace(items=())
+        slices = {
+            name: {"availability": "unavailable"}
+            for name in (
+                "current_situation",
+                "relationship_slice",
+                "appraisals",
+                "affect_episodes",
+                "open_threads",
+                "recent_experiences",
+                "world_life",
+            )
+        }
+        slices["character_core"] = {
+            "availability": "available",
+            "items": [{"item_ref": "self:1", "value": value}],
+        }
+        self.model_content_json = json.dumps(
+            {
+                "world_id": "world:attention-production",
+                "actor_ref": "character:zhizhi",
+                "trigger_ref": "external-attention-context:test",
+                "world_revision": 1,
+                "deliberation_revision": 0,
+                "ledger_sequence": 1,
+                "logical_time": NOW.isoformat(),
+                "consumer_scope": "deliberation_internal",
+                "slices": slices,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
 
     @property
     def recent_dialogue(self) -> object:
@@ -138,8 +163,7 @@ async def test_context_port_freezes_complete_cursor_and_only_role_safe_capsule_s
         ledger_sequence=projected.ledger_sequence,
     )
     assert context.world_logical_time == NOW
-    assert context.current_self_state[0].text == '{"activity":"在窗边整理东西"}'
-    assert context.current_self_state[0].source_refs == ("event:self:1",)
+    assert not hasattr(context, "inner_life_snapshot")
     assert context.available_channels == (channel,)
     assert compiler.queries[0].cursor == context.pinned_world_cursor
 
@@ -232,6 +256,7 @@ async def test_public_information_channel_is_derived_from_exact_active_ledger_ca
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("state", ["revoked", "expired"])
+@pytest.mark.asyncio
 async def test_public_information_channel_fails_closed_without_active_authority(
     state: str,
 ) -> None:
@@ -280,130 +305,6 @@ async def test_public_information_channel_fails_closed_without_active_authority(
     assert channels == ()
 
 
-class _ChatModel:
-    model = "fixture-background-model"
-
-    def __init__(self, response: str) -> None:
-        self.response = response
-        self.calls: list[tuple[list[dict[str, str]], float]] = []
-
-    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
-        self.calls.append((messages, temperature))
-        return self.response
-
-
-def _request(*, ordinal: int = 0) -> LiveCharacterAttentionRequest:
-    projection = _world().project()
-    cursor = ProjectionCursor(
-        world_revision=projection.world_revision,
-        deliberation_revision=projection.deliberation_revision,
-        ledger_sequence=projection.ledger_sequence,
-    )
-    context = LiveCharacterAttentionContext(
-        world_id="world:attention-production",
-        actor_ref="character:zhizhi",
-        pinned_world_cursor=cursor,
-        world_logical_time=NOW,
-        current_self_state=(),
-        situation=(),
-        relevant_context=(),
-        available_channels=(),
-    )
-    window = LivePerceptionWindow.model_construct(
-        window_id="window:1",
-        attention_attempt_id="attempt:1",
-        opportunity_id="opportunity:1",
-        world_id=context.world_id,
-        actor_ref=context.actor_ref,
-        pinned_world_cursor=cursor,
-        attention_policy_revision="attention-policy:1",
-        deployment_mode="live",
-        deployment_mode_revision="live:test:1",
-        generated_at=NOW,
-        expires_at=NOW + timedelta(hours=1),
-        candidates=(),
-        durable_snapshots=(),
-        candidate_set_hash="a" * 64,
-        exposure_draw_ref="draw:1",
-    )
-    return LiveCharacterAttentionRequest(
-        attention_attempt_id="attempt:1",
-        retry_ordinal=0,
-        selection_ordinal=ordinal,
-        window=window,
-        current_context=context,
-        validation_failure_codes=("result_shape_invalid:selections",) if ordinal else (),
-        rejected_result_json='{"wrong":true}' if ordinal else None,
-    )
-
-
-@pytest.mark.asyncio
-async def test_model_adapter_preserves_exact_audit_and_leaves_zero_or_many_to_character() -> None:
-    raw = '{ "selections" : [] }'
-    model = _ChatModel(raw)
-    adapter = ChatCompletionLiveAttentionModel(
-        model=model,
-        model_id=model.model,
-        adapter_revision="external-attention-chat.1",
-    )
-
-    result = await adapter.consider_attention(_request())
-
-    assert result.decision == LiveCharacterAttentionResult(selections=())
-    assert result.model_result.proposal_hash == "sha256:" + _hash_text('{"selections":[]}')
-    audit = json.loads(result.model_result.audit_json)
-    assert audit["request_hash"] == _hash_text(
-        json.dumps(model.calls[0][0], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    )
-    assert audit["response_hash"] == _hash_text(raw)
-    trace = adapter.trace_for(
-        attention_attempt_id="attempt:1", retry_ordinal=0, selection_ordinal=0
-    )
-    assert trace.request_json == json.dumps(
-        model.calls[0][0], ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
-    assert trace.response_text == raw
-    system_prompt = model.calls[0][0][0]["content"]
-    assert "固定动机" not in system_prompt
-    assert "必须联系" not in system_prompt
-    assert "是否注意以及注意多少条都由你决定" in system_prompt
-
-
-@pytest.mark.asyncio
-async def test_model_adapter_exposes_exact_reselection_failures_without_local_fallback() -> None:
-    model = _ChatModel('{"selections":[]}')
-    adapter = ChatCompletionLiveAttentionModel(model=model, model_id=model.model)
-
-    await adapter.consider_attention(_request(ordinal=1))
-
-    prompt = model.calls[0][0][1]["content"]
-    assert "result_shape_invalid:selections" in prompt
-    assert json.loads(prompt)["reselection"]["rejected_result_json"] == '{"wrong":true}'
-    assert len(model.calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_invalid_model_shape_is_returned_to_coordinator_without_local_repair() -> None:
-    model = _ChatModel("not json at all")
-    adapter = ChatCompletionLiveAttentionModel(model=model, model_id=model.model)
-
-    rejected = await adapter.consider_attention(_request())
-
-    assert rejected["invalid_model_output"] == "not json at all"
-    assert rejected["response_hash"] == _hash_text("not json at all")
-    assert len(model.calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_live_model_rejects_a_provider_wrapped_contract_for_model_owned_reselection() -> None:
-    model = _ChatModel('{"output_contract":{"selections":[]}}')
-    adapter = ChatCompletionLiveAttentionModel(model=model, model_id=model.model)
-
-    result = await adapter.consider_attention(_request())
-
-    assert result["invalid_model_output"] == '{"output_contract":{"selections":[]}}'
-
-
 @pytest.mark.asyncio
 async def test_shadow_context_uses_same_capsule_but_only_an_opaque_read_cursor() -> None:
     ledger = _world()
@@ -434,90 +335,4 @@ async def test_shadow_context_uses_same_capsule_but_only_an_opaque_read_cursor()
         "ledger_sequence": 1,
         "world_revision": 1,
     }
-    assert context.current_self_state[0].source_refs == ("event:self:1",)
-
-
-@pytest.mark.asyncio
-async def test_shadow_model_uses_real_character_choice_without_v2_audit_authority() -> None:
-    live_request = _request()
-    shadow_context = CharacterAttentionContext(
-        world_id=live_request.current_context.world_id,
-        actor_ref=live_request.current_context.actor_ref,
-        pinned_world_cursor="projection-cursor:{}",
-        current_self_state=(),
-        situation=(),
-        relevant_context=(),
-        available_channels=(),
-    )
-    shadow_window = PerceptionWindow.model_construct(
-        **live_request.window.model_dump(
-            mode="python",
-            exclude={
-                "durable_snapshots",
-                "pinned_world_cursor",
-                "deployment_mode",
-                "deployment_mode_revision",
-            },
-        ),
-        deployment_mode="shadow",
-        deployment_mode_revision="shadow:test:1",
-        pinned_world_cursor=shadow_context.pinned_world_cursor,
-    )
-    request = CharacterAttentionRequest(
-        attention_attempt_id=shadow_window.attention_attempt_id,
-        retry_ordinal=0,
-        selection_ordinal=0,
-        window=shadow_window,
-        current_context=shadow_context,
-    )
-    model = _ChatModel('{"selections":[]}')
-    adapter = ChatCompletionShadowAttentionModel(model=model, model_id=model.model)
-
-    result = await adapter.consider_attention(request)
-
-    assert result == CharacterAttentionResult(selections=())
-    assert not hasattr(result, "model_result")
-    assert "是否注意以及注意多少条都由你决定" in model.calls[0][0][0]["content"]
-
-
-@pytest.mark.asyncio
-async def test_shadow_model_rejects_a_provider_wrapped_contract_for_model_owned_reselection() -> (
-    None
-):
-    live_request = _request()
-    shadow_context = CharacterAttentionContext(
-        world_id=live_request.current_context.world_id,
-        actor_ref=live_request.current_context.actor_ref,
-        pinned_world_cursor="projection-cursor:{}",
-        current_self_state=(),
-        situation=(),
-        relevant_context=(),
-        available_channels=(),
-    )
-    shadow_window = PerceptionWindow.model_construct(
-        **live_request.window.model_dump(
-            mode="python",
-            exclude={
-                "durable_snapshots",
-                "pinned_world_cursor",
-                "deployment_mode",
-                "deployment_mode_revision",
-            },
-        ),
-        deployment_mode="shadow",
-        deployment_mode_revision="shadow:test:wrapped-contract",
-        pinned_world_cursor=shadow_context.pinned_world_cursor,
-    )
-    request = CharacterAttentionRequest(
-        attention_attempt_id=shadow_window.attention_attempt_id,
-        retry_ordinal=0,
-        selection_ordinal=0,
-        window=shadow_window,
-        current_context=shadow_context,
-    )
-    model = _ChatModel('{"output_contract":{"selections":[]}}')
-    adapter = ChatCompletionShadowAttentionModel(model=model, model_id=model.model)
-
-    result = await adapter.consider_attention(request)
-
-    assert result["invalid_model_output"] == '{"output_contract":{"selections":[]}}'
+    assert context.world_logical_time == NOW

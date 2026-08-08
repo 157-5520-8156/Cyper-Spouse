@@ -9,14 +9,8 @@ from pathlib import Path
 import pytest
 
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
-from companion_daemon.world_v2.appraisal_acceptance_runtime import AppraisalAcceptanceRuntime
-from companion_daemon.world_v2.appraisal_proposal_compiler import AppraisalProposalCompiler
-from companion_daemon.world_v2.appraisal_proposal_worker import AppraisalProposalWorker
-from companion_daemon.world_v2.affect_acceptance_runtime import AffectAcceptanceRuntime
-from companion_daemon.world_v2.affect_deliberation_worker import AffectDeliberationWorker
-from companion_daemon.world_v2.affect_proposal_compiler import AffectProposalCompiler
+from companion_daemon.world_v2.appraisal_trigger import interaction_appraisal_trigger_events
 from companion_daemon.world_v2.context_capsule import ContextCapsuleCompiler
-from companion_daemon.world_v2.advisory_compiler import AdvisoryAdapterInput, AdvisoryCompiler
 from companion_daemon.world_v2.deliberation import (
     Deliberation,
     ModelInput,
@@ -35,7 +29,6 @@ from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.batch_invariants import interaction_appraisal_trigger_identity
 from companion_daemon.world_v2.ledger_context_resolver import (
-    ContextRelevanceScope,
     context_capsule_compiler_from_ledger,
 )
 from companion_daemon.world_v2.pinned_turn import PinnedTurnCompiler
@@ -44,10 +37,8 @@ from companion_daemon.world_v2.minimal_reply_atomic_recorder import MinimalReply
 from companion_daemon.world_v2.perception_trigger import perception_trigger_event
 from companion_daemon.world_v2.proposal_envelope import (
     CanonicalTypedPayload,
-    DecisionProposal,
     MinimalProposal,
     ProposalActionIntent,
-    ProposalEvidenceRef,
     TypedChange,
 )
 from companion_daemon.world_v2.runtime import WorldRuntime
@@ -59,11 +50,6 @@ from companion_daemon.world_v2.schemas import (
     WorldEvent,
 )
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
-from companion_daemon.world_v2.matrix_catalog import (
-    CandidateDistribution,
-    ClassificationCandidate,
-    default_matrix_catalog,
-)
 
 
 NOW = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
@@ -191,175 +177,6 @@ class _MinimalReplyModel:
         )
 
 
-class _DecisionAppraisalModel:
-    def __init__(self, *, evidence_hash: str) -> None:
-        self._evidence_hash = evidence_hash
-        self.request: ModelInput | None = None
-
-    async def propose(self, request: ModelInput) -> ModelOutput:
-        self.request = request
-        proposal = DecisionProposal(
-            proposal_id="proposal:pinned-turn:appraisal:1",
-            trigger_ref=request.trigger_ref,
-            evaluated_world_revision=request.evaluated_world_revision,
-            evidence_refs=(
-                ProposalEvidenceRef(
-                    ref_id=_observation().observation_id,
-                    evidence_kind="observed_message",
-                    source_world_revision=2,
-                    immutable_hash="sha256:" + self._evidence_hash,
-                ),
-            ),
-            proposed_changes=(
-                TypedChange(
-                    change_id="change:pinned-turn:appraisal:1",
-                    kind="appraisal_transition",
-                    target_id="appraisal:model-hint",
-                    transition="activate",
-                    expected_entity_revision=0,
-                    evidence_refs=(_observation().observation_id,),
-                    payload=CanonicalTypedPayload.from_value(
-                        payload_schema="appraisal_transition.v1",
-                        value={
-                            "appraisal_id": "appraisal:model-hint",
-                            "meaning_candidates": [
-                                {"meaning": "disappointment", "confidence": 7000},
-                                {"meaning": "misunderstanding", "confidence": 3000},
-                            ],
-                            "attribution": "user",
-                            "severity": 6000,
-                            "confidence": 7600,
-                            "expiry": None,
-                        },
-                    ),
-                ),
-            ),
-            action_intents=(),
-            confidence=7600,
-            brief_rationale="Persist a fallible interpretation for later affect deliberation.",
-            behavior_tendency="hold_space",
-            stance="attend",
-            display_strategy="withhold",
-        )
-        return ModelOutput(
-            model_id="test-decision-main",
-            model_version="test.1",
-            raw_proposal=proposal.model_dump(mode="json"),
-            input_tokens=1,
-            output_tokens=1,
-        )
-
-
-class _AffectDecisionModel:
-    def __init__(
-        self,
-        *,
-        appraisal_change_id: str,
-        evidence_ref: str,
-        evidence_hash: str,
-        evidence_revision: int,
-    ) -> None:
-        self._appraisal_change_id = appraisal_change_id
-        self._evidence_ref = evidence_ref
-        self._evidence_hash = evidence_hash
-        self._evidence_revision = evidence_revision
-        self.request: ModelInput | None = None
-        self.calls = 0
-
-    async def propose(self, request: ModelInput) -> ModelOutput:
-        self.calls += 1
-        self.request = request
-        proposal = DecisionProposal(
-            proposal_id="proposal:pinned-turn:affect:1",
-            trigger_ref=request.trigger_ref,
-            evaluated_world_revision=request.evaluated_world_revision,
-            evidence_refs=(
-                ProposalEvidenceRef(
-                    ref_id=self._evidence_ref,
-                    evidence_kind="committed_world_event",
-                    source_world_revision=self._evidence_revision,
-                    immutable_hash="sha256:" + self._evidence_hash,
-                ),
-            ),
-            proposed_changes=(
-                TypedChange(
-                    change_id="change:pinned-turn:affect:1",
-                    kind="affect_transition",
-                    target_id="affect:model-hint",
-                    transition="open",
-                    expected_entity_revision=0,
-                    evidence_refs=(self._evidence_ref,),
-                    payload=CanonicalTypedPayload.from_value(
-                        payload_schema="affect_transition.v1",
-                        value={
-                            "episode_id": "affect:model-hint",
-                            "appraisal_change_refs": [self._appraisal_change_id],
-                            "component_deltas": [{"name": "hurt", "value": 4200}],
-                            "decay_config": {
-                                "object_ref": "policy:decay:standard",
-                                "schema_version": "affect-decay.1",
-                                "payload_hash": "sha256:" + "a" * 64,
-                            },
-                            "residue_config": {
-                                "object_ref": "policy:residue:standard",
-                                "schema_version": "affect-residue.1",
-                                "payload_hash": "sha256:" + "b" * 64,
-                            },
-                        },
-                    ),
-                ),
-            ),
-            action_intents=(),
-            confidence=7300,
-            brief_rationale="The appraisal may leave a bounded residual hurt episode.",
-            affect_decision="propose",
-            behavior_tendency="hold_space",
-            stance="care_despite_hurt",
-            display_strategy="partial_disclosure",
-        )
-        return ModelOutput(
-            model_id="test-affect-main",
-            model_version="test.1",
-            raw_proposal=proposal.model_dump(mode="json"),
-            input_tokens=1,
-            output_tokens=1,
-        )
-
-
-class _EmotionAdvice:
-    adapter_id = "emotion"
-    version = "test.1"
-
-    def __init__(self) -> None:
-        self.received: AdvisoryAdapterInput | None = None
-
-    async def classify(self, request: AdvisoryAdapterInput) -> tuple[CandidateDistribution, ...]:
-        self.received = request
-        return (
-            CandidateDistribution(
-                catalog_version="world-v2-matrix-2",
-                field_id="appraisal.negative",
-                candidates=(
-                    ClassificationCandidate(
-                        value="disappointment",
-                        weight=7100,
-                        confidence=7800,
-                        producer="emotion@test.1",
-                        source_refs=(request.trigger_ref,),
-                        expires_at=request.expires_at,
-                    ),
-                ),
-                produced_at=request.logical_time,
-            ),
-        )
-
-
-class _InvalidAdvice(_EmotionAdvice):
-    async def classify(self, request: AdvisoryAdapterInput) -> tuple[CandidateDistribution, ...]:
-        output = (await super().classify(request))[0]
-        return (output.model_copy(update={"field_id": "unknown.advisory.field"}),)
-
-
 def _observation() -> Observation:
     return Observation(
         schema_version="world-v2.1",
@@ -446,6 +263,24 @@ def _expression_episode_events(
     return opened_event, claimed_event, claimed_process
 
 
+def _inbound_authority_events(
+    observation: Observation,
+    observation_event: WorldEvent,
+) -> tuple[WorldEvent, WorldEvent]:
+    """Register the CharacterInterior inbound authority for one observation.
+
+    The .52 retirement fold keeps an expression episode only when an
+    interaction appraisal for the same observation carries a
+    character-interior-inbound attempt.  These events supply exactly that
+    authority in the same commit batch as the episode.
+    """
+    return interaction_appraisal_trigger_events(
+        observation=observation,
+        observation_event=observation_event,
+        owner_id="worker:test:inbound-state",
+    )
+
+
 def _budget_configured(*, limit: int = 100) -> WorldEvent:
     return WorldEvent.from_payload(
         schema_version="world-v2.1",
@@ -485,7 +320,14 @@ async def test_runtime_audits_one_cursor_pinned_turn_without_authorizing_effects
         ),
         companion_actor_ref="agent:companion",
     )
-    runtime = WorldRuntime(world_id=WORLD, ledger=ledger, pinned_turn=turn)
+    runtime = WorldRuntime(
+        world_id=WORLD,
+        ledger=ledger,
+        pinned_turn=turn,
+        # Claim the unified inbound state trigger so the .52 fold keeps this
+        # manually composed expression episode on the production path.
+        inbound_state_owner="worker:pinned-turn:inbound-state",
+    )
 
     first = await runtime.ingest(_observation())
     duplicate = await runtime.ingest(_observation())
@@ -493,9 +335,10 @@ async def test_runtime_audits_one_cursor_pinned_turn_without_authorizing_effects
     assert first == duplicate
     projection = ledger.project()
     assert projection.world_revision == 2
-    # Two model-result audits plus the open/claim lifecycle that makes the
+    # Two model-result audits plus the expression open/claim lifecycle and the
+    # unified inbound-state open/claim (the .52 fold authority) that make the
     # technical failure restart-recoverable.
-    assert projection.deliberation_revision == 4
+    assert projection.deliberation_revision == 6
     assert len(projection.model_result_audits) == 2
     assert projection.proposal_audits == ()
     assert expression_model.request is not None
@@ -539,7 +382,7 @@ async def test_content_free_technical_result_rebases_after_unrelated_head_advanc
         observation_event,
     )
     committed = ledger.commit(
-        (observation_event, opened_event, claimed_event),
+        (observation_event, opened_event, claimed_event, *_inbound_authority_events(observation, observation_event)),
         expected_world_revision=1,
         expected_deliberation_revision=0,
     )
@@ -631,7 +474,7 @@ async def test_concurrent_content_free_rebases_join_one_exact_audit(
         observation_event,
     )
     committed = ledger.commit(
-        (observation_event, opened_event, claimed_event),
+        (observation_event, opened_event, claimed_event, *_inbound_authority_events(observation, observation_event)),
         expected_world_revision=1,
         expected_deliberation_revision=0,
     )
@@ -714,7 +557,7 @@ async def test_content_free_idempotency_conflict_fails_closed_without_rebase(
         observation_event,
     )
     committed = ledger.commit(
-        (observation_event, opened_event, claimed_event),
+        (observation_event, opened_event, claimed_event, *_inbound_authority_events(observation, observation_event)),
         expected_world_revision=1,
         expected_deliberation_revision=0,
     )
@@ -762,6 +605,7 @@ async def test_content_free_idempotency_conflict_fails_closed_without_rebase(
         (TypeError, "resolver returned the wrong contract type"),
     ),
 )
+@pytest.mark.asyncio
 async def test_snapshot_hard_failure_is_not_recorded_as_model_failure(
     monkeypatch: pytest.MonkeyPatch,
     error_type: type[Exception],
@@ -782,7 +626,7 @@ async def test_snapshot_hard_failure_is_not_recorded_as_model_failure(
         observation_event,
     )
     committed = ledger.commit(
-        (observation_event, opened_event, claimed_event),
+        (observation_event, opened_event, claimed_event, *_inbound_authority_events(observation, observation_event)),
         expected_world_revision=1,
         expected_deliberation_revision=0,
     )
@@ -820,6 +664,72 @@ async def test_snapshot_hard_failure_is_not_recorded_as_model_failure(
 
 
 @pytest.mark.asyncio
+async def test_audit_strict_revalidation_failure_degrades_to_content_free_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken provider audit must not kill the turn after the call spent."""
+
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    ledger.commit((_world_started(),), expected_world_revision=0, expected_deliberation_revision=0)
+    observation = _observation()
+    observation_event = _observation_event(observation)
+    opened_event, claimed_event, claimed = _expression_episode_events(
+        observation,
+        observation_event,
+    )
+    committed = ledger.commit(
+        (
+            observation_event,
+            opened_event,
+            claimed_event,
+            *_inbound_authority_events(observation, observation_event),
+        ),
+        expected_world_revision=1,
+        expected_deliberation_revision=0,
+    )
+    model = _MinimalReplyModel()
+    turn = PinnedTurnCompiler(
+        ledger=ledger,
+        capsule_compiler=context_capsule_compiler_from_ledger(ledger=ledger),
+        deliberation=Deliberation(
+            router=_Router(),
+            main_model=model,
+            quick_recovery=_InvalidQuick(),
+        ),
+        companion_actor_ref="agent:companion",
+    )
+
+    original_record = turn._recorder.record
+
+    def corrupt_record(result, context):  # type: ignore[no-untyped-def]
+        if result.proposal is not None:
+            raise ValueError("deliberation result failed strict revalidation")
+        return original_record(result, context)
+
+    monkeypatch.setattr(turn._recorder, "record", corrupt_record)
+
+    recorded = await turn.audit_observation(
+        observation=observation,
+        observation_event=observation_event,
+        cursor=ProjectionCursor(
+            world_revision=committed.world_revision,
+            deliberation_revision=committed.deliberation_revision,
+            ledger_sequence=committed.ledger_sequence,
+        ),
+        expression_attempt_id=claimed.claim_lease.attempt_id,
+    )
+
+    projection = ledger.project()
+    assert recorded.model_result_ref is not None
+    # One content-free technical result replaces the dead audit.
+    assert len(projection.model_result_audits) == 1
+    audit = projection.model_result_audits[0]
+    audit_json = json.loads(audit.audit_json)
+    assert audit_json["outcome"] == "exception"
+    assert audit_json["status"] == "main_exception"
+
+
+@pytest.mark.asyncio
 async def test_runtime_accepts_audited_minimal_reply_once_and_replays_its_outcome() -> None:
     issuer = AcceptedLedgerBatchIssuer()
     ledger = WorldLedger.in_memory(world_id=WORLD, accepted_batch_issuer=issuer)
@@ -837,6 +747,9 @@ async def test_runtime_accepts_audited_minimal_reply_once_and_replays_its_outcom
         world_id=WORLD,
         ledger=ledger,
         pinned_turn=turn,
+        # Claim the unified inbound state trigger so the .52 fold keeps this
+        # manually composed expression episode on the production path.
+        inbound_state_owner="worker:pinned-turn:inbound-state",
         reply_policy=ReplyBudgetPolicy(
             account_id="account:pinned-turn:chat",
             amount_limit=10,
@@ -882,6 +795,9 @@ async def test_runtime_defers_an_audited_reply_when_the_budget_is_unavailable() 
         world_id=WORLD,
         ledger=ledger,
         pinned_turn=turn,
+        # Claim the unified inbound state trigger so the .52 fold keeps this
+        # manually composed expression episode on the production path.
+        inbound_state_owner="worker:pinned-turn:inbound-state",
         reply_policy=ReplyBudgetPolicy(
             account_id="account:pinned-turn:chat",
             amount_limit=10,
@@ -913,17 +829,26 @@ async def test_runtime_defers_an_audited_reply_when_the_budget_is_unavailable() 
 
 
 @pytest.mark.asyncio
-async def test_runtime_opens_and_claims_one_source_bound_interaction_appraisal_trigger() -> None:
+async def test_source_bound_interaction_appraisal_events_open_and_claim_once() -> None:
     ledger = WorldLedger.in_memory(world_id=WORLD)
     ledger.commit((_world_started(),), expected_world_revision=0, expected_deliberation_revision=0)
-    runtime = WorldRuntime(
-        world_id=WORLD,
-        ledger=ledger,
-        interaction_appraisal_owner="worker:interaction-appraisal",
+    observation = _observation()
+    observation_event = _observation_event(observation)
+    first = interaction_appraisal_trigger_events(
+        observation=observation,
+        observation_event=observation_event,
+        owner_id="worker:interaction-appraisal",
     )
-
-    first = await runtime.ingest(_observation())
-    duplicate = await runtime.ingest(_observation())
+    duplicate = interaction_appraisal_trigger_events(
+        observation=observation,
+        observation_event=observation_event,
+        owner_id="worker:interaction-appraisal",
+    )
+    ledger.commit(
+        (observation_event, *first),
+        expected_world_revision=1,
+        expected_deliberation_revision=0,
+    )
 
     trigger_id = interaction_appraisal_trigger_identity(WORLD, _observation().observation_id)
     projection = ledger.project()
@@ -933,253 +858,12 @@ async def test_runtime_opens_and_claims_one_source_bound_interaction_appraisal_t
     assert trigger.state == "claimed"
     assert trigger.claim_lease is not None
     assert trigger.claim_lease.owner_id == "worker:interaction-appraisal"
+    assert trigger.claim_lease.attempt_id.startswith(
+        "attempt:character-interior-inbound:"
+    )
     assert first == duplicate
     assert projection.world_revision == 2
     assert projection.deliberation_revision == 2
-
-
-@pytest.mark.asyncio
-async def test_runtime_materializes_audited_appraisal_without_a_second_model_call() -> None:
-    observation = _observation()
-    observation_event = WorldEvent.from_payload(
-        schema_version=observation.schema_version,
-        event_id=(
-            f"event:trigger:observation:{observation.source}:{observation.source_event_id}"
-        ),
-        world_id=WORLD,
-        event_type="ObservationRecorded",
-        logical_time=observation.logical_time,
-        created_at=observation.created_at,
-        actor=observation.actor,
-        source=observation.source,
-        trace_id=observation.trace_id,
-        causation_id=observation.causation_id,
-        correlation_id=observation.correlation_id,
-        idempotency_key=f"observation:{observation.source}:{observation.source_event_id}",
-        payload=observation.model_dump(mode="json"),
-    )
-    issuer = AcceptedLedgerBatchIssuer()
-    ledger = WorldLedger.in_memory(world_id=WORLD, accepted_batch_issuer=issuer)
-    ledger.commit((_world_started(),), expected_world_revision=0, expected_deliberation_revision=0)
-    appraisal_model = _DecisionAppraisalModel(evidence_hash=observation_event.payload_hash)
-    turn = PinnedTurnCompiler(
-        ledger=ledger,
-        capsule_compiler=context_capsule_compiler_from_ledger(ledger=ledger),
-        deliberation=Deliberation(
-            router=_Router(),
-            main_model=appraisal_model,
-            quick_recovery=_InvalidQuick(),
-        ),
-        companion_actor_ref="agent:companion",
-        affect_target_bounds_enabled=True,
-    )
-    acceptance = AppraisalAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
-    runtime = WorldRuntime(
-        world_id=WORLD,
-        ledger=ledger,
-        pinned_turn=turn,
-        interaction_appraisal_owner="worker:interaction-appraisal",
-        appraisal_acceptance=acceptance,
-        appraisal_acceptance_actor="worker:interaction-appraisal",
-        affect_deliberation_owner="worker:affect",
-        appraisal_worker=AppraisalProposalWorker(
-            compiler=AppraisalProposalCompiler(ledger=ledger),
-            acceptance=acceptance,
-            actor="worker:interaction-appraisal",
-        ),
-    )
-
-    outcome = await runtime.ingest(observation)
-
-    assert outcome.status == "observed_only", outcome
-    projection = ledger.project()
-    assert projection.appraisals[0].hypotheses[0].meaning == "disappointment"
-    assert appraisal_model.request is not None
-    appraisal_bounds = appraisal_model.request.affect_target_bounds
-    assert appraisal_bounds is not None
-    assert appraisal_bounds.source_world_revision == (
-        appraisal_model.request.evaluated_world_revision
-    )
-    assert appraisal_bounds.source_ledger_sequence == (
-        appraisal_model.request.evaluated_ledger_sequence
-    )
-    assert appraisal_bounds.minimum_for("hurt") == 500
-    interaction = next(
-        item
-        for item in projection.trigger_processes
-        if item.process_kind == "interaction_appraisal"
-    )
-    affect = next(
-        item
-        for item in projection.trigger_processes
-        if item.process_kind == "affect_deliberation"
-    )
-    assert interaction.state == "terminal"
-    assert affect.state == "claimed"
-
-    appraisal_event_ref = next(
-        ref.event_id
-        for ref in projection.committed_world_event_refs
-        if ref.event_type == "AppraisalAccepted"
-    )
-    stored = ledger.lookup_event_commit(appraisal_event_ref)
-    assert stored is not None
-    appraisal_event, appraisal_commit = stored
-    # Claiming the source-bound affect trigger is a separate durable commit.
-    # The affect turn must still accept the earlier Appraisal as immutable
-    # evidence at this later pinned cursor.
-    assert appraisal_commit.ledger_sequence < projection.ledger_sequence
-    affect_model = _AffectDecisionModel(
-        appraisal_change_id=projection.appraisals[0].origin.change_id,
-        evidence_ref=appraisal_event.event_id,
-        evidence_hash=appraisal_event.payload_hash,
-        evidence_revision=appraisal_commit.world_revision,
-    )
-    affect_turn = PinnedTurnCompiler(
-        ledger=ledger,
-        capsule_compiler=context_capsule_compiler_from_ledger(
-            ledger=ledger,
-            relevance_scope=ContextRelevanceScope(
-                actor_ref="agent:companion", related_subject_refs=("user:primary",)
-            ),
-        ),
-        deliberation=Deliberation(
-            router=_Router(),
-            main_model=affect_model,
-            quick_recovery=_InvalidQuick(),
-        ),
-        companion_actor_ref="agent:companion",
-        affect_target_bounds_enabled=True,
-    )
-    affect_acceptance = AffectAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
-    affect_worker = AffectDeliberationWorker(
-        ledger=ledger,
-        pinned_turn=affect_turn,
-        compiler=AffectProposalCompiler(ledger=ledger),
-        acceptance=affect_acceptance,
-        actor="worker:affect",
-    )
-    # First leave only the expensive generic audit durable, then resume through
-    # the worker.  It must compile that audit rather than call the model again.
-    audited = await affect_turn.audit_appraisal_accepted(
-        appraisal_event=appraisal_event,
-        cursor=ProjectionCursor(
-            world_revision=projection.world_revision,
-            deliberation_revision=projection.deliberation_revision,
-            ledger_sequence=projection.ledger_sequence,
-        ),
-    )
-    assert audited.proposal_id is not None
-    assert affect_model.request is not None
-    affect_bounds = affect_model.request.affect_target_bounds
-    assert affect_bounds is not None
-    assert (
-        affect_bounds.source_world_revision,
-        affect_bounds.source_deliberation_revision,
-        affect_bounds.source_ledger_sequence,
-    ) == (
-        projection.world_revision,
-        projection.deliberation_revision,
-        projection.ledger_sequence,
-    )
-    assert affect_bounds.minimum_for("hurt") == 500
-    after_audit = ledger.project()
-    # Simulate a process death after the acceptance batch and before trigger
-    # completion. The recovery runtime must detect that durable effect and
-    # finish the same trigger without another model call.
-    affect_result = await affect_worker.process(
-        world_id=WORLD,
-        cursor=ProjectionCursor(
-            world_revision=after_audit.world_revision,
-            deliberation_revision=after_audit.deliberation_revision,
-            ledger_sequence=after_audit.ledger_sequence,
-        ),
-        appraisal_event=appraisal_event,
-    )
-    assert affect_result.status == "accepted"
-    assert next(
-        item
-        for item in ledger.project().trigger_processes
-        if item.process_kind == "affect_deliberation"
-    ).state == "claimed"
-    affect_runtime = WorldRuntime(
-        world_id=WORLD,
-        ledger=ledger,
-        affect_deliberation_owner="worker:affect",
-        affect_worker=affect_worker,
-    )
-    recovered = await affect_runtime.drain_background_once()
-    assert recovered is not None
-    assert recovered.status == "completed_existing"
-    assert recovered.work_status == "accepted"
-    after_affect = ledger.project()
-    assert after_affect.affect_episodes[0].components[0].dimension == "hurt"
-    assert after_affect.trigger_processes[1].state == "terminal"
-    assert affect_model.calls == 1
-
-    # A restart sees the terminal durable outcome and performs no second turn.
-    idle = await affect_runtime.drain_background_once()
-    assert idle is not None and idle.status == "idle"
-
-
-@pytest.mark.asyncio
-async def test_pinned_turn_passes_source_bound_advisory_candidates_to_deliberation() -> None:
-    ledger = WorldLedger.in_memory(world_id=WORLD)
-    ledger.commit((_world_started(),), expected_world_revision=0, expected_deliberation_revision=0)
-    model = _InvalidModel()
-    turn = PinnedTurnCompiler(
-        ledger=ledger,
-        capsule_compiler=context_capsule_compiler_from_ledger(ledger=ledger),
-        deliberation=Deliberation(
-            router=_Router(), main_model=model, quick_recovery=_InvalidQuick()
-        ),
-        companion_actor_ref="agent:companion",
-        advisory_compiler=AdvisoryCompiler(
-            catalog=default_matrix_catalog(),
-            adapters=(advice := _EmotionAdvice(),),
-            authority_key=b"pinned-turn-advisory-test-authority-key",
-        ),
-    )
-    runtime = WorldRuntime(world_id=WORLD, ledger=ledger, pinned_turn=turn)
-
-    await runtime.ingest(_observation())
-
-    assert model.request is not None
-    content = model.request.model_content_json
-    assert '"kind":"appraisal.negative"' in content
-    assert '"value":"disappointment"' in content
-    assert '"source_refs":["event:trigger:observation:test:message:pinned-turn:1"]' in content
-    assert advice.received is not None
-    assert advice.received.trigger["text"] == "我好像有点失望，你刚刚没怎么接住我。"
-    projection = ledger.project()
-    assert projection.world_revision == 2
-    assert projection.deliberation_revision == 4
-
-
-@pytest.mark.asyncio
-async def test_invalid_advisory_fails_open_without_blocking_deliberation() -> None:
-    ledger = WorldLedger.in_memory(world_id=WORLD)
-    ledger.commit((_world_started(),), expected_world_revision=0, expected_deliberation_revision=0)
-    model = _InvalidModel()
-    turn = PinnedTurnCompiler(
-        ledger=ledger,
-        capsule_compiler=context_capsule_compiler_from_ledger(ledger=ledger),
-        deliberation=Deliberation(
-            router=_Router(), main_model=model, quick_recovery=_InvalidQuick()
-        ),
-        companion_actor_ref="agent:companion",
-        advisory_compiler=AdvisoryCompiler(
-            catalog=default_matrix_catalog(),
-            adapters=(_InvalidAdvice(),),
-            authority_key=b"pinned-turn-advisory-test-authority-key",
-        ),
-    )
-
-    await WorldRuntime(world_id=WORLD, ledger=ledger, pinned_turn=turn).ingest(_observation())
-
-    assert model.request is not None
-    assert '"advisories":{"availability":"unavailable"' in model.request.model_content_json
-    assert '"disappointment"' not in model.request.model_content_json
 
 
 @pytest.mark.asyncio
@@ -1222,7 +906,7 @@ async def test_pinned_turn_rejects_expression_attempt_claimed_for_another_observ
     first_event = _observation_event(first)
     first_opened, first_claimed, _ = _expression_episode_events(first, first_event)
     first_commit = ledger.commit(
-        (first_event, first_opened, first_claimed),
+        (first_event, first_opened, first_claimed, *_inbound_authority_events(first, first_event)),
         expected_world_revision=1,
         expected_deliberation_revision=0,
     )
@@ -1241,7 +925,7 @@ async def test_pinned_turn_rejects_expression_attempt_claimed_for_another_observ
         second_event,
     )
     latest = ledger.commit(
-        (second_event, second_opened, second_claimed),
+        (second_event, second_opened, second_claimed, *_inbound_authority_events(second, second_event)),
         expected_world_revision=first_commit.world_revision,
         expected_deliberation_revision=first_commit.deliberation_revision,
     )
@@ -1287,7 +971,7 @@ async def test_pinned_turn_rejects_a_terminal_expression_attempt() -> None:
         observation_event,
     )
     claimed_commit = ledger.commit(
-        (observation_event, opened_event, claimed_event),
+        (observation_event, opened_event, claimed_event, *_inbound_authority_events(observation, observation_event)),
         expected_world_revision=1,
         expected_deliberation_revision=0,
     )

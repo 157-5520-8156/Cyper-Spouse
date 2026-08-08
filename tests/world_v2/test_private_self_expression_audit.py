@@ -108,9 +108,9 @@ def test_naturalness_readiness_keeps_zero_preheat_reliability_only() -> None:
     assert readiness.source_bound_self_material.status == "unavailable"
     assert readiness.source_bound_self_material.committed_experience_count == 0
     assert readiness.source_bound_self_material.active_memory_candidate_count == 0
-    assert readiness.current_self_state.status == "available"
+    assert readiness.inner_life_snapshot.status == "available"
     assert (
-        readiness.current_self_state.evidence_basis
+        readiness.inner_life_snapshot.evidence_basis
         == "immutable_projection_inputs_not_provider_delivery"
     )
     assert readiness.prior_interaction_appraisal.status == "settled"
@@ -165,7 +165,7 @@ def test_naturalness_readiness_reports_source_material_but_pending_prior_apprais
     assert readiness.source_bound_self_material.status == "available"
     assert readiness.source_bound_self_material.committed_experience_count == 1
     assert readiness.source_bound_self_material.active_memory_candidate_count == 1
-    assert readiness.current_self_state.status == "available"
+    assert readiness.inner_life_snapshot.status == "available"
     assert readiness.prior_interaction_appraisal.status == "pending"
     assert readiness.prior_interaction_appraisal.pending_count == 1
     assert readiness.reason_codes == ("prior_interaction_appraisal_pending",)
@@ -438,14 +438,44 @@ class _BackgroundModel:
 
 
 def _recall_material(messages: list[dict[str, str]]) -> dict[str, object] | None:
-    if len(messages) < 4:
+    if len(messages) >= 4:
+        content = messages[-1]["content"]
+        marker = "\n{"
+        marker_index = content.rfind(marker)
+        if marker_index >= 0:
+            return json.loads(content[marker_index + 1 :])
+
+    # Production CharacterInterior performs the bounded pull outside the
+    # provider transcript, then invokes the same author with the result in the
+    # source-bound selective-memory facet.  Normalize that production shape to
+    # the older fixture helper's tiny audit view.
+    supplied = json.loads(messages[1]["content"])
+    snapshot = supplied.get("inner_life_snapshot")
+    if not isinstance(snapshot, dict):
         return None
-    content = messages[-1]["content"]
-    marker = "\n{"
-    marker_index = content.rfind(marker)
-    if marker_index < 0:
+    materials = snapshot.get("materials")
+    if not isinstance(materials, dict):
         return None
-    return json.loads(content[marker_index + 1 :])
+    selected = materials.get("selected_recall")
+    if not isinstance(selected, dict):
+        return None
+    selected_content = selected.get("content")
+    if not isinstance(selected_content, dict):
+        return None
+    items = selected_content.get("items")
+    if not isinstance(items, list) or not items:
+        return None
+    candidates: list[dict[str, object]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        source_ref = item.get("source_ref")
+        if not isinstance(source_ref, str) or not source_ref:
+            continue
+        candidates.append({**item, "source_refs": [source_ref]})
+    if not candidates:
+        return None
+    return {"character_chosen_recall": {"candidates": candidates}}
 
 
 def _first_hit_source_ref(material: dict[str, object]) -> str:
@@ -476,6 +506,43 @@ class _RoleModel:
         self.calls.append(messages)
         system = messages[0]["content"]
         raw_user = json.loads(messages[1]["content"])
+        inner_turn = raw_user.get("inner_turn")
+        if isinstance(inner_turn, dict) and inner_turn.get("purpose") == "fact_memory_retention":
+            capability = raw_user.get("capability_manifest")
+            assert isinstance(capability, dict)
+            source_refs = capability.get("source_refs")
+            assert isinstance(source_refs, list) and source_refs
+            return json.dumps(
+                {
+                    "status": "decision",
+                    "summary": "这段具体经历对以后理解她很有用，我愿意把它留下来。",
+                    "attended_source_refs": [],
+                    "decision": {
+                        "source_refs": source_refs,
+                        "payload": {
+                            "retain": True,
+                            "cue_kind": "emotional_residue",
+                            "retention_rationales": [
+                                "emotional_salience",
+                                "future_utility",
+                            ],
+                            "salience": {
+                                "autobiographical_relevance_bp": 1_000,
+                                "relationship_relevance_bp": 5_000,
+                                "emotional_residue_bp": 8_000,
+                                "unfinished_business_bp": 3_000,
+                                "recurrence_bp": 1_000,
+                                "novelty_bp": 4_000,
+                                "future_utility_bp": 6_000,
+                                "world_continuity_bp": 2_000,
+                            },
+                        },
+                    },
+                    "recall_query": None,
+                    "proposals": [],
+                },
+                ensure_ascii=False,
+            )
         user_material = raw_user
         trigger = user_material["current_trigger_message"]
         assert isinstance(trigger, dict)
@@ -588,39 +655,10 @@ class _ExpressionInvalidAppraisalValidRoleModel:
         *,
         temperature: float = 0.8,
     ) -> str:
-        del temperature
+        del messages, temperature
         self.call_count += 1
-        if self.call_count > 1:
-            material = json.loads(messages[1]["content"])
-            trigger = material["current_trigger_message"]
-            observation_ref = str(trigger["observation_ref"])
-            return json.dumps(
-                {
-                    "appraisal_draft": {
-                        "appraise": False,
-                        "affect": "no_change",
-                        "brief_rationale": "The background appraisal can complete.",
-                        "behavior_tendency": "choose_own_response",
-                        "stance": "self_directed",
-                        "display_strategy": "model_owned",
-                        "confidence": 7_000,
-                    },
-                    "expression_draft": {
-                        "private_turn_state": {
-                            "contract": "private-turn-state.1",
-                            "inner_state_summary": "后台评估不替代失败的表达尝试。",
-                            "attended_source_refs": [observation_ref],
-                        },
-                        "timing_choice": "now",
-                        "beats": [{"modality": "text", "text": "后台评估草稿。"}],
-                        "stance": "background_fixture_only",
-                        "brief_rationale": "Valid background fixture.",
-                        "confidence": 7_000,
-                        "world_claims": [],
-                    },
-                },
-                ensure_ascii=False,
-            )
+        # Permanently invalid envelope: envelope repair (2026-08-08) must
+        # still fail closed so the failure-audit privacy assertions hold.
         return '{"not":"an-expression-draft"}'
 
 
@@ -682,15 +720,16 @@ async def test_targeted_fixture_audit_reads_private_self_recall_expression_and_r
     database_path = tmp_path / "private-self-expression-audit.sqlite"
     host = build_qq_c2c_host(
         settings=Settings(
+            _env_file=None,
             database_path=database_path,
             PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
             WORLD_V2_EXPRESSION_EPISODE_MODE="off",
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
         model=role_model,
-        advisory_model=_BackgroundModel(),
+        world_support_model=_BackgroundModel(),
         delivery=delivery,
         ingress_now=ingress_clock.now,
         ingress_sleep=ingress_clock.sleep,
@@ -761,15 +800,19 @@ async def test_targeted_fixture_audit_reads_private_self_recall_expression_and_r
     assert selected_author.status == "proposal_validated"
     assert selected_author.failure_code is None
     assert selected_author.ledger_event is not None
-    assert any(
-        attempt.status == "main_invalid"
-        and not attempt.selected_proposal_author
+    # A valid CharacterInterior recall choice is an internal phase of the same
+    # semantic author turn.  It must not be misreported as an invalid primary
+    # proposal merely because the role chose to retrieve before expressing.
+    assert all(
+        attempt.status != "main_invalid"
         for attempt in final_turn.model_result_attempts
     )
     assert final_turn.private_turn_state is not None
     assert final_turn.private_turn_state.inner_state_summary.startswith("重新看到她先前")
     assert final_turn.causal_chain.private_state_recorded
-    assert final_turn.causal_chain.prefetch_presented
+    # Parallel prefetch remains opportunistic.  The authoritative requirement
+    # is the character-selected pull below; a slow/empty prefetch must neither
+    # block nor become a second semantic author path.
     assert final_turn.causal_chain.character_pull_selected
     assert final_turn.causal_chain.character_recall_selected
     assert final_turn.causal_chain.final_private_state_recorded_after_character_recall
@@ -886,15 +929,16 @@ async def test_missing_proposal_keeps_observation_bound_failure_audit_without_pr
     database_path = tmp_path / "private-self-expression-failure-audit.sqlite"
     host = build_qq_c2c_host(
         settings=Settings(
+            _env_file=None,
             database_path=database_path,
             PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
             WORLD_V2_EXPRESSION_EPISODE_MODE="off",
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
         model=role_model,
-        advisory_model=_BackgroundModel(),
+        world_support_model=_BackgroundModel(),
         delivery=_Delivery(),
         ingress_now=clock.now,
         ingress_sleep=clock.sleep,
@@ -935,18 +979,12 @@ async def test_missing_proposal_keeps_observation_bound_failure_audit_without_pr
     assert turn.observations == ("model_result_failure_recorded",)
     assert turn.model_result_attempts
     assert {attempt.attempt_lane for attempt in turn.model_result_attempts} == {
-        "background",
         "expression",
     }
     assert all(
         attempt.status != "proposal_validated"
         for attempt in turn.model_result_attempts
         if attempt.attempt_lane == "expression"
-    )
-    assert any(
-        attempt.status == "proposal_validated"
-        for attempt in turn.model_result_attempts
-        if attempt.attempt_lane == "background"
     )
     expression_attempts = tuple(
         attempt for attempt in turn.model_result_attempts if attempt.attempt_lane == "expression"
@@ -1020,15 +1058,16 @@ async def test_nested_reviewer_winner_does_not_hide_failed_expression_author_cha
     database_path = tmp_path / "private-self-expression-nested-reviewer.sqlite"
     host = build_qq_c2c_host(
         settings=Settings(
+            _env_file=None,
             database_path=database_path,
             PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
             WORLD_V2_EXPRESSION_EPISODE_MODE="off",
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
         model=_ExpressionInvalidAppraisalValidRoleModel(),
-        advisory_model=_BackgroundModel(),
+        world_support_model=_BackgroundModel(),
         delivery=_Delivery(),
         ingress_now=clock.now,
         ingress_sleep=clock.sleep,
@@ -1242,25 +1281,27 @@ async def test_nested_reviewer_winner_does_not_hide_failed_expression_author_cha
 
 
 @pytest.mark.asyncio
-async def test_accepted_expression_is_not_technical_silence_when_background_appraisal_fails(
+async def test_accepted_unified_expression_never_opens_background_appraisal_author(
     tmp_path: Path,
 ) -> None:
     scenario = load_private_self_expression_scenario(FIXTURE)
     first = scenario.turns[0]
     scenario = scenario.model_copy(update={"turns": (first,)})
     clock = _AuditClock()
+    role_model = _ExpressionValidAppraisalInvalidRoleModel()
     database_path = tmp_path / "private-self-expression-background-failure.sqlite"
     host = build_qq_c2c_host(
         settings=Settings(
+            _env_file=None,
             database_path=database_path,
             PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
             WORLD_V2_EXPRESSION_EPISODE_MODE="off",
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
-        model=_ExpressionValidAppraisalInvalidRoleModel(),
-        advisory_model=_AppraisalInvalidBackgroundModel(),
+        model=role_model,
+        world_support_model=_AppraisalInvalidBackgroundModel(),
         delivery=_Delivery(),
         ingress_now=clock.now,
         ingress_sleep=clock.sleep,
@@ -1291,38 +1332,9 @@ async def test_accepted_expression_is_not_technical_silence_when_background_appr
     background_attempts = tuple(
         attempt for attempt in turn.model_result_attempts if attempt.attempt_lane == "background"
     )
-    recorded_by_ref = {
-        item.model_result_ref: RecordedModelResultAudit.model_validate_json(
-            item.audit_json
-        )
-        for item in evidence.replay.model_result_audits
-    }
-    appraisal_attempt_ids = {
-        audit.attempt_id
-        for audit in recorded_by_ref.values()
-        if audit.model_version == "single-call-inbound-cognition.2"
-        and audit.failure_code == "main_invalid_output"
-    }
-    appraisal_attempts = tuple(
-        attempt
-        for attempt in background_attempts
-        if recorded_by_ref[attempt.model_result_ref].attempt_id
-        in appraisal_attempt_ids
-    )
-    relationship_attempts = tuple(
-        attempt
-        for attempt in background_attempts
-        if recorded_by_ref[attempt.model_result_ref].model_version
-        == "relationship-draft-deliberation-adapter.2"
-    )
-
     assert outcome.status == "action_authorized"
     assert turn.proposal_selection == "effect_accepted"
     assert any(attempt.status == "proposal_validated" for attempt in expression_attempts)
-    assert background_attempts
-    assert len(appraisal_attempt_ids) == 1
-    assert appraisal_attempts
-    assert all(attempt.status != "proposal_validated" for attempt in appraisal_attempts)
-    assert all(attempt.failure_code == "main_invalid_output" for attempt in appraisal_attempts)
-    assert any(attempt.status == "proposal_validated" for attempt in relationship_attempts)
+    assert background_attempts == ()
+    assert len(role_model._valid_expression.calls) == 1  # noqa: SLF001
     assert report.summary.technical_failure_turn_count == 0

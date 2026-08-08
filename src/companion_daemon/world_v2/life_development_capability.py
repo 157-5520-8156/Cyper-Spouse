@@ -221,7 +221,10 @@ class ProjectionLifeCapabilityManifestCompiler:
             npc_identity_views(
                 projection,
                 content_store=self._content_store,
-                relationships=npc_relationship_readings(projection),
+                relationships=npc_relationship_readings(
+                    projection,
+                    protagonist_actor_ref=self._owner,
+                ),
                 reviewed_identity_summaries={
                     item.stable_identity_ref: item.identity_summary
                     for item in self._catalog.reviewed_npcs
@@ -294,13 +297,9 @@ class ProjectionLifeCapabilityManifestCompiler:
                         if item.protagonist_relationship is not None
                         else None
                     ),
-                    protagonist_friction_bp=(
-                        item.protagonist_relationship.friction_bp
-                        if item.protagonist_relationship is not None
-                        else None
-                    ),
                 )
                 for item in identity_views
+                if item.npc_ref in entity_refs
             ),
             biographical_context_tags=biography.context_tags,
             biographical_coordinates=tuple(

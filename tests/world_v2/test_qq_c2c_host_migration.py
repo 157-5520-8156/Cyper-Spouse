@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from companion_daemon.config import Settings
-from companion_daemon.llm import FailoverChatModel, FakeCompanionModel
+from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.world_v2.action_due_wake import ActionDueWake
 import companion_daemon.world_v2.qq_c2c_host as qq_c2c_host_module
 from companion_daemon.world_v2.qq_c2c_host import (
@@ -109,16 +109,13 @@ async def test_qq_composition_wires_independent_proactive_source_authority(
         use_configured_recall_embedding=False,
     )
     try:
-        runtime = (  # noqa: SLF001
-            host._host._application._turns._runtime._proactive_action_runtime
-        )
+        interior = host._host._application._turns._runtime._character_interior  # noqa: SLF001
+        runtime = interior._background_driver._proactive  # noqa: SLF001
         adapter = runtime._turn._deliberation._main  # noqa: SLF001
 
         assert adapter._identity_frame is not None  # noqa: SLF001
         assert adapter._source_closure_reviewer is reviewer  # noqa: SLF001
-        assert (  # noqa: SLF001
-            adapter._candidate_external_proposition_inventory_model is inventory
-        )
+        assert adapter._inventory_model is inventory  # noqa: SLF001
         development = (  # noqa: SLF001
             host._host._application._life_ecology._life_development_followup
         )
@@ -140,6 +137,10 @@ def test_qq_c2c_production_builder_has_no_quick_reaction_injection() -> None:
     """Visible quick reactions cannot be enabled through the QQ composition API."""
 
     assert "quick_reaction_model" not in inspect.signature(build_qq_c2c_host).parameters
+    assert (
+        "_test_only_expression_episode_mode"
+        not in inspect.signature(build_qq_c2c_host).parameters
+    )
 
 
 @pytest.mark.asyncio
@@ -302,6 +303,7 @@ async def test_stale_action_timer_does_not_jump_to_new_future_due() -> None:
     ("cognition_seconds", "dispatch_delay_seconds"),
     ((13.0, 0.0), (11.95, 0.1)),
 )
+@pytest.mark.asyncio
 async def test_qq_visible_reply_still_reaches_delivery_after_cognition_exhausts_turn_budget(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1465,7 +1467,12 @@ class _StreamingExpressionModel(_OneExpressionModel):
             tail_release = asyncio.Event()
             self.tail_releases.append(tail_release)
         self.calls += 1
-        self.prompt_kinds.append("stream")
+        joined = "\n".join(message["content"] for message in messages)
+        combined = (
+            "appraisal_draft" in joined
+            and "character-interior-events.1" in joined
+        )
+        self.prompt_kinds.append("combined_stream" if combined else "expression_stream")
         first = {
             "type": "head",
             "private_turn_state": {
@@ -1485,7 +1492,15 @@ class _StreamingExpressionModel(_OneExpressionModel):
         }
         raw = json.dumps(
             {
-                "protocol": "expression-events.1",
+                "protocol": "character-interior-events.1",
+                "appraisal_draft": {
+                    "appraise": False,
+                    "brief_rationale": "No durable appraisal is needed for this fixture.",
+                    "behavior_tendency": "observe",
+                    "stance": "open",
+                    "display_strategy": "natural",
+                    "confidence": 3000,
+                },
                 "events": [
                     first,
                     {
@@ -1544,31 +1559,57 @@ class _SilentExpressionModel(_CanonicalStreamingFixture):
         self.calls = 0
 
     async def complete(self, messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
-        del messages, temperature
+        del temperature
         self.calls += 1
+        joined = "\n".join(message["content"] for message in messages)
+        combined = (
+            "appraisal_draft and expression_draft" in joined
+            and "COMBINED OUTPUT ENVELOPE" in joined
+        )
+        expression = {
+            "private_turn_state": {
+                "inner_state_summary": "I do not want to add a visible reply this turn.",
+                "attended_source_refs": [],
+            },
+            "timing_choice": "silent",
+            "beats": [],
+            "cadence": "conversational",
+            "stance": "defer",
+            "brief_rationale": "A reaction is available, but I choose not to use it.",
+            "confidence": 7000,
+        }
+        if not combined:
+            return json.dumps(expression)
         return json.dumps(
             {
-                "private_turn_state": {
-                    "inner_state_summary": "I do not want to add a visible reply this turn.",
-                    "attended_source_refs": [],
+                "appraisal_draft": {
+                    "appraise": False,
+                    "brief_rationale": "No durable appraisal is needed for this fixture.",
+                    "behavior_tendency": "observe",
+                    "stance": "open",
+                    "display_strategy": "natural",
+                    "confidence": 3000,
                 },
-                "timing_choice": "silent",
-                "beats": [],
-                "cadence": "conversational",
-                "stance": "defer",
-                "brief_rationale": "A reaction is available, but I choose not to use it.",
-                "confidence": 7000,
+                "expression_draft": expression,
             }
         )
 
 
-class _WrappedExpressionModel(_CanonicalStreamingFixture):
-    model = "fixture:wrapped-expression"
+class _CombinedCharacterInteriorModel(_CanonicalStreamingFixture):
+    model = "fixture:combined-character-interior"
 
     async def complete(self, _messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
         del temperature
         return json.dumps(
             {
+                "appraisal_draft": {
+                    "appraise": False,
+                    "brief_rationale": "No durable appraisal is needed for this fixture.",
+                    "behavior_tendency": "observe",
+                    "stance": "open",
+                    "display_strategy": "natural",
+                    "confidence": 3000,
+                },
                 "expression_draft": {
                     "private_turn_state": {
                         "inner_state_summary": "I want to answer the current message directly.",
@@ -1618,7 +1659,6 @@ class _DurableExpressionRetryModel:
         if (
             self.initial_delay_seconds
             and not self.retry_state["ready"]
-            and "This is a recovery attempt" not in joined
             and "failed the private-turn-state causal contract" not in joined
         ):
             await asyncio.sleep(self.initial_delay_seconds)
@@ -1665,18 +1705,31 @@ class _IdentityAwareModel(_CanonicalStreamingFixture):
             "沈知栀" in system and "not as a task assistant" in system and "geoff" in system.lower()
         )
         text = "我是沈知栀，你是 Geoff。" if grounded else "我是你的 AI 助手小 Geoff。"
+        expression = {
+            "private_turn_state": {
+                "inner_state_summary": "The stable identity is salient for this answer.",
+                "attended_source_refs": [],
+            },
+            "timing_choice": "now",
+            "beats": [{"modality": "text", "text": text}],
+            "cadence": "conversational",
+            "stance": "answer_without_world_claims",
+            "brief_rationale": "Answer from the supplied stable identity.",
+            "confidence": 7000,
+        }
+        if "COMBINED OUTPUT ENVELOPE" not in system:
+            return json.dumps(expression, ensure_ascii=False)
         return json.dumps(
             {
-                "private_turn_state": {
-                    "inner_state_summary": "The stable identity is salient for this answer.",
-                    "attended_source_refs": [],
+                "appraisal_draft": {
+                    "appraise": False,
+                    "brief_rationale": "Identity recall does not require a durable appraisal.",
+                    "behavior_tendency": "observe",
+                    "stance": "open",
+                    "display_strategy": "natural",
+                    "confidence": 3000,
                 },
-                "timing_choice": "now",
-                "beats": [{"modality": "text", "text": text}],
-                "cadence": "conversational",
-                "stance": "answer_without_world_claims",
-                "brief_rationale": "Answer from the supplied stable identity.",
-                "confidence": 7000,
+                "expression_draft": expression,
             },
             ensure_ascii=False,
         )
@@ -1750,6 +1803,55 @@ class _SelectingLifeEcologyModel:
                     "intention_summary": "我想出去走一小圈。",
                     "importance_bp": 3500,
                     "participant_refs": [],
+                },
+                ensure_ascii=False,
+            )
+        if capsule.get("inner_turn", {}).get("purpose") == "life_development_choice":
+            source_refs = capsule["capability_manifest"]["source_refs"]
+            return json.dumps(
+                {
+                    "status": "decision",
+                    "summary": "我想出去走一小圈。",
+                    "attended_source_refs": source_refs,
+                    "decision": {
+                        "source_refs": source_refs,
+                        "payload": {
+                            "completion": {
+                                "decision": "accept",
+                                "intention_summary": "我想出去走一小圈。",
+                                "importance_bp": 3500,
+                                "participant_refs": [],
+                            }
+                        },
+                    },
+                    "proposals": [],
+                },
+                ensure_ascii=False,
+            )
+        if capsule.get("inner_turn", {}).get("purpose") == "activity_lifecycle_choice":
+            source_refs = capsule["capability_manifest"]["source_refs"]
+            openings = capsule["capability_manifest"]["payload"]["openings"]
+            selected = next(
+                (
+                    item
+                    for item in openings
+                    if item["safe_summary"].startswith("finish ")
+                ),
+                openings[0],
+            )
+            return json.dumps(
+                {
+                    "status": "decision",
+                    "summary": "我愿意推进当前这段生活安排。",
+                    "attended_source_refs": source_refs,
+                    "decision": {
+                        "source_refs": source_refs,
+                        "payload": {
+                            "decision": "select",
+                            "selected_token": selected["opening_token"],
+                        },
+                    },
+                    "proposals": [],
                 },
                 ensure_ascii=False,
             )
@@ -1848,18 +1950,30 @@ class _LaterQQModel:
         self.calls += 1
         return json.dumps(
             {
-                "private_turn_state": {
-                    "inner_state_summary": "I want to defer this reply and return to it shortly.",
-                    "attended_source_refs": [],
+                "appraisal_draft": {
+                    "appraise": False,
+                    "brief_rationale": "No durable emotional change is needed.",
+                    "behavior_tendency": "choose_own_response",
+                    "stance": "present",
+                    "display_strategy": "model_owned",
+                    "confidence": 6000,
                 },
-                "timing_choice": "later",
-                "beats": [{"modality": "text", "text": "晚点我来找你。"}],
-                "cadence": "conversational",
-                "delay_seconds": 60,
-                "expires_after_seconds": 600,
-                "stance": "defer",
-                "brief_rationale": "稍后接续",
-                "confidence": 7200,
+                "expression_draft": {
+                    "private_turn_state": {
+                        "inner_state_summary": (
+                            "I want to defer this reply and return to it shortly."
+                        ),
+                        "attended_source_refs": [],
+                    },
+                    "timing_choice": "later",
+                    "beats": [{"modality": "text", "text": "晚点我来找你。"}],
+                    "cadence": "conversational",
+                    "delay_seconds": 60,
+                    "expires_after_seconds": 600,
+                    "stance": "defer",
+                    "brief_rationale": "稍后接续",
+                    "confidence": 7200,
+                },
             },
             ensure_ascii=False,
         )
@@ -1938,7 +2052,7 @@ async def test_qq_shared_reply_audit_reaches_deferred_followup_with_one_main_cal
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=delivery,
     )
     try:
@@ -1973,7 +2087,7 @@ async def test_qq_stream_mode_sends_two_units_from_one_role_author_request(
             database_path=tmp_path / "qq-unit-stream.sqlite",
             PRIMARY_USER_ID="geoff",
             WORLD_V2_EXPRESSION_EPISODE_MODE="stream",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
@@ -2025,6 +2139,8 @@ async def test_qq_stream_mode_sends_two_units_from_one_role_author_request(
 
     assert result.status == "action_authorized"
     assert model.stream_calls == 1
+    assert model.prompt_kinds.count("combined_stream") == 1
+    assert "expression_stream" not in model.prompt_kinds
     assert len(stream_audits) == 2
     assert len({item.model_call_id for item in stream_audits}) == 2
     assert len({item.parent_model_call_id for item in stream_audits}) == 1
@@ -2054,7 +2170,7 @@ async def test_new_user_message_supersedes_an_unfinished_stream_tail(
             database_path=tmp_path / "qq-unit-stream-interrupt.sqlite",
             PRIMARY_USER_ID="geoff",
             WORLD_V2_EXPRESSION_EPISODE_MODE="stream",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
@@ -2206,15 +2322,6 @@ async def test_qq_restart_scheduler_retries_a_deferred_expression_failure_once(
         retry_state=retry_state,
         initial_delay_seconds=0.05,
     )
-    recovery = _DurableExpressionRetryModel(
-        model="fixture:expression-retry-recovery",
-        retry_state=retry_state,
-    )
-    model = FailoverChatModel(
-        primary=primary,
-        fallback=recovery,
-        implicit_failover=False,
-    )
     budget = InteractiveTurnBudgetPolicy(
         total_seconds=3.5,
         hedge_after_seconds=0.01,
@@ -2227,12 +2334,12 @@ async def test_qq_restart_scheduler_retries_a_deferred_expression_failure_once(
             database_path=database,
             PRIMARY_USER_ID="geoff",
             WORLD_V2_EXPRESSION_EPISODE_MODE="off",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
-        model=model,
-        advisory_model=FakeCompanionModel(),
+        model=primary,
+        world_support_model=FakeCompanionModel(),
         delivery=first_delivery,
         interactive_turn_budget_policy=budget,
         use_configured_recall_embedding=False,
@@ -2250,9 +2357,8 @@ async def test_qq_restart_scheduler_retries_a_deferred_expression_failure_once(
 
     assert failed.status == "deferred"
     assert _visible(first_delivery) == []
-    assert any("This is a recovery attempt" in prompt for prompt in recovery.prompts)
     assert any(
-        "failed the private-turn-state causal contract" in prompt for prompt in recovery.prompts
+        "failed the private-turn-state causal contract" in prompt for prompt in primary.prompts
     )
     waiting_retry = waiting_before_restart["mechanisms"]["expression_retry"]
     assert waiting_before_restart["expression_retry"] == waiting_retry
@@ -2282,12 +2388,12 @@ async def test_qq_restart_scheduler_retries_a_deferred_expression_failure_once(
             database_path=database,
             PRIMARY_USER_ID="geoff",
             WORLD_V2_EXPRESSION_EPISODE_MODE="off",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
         ),
         recipient_id="10001",
         bootstrap_at=NOW + timedelta(minutes=10, seconds=1),
-        model=model,
-        advisory_model=FakeCompanionModel(),
+        model=primary,
+        world_support_model=FakeCompanionModel(),
         delivery=retry_delivery,
         interactive_turn_budget_policy=budget,
         use_configured_recall_embedding=False,
@@ -2366,15 +2472,6 @@ async def test_restart_waits_for_foreign_reclaimed_attempt_that_crashed_before_m
         retry_state=retry_state,
         initial_delay_seconds=0.05,
     )
-    recovery = _DurableExpressionRetryModel(
-        model="fixture:reclaim-crash-recovery",
-        retry_state=retry_state,
-    )
-    model = FailoverChatModel(
-        primary=primary,
-        fallback=recovery,
-        implicit_failover=False,
-    )
     settings = Settings(
         database_path=database,
         PRIMARY_USER_ID="geoff",
@@ -2384,8 +2481,8 @@ async def test_restart_waits_for_foreign_reclaimed_attempt_that_crashed_before_m
         settings=settings,
         recipient_id="10001",
         bootstrap_at=NOW,
-        model=model,
-        advisory_model=FakeCompanionModel(),
+        model=primary,
+        world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
         use_configured_recall_embedding=False,
     )
@@ -2405,8 +2502,8 @@ async def test_restart_waits_for_foreign_reclaimed_attempt_that_crashed_before_m
         settings=settings,
         recipient_id="10001",
         bootstrap_at=NOW + timedelta(minutes=10, seconds=1),
-        model=model,
-        advisory_model=FakeCompanionModel(),
+        model=primary,
+        world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
         use_configured_recall_embedding=False,
     )
@@ -2435,8 +2532,8 @@ async def test_restart_waits_for_foreign_reclaimed_attempt_that_crashed_before_m
         settings=settings,
         recipient_id="10001",
         bootstrap_at=NOW + timedelta(minutes=10, seconds=2),
-        model=model,
-        advisory_model=FakeCompanionModel(),
+        model=primary,
+        world_support_model=FakeCompanionModel(),
         delivery=delivered,
         use_configured_recall_embedding=False,
     )
@@ -2488,15 +2585,6 @@ async def test_newer_qq_inbound_supersedes_older_technical_expression_retry_afte
         retry_state=retry_state,
         initial_delay_seconds=0.05,
     )
-    recovery = _DurableExpressionRetryModel(
-        model="fixture:expression-supersession-recovery",
-        retry_state=retry_state,
-    )
-    model = FailoverChatModel(
-        primary=primary,
-        fallback=recovery,
-        implicit_failover=False,
-    )
     budget = InteractiveTurnBudgetPolicy(
         total_seconds=3.5,
         hedge_after_seconds=0.01,
@@ -2511,8 +2599,8 @@ async def test_newer_qq_inbound_supersedes_older_technical_expression_retry_afte
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
-        model=model,
-        advisory_model=FakeCompanionModel(),
+        model=primary,
+        world_support_model=FakeCompanionModel(),
         delivery=first_delivery,
         interactive_turn_budget_policy=budget,
         use_configured_recall_embedding=False,
@@ -2548,7 +2636,7 @@ async def test_newer_qq_inbound_supersedes_older_technical_expression_retry_afte
                 "appraisal_draft and expression_draft" in prompt
                 and "COMBINED OUTPUT ENVELOPE" in prompt
             )
-            for prompt in (*primary.prompts, *recovery.prompts)
+            for prompt in primary.prompts
         )
 
     calls_after_newer_reply = expression_prompt_count()
@@ -2561,8 +2649,8 @@ async def test_newer_qq_inbound_supersedes_older_technical_expression_retry_afte
         ),
         recipient_id="10001",
         bootstrap_at=NOW + timedelta(minutes=10, seconds=1),
-        model=model,
-        advisory_model=FakeCompanionModel(),
+        model=primary,
+        world_support_model=FakeCompanionModel(),
         delivery=restarted_delivery,
         interactive_turn_budget_policy=budget,
         use_configured_recall_embedding=False,
@@ -2621,7 +2709,7 @@ async def test_restart_recovers_an_observation_crash_before_reply_model_call(
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
         use_configured_recall_embedding=False,
     )
@@ -2655,7 +2743,7 @@ async def test_restart_recovers_an_observation_crash_before_reply_model_call(
         recipient_id="10001",
         bootstrap_at=NOW + timedelta(seconds=1),
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=delivery,
         use_configured_recall_embedding=False,
     )
@@ -2674,24 +2762,24 @@ async def test_restart_recovers_an_observation_crash_before_reply_model_call(
         await restarted.scheduler_once(
             observed_at=NOW + timedelta(seconds=121),
             max_action_units=8,
-            # The recovered same-turn Appraisal dependency is one durable
-            # unit; Expression recovery is the immediately following unit.
+            # One recovered CharacterInterior unit owns appraisal, affect and
+            # expression at the same pinned cursor.
             max_background_units=2,
         )
     finally:
         await restarted.aclose()
 
-    # The recovered Appraisal and the final Expression have different pinned
-    # ModelInput identities after the Appraisal commit advances the cursor.
-    # Reusing the combined call's expression bytes would misattribute them to
-    # the later request, so recovery must make one fresh standalone call.
-    assert model.calls == 2
-    assert model.prompt_kinds == ["combined", "expression"]
+    # Recovery invokes the one canonical CharacterInterior author once.  Its
+    # audited combined result settles same-turn inner state and expression;
+    # the retired Appraisal-then-Expression side path must not reappear.
+    assert model.calls == 1
+    assert model.prompt_kinds == ["combined"]
     assert _visible(delivery) == [("10001", "刚才中断了，但这句我接回来了。")]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("choice", ("now", "silent", "later"))
+@pytest.mark.asyncio
 async def test_restart_continues_exact_durable_reply_proposal_without_regeneration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2714,7 +2802,7 @@ async def test_restart_continues_exact_durable_reply_proposal_without_regenerati
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
         use_configured_recall_embedding=False,
     )
@@ -2775,7 +2863,7 @@ async def test_restart_continues_exact_durable_reply_proposal_without_regenerati
         recipient_id="10001",
         bootstrap_at=NOW + timedelta(seconds=1),
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=delivery,
         use_configured_recall_embedding=False,
     )
@@ -2810,25 +2898,25 @@ async def test_restart_continues_exact_durable_reply_proposal_without_regenerati
 
 
 @pytest.mark.asyncio
-async def test_qq_c2c_host_turns_a_wrapped_flash_draft_into_a_delivered_action(
+async def test_qq_c2c_host_turns_a_combined_inner_turn_into_a_delivered_action(
     tmp_path: Path,
 ) -> None:
     delivery = _Delivery()
     host = build_qq_c2c_host(
         settings=Settings(
-            database_path=tmp_path / "qq-wrapped-flash.sqlite", PRIMARY_USER_ID="geoff"
+            database_path=tmp_path / "qq-combined-inner-turn.sqlite", PRIMARY_USER_ID="geoff"
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
-        model=_WrappedExpressionModel(),
-        advisory_model=FakeCompanionModel(),
+        model=_CombinedCharacterInteriorModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=delivery,
     )
     runtime = host._host._application._turns._runtime  # noqa: SLF001
-    assert runtime._quick_reaction_worker is None  # noqa: SLF001
+    assert not hasattr(runtime, "_quick_reaction_worker")
     try:
         result = await host.inbound_text(
-            message_id="wrapped-flash-1",
+            message_id="combined-inner-turn-1",
             recipient_id="10001",
             text="你好？",
             observed_at=NOW,
@@ -2851,7 +2939,7 @@ async def test_qq_c2c_host_supplies_companion_and_user_identity_to_the_reply_mod
         recipient_id="10001",
         bootstrap_at=NOW,
         model=_IdentityAwareModel(),
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=delivery,
     )
     try:
@@ -2921,6 +3009,7 @@ async def test_qq_c2c_host_accepts_pure_attachment_without_fabricating_text(
         ({"modality": "sticker", "sticker_id": "qq-face:14"}, "sticker:qq-face:14"),
     ),
 )
+@pytest.mark.asyncio
 async def test_napcat_expression_is_selected_by_the_single_main_model_and_reaches_delivery(
     tmp_path: Path, beat: dict[str, str], expected: str
 ) -> None:
@@ -2935,7 +3024,7 @@ async def test_napcat_expression_is_selected_by_the_single_main_model_and_reache
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=delivery,
     )
     try:
@@ -2976,7 +3065,7 @@ async def test_napcat_typing_only_choice_cannot_become_a_silent_expression_plan(
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=delivery,
     )
     try:
@@ -3011,7 +3100,7 @@ async def test_napcat_main_model_can_choose_silence_without_host_owned_typing(
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=delivery,
     )
     try:
@@ -3076,7 +3165,6 @@ def test_real_onebot_entry_carries_complete_media_deployment_and_defaults_unavai
     tmp_path: Path,
 ) -> None:
     deployment = MediaPreviewDeployment(
-        selection_model=_SelectionModel(),
         planner=_NoCallMediaPlanner(),
         acceptance=MediaSelectionAcceptanceComposition(
             grant=ProviderMediaGrantBinding(
@@ -3173,7 +3261,7 @@ def test_onebot_entry_accepts_explicit_distinct_test_authorities_without_provide
             NAPCAT_ALLOWED_PRIVATE_USER_IDS="10001",
         ),
         _test_only_model=author,
-        _test_only_advisory_model=author,
+        _test_only_world_support_model=author,
         _test_only_source_closure_model=reviewer,
         _test_only_life_source_closure_model=life_reviewer,
     )
@@ -3219,7 +3307,7 @@ def test_qq_health_reports_a_running_scheduler_even_when_the_world_is_starved(
             _env_file=None,
             database_path=tmp_path / "qq-onebot-starved.sqlite",
             NAPCAT_ALLOWED_PRIVATE_USER_IDS="10001",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
         ),
         use_fake_model=True,
         scheduler_interval_seconds=3_600,
@@ -3433,6 +3521,13 @@ def test_qq_public_health_forwards_expression_diagnostics_without_removing_old_f
     assert "initiative" in scheduler
     assert "world_activity" in scheduler
     assert "recall_semantic" in scheduler
+    interior = scheduler["character_interior"]
+    assert interior["semantic_author_count"] == 1
+    assert interior["primary_author_model"] != "unknown"
+    assert interior["primary_author_route"]["model_id"] == interior["primary_author_model"]
+    assert interior["legacy_interface_invocations"] == 0
+    assert interior["parallel_character_author_conflicts"] == 0
+    assert interior["dual_write_conflicts"] == 0
     reliability = scheduler["reliability"]
     assert isinstance(reliability["dispatch_acks_24h"], int)
     assert isinstance(reliability["visible_replies_24h"], int)
@@ -3812,6 +3907,8 @@ def test_qq_fake_composition_keeps_open_life_fact_effects_fail_closed(
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
+        model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
     )
     try:
@@ -3821,23 +3918,24 @@ def test_qq_fake_composition_keeps_open_life_fact_effects_fail_closed(
         assert development._world_author.model.endswith(  # noqa: SLF001
             "/life-development/world_author"
         )
-        assert development._character_model.model.endswith(  # noqa: SLF001
-            "/life-development/character_model"
+        assert not hasattr(development, "_character_model")
+        assert development._character_interior is (  # noqa: SLF001
+            host._host._application._character_interior  # type: ignore[attr-defined]  # noqa: SLF001
         )
-        assert development._world_author.model != development._character_model.model  # noqa: SLF001
         assert development._source_closure_reviewer is None  # noqa: SLF001
         assert development._source_closure_reviewer_is_independent is False  # noqa: SLF001
         assert (  # noqa: SLF001
             development._world_author_source_rewriter.authority_origin
             is development._world_author.authority_origin
         )
-        assert ecology._life_author_followup is None  # noqa: SLF001
-        assert ecology._future_life_author_followup is None  # noqa: SLF001
+        assert not hasattr(ecology, "_life_author_followup")
+        assert not hasattr(ecology, "_future_life_author_followup")
         assert ecology._npc_initiative_followup is not None  # noqa: SLF001
         assert (  # noqa: SLF001
             type(ecology._npc_initiative_followup).__name__ == "NpcEcology"
         )
-        assert ecology._aspiration_followup is None  # noqa: SLF001
+        assert not hasattr(ecology, "_aspiration_followup")
+        assert not hasattr(ecology, "_shared_private_followup")
         assert ecology._open_world_followup is None  # noqa: SLF001
     finally:
         host._host._application.close()  # type: ignore[attr-defined]

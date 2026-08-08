@@ -29,12 +29,7 @@ from companion_daemon.world_v2.proposal_envelope import (
 )
 from companion_daemon.world_v2.perception_executor import PerceptionActionExecutor
 from companion_daemon.world_v2.perception_result_context import PerceptionResultContent
-from companion_daemon.world_v2.perception_result_trigger_runtime import (
-    NoopPerceptionResultDeliberator,
-)
 from companion_daemon.world_v2.runtime import WorldRuntime
-from companion_daemon.world_v2.context_resolver import query_from_projection
-from companion_daemon.world_v2.ledger_context_resolver import context_capsule_compiler_from_ledger
 from companion_daemon.world_v2.schemas import (
     BudgetAccount,
     ClaimLease,
@@ -218,6 +213,7 @@ def _claim_perception_trigger(ledger, source: WorldEvent) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("analysis_kind", ("vision", "transcription"))
+@pytest.mark.asyncio
 async def test_injected_perception_provider_is_source_bound_private_and_result_triggered_once(
     monkeypatch, analysis_kind
 ) -> None:
@@ -259,8 +255,6 @@ async def test_injected_perception_provider_is_source_bound_private_and_result_t
         ledger=ledger,
         action_executor=PerceptionActionExecutor(inputs=Inputs(), transport=provider),
         action_pump_owner="pump:perception",
-        perception_result_owner="worker:perception-result",
-        perception_result_deliberator=NoopPerceptionResultDeliberator(),
     )
     settled = await runtime.drain_actions_once()
     assert settled is not None and settled.status == "settled" and provider.calls == 1
@@ -269,39 +263,13 @@ async def test_injected_perception_provider_is_source_bound_private_and_result_t
     assert projection.perception_results[0].analysis_kind == analysis_kind
     assert projection.perception_results[0].result_ref == "result:vision:1"
     assert projection.trigger_processes[-1].process_kind == "perception_result_deliberation"
-    assert (await runtime.drain_background_once()).status == "processed"
+    # A result cannot become protagonist Context through a deterministic
+    # consumer. Production composes this trigger into CharacterInterior's
+    # world-stimulus lane; this standalone hard-boundary fixture intentionally
+    # leaves it open.
     assert await runtime.drain_background_once() is None
-    head = ledger.project()
-    capsule = context_capsule_compiler_from_ledger(
-        ledger=ledger, perception_result_reader=provider
-    ).compile(
-        query_from_projection(
-            head, actor_ref="agent:companion", trigger_ref=source.event_id
-        )
-    )
-    assert capsule.perception_results is not None
-    payload = capsule.perception_results.items[0].payload_json
-    assert "external_perception_descriptor" in payload
-    assert "provider_observation_not_world_fact" in payload
-    assert json.loads(payload)["text"] == '{"labels":["cat"]}'
-
-    class ForgedReader:
-        def read_exact(self, *, result_ref: str):
-            return PerceptionResultContent.model_construct(
-                result_ref=result_ref,
-                result_hash=_hash('{"labels":["cat"]}'),
-                text='{"labels":["fabricated-person"]}',
-            )
-
-    forged = context_capsule_compiler_from_ledger(
-        ledger=ledger, perception_result_reader=ForgedReader()
-    ).compile(
-        query_from_projection(
-            head, actor_ref="agent:companion", trigger_ref=source.event_id
-        )
-    )
-    assert forged.perception_results is not None
-    assert forged.perception_results.items == ()
+    process = ledger.project().trigger_processes[-1]
+    assert process.state == "open"
 
 
 @pytest.mark.asyncio

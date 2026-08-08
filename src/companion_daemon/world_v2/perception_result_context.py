@@ -87,7 +87,25 @@ class PerceptionResultContextCompiler:
             for item in projection.trigger_processes
             if item.process_kind == "perception_result_deliberation"
             and item.state == "terminal"
-            and item.runtime_outcome_ref == f"outcome:{item.trigger_id}:no-visible-action"
+            and (
+                # Historical ledgers completed this process through a semantic
+                # no-op. Keep that immutable prefix readable after the old
+                # interface is retired.
+                item.runtime_outcome_ref == f"outcome:{item.trigger_id}:no-visible-action"
+                # Current ledgers route the exact accepted descriptor through
+                # CharacterInterior. A private no-change is recorded by the
+                # unified stimulus runtime; an activated appraisal is
+                # terminalized atomically by Appraisal acceptance.
+                or item.runtime_outcome_ref
+                in {
+                    f"outcome:{item.trigger_id}:no-change",
+                    f"outcome:{item.trigger_id}:accepted",
+                }
+                or (
+                    item.runtime_outcome_ref is not None
+                    and item.runtime_outcome_ref.startswith("appraisal:")
+                )
+            )
         }
         rows: list[PerceptionResultContextItem] = []
         for result in projection.perception_results:

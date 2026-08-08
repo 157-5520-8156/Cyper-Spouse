@@ -262,8 +262,11 @@ def update_affect_episode(
             raise ValueError("affect update cannot reset the decay delay")
         if after.decay_not_before != before.decay_not_before:
             raise ValueError("affect update cannot move decay_not_before")
-        if change.operation == "stimulus":
-            if logical_time - before.last_stimulus_at > _seconds(merge_window_seconds):
+        if change.operation in {"stimulus", "reinterpret"}:
+            if (
+                change.operation == "stimulus"
+                and logical_time - before.last_stimulus_at > _seconds(merge_window_seconds)
+            ):
                 raise ValueError("affect component is outside its merge window")
             if not (
                 after.decay_anchor_at

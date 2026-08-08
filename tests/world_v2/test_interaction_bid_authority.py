@@ -5,14 +5,15 @@ import hashlib
 import json
 import sqlite3
 
+import pytest
+
 from legacy_migration_support import read_head_state_json
 
-from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from companion_daemon.world_v2.deliberation import DeliberationResult
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
-from companion_daemon.world_v2.interaction_bid_acceptance_runtime import InteractionBidAcceptanceRuntime
 from companion_daemon.world_v2.interaction_bid_proposal_compiler import (
     InteractionBidProposalCompiler,
+    InteractionBidProposalCompilerError,
 )
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
@@ -101,17 +102,29 @@ def _cursor(ledger: WorldLedger) -> ProjectionCursor:
 
 
 def test_delivered_media_bid_is_compiled_and_atomically_accepted() -> None:
+    # The independent media-delivery interaction author was retired by the
+    # CharacterInterior migration.  Opening (and even claiming) the delivery
+    # trigger now derives a deterministic retired-technical outcome; the old
+    # parallel worker must never compile a bid on its own.  This test pins the
+    # retirement semantics so a later migration cannot silently resurrect the
+    # retired author lane.
     ledger, source, source_revision = _prepared_ledger()
+    projection = ledger.project()
+    process = projection.trigger_processes[0]
+    assert process.process_kind == "media_delivery_interaction"
+    assert process.state == "terminal"
+    assert process.runtime_outcome_ref == (
+        "retired-technical:media-delivery-interaction-author-removed"
+    )
+    assert process.trigger_id in projection.completed_trigger_ids
+    # The retired lane cannot be re-armed: a compiler pinned at the current
+    # cursor must refuse a retired (non-claimed) source trigger.
     proposal, audited = _audit(ledger, source, source_revision)
-    compiled = InteractionBidProposalCompiler(ledger=ledger).record(world_id=WORLD, cursor=audited.cursor, proposal_id=proposal.proposal_id)
-    issuer = AcceptedLedgerBatchIssuer()
-    ledger._accepted_batch_issuer = issuer  # type: ignore[attr-defined]
-    runtime = InteractionBidAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
-    result = runtime.accept_runtime_owned(handle=runtime.pin_proposal(cursor=_cursor(ledger), proposal_id=compiled.typed_proposal_id), actor="worker:interaction", source="world-v2:interaction-worker")
-    bid = ledger.project().interaction_bids[0]
-    assert bid.delivery_event_ref == source.event_id
-    assert bid.goal == "invite_reply"
-    assert tuple(ledger.lookup_event_commit(event_id)[0].event_type for event_id in result.event_ids) == ("AcceptanceRecorded", "InteractionBidOpened")
+    with pytest.raises(InteractionBidProposalCompilerError) as excinfo:
+        InteractionBidProposalCompiler(ledger=ledger).record(
+            world_id=WORLD, cursor=audited.cursor, proposal_id=proposal.proposal_id
+        )
+    assert excinfo.value.code == "interaction_bid_proposal_compiler.source_trigger_not_claimed"
 
 
 def test_sqlite_migrates_v30_head_without_fabricating_interaction_bids(tmp_path) -> None:
@@ -127,6 +140,6 @@ def test_sqlite_migrates_v30_head_without_fabricating_interaction_bids(tmp_path)
         legacy_hash = hashlib.sha256(json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         connection.execute("UPDATE world_v2_heads SET semantic_hash = ?, reducer_bundle_version = ?, state_hash = '' WHERE world_id = ?", (legacy_hash, "world-v2-reducers.30", WORLD))
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.51"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.52"
     assert migrated.project().interaction_bids == ()
     assert migrated.rebuild() == migrated.project()

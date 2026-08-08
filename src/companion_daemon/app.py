@@ -243,6 +243,54 @@ def _http_v2_capture_health(*, asgi_app: FastAPI) -> dict[str, str]:
     return {"status": "failed", "failure_code": failure_code}
 
 
+def _unavailable_character_interior_health() -> dict[str, object]:
+    """Return an explicit unknown measurement instead of reconstructing topology."""
+
+    return {
+        "status": "unavailable",
+        "installed": False,
+        "semantic_author_count": 0,
+        "primary_author_model": None,
+        "primary_author_route": None,
+        # Retain the legacy scalar fields for health-client compatibility, but
+        # make their unavailable measurement state impossible to mistake for a
+        # successful runtime observation.
+        "legacy_interface_invocations": 0,
+        "parallel_character_author_conflicts": 0,
+        "dual_write_conflicts": 0,
+        "metrics_available": False,
+        "warning": True,
+        "warning_reasons": ["character_interior.composition_unavailable"],
+    }
+
+
+def _character_interior_is_ready(health: object) -> bool:
+    """Fail closed unless the composed runtime proves one clean semantic author."""
+
+    if not isinstance(health, dict):
+        return False
+    if (
+        health.get("status") != "ready"
+        or health.get("installed") is not True
+        or health.get("semantic_author_count") != 1
+        or health.get("legacy_interface_invocations") != 0
+        or health.get("parallel_character_author_conflicts") != 0
+        or health.get("dual_write_conflicts") != 0
+        or health.get("topology_issues") != []
+    ):
+        return False
+    topology = health.get("topology_evidence")
+    if not isinstance(topology, dict):
+        return False
+    semantic_author_ids = topology.get("semantic_author_ids")
+    return bool(
+        topology.get("duplicate_purpose_owner_count") == 0
+        and topology.get("legacy_compatibility_route_installed") is False
+        and isinstance(semantic_author_ids, list)
+        and len(semantic_author_ids) == 1
+    )
+
+
 async def _http_v2_capture_async(
     *,
     asgi_app: FastAPI,
@@ -463,11 +511,27 @@ async def health(request: Request) -> dict[str, object]:
     if _existing_http_v2_capture(request.app) is None:
         _schedule_http_v2_warmup(asgi_app=request.app)
     capture_health = _http_v2_capture_health(asgi_app=request.app)
-    response: dict[str, object] = {
-        "status": "degraded" if capture_health["status"] == "failed" else "ok",
-        "world_v2_capture": capture_health,
-    }
     capture = _existing_http_v2_capture(request.app)
+    interior_health: dict[str, object] = _unavailable_character_interior_health()
+    if capture is not None:
+        interior_health_reader = getattr(capture, "character_interior_health", None)
+        if callable(interior_health_reader):
+            try:
+                candidate = interior_health_reader()
+            except Exception:  # pragma: no cover - defensive deployment boundary
+                _LOG.exception("CharacterInterior health snapshot failed")
+            else:
+                if isinstance(candidate, dict):
+                    interior_health = candidate
+    deployment_ready = bool(
+        capture_health.get("status") == "ready"
+        and _character_interior_is_ready(interior_health)
+    )
+    response: dict[str, object] = {
+        "status": "ok" if deployment_ready else "degraded",
+        "world_v2_capture": capture_health,
+        "character_interior": interior_health,
+    }
     if capture is not None:
         response["proactive_source_authority"] = (
             capture.proactive_source_authority_health()

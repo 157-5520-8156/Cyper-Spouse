@@ -26,15 +26,7 @@ from .evaluation_artifacts import (
 )
 from .mechanical_evaluation_scope import MechanicalEvaluationScope
 from .route_hints import RouteHints
-from .semantic_advisory_adapter import SemanticAdvisoryAdapter, SemanticAdvisoryModel
 from .semantic_compute_router import SemanticComputeRouter
-from .expression_episode import (
-    EpisodeExternalResult,
-    EpisodeObservation,
-    EpisodeOutcome,
-    ExpressionEpisode,
-    SettlementOutcome,
-)
 from .expression_cadence import (
     CADENCE_POLICY_VERSION,
     CadenceDraw,
@@ -91,14 +83,10 @@ __all__ = [
     "ExternalObservation",
     "ExecutionReceipt",
     "EvaluationProtocol",
-    "EpisodeExternalResult",
-    "EpisodeObservation",
-    "EpisodeOutcome",
     "EvaluationArtifactBundle",
     "EvidenceArtifactCapture",
     "ExperienceEvaluationReport",
     "ExperienceEvaluator",
-    "ExpressionEpisode",
     "FrequencyBudget",
     "FactV2AcceptanceRuntime",
     "MatrixCatalog",
@@ -120,10 +108,7 @@ __all__ = [
     "TriggerProcess",
     "ScenarioTurn",
     "ScenarioCorpusEntry",
-    "SemanticAdvisoryAdapter",
-    "SemanticAdvisoryModel",
     "SemanticComputeRouter",
-    "SettlementOutcome",
     "WorldProjection",
     "WorldRuntime",
     "cadence_windows",

@@ -360,7 +360,7 @@ def test_production_health_exposes_latency_warning_without_changing_runtime_stat
             _env_file=None,
             database_path=tmp_path / "qq-latency-health.sqlite",
             NAPCAT_ALLOWED_PRIVATE_USER_IDS="10001",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
         ),
         use_fake_model=True,
         scheduler_interval_seconds=3_600,

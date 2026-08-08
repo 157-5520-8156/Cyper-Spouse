@@ -5,24 +5,18 @@ import json
 
 import pytest
 
-from companion_daemon.world_v2.deliberation import DeliberationResult
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
-from companion_daemon.world_v2.external_result_trigger_runtime import NoopToolResultDeliberator
-from companion_daemon.world_v2.proposal_audit import ProposalAuditContext, ProposalAuditRecorder
-from companion_daemon.world_v2.proposal_envelope import (
-    CanonicalTypedPayload, DecisionProposal, ProposalActionIntent, ProposalEvidenceRef, TypedChange,
+from companion_daemon.world_v2.read_only_tool import (
+    ReadOnlyToolAcceptanceRuntime,
+    ReadOnlyToolProposal,
 )
-from companion_daemon.world_v2.read_only_tool_authorization_resolver import ProjectionReadOnlyToolAuthorizationResolver
 from companion_daemon.world_v2.read_only_tool_executor import ReadOnlyToolActionExecutor
-from companion_daemon.world_v2.read_only_tool_proposal_compiler import ReadOnlyToolProposalCompiler, tool_query_ref
-from companion_daemon.world_v2.read_only_tool_query_reader import AuditedReadOnlyToolQueryReader
 from companion_daemon.world_v2.read_only_tool_trigger import read_only_tool_trigger_event
 from companion_daemon.world_v2.runtime import WorldRuntime
 from companion_daemon.world_v2.schemas import ClaimLease, ProjectionCursor, TriggerProcess, WorldEvent
 
 from authorization_test_support import enforcement_tool_ledger
-from test_proposal_audit import _digest, _result
-from test_read_only_tool_vertical import NOW, WORLD, Provider, _source
+from test_read_only_tool_vertical import NOW, WORLD, Provider, Queries, _source
 
 
 def _cursor(projection) -> ProjectionCursor:
@@ -54,60 +48,69 @@ def _claim_tool_trigger(ledger, source) -> None:
 
 
 @pytest.mark.asyncio
-async def test_injected_tool_lane_compiles_enforced_request_then_settles_a_real_result(monkeypatch) -> None:
-    ledger, _ = enforcement_tool_ledger(monkeypatch, world_id=WORLD, now=NOW, actor="agent:companion", subject="user:primary")
+async def test_injected_tool_lane_settles_result_without_retired_parallel_author(monkeypatch) -> None:
+    # The independent read-only-tool author was retired by the CharacterInterior
+    # migration.  Opening (and even claiming) the legacy tool trigger now
+    # derives a deterministic retired-technical outcome; the production lane
+    # must settle tool results through the typed acceptance runtime instead of
+    # a retired parallel author.  This test pins the retirement semantics and
+    # proves the injected tool lane still works end to end.
+    ledger, authorization = enforcement_tool_ledger(monkeypatch, world_id=WORLD, now=NOW, actor="agent:companion", subject="user:primary")
     source = _source(ledger)
     _claim_tool_trigger(ledger, source)
-    head = ledger.project()
-    query = '{"city":"Shanghai"}'
-    query_hash = "sha256:" + hashlib.sha256(query.encode()).hexdigest()
-    change = TypedChange(
-        change_id="change:tool:1", kind="read_only_tool_request", target_id="tool:weather", transition="request",
-        evidence_refs=("observation:tool-question",),
-        payload=CanonicalTypedPayload.from_value(payload_schema="read_only_tool_request.v1", value={
-            "tool_name": "weather", "target": "tool:weather", "query": query,
-            "budget_account_id": "account:tool", "budget_limit": 5,
-        }),
+    projection = ledger.project()
+    retired = next(
+        (
+            item
+            for item in projection.trigger_processes
+            if item.process_kind == "read_only_tool_deliberation"
+        ),
+        None,
     )
-    proposal = DecisionProposal(
-        proposal_id="proposal:tool:production:1", trigger_ref=source.event_id,
-        evaluated_world_revision=head.world_revision,
-        evidence_refs=(ProposalEvidenceRef(ref_id="observation:tool-question", evidence_kind="observed_message", source_world_revision=ledger.lookup_event_commit(source.event_id)[1].world_revision, immutable_hash="sha256:" + source.payload_hash),),
-        proposed_changes=(change,), action_intents=(ProposalActionIntent(
-            intent_id="intent:tool:1", kind="read_only_tool", layer="read_only_tool", target="tool:weather",
-            payload_ref=tool_query_ref(proposal_id="proposal:tool:production:1", change_id="change:tool:1"), payload_hash=query_hash,
-            causal_change_id="change:tool:1",
-        ),), confidence=9000, brief_rationale="A current weather lookup is useful.",
-        behavior_tendency="verify", stance="helpful", display_strategy="private",
+    assert retired is not None
+    assert retired.state == "terminal"
+    assert retired.runtime_outcome_ref == (
+        "retired-technical:read-only-tool-independent-author-removed"
     )
-    base = _result()
-    result = DeliberationResult(
-        result_id="deliberation:" + _digest({
-            "capsule_id": base.capsule_id,
-            "proposal_hash": proposal.proposal_hash,
-            "attempt_audits": [base.audit.model_dump(mode="json")],
-        }),
-        capsule_id=base.capsule_id, proposal=proposal, audit=base.audit, attempt_audits=(base.audit,),
+    assert retired.trigger_id in projection.completed_trigger_ids
+
+    # The typed acceptance lane (the production path) still settles the tool
+    # result without ever re-arming the retired author trigger.
+    proposal = ReadOnlyToolProposal(
+        proposal_id="proposal:tool:production:1",
+        source_event_ref=source.event_id,
+        source_world_revision=ledger.lookup_event_commit(source.event_id)[1].world_revision,
+        source_payload_hash=source.payload_hash,
+        tool_name="weather",
+        target="tool:weather",
+        query_ref="payload:tool:weather:1",
+        query_hash="sha256:" + hashlib.sha256('{"city":"Shanghai"}'.encode()).hexdigest(),
+        budget_account_id="account:tool",
+        budget_limit=5,
+        authorization=authorization,
     )
-    audited = ProposalAuditRecorder(ledger=ledger).record(result, ProposalAuditContext(
-        world_id=WORLD, trigger_ref=source.event_id, logical_time=NOW, created_at=NOW, actor="agent:companion", source="test",
-        trace_id="trace:tool", causation_id=source.event_id, correlation_id="conversation:tool", evaluated_world_revision=head.world_revision,
-        expected_commit_world_revision=head.world_revision, expected_deliberation_revision=head.deliberation_revision,
-        expected_ledger_sequence=head.ledger_sequence,
-    ))
-    compiled = ReadOnlyToolProposalCompiler(
-        ledger=ledger, authorization_resolver=ProjectionReadOnlyToolAuthorizationResolver(), actor_ref="agent:companion",
-        budget_account_id="account:tool", budget_limit=5,
-    ).accept(world_id=WORLD, cursor=audited.cursor, proposal_id=proposal.proposal_id, actor="worker:tool", source="test")
-    assert compiled.status == "accepted"
+    ReadOnlyToolAcceptanceRuntime(ledger=ledger).accept(
+        proposal=proposal,
+        actor="worker:tool-proposal",
+        source="test",
+        logical_time=NOW,
+        created_at=NOW,
+        trace_id="trace:tool",
+        correlation_id="conversation:tool",
+    )
     provider = Provider()
     runtime = WorldRuntime(
         world_id=WORLD, ledger=ledger,
-        action_executor=ReadOnlyToolActionExecutor(queries=AuditedReadOnlyToolQueryReader(ledger=ledger), transport=provider),
-        action_pump_owner="pump:tool", external_result_owner="worker:result", external_result_deliberator=NoopToolResultDeliberator(),
+        action_executor=ReadOnlyToolActionExecutor(queries=Queries(), transport=provider),
+        action_pump_owner="pump:tool",
     )
     outcome = await runtime.drain_actions_once()
     assert outcome is not None and outcome.status == "settled" and provider.calls == 1
-    assert ledger.project().tool_results[0].result_ref == "result:weather:1"
+    projection = ledger.project()
+    assert projection.tool_results[0].result_ref == "result:weather:1"
+    assert not any(
+        item.process_kind == "external_result_deliberation"
+        for item in projection.trigger_processes
+    )
     background = await runtime.drain_background_once()
-    assert background is not None and background.status == "processed"
+    assert background is None

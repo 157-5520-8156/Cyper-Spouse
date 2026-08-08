@@ -167,6 +167,7 @@ async def test_conductor_reports_acceptance_not_renderable_without_planning() ->
         ),
     ),
 )
+@pytest.mark.asyncio
 async def test_conductor_structures_expected_acceptance_races(
     failure: Exception, reason_code: str,
 ) -> None:

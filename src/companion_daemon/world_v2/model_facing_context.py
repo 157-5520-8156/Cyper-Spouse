@@ -258,10 +258,32 @@ def compact_model_facing_context(raw: str) -> str:
             "actor_ref",
             "trigger_ref",
             "world_revision",
+            "deliberation_revision",
+            "ledger_sequence",
             "logical_time",
+            "consumer_scope",
+            "context_compiler_version",
+            "viewer_privacy_ceiling",
+            "truncation",
         )
         if key in context
     }
+    inner_life_snapshot = context.get("inner_life_snapshot")
+    if isinstance(inner_life_snapshot, dict):
+        # CharacterInterior already produced a bounded provider view. Preserve
+        # its semantic materials/source refs while removing proof-only hashes;
+        # dropping this field would make the supposedly unified role call run
+        # without the character's current private perspective. The aggregate
+        # source_inventory is audit metadata: every material already carries
+        # its own source refs and the hard-boundary manifest names the claim
+        # scope, so the provider view drops it to save prompt budget.
+        snapshot_view = _semantic_value(inner_life_snapshot)
+        if isinstance(snapshot_view, dict):
+            snapshot_view.pop("source_inventory", None)
+        compact["inner_life_snapshot"] = snapshot_view
+    recall_control = context.get("recall_control")
+    if isinstance(recall_control, dict):
+        compact["recall_control"] = recall_control
     compact_slices: dict[str, object] = {}
     for name, slice_value in context["slices"].items():
         if not isinstance(name, str) or not isinstance(slice_value, dict):
@@ -309,10 +331,6 @@ def compact_model_facing_context(raw: str) -> str:
     if pinned_time is not None:
         compact["pinned_time"], compact_slices[_PINNED_TIME_SLICE] = pinned_time
     compact["slices"] = compact_slices
-    compact["current_self_state"] = _build_current_self_state(
-        slices=compact_slices,
-        logical_time=compact.get("logical_time"),
-    )
     relationship = context.get("relationship_evaluation")
     if isinstance(relationship, dict):
         compact["relationship_evaluation"] = {
@@ -352,476 +370,6 @@ def _semantic_value(value: object) -> object:
             continue
         result[key] = _semantic_value(item)
     return result
-
-
-def _slice_items(slices: dict[str, object], name: str) -> list[dict[str, object]]:
-    lane = slices.get(name)
-    if not isinstance(lane, dict) or lane.get("availability") != "available":
-        return []
-    items = lane.get("items")
-    if not isinstance(items, list):
-        return []
-    return [item for item in items if isinstance(item, dict)]
-
-
-def _state_entry(
-    item: dict[str, object],
-    *,
-    fields: tuple[str, ...] | None = None,
-) -> dict[str, object] | None:
-    source_ref = item.get("source_ref")
-    if not isinstance(source_ref, str) or not source_ref:
-        return None
-    value = item.get("value")
-    if not isinstance(value, dict):
-        return None
-    semantic = {key: value[key] for key in fields if key in value} if fields is not None else value
-    if not semantic:
-        return None
-    result: dict[str, object] = dict(semantic)
-    result["source_ref"] = source_ref
-    return result
-
-
-def _affect_state_entry(item: dict[str, object]) -> dict[str, object] | None:
-    source_ref = item.get("source_ref")
-    if not isinstance(source_ref, str) or not source_ref:
-        return None
-    value = item.get("value")
-    if not isinstance(value, dict):
-        return None
-    components: list[dict[str, object]] = []
-    raw_components = value.get("components")
-    if isinstance(raw_components, list):
-        for component in raw_components:
-            if not isinstance(component, dict) or not isinstance(component.get("dimension"), str):
-                continue
-            material = {
-                key: component[key]
-                for key in (
-                    "dimension",
-                    "source_cluster_ref",
-                    "appraisal_refs",
-                    "intensity_bp",
-                    "residue_bp",
-                    "opened_at",
-                    "last_stimulus_at",
-                    "last_updated_at",
-                    "decay_not_before",
-                )
-                if key in component
-            }
-            components.append(material)
-    if not components:
-        return None
-    result: dict[str, object] = {
-        "components": components,
-        **{key: value[key] for key in ("opened_at", "updated_at") if key in value},
-    }
-    result["source_ref"] = source_ref
-    return result
-
-
-def _core_state_entry(item: dict[str, object]) -> dict[str, object] | None:
-    source_ref = item.get("source_ref")
-    if not isinstance(source_ref, str) or not source_ref:
-        return None
-    value = item.get("value")
-    values = value.get("values") if isinstance(value, dict) else None
-    if not isinstance(values, dict):
-        return None
-    slow = values.get("slow_evolving")
-    if not isinstance(slow, dict):
-        return None
-    return {"slow_evolving": slow, "source_ref": source_ref}
-
-
-def _recalled_document_state_entry(
-    item: dict[str, object],
-    *,
-    memory_kinds: frozenset[str],
-) -> dict[str, object] | None:
-    """Project one trusted, already-selected RecallDocument into Current Self."""
-
-    source_ref = item.get("source_ref")
-    value = item.get("value")
-    if (
-        not isinstance(source_ref, str)
-        or not source_ref
-        or not isinstance(value, dict)
-        or value.get("memory_kind") not in memory_kinds
-        or not isinstance(value.get("actor_ref"), str)
-        or not isinstance(value.get("text"), str)
-        or not value["text"].strip()
-    ):
-        return None
-    fields = (
-        "memory_kind",
-        "authority",
-        "epistemic_scope",
-        "actor_ref",
-        "speaker_ref",
-        "subject_refs",
-        "text",
-        "occurred_from",
-        "occurred_to",
-        "valid_from",
-        "valid_to",
-        "status",
-    )
-    return {
-        **{
-            key: value[key]
-            for key in fields
-            if key in value and value[key] is not None
-        },
-        "source_ref": source_ref,
-    }
-
-
-def _recent_experience_state_entry(
-    item: dict[str, object],
-    *,
-    lane: str,
-) -> dict[str, object] | None:
-    """Keep a small semantic, source-bound view of the companion's own past.
-
-    ``recent_experiences`` contains the committed Experience projection while
-    ``world_life`` can additionally carry descriptor-bound prose from the
-    immutable life-content store. Neither lane is interpreted here: this view
-    only removes proof/accounting material and retains the Capsule item token.
-    """
-
-    source_ref = item.get("source_ref")
-    value = item.get("value")
-    if not isinstance(source_ref, str) or not source_ref or not isinstance(value, dict):
-        return None
-    recalled = _recalled_document_state_entry(
-        item,
-        memory_kinds=frozenset({"episodic"}),
-    )
-    if recalled is not None:
-        # A trusted RecallTrace is injected as a compact, flat document view
-        # rather than either nested live projection below. Keep the selected
-        # first-person episode in the working-self view instead of burying it
-        # back in a generic Context lane after the character's own attention
-        # mechanism surfaced it.
-        return recalled
-    elif lane == "world_life":
-        if value.get("context_kind") == "biographical_context":
-            return None
-        fields = (
-            (
-                "occurrence_id",
-                "occurrence_entity_revision",
-                "participant_refs",
-                "location_ref",
-                "time_window",
-                "activated_at",
-                "status",
-                "privacy_class",
-                "premise",
-            )
-            if value.get("context_kind") == "active_world_occurrence"
-            else (
-                "occurrence_id",
-                "occurrence_entity_revision",
-                "participant_refs",
-                "location_ref",
-                "result_id",
-                "settled_at",
-                "privacy_class",
-                "content",
-            )
-        )
-        semantic = {key: value[key] for key in fields if key in value}
-    else:
-        values = value.get("values")
-        if isinstance(values, dict):
-            fields = (
-                "summary_ref",
-                "occurred_from",
-                "occurred_to",
-                "participant_refs",
-                "privacy_class",
-            )
-            semantic = {
-                **(
-                    {"experience_id": value["experience_id"]}
-                    if isinstance(value.get("experience_id"), str)
-                    else {}
-                ),
-                **{key: values[key] for key in fields if key in values},
-            }
-            content = value.get("content")
-            if isinstance(content, dict):
-                content_fields = ("content_ref", "text", "truncated")
-                compact_content = {
-                    key: content[key] for key in content_fields if key in content
-                }
-                if isinstance(compact_content.get("text"), str):
-                    semantic["content"] = compact_content
-        else:
-            return None
-    if not semantic:
-        return None
-    return {**semantic, "source_ref": source_ref}
-
-
-def _state_source_refs(state: dict[str, object]) -> list[str]:
-    """Collect only the semantic Capsule item refs represented in this view."""
-
-    refs: set[str] = set()
-    for value in state.values():
-        candidates: object = value
-        if isinstance(value, dict) and isinstance(value.get("items"), list):
-            candidates = value["items"]
-        if not isinstance(candidates, list):
-            continue
-        for item in candidates:
-            if isinstance(item, dict) and isinstance(item.get("source_ref"), str):
-                refs.add(item["source_ref"])
-    return sorted(refs)
-
-
-def _build_current_self_state(
-    *,
-    slices: dict[str, object],
-    logical_time: object,
-) -> dict[str, object]:
-    """Derive one compact working-self view from already verified slices.
-
-    It deliberately preserves concurrent Affect components and Appraisal
-    alternatives.  This is a salience/view layer only: source refs continue to
-    point at the authoritative Capsule items and no derived prose is created.
-    """
-
-    state: dict[str, object] = {
-        "contract": "current-self-state.1",
-        "authority": "derived_from_verified_context",
-    }
-    if isinstance(logical_time, str):
-        state["logical_time"] = logical_time
-    stable_self = [
-        entry
-        for item in _slice_items(slices, "character_core")
-        for entry in (_core_state_entry(item),)
-        if entry is not None
-    ]
-    if stable_self:
-        state["stable_self"] = stable_self
-    biographical_context = [
-        entry
-        for item in _slice_items(slices, "world_life")
-        if isinstance(item.get("value"), dict)
-        and item["value"].get("context_kind") == "biographical_context"
-        for entry in (
-            _state_entry(
-                item,
-                fields=(
-                    "reviewed_timeline_ref",
-                    "timeline_source_event_ref",
-                    "logical_at",
-                    "age",
-                    "academic_phase",
-                    "academic_year",
-                    "season",
-                    "calendar_context_tags",
-                    "current_residence_context_tags",
-                    "active_life_arcs",
-                    "settled_biographical_coordinates",
-                ),
-            ),
-        )
-        if entry is not None
-    ]
-    if biographical_context:
-        state["biographical_context"] = biographical_context
-    lane_contracts = (
-        (
-            "situation",
-            "current_situation",
-            (
-                "logical_time",
-                "time_segment",
-                "activity_slices",
-                "goal_slices",
-                "resource_pressure",
-                "attention_slice",
-                "social_environment",
-                "plan_relation",
-                "commitment_slices",
-            ),
-        ),
-        (
-            "relationship",
-            "relationship_slice",
-            (
-                "subject_ref",
-                "stage",
-                "variables",
-                "temperature",
-                "hysteresis",
-                "commitment_refs",
-                "last_adjusted_at",
-            ),
-        ),
-        (
-            "appraisals",
-            "appraisals",
-            (
-                "subject_ref",
-                "source_cluster_ref",
-                "hypotheses",
-                "evidence_refs",
-                "confidence_bp",
-                "accepted_at",
-                "expires_at",
-            ),
-        ),
-        (
-            "unresolved",
-            "open_threads",
-            (
-                "kind",
-                "subject_ref",
-                "importance_bp",
-                "due_window",
-                "window_closes_at",
-                "expected_response_ref",
-                "status",
-            ),
-        ),
-        (
-            "advisories",
-            "advisories",
-            (
-                "kind",
-                "candidate_refs",
-                "candidates",
-                "confidence_bp",
-                "expiry",
-                "producer_version",
-            ),
-        ),
-    )
-    for output_name, slice_name, fields in lane_contracts:
-        entries = [
-            entry
-            for item in _slice_items(slices, slice_name)
-            for entry in (_state_entry(item, fields=fields),)
-            if entry is not None
-        ]
-        if entries:
-            state[output_name] = entries
-    advisories = state.get("advisories")
-    if isinstance(advisories, list):
-        interruption = [
-            item
-            for item in advisories
-            if isinstance(item, dict)
-            and isinstance(item.get("kind"), str)
-            and item["kind"].startswith("interruption.")
-        ]
-        if interruption:
-            state["interruption"] = interruption
-            remaining = [item for item in advisories if item not in interruption]
-            if remaining:
-                state["advisories"] = remaining
-            else:
-                state.pop("advisories", None)
-    affect = [
-        entry
-        for item in _slice_items(slices, "affect_episodes")
-        for entry in (_affect_state_entry(item),)
-        if entry is not None
-    ]
-    if affect:
-        state["affect"] = affect
-    remembered_material = [
-        entry
-        for item in _slice_items(slices, "active_memory_candidates")
-        for entry in (_state_entry(item),)
-        if entry is not None
-    ][:2]
-    if remembered_material:
-        # These are already source-bound retrieval excerpts, not a host-authored
-        # suggestion to mention them.  Keeping a tiny working set beside Affect
-        # and current life makes memory available to the character's own
-        # attention without inventing a memory-to-response rule.
-        state["remembered_material"] = remembered_material
-    recalled_emotional_associations = [
-        entry
-        for item in _slice_items(slices, "recalled_emotional_associations")
-        for entry in (
-            _recalled_document_state_entry(
-                item,
-                memory_kinds=frozenset({"reflective"}),
-            ),
-        )
-        if entry is not None
-    ][:2]
-    if recalled_emotional_associations:
-        # These are defeasible memories of prior feeling/interpretation, not a
-        # host-generated mood or a fact about the counterpart. Their source
-        # labels remain visible so the role can notice or ignore them.
-        state["recalled_emotional_associations"] = recalled_emotional_associations
-    private_impressions = [
-        entry
-        for item in _slice_items(slices, "private_impressions")
-        for entry in (
-            _state_entry(
-                item,
-                fields=(
-                    "subject_ref",
-                    "reflection_summary",
-                    "confidence_bp",
-                    "first_seen",
-                    "last_supported",
-                    "expiry_condition",
-                    "contradiction_refs",
-                    "status",
-                ),
-            ),
-        )
-        if entry is not None
-    ][:2]
-    if private_impressions:
-        state["private_impressions"] = private_impressions
-    experience_lanes = [
-        [
-            entry
-            for item in _slice_items(slices, lane)
-            for entry in (_recent_experience_state_entry(item, lane=lane),)
-            if entry is not None
-        ]
-        for lane in ("world_life", "recent_experiences")
-    ]
-    # Keep the tiny current-self budget representative of both immediate life
-    # occurrences and committed experiences.  A busy world-life lane must not
-    # crowd durable personal experience out of the character's own attention.
-    recent_self_experiences = [
-        entries[0] for entries in experience_lanes if entries
-    ]
-    if len(recent_self_experiences) < 2:
-        recent_self_experiences.extend(
-            entry
-            for entries in experience_lanes
-            for entry in entries[1:]
-        )
-    recent_self_experiences = recent_self_experiences[:2]
-    state["recent_self_experiences"] = (
-        {
-            "availability": "available",
-            "items": recent_self_experiences,
-        }
-        if recent_self_experiences
-        else {"availability": "unavailable"}
-    )
-    source_refs = _state_source_refs(state)
-    state["source_refs"] = source_refs
-    state["availability"] = "available" if source_refs else "unavailable"
-    return state
 
 
 def compact_chat_model_facing_context(raw: str) -> str:
@@ -874,10 +422,6 @@ def compact_chat_model_facing_context(raw: str) -> str:
         if semantic_items:
             slices[name] = {"availability": "available", "items": semantic_items}
     context["slices"] = slices
-    context["current_self_state"] = _build_current_self_state(
-        slices=slices,
-        logical_time=context.get("logical_time"),
-    )
     return json.dumps(
         context,
         ensure_ascii=False,
@@ -921,10 +465,10 @@ def compact_recovery_model_facing_context(raw: str) -> str:
     # top-level convenience view is unnecessary on this deliberately tiny
     # fallback path.
     context.pop("pinned_time", None)
-    context["current_self_state"] = _build_current_self_state(
-        slices=retained,
-        logical_time=context.get("logical_time"),
-    )
+    # CharacterInterior injects its canonical typed snapshot after this
+    # generic compaction step. Avoid repeating actor identity at the recovery
+    # envelope root, where it has no authority and only consumes payload.
+    context.pop("actor_ref", None)
     return json.dumps(
         context,
         ensure_ascii=False,

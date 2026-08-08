@@ -145,6 +145,13 @@ def _life_identity_components(
             payload.get("expected_entity_revision"),
             payload.get("transition_id"),
         )
+    if event_type in {"AspirationRevised", "AspirationAbandoned"}:
+        return (
+            world_id,
+            _nested(payload, "aspiration_after", "aspiration_id"),
+            payload.get("expected_entity_revision"),
+            payload.get("transition_id"),
+        )
     if event_type == "PhotoCandidateOpened":
         return world_id, _nested(payload, "candidate", "candidate_id")
     if event_type == "PhotoCandidateUnrenderable":
@@ -615,6 +622,7 @@ def _life_identity_components(
             "interaction_appraisal",
             "silence_appraisal",
             "plan_disruption_appraisal",
+            "perception_result_deliberation",
             "interaction_fact",
             "private_impression_deliberation",
             "affect_deliberation",
@@ -625,6 +633,7 @@ def _life_identity_components(
             "expression_reconsideration",
             "external_result_deliberation",
             "life_ecology",
+            "life_reflection",
             "social_action_deliberation",
             "memory_candidate_review",
             "expression_episode",

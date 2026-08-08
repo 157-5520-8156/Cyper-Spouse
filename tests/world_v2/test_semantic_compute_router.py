@@ -102,6 +102,7 @@ async def test_ordinary_hints_take_flash_without_reply_or_content_material() -> 
         ),
     ],
 )
+@pytest.mark.asyncio
 async def test_semantically_expensive_categories_can_take_thinking(
     updates: dict[str, str], reason: str
 ) -> None:

@@ -19,6 +19,7 @@ from pydantic import Field, model_validator
 from .ledger import LedgerPort
 from .random_authority import RandomAuthority
 from .schema_core import FrozenModel
+from .schemas import WorldEvent
 
 
 _SITUATION_STIMULUS_EVENT_TYPES = frozenset(
@@ -49,6 +50,97 @@ _SITUATION_STIMULUS_EVENT_TYPES = frozenset(
 SITUATION_STIMULUS_EVENT_TYPES = _SITUATION_STIMULUS_EVENT_TYPES
 _SITUATION_WINDOW = timedelta(minutes=10)
 _SITUATION_DELAY_CANDIDATES = (120, 900, 2_700)
+_ACTOR_SCOPED_SITUATION_EVENT_TYPES = frozenset(
+    {
+        "ActivityStarted",
+        "ActivityPaused",
+        "ActivityResumed",
+        "ActivityCompleted",
+        "ActivityAbandoned",
+        "WorldOccurrenceActivated",
+        "WorldOccurrenceSettled",
+        "ExperienceCommitted",
+        "ExternalPerceptionRecorded",
+        "LifeArcChanged",
+        "NpcStatusChanged",
+    }
+)
+
+
+def situation_stimulus_is_observable(
+    *, projection, event: WorldEvent, actor_ref: str
+) -> bool:
+    """Return whether one committed situation event may enter ``actor_ref``'s mind.
+
+    Privacy labels govern later sharing; they do not prove that the protagonist
+    witnessed an NPC-owned event.  Actor-scoped sources therefore require an
+    exact participation, ownership, or accepted perception binding.  An
+    ``ExternalPerceptionRecorded`` event is the disclosure-safe authority for
+    something learned indirectly; the private source it summarized is not
+    promoted into the protagonist's context.
+    """
+
+    if event.event_type not in _SITUATION_STIMULUS_EVENT_TYPES:
+        return False
+    if event.event_type not in _ACTOR_SCOPED_SITUATION_EVENT_TYPES:
+        return True
+    payload = event.payload()
+    if event.event_type in {"WorldOccurrenceActivated", "WorldOccurrenceSettled"}:
+        occurrence_id = payload.get("occurrence_id")
+        occurrence = next(
+            (
+                item
+                for item in getattr(projection, "world_occurrences", ())
+                if item.occurrence_id == occurrence_id
+            ),
+            None,
+        )
+        return occurrence is not None and actor_ref in occurrence.participant_refs
+    if event.event_type == "ExperienceCommitted":
+        experience = next(
+            (
+                item
+                for item in getattr(projection, "experiences", ())
+                if getattr(getattr(item, "origin", None), "accepted_event_ref", None)
+                == event.event_id
+            ),
+            None,
+        )
+        if experience is not None:
+            values = getattr(experience, "values", experience)
+            return actor_ref in getattr(values, "participant_refs", ())
+        participants = (
+            payload.get("experience", {}).get("values", {}).get("participant_refs", ())
+            if isinstance(payload.get("experience"), dict)
+            else ()
+        )
+        return actor_ref in participants
+    if event.event_type == "ExternalPerceptionRecorded":
+        return payload.get("actor_ref") == actor_ref
+    if event.event_type == "LifeArcChanged":
+        arc_after = payload.get("arc_after")
+        return isinstance(arc_after, dict) and arc_after.get("owner_actor_ref") == actor_ref
+    if event.event_type.startswith("Activity"):
+        plan_id = payload.get("plan_id")
+        plan = next(
+            (
+                item
+                for item in getattr(projection, "plans", ())
+                if item.plan_id == plan_id
+                or getattr(
+                    getattr(item, "authority_origin", None),
+                    "accepted_event_ref",
+                    None,
+                )
+                == event.event_id
+            ),
+            None,
+        )
+        return plan is not None and getattr(plan, "owner_actor_ref", None) == actor_ref
+    # NPC lifecycle is not perception authority, even when the new state is
+    # public/shareable. Shared participation or a later perception event has
+    # its own committed source and can independently wake consideration.
+    return False
 
 
 class SocialInitiativePolicy(FrozenModel):
@@ -253,8 +345,13 @@ def social_initiative_consideration_id(
 class SocialInitiativeCompiler:
     """Find one eligible source without interpreting words or inventing facts."""
 
-    def __init__(self, *, ledger: LedgerPort, policy: SocialInitiativePolicy) -> None:
+    def __init__(
+        self, *, ledger: LedgerPort, actor_ref: str, policy: SocialInitiativePolicy
+    ) -> None:
+        if not actor_ref:
+            raise ValueError("social initiative requires an actor authority")
         self._ledger = ledger
+        self._actor_ref = actor_ref
         self._policy = policy
         self._context = SocialInitiativeContextPolicy(policy=policy)
         self._random = RandomAuthority(
@@ -388,17 +485,31 @@ class SocialInitiativeCompiler:
                 source_id = message.observation_id
                 stimulus_event_refs = ()
             elif event.event_type in _SITUATION_STIMULUS_EVENT_TYPES:
+                if not situation_stimulus_is_observable(
+                    projection=projection,
+                    event=event,
+                    actor_ref=self._actor_ref,
+                ):
+                    continue
                 source_kind = "situation_change"
                 source_id = "situation-window:" + source_ref.event_id
                 stimulus_event_refs = tuple(
                     item.event_id
-                    for item in projection.committed_world_event_refs
-                    if item.event_type in _SITUATION_STIMULUS_EVENT_TYPES
-                    and event.logical_time
-                    <= item.logical_time
-                    < event.logical_time + _SITUATION_WINDOW
-                    and item.world_revision > latest_message_revision
+                    for item in await self._observable_stimulus_refs(
+                        projection,
+                        tuple(
+                            item
+                            for item in projection.committed_world_event_refs
+                            if item.event_type in _SITUATION_STIMULUS_EVENT_TYPES
+                            and event.logical_time
+                            <= item.logical_time
+                            < event.logical_time + _SITUATION_WINDOW
+                            and item.world_revision > latest_message_revision
+                        ),
+                    )
                 )
+                if source_ref.event_id not in stimulus_event_refs:
+                    continue
             else:
                 continue
             return await self._from_source(
@@ -413,6 +524,28 @@ class SocialInitiativeCompiler:
             )
         return None
 
+    async def _observable_stimulus_refs(
+        self, projection, refs: tuple[object, ...]
+    ) -> tuple[object, ...]:
+        observable: list[object] = []
+        for ref in refs:
+            if ref.event_type not in _ACTOR_SCOPED_SITUATION_EVENT_TYPES:
+                observable.append(ref)
+                continue
+            located = await self._lookup(ref.event_id)
+            if located is None:
+                continue
+            event = located[0]
+            if event.event_type != ref.event_type or event.logical_time != ref.logical_time:
+                continue
+            if situation_stimulus_is_observable(
+                projection=projection,
+                event=event,
+                actor_ref=self._actor_ref,
+            ):
+                observable.append(ref)
+        return tuple(observable)
+
     async def _situation_change(
         self,
         projection,
@@ -425,7 +558,7 @@ class SocialInitiativeCompiler:
             if projection.message_observations
             else 0
         )
-        refs = tuple(
+        candidate_refs = tuple(
             sorted(
                 (
                     item
@@ -437,6 +570,7 @@ class SocialInitiativeCompiler:
                 key=lambda item: (item.logical_time, item.world_revision, item.event_id),
             )
         )
+        refs = await self._observable_stimulus_refs(projection, candidate_refs)
         if not refs:
             return None
         clusters: list[list[object]] = []
@@ -651,6 +785,12 @@ class SocialInitiativeCompiler:
         )
         if source_kind is None:
             return None
+        if source_kind == "situation_change" and not situation_stimulus_is_observable(
+            projection=projection,
+            event=event,
+            actor_ref=self._actor_ref,
+        ):
+            return None
         source_id = f"retry:{source_ref.event_id}"
         if source_kind == "spontaneous_contact":
             message = next(
@@ -664,20 +804,24 @@ class SocialInitiativeCompiler:
             if message is None:
                 return None
             source_id = message.observation_id
-        stimulus_event_refs = (
-            tuple(
-                item.event_id
-                for item in projection.committed_world_event_refs
-                if item.event_type in _SITUATION_STIMULUS_EVENT_TYPES
-                and event.logical_time
-                <= item.logical_time
-                < event.logical_time + _SITUATION_WINDOW
-                and item.world_revision > latest_message_revision
-                and item.world_revision <= failed_audit.evaluated_world_revision
+        stimulus_event_refs = ()
+        if source_kind == "situation_change":
+            observable = await self._observable_stimulus_refs(
+                projection,
+                tuple(
+                    item
+                    for item in projection.committed_world_event_refs
+                    if item.event_type in _SITUATION_STIMULUS_EVENT_TYPES
+                    and event.logical_time
+                    <= item.logical_time
+                    < event.logical_time + _SITUATION_WINDOW
+                    and item.world_revision > latest_message_revision
+                    and item.world_revision <= failed_audit.evaluated_world_revision
+                ),
             )
-            if source_kind == "situation_change"
-            else ()
-        )
+            stimulus_event_refs = tuple(item.event_id for item in observable)
+            if source_ref.event_id not in stimulus_event_refs:
+                return None
         return await self._from_source(
             source_kind=source_kind,
             source_id=source_id,
@@ -897,6 +1041,7 @@ __all__ = [
     "SocialInitiativeDecisionProfile",
     "SocialInitiativeOpportunity",
     "SocialInitiativePolicy",
+    "situation_stimulus_is_observable",
     "social_initiative_attempt_id",
     "social_initiative_consideration_id",
     "technical_failure_point",

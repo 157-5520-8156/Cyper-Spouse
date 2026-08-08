@@ -4,7 +4,8 @@ This is the one place that turns deployment ``Settings`` into a complete,
 explicit :class:`MediaPreviewDeployment` plus its durable provider transport.
 It composes only already-reviewed seams:
 
-- bounded candidate selection uses the flash chat model;
+- bounded candidate selection is offered through the already-composed
+  ``CharacterInterior`` by the World application;
 - planning goes through ``EventMediaPlannerAdapter`` with a durable SQLite
   terminal-result store, wrapping the image machine's v5 ``MediaPlanner``
   with the module flags passed explicitly (no environment switches);
@@ -234,7 +235,7 @@ def build_qq_media_preview_deployment(
     from companion_daemon.llm import DeepSeekChatModel
 
     def routed_model(*, model: str):
-        """Use the same sole character-author provider as production chat."""
+        """Build the objective media-planning provider, never a role author."""
 
         return DeepSeekChatModel(
             api_key=settings.deepseek_api_key,
@@ -243,7 +244,6 @@ def build_qq_media_preview_deployment(
             thinking_enabled=False,
         )
 
-    selection_model = routed_model(model=settings.deepseek_model)
     planner_model = routed_model(
         model=settings.world_v2_media_planner_model or settings.deepseek_model,
     )
@@ -291,7 +291,6 @@ def build_qq_media_preview_deployment(
         path=str(database_path), world_id=world_id, renderer=renderer
     )
     deployment = MediaPreviewDeployment(
-        selection_model=selection_model,
         planner=planner,
         acceptance=MediaSelectionAcceptanceComposition(
             grant=ProviderMediaGrantBinding(

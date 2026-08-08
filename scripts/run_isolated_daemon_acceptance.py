@@ -270,17 +270,17 @@ def _provider_request_evidence(payload: dict[str, object]) -> dict[str, object]:
     raw_messages = payload.get("messages")
     messages = raw_messages if isinstance(raw_messages, list) else []
     decoded = _decoded_json_material(messages)
-    current_self = [
+    inner_life_snapshots = [
         state
         for state in _named_material(
             decoded,
-            names=frozenset({"current_self_state"}),
+            names=frozenset({"inner_life_snapshot"}),
         )
         if _has_source_bound_semantic_material(state)
     ]
     recall = _available_recall_material(decoded)
     emotion: list[object] = []
-    for state in current_self:
+    for state in inner_life_snapshots:
         emotion.extend(
             material
             for material in _named_material(
@@ -312,7 +312,9 @@ def _provider_request_evidence(payload: dict[str, object]) -> dict[str, object]:
             and "This is a provisional first beat" not in joined
         )
     ) and not source_closure
-    current_self_hash = _canonical_hash(current_self) if current_self else None
+    inner_life_snapshot_hash = (
+        _canonical_hash(inner_life_snapshots) if inner_life_snapshots else None
+    )
     recall_hash = _canonical_hash(recall) if recall else None
     emotion_hash = _canonical_hash(emotion) if emotion else None
     temperature = payload.get("temperature")
@@ -330,7 +332,7 @@ def _provider_request_evidence(payload: dict[str, object]) -> dict[str, object]:
         "request_hash": _canonical_hash(payload),
         "presentation_hash": _canonical_hash(messages),
         "model_invocation_request_hash": model_invocation_request_hash,
-        "current_self_state_hash": current_self_hash,
+        "inner_life_snapshot_hash": inner_life_snapshot_hash,
         "recall_context_hash": recall_hash,
         "emotion_context_hash": emotion_hash,
         "source_closure_request": source_closure,
@@ -547,8 +549,10 @@ class _ProviderCaptureState:
             )
 
         source_records = [record for record in records if record["source_closure_request"] is True]
-        current_self_records = [
-            record for record in records if isinstance(record.get("current_self_state_hash"), str)
+        inner_life_snapshot_records = [
+            record
+            for record in records
+            if isinstance(record.get("inner_life_snapshot_hash"), str)
         ]
         recall_records = [
             record for record in records if isinstance(record.get("recall_context_hash"), str)
@@ -556,14 +560,8 @@ class _ProviderCaptureState:
         causal_records = [
             record
             for record in records
-            if all(
-                isinstance(record.get(key), str)
-                for key in (
-                    "current_self_state_hash",
-                    "recall_context_hash",
-                    "emotion_context_hash",
-                )
-            )
+            if isinstance(record.get("inner_life_snapshot_hash"), str)
+            and isinstance(record.get("emotion_context_hash"), str)
         ]
         return {
             "contract": "provider-presentation-capture.1",
@@ -574,14 +572,14 @@ class _ProviderCaptureState:
             "request_hashes": hashes("request_hash"),
             "presentation_hashes": hashes("presentation_hash"),
             "model_invocation_request_hashes": hashes("model_invocation_request_hash"),
-            "current_self_state_present_count": sum(
-                isinstance(record.get("current_self_state_hash"), str) for record in records
+            "inner_life_snapshot_present_count": sum(
+                isinstance(record.get("inner_life_snapshot_hash"), str) for record in records
             ),
-            "current_self_state_hashes": hashes("current_self_state_hash"),
-            "current_self_state_model_request_hashes": list(
+            "inner_life_snapshot_hashes": hashes("inner_life_snapshot_hash"),
+            "inner_life_snapshot_model_request_hashes": list(
                 dict.fromkeys(
                     str(record["model_invocation_request_hash"])
-                    for record in current_self_records
+                    for record in inner_life_snapshot_records
                     if isinstance(
                         record.get("model_invocation_request_hash"),
                         str,
@@ -626,7 +624,7 @@ class _ProviderCaptureState:
             "request_evidence": [
                 {
                     "model_invocation_request_hash": record.get("model_invocation_request_hash"),
-                    "current_self_state_hash": record.get("current_self_state_hash"),
+                    "inner_life_snapshot_hash": record.get("inner_life_snapshot_hash"),
                     "recall_context_hash": record.get("recall_context_hash"),
                     "emotion_context_hash": record.get("emotion_context_hash"),
                     "source_closure_request": record["source_closure_request"],
@@ -1052,7 +1050,7 @@ def _serve_isolated_loopback_daemon(*, port: int) -> None:
         adapter="napcat",
         settings=settings,
         _test_only_model=role_model,
-        _test_only_advisory_model=role_model,
+        _test_only_world_support_model=role_model,
         _test_only_source_closure_model=reviewer,
         scheduler_interval_seconds=settings.qq_c2c_scheduler_interval_seconds,
     )
@@ -1134,7 +1132,7 @@ def _daemon_environment(
             "QQ_C2C_SCHEDULER_INTERVAL_SECONDS": "600",
             "QQ_C2C_IDLE_HEARTBEAT_SECONDS": "600",
             "WORLD_V2_RECALL_SEMANTIC_ENABLED": "false",
-            "LOCAL_APPRAISAL_ENABLED": "false",
+            "WORLD_V2_TEXT_ENDPOINT_ENABLED": "false",
             # The legacy loopback provider fixture returns ordinary JSON and
             # does not implement the expression-units SSE contract. Streaming
             # has its own transport + production-host acceptance tests; keep
@@ -1186,9 +1184,7 @@ def _daemon_environment(
                 {
                     "DEEPSEEK_API_KEY": "isolated-loopback-stub",
                     "DEEPSEEK_MODEL": "isolated-loopback-stub",
-                    "DEEPSEEK_REPLY_MODEL": "isolated-loopback-stub",
-                    "DEEPSEEK_EXPRESSIVE_MODEL": "isolated-loopback-stub",
-                    "DEEPSEEK_DEEP_APPRAISAL_MODEL": "isolated-loopback-stub",
+                    "DEEPSEEK_CHARACTER_THINKING_MODEL": "isolated-loopback-stub",
                 }
             )
     # Keep import behavior explicit when the repository is not installed in
@@ -2218,7 +2214,7 @@ def build_causal_audit(
     """Correlate provider presentation with one accepted effect chain.
 
     Run-wide counts remain useful diagnostics, but they are deliberately kept
-    outside this causal evidence.  A chain gains current-self, Recall, or
+    outside this causal evidence.  A chain gains an InnerLifeSnapshot, Recall, or
     source-review evidence only through the exact provider request hash and,
     for nested reviews, the same trigger/attempt plus an explicit parent model
     call.
@@ -2235,8 +2231,8 @@ def build_causal_audit(
             "AffectEpisodeUpdated",
         )
     )
-    current_self_model_hashes = _string_set(
-        provider_audit.get("current_self_state_model_request_hashes")
+    inner_life_snapshot_model_hashes = _string_set(
+        provider_audit.get("inner_life_snapshot_model_request_hashes")
     )
     recall_material_model_hashes = _string_set(
         provider_audit.get("recall_material_model_request_hashes")
@@ -2313,8 +2309,8 @@ def build_causal_audit(
             ),
             key=lambda item: int(item.get("event_sequence") or 0),
         )
-        current_self_presented = (
-            isinstance(request_hash, str) and request_hash in current_self_model_hashes
+        inner_life_snapshot_presented = (
+            isinstance(request_hash, str) and request_hash in inner_life_snapshot_model_hashes
         )
         recall_material_presented = (
             isinstance(request_hash, str) and request_hash in recall_material_model_hashes
@@ -2322,11 +2318,11 @@ def build_causal_audit(
         enriched = dict(chain)
         enriched.update(
             {
-                "current_self_presented": current_self_presented,
-                "current_self_state_hash": (
-                    provider_evidence.get("current_self_state_hash")
+                "inner_life_snapshot_presented": inner_life_snapshot_presented,
+                "inner_life_snapshot_hash": (
+                    provider_evidence.get("inner_life_snapshot_hash")
                     if provider_evidence is not None
-                    and isinstance(provider_evidence.get("current_self_state_hash"), str)
+                    and isinstance(provider_evidence.get("inner_life_snapshot_hash"), str)
                     else None
                 ),
                 "recall_material_presented": recall_material_presented,
@@ -2361,8 +2357,8 @@ def build_causal_audit(
         "affect_event_count": affect_event_count,
         "global_coverage": {
             "scope": "run_wide_not_causal",
-            "current_self_provider_request_count": int(
-                provider_audit.get("current_self_state_present_count") or 0
+            "inner_life_snapshot_provider_request_count": int(
+                provider_audit.get("inner_life_snapshot_present_count") or 0
             ),
             "recall_material_provider_request_count": int(
                 provider_audit.get("recall_material_present_count") or 0
@@ -2403,8 +2399,8 @@ def build_causal_audit(
         "accepted_character_choice_request_hashes": sorted(
             accepted_character_choice_request_hashes
         ),
-        "current_self_correlated_character_choice_request_hashes": sorted(
-            accepted_character_choice_request_hashes & current_self_model_hashes
+        "inner_life_snapshot_correlated_character_choice_request_hashes": sorted(
+            accepted_character_choice_request_hashes & inner_life_snapshot_model_hashes
         ),
         # Deliberately excludes prompts, responses and visible text. This is
         # enough to distinguish an aggregate validation failure from the exact

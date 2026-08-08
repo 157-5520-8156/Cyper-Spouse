@@ -12,15 +12,18 @@ from typing import Literal, Protocol
 from zoneinfo import ZoneInfo
 
 import httpx
-from pydantic import Field, ValidationError
+from pydantic import Field
 
 from .context_resolver import query_from_projection
+from .character_interior import CharacterInterior, InnerDecision, InteriorOpportunity
+from .character_interior.contracts import _InteriorCapabilityManifest
+from .character_interior.purpose_context import InteriorPurposeContext
 from .aspiration_view import active_aspiration_advisories
 from .aspiration_events import AspirationCrystallizedPayload
 from .deliberation import ModelUsageProvenance, ProviderSubcallAudit
 from .errors import ConcurrencyConflict
 from .event_identity import domain_idempotency_key
-from .life_author_runtime import (
+from .life_context import (
     LifeContextCapsuleCompiler,
     compile_life_decision_context,
 )
@@ -76,7 +79,6 @@ from .life_review_identity import (
     legacy_source_review_subject_hash,
 )
 from .proposal_audit_schemas import (
-    LifeDevelopmentRecallResultRecordedPayload,
     ModelResultRecordedPayload,
     ProposalRecordedV2Payload,
     RecordedModelDecisionContext,
@@ -89,14 +91,6 @@ from .proposal_audit_schemas import (
 )
 from .proposal_audit import provider_subcall_model_audit
 from .proposal_envelope import MinimalProposal
-from .recall_audit import CharacterRecallRequest, RecallAuditTrace
-from .recall_index import RecallCursor
-from .recall_runtime import (
-    RecallCoordinator,
-    perform_character_recall,
-    recall_evidence_json,
-    verify_trusted_recall_trace,
-)
 from .schema_core import FrozenModel, PrivacyClass
 from .structured_completion import complete_json_object
 from .schemas import (
@@ -167,12 +161,13 @@ def compile_recent_life_texture(context: dict[str, object]) -> dict[str, object]
         for item in recent_world_life:
             include(item, lane="recent_world_life")
 
-    current_self = context.get("current_self_state")
+    current_self = context.get("inner_life_snapshot")
     if isinstance(current_self, dict):
-        recent = current_self.get("recent_self_experiences")
+        materials = current_self.get("materials")
+        recent = materials.get("recent_self_experiences") if isinstance(materials, dict) else None
         if isinstance(recent, dict) and isinstance(recent.get("items"), list):
             for item in recent["items"]:
-                include(item, lane="current_self_state.recent_self_experiences")
+                include(item, lane="inner_life_snapshot.recent_self_experiences")
 
     slices = context.get("slices")
     if isinstance(slices, dict):
@@ -233,8 +228,6 @@ _LifeDevelopmentRole = Literal[
     "world_author",
     "world_author_source_reviewer",
     "world_author_novel_origin_critic",
-    "character_recall_request",
-    "character_model",
 ]
 
 
@@ -247,7 +240,6 @@ class _LifeDevelopmentAttempt:
     slot: Literal["primary", "corrective"] | None = None
     outcome: _AttemptOutcome | None = None
     source_review_attempts: tuple[SourceReviewAttemptTrace, ...] = ()
-    recall_trace: RecallAuditTrace | None = None
 
 
 @dataclass(frozen=True)
@@ -257,7 +249,6 @@ class _LifeDevelopmentModelRun:
         LifeDevelopmentWorldDraft
         | CharacterChoiceAcceptDraft
         | CharacterChoiceNoOpDraft
-        | CharacterRecallRequest
         | LifeDevelopmentSourceClosureReview
         | LifeDevelopmentNovelOriginReview
         | None
@@ -274,10 +265,7 @@ class _LifeDevelopmentModelRun:
 
     @property
     def repair_ordinal(self) -> int:
-        return int(
-            len(self.attempts) > 1
-            and self.attempts[0].status != "candidate_returned"
-        )
+        return int(len(self.attempts) > 1 and self.attempts[0].status != "candidate_returned")
 
 
 @dataclass(frozen=True)
@@ -321,6 +309,49 @@ class _RecordedDeliberation:
             "capability_manifest": self.capability_manifest,
             "capability_manifest_content_ref": (self.capability_manifest_content_ref),
             "capability_manifest_content_hash": (self.capability_manifest_content_hash),
+        }
+
+
+@dataclass(frozen=True)
+class _RecordedCharacterInteriorDecision:
+    """Durable, reusable binding for one complete CharacterInterior result."""
+
+    inner_decision: InnerDecision
+    decision_subject_hash: str
+    model_result_event_ref: str
+    model_result_event_hash: str
+    audit_proposal_event_ref: str
+    audit_proposal_event_hash: str
+    deliberation_result_id: str
+    final_model_result_ref: str
+    inner_decision_content_ref: str
+    inner_decision_content_hash: str
+
+    def authority_payload(self) -> dict[str, object]:
+        lineage = self.inner_decision.author_lineage
+        decision = self.inner_decision.decision
+        if lineage is None or decision is None:
+            raise ValueError("recorded CharacterInterior decision is incomplete")
+        inner_value = self.inner_decision.model_dump(mode="json")
+        return {
+            "contract": "life-development-character-inner-decision.1",
+            "inner_turn_id": self.inner_decision.inner_turn_id,
+            "snapshot_id": self.inner_decision.snapshot_id,
+            "snapshot_hash": self.inner_decision.snapshot_hash,
+            "author_lineage": lineage.model_dump(mode="json"),
+            "decision": decision,
+            "decision_hash": _digest(decision),
+            "inner_decision": inner_value,
+            "inner_decision_hash": _digest(inner_value),
+            "inner_decision_content_ref": self.inner_decision_content_ref,
+            "inner_decision_content_hash": self.inner_decision_content_hash,
+            "decision_subject_hash": self.decision_subject_hash,
+            "model_result_event_ref": self.model_result_event_ref,
+            "model_result_event_hash": self.model_result_event_hash,
+            "audit_proposal_event_ref": self.audit_proposal_event_ref,
+            "audit_proposal_event_hash": self.audit_proposal_event_hash,
+            "deliberation_result_id": self.deliberation_result_id,
+            "final_model_result_ref": self.final_model_result_ref,
         }
 
 
@@ -523,17 +554,12 @@ class LifeDevelopmentProposalReader:
         projection = self._ledger.project()
         if (
             projection.world_revision != expected_cursor.world_revision
-            or projection.deliberation_revision
-            != expected_cursor.deliberation_revision
+            or projection.deliberation_revision != expected_cursor.deliberation_revision
             or projection.ledger_sequence != expected_cursor.ledger_sequence
         ):
             return None
         occurrence = next(
-            (
-                item
-                for item in projection.world_occurrences
-                if item.occurrence_id == occurrence_id
-            ),
+            (item for item in projection.world_occurrences if item.occurrence_id == occurrence_id),
             None,
         )
         privacy_rank = {
@@ -549,13 +575,10 @@ class LifeDevelopmentProposalReader:
             or occurrence.activated_at is None
             or actor_ref not in occurrence.participant_refs
             or occurrence.visibility == "withhold"
-            or privacy_rank[occurrence.visibility]
-            > privacy_rank[viewer_privacy_ceiling]
+            or privacy_rank[occurrence.visibility] > privacy_rank[viewer_privacy_ceiling]
         ):
             return None
-        committed = {
-            item.event_id: item for item in projection.committed_world_event_refs
-        }
+        committed = {item.event_id: item for item in projection.committed_world_event_refs}
 
         def exact_event(event_ref: str, event_type: str):
             authority = committed.get(event_ref)
@@ -575,18 +598,14 @@ class LifeDevelopmentProposalReader:
                 raise ValueError("active occurrence authority is not exact")
             return authority, located[0], located[1]
 
-        proposal_located = self._ledger.lookup_event_commit(
-            occurrence.trigger_ref
-        )
+        proposal_located = self._ledger.lookup_event_commit(occurrence.trigger_ref)
         if (
             proposal_located is None
             or proposal_located[0].event_type != "ProposalRecorded"
             or proposal_located[0].source != "world-v2:life-development"
             or proposal_located[0].event_id not in proposal_located[1].event_ids
-            or proposal_located[1].ledger_sequence
-            > expected_cursor.ledger_sequence
-            or proposal_located[1].world_revision
-            > expected_cursor.world_revision
+            or proposal_located[1].ledger_sequence > expected_cursor.ledger_sequence
+            or proposal_located[1].world_revision > expected_cursor.world_revision
         ):
             return None
         proposal_event, proposal_commit = proposal_located
@@ -597,7 +616,8 @@ class LifeDevelopmentProposalReader:
             proposal.get("proposal_kind") != "life_development"
             or proposal.get("effect_kind") != "world_occurrence"
             or proposal.get("effect_ref") != occurrence.occurrence_id
-            or version not in {
+            or version
+            not in {
                 "life-development-possibility.4",
                 "life-development-possibility.5",
                 "life-development-possibility.6",
@@ -632,9 +652,7 @@ class LifeDevelopmentProposalReader:
                 event_ref,
                 "WorldOccurrenceCommitted",
             )
-            payload = WorldOccurrenceCommittedPayload.model_validate_json(
-                candidate.payload_json
-            )
+            payload = WorldOccurrenceCommittedPayload.model_validate_json(candidate.payload_json)
             if payload.occurrence.occurrence_id == occurrence.occurrence_id:
                 occurrence_events.append((authority, candidate, payload))
         if len(occurrence_events) != 1:
@@ -657,9 +675,7 @@ class LifeDevelopmentProposalReader:
                 authority.event_id,
                 "WorldOccurrenceActivated",
             )
-            payload = WorldOccurrenceActivatedPayload.model_validate_json(
-                candidate.payload_json
-            )
+            payload = WorldOccurrenceActivatedPayload.model_validate_json(candidate.payload_json)
             if payload.occurrence_id == occurrence.occurrence_id:
                 activation_events.append((authority, payload))
         if len(activation_events) != 1:
@@ -670,9 +686,7 @@ class LifeDevelopmentProposalReader:
                 "entity_revision": 2,
                 "status": "active",
                 "activated_at": activation.activated_at,
-                "satisfied_precondition_refs": (
-                    activation.satisfied_precondition_refs
-                ),
+                "satisfied_precondition_refs": (activation.satisfied_precondition_refs),
             }
         )
         if activation.expected_entity_revision != 1 or expected_active != occurrence:
@@ -703,12 +717,8 @@ class LifeDevelopmentProposalReader:
             and item.get("content_ref") == content_ref
             and item.get("content_payload_hash") == content_payload_hash
         )
-        roles = tuple(
-            item.get("role") for item in bindings if isinstance(item, dict)
-        )
-        refs = tuple(
-            item.get("content_ref") for item in bindings if isinstance(item, dict)
-        )
+        roles = tuple(item.get("role") for item in bindings if isinstance(item, dict))
+        refs = tuple(item.get("content_ref") for item in bindings if isinstance(item, dict))
         if (
             len(matching_bindings) != 1
             or len(roles) != len(bindings)
@@ -766,9 +776,7 @@ class LifeDevelopmentProposalReader:
         proposal_event: WorldEvent,
     ) -> None:
         review = proposal.get("world_author_source_closure_review")
-        review_deliberation = proposal.get(
-            "world_author_source_closure_deliberation"
-        )
+        review_deliberation = proposal.get("world_author_source_closure_deliberation")
         author_deliberation = proposal.get("world_author_deliberation")
         if (
             not isinstance(review, dict)
@@ -783,16 +791,11 @@ class LifeDevelopmentProposalReader:
             or parsed.undeclared_fact_fragments
             or parsed.undeclared_fact_paths
             or parsed.typed_location_conflicts
-            or proposal.get("world_author_source_closure_review_hash")
-            != _digest(review)
-            or proposal.get(
-                "world_author_source_closure_deliberation_hash"
-            )
+            or proposal.get("world_author_source_closure_review_hash") != _digest(review)
+            or proposal.get("world_author_source_closure_deliberation_hash")
             != _digest(review_deliberation)
-            or review_deliberation.get("role")
-            != "world_author_source_reviewer"
-            or review_deliberation.get("capsule_id")
-            != author_deliberation.get("capsule_id")
+            or review_deliberation.get("role") != "world_author_source_reviewer"
+            or review_deliberation.get("capsule_id") != author_deliberation.get("capsule_id")
             or review_deliberation.get("context_cursor")
             != author_deliberation.get("context_cursor")
             or review_deliberation.get("capability_manifest")
@@ -832,7 +835,8 @@ class LifeDevelopmentProposalReader:
             )
         expected_source_subject = (
             current_subject
-            if possibility_version in {
+            if possibility_version
+            in {
                 "life-development-possibility.6",
                 "life-development-possibility.7",
             }
@@ -840,8 +844,7 @@ class LifeDevelopmentProposalReader:
         )
         if (
             expected_source_subject is None
-            or review_deliberation.get("decision_subject_hash")
-            != expected_source_subject
+            or review_deliberation.get("decision_subject_hash") != expected_source_subject
         ):
             raise ValueError("active occurrence source closure changed subject")
         if possibility_version not in {
@@ -851,17 +854,10 @@ class LifeDevelopmentProposalReader:
         }:
             return
         novel_review = proposal.get("world_author_novel_origin_review")
-        novel_deliberation = proposal.get(
-            "world_author_novel_origin_deliberation"
-        )
-        if (
-            not isinstance(novel_review, dict)
-            or not isinstance(novel_deliberation, dict)
-        ):
+        novel_deliberation = proposal.get("world_author_novel_origin_deliberation")
+        if not isinstance(novel_review, dict) or not isinstance(novel_deliberation, dict):
             raise ValueError("active occurrence has no novel-origin authority")
-        parsed_novel = LifeDevelopmentNovelOriginReview.model_validate(
-            novel_review
-        )
+        parsed_novel = LifeDevelopmentNovelOriginReview.model_validate(novel_review)
         if (
             parsed_novel.decision != "supported"
             or parsed_novel.unsupported_claims
@@ -870,8 +866,7 @@ class LifeDevelopmentProposalReader:
             or parsed_novel.unsupported_outcome_prerequisites
             or parsed_novel.unsupported_objective_transitions
             or parsed_novel.undeclared_premise_fragments
-            or proposal.get("world_author_novel_origin_review_hash")
-            != _digest(novel_review)
+            or proposal.get("world_author_novel_origin_review_hash") != _digest(novel_review)
             or proposal.get("world_author_novel_origin_deliberation_hash")
             != _digest(novel_deliberation)
         ):
@@ -901,7 +896,8 @@ class LifeDevelopmentProposalReader:
             )
         expected_novel_subjects = (
             {current_novel_subject}
-            if possibility_version in {
+            if possibility_version
+            in {
                 "life-development-possibility.6",
                 "life-development-possibility.7",
             }
@@ -932,12 +928,11 @@ class LifeDevelopmentRuntime:
         content_store: ImmutableLifeContentStore,
         world_author: LifeDevelopmentModel,
         world_author_source_rewriter: LifeDevelopmentModel | None = None,
-        character_model: LifeDevelopmentModel,
+        character_interior: CharacterInterior,
         source_closure_reviewer: LifeDevelopmentModel | None = None,
         capsule_compiler: LifeContextCapsuleCompiler,
         capability_manifest_compiler: LifeDevelopmentCapabilityManifestCompiler,
         owner_actor_ref: str,
-        recall_coordinator: RecallCoordinator | None = None,
         novel_origin_critic: LifeDevelopmentModel | None = None,
         actor: str = "worker:world-v2:life-development",
     ) -> None:
@@ -951,12 +946,10 @@ class LifeDevelopmentRuntime:
             if world_author_source_rewriter is not None
             else world_author
         )
-        self._character_model = character_model
+        self._character_interior = character_interior
         self._source_closure_reviewer = source_closure_reviewer
         self._novel_origin_critic = (
-            novel_origin_critic
-            if novel_origin_critic is not None
-            else source_closure_reviewer
+            novel_origin_critic if novel_origin_critic is not None else source_closure_reviewer
         )
         self._source_closure_reviewer_is_independent = (
             source_closure_reviewer is not None
@@ -982,7 +975,6 @@ class LifeDevelopmentRuntime:
         )
         self._capsule_compiler = capsule_compiler
         self._manifest_compiler = capability_manifest_compiler
-        self._recall = recall_coordinator
         self._owner = owner_actor_ref
         self._actor = actor
         self._world_author_model = (
@@ -991,9 +983,6 @@ class LifeDevelopmentRuntime:
         self._world_author_source_rewriter_model = (
             str(getattr(self._world_author_source_rewriter, "model", "")).strip()
             or type(self._world_author_source_rewriter).__name__
-        )
-        self._character_model_id = (
-            str(getattr(character_model, "model", "")).strip() or type(character_model).__name__
         )
         self._source_closure_reviewer_model_id = (
             (
@@ -1241,305 +1230,71 @@ class LifeDevelopmentRuntime:
             {
                 "external_opportunity": draft.model_dump(mode="json"),
                 "offered_window": offered_window.model_dump(mode="json"),
+                "active_aspiration_source_refs": (world_manifest.active_aspiration_source_refs),
             }
         )
-        recall_request_subject_hash = _digest(
-            {
-                "character_subject_hash": character_subject_hash,
-                "semantic_stage": "character_recall_request",
-            }
-        )
-        recovered_character = self._recover_successful_model_run(
-            proposal_id=proposal_id,
-            role="character_model",
-            current_world_revision=projection.world_revision,
-            expected_subject_hash=character_subject_hash,
-        )
-        if recovered_character is None and self._recover_terminal_model_failure(
-            proposal_id=proposal_id,
-            role="character_model",
+        recovered_character = self._recover_character_interior_decision(
             wake_event_ref=wake.event_id,
             current_world_revision=projection.world_revision,
-            expected_subject_hash=character_subject_hash,
-        ):
-            return LifeDevelopmentResult(
-                status="technical_failure",
-                reason_code="life_development.character_model_unavailable",
-            )
+            decision_subject_hash=character_subject_hash,
+        )
         if recovered_character is not None:
-            (
-                character_raw,
-                character_repair_ordinal,
-                character_audit,
-                character_capsule,
-                _unused_manifest,
-            ) = recovered_character
-            character_cursor = character_audit.context_cursor
-            character_choice = parse_character_choice(
-                raw=character_raw,
-                offered=draft,
+            character_audit = recovered_character
+            character_decision = recovered_character.inner_decision
+        else:
+            # A historical half-complete nested-Recall stage remains immutable
+            # ledger evidence.  It is deliberately not resumed or interpreted
+            # here: the only live continuation is a fresh, cursor-pinned
+            # CharacterInterior turn whose own selective recall is effect-once.
+            character_projection = self._ledger.project()
+            character_cursor = _cursor(character_projection)
+            character_decision = await self._character_initial_choice(
+                draft=draft,
                 offered_window=offered_window,
-                active_aspiration_source_refs=(
-                    world_manifest.active_aspiration_source_refs
+                active_aspiration_source_refs=(world_manifest.active_aspiration_source_refs),
+                purpose_context=InteriorPurposeContext(
+                    inner_turn_ref=f"life-development:{proposal_id}:initial",
+                    trigger_ref=wake.event_id,
+                    cursor=character_cursor,
+                    logical_time=wake.logical_time,
+                    source_refs=tuple(
+                        dict.fromkeys((wake.event_id, *world_audit.model_result_event_refs))
+                    ),
                 ),
             )
-        else:
-            recovered_recall_request = self._recover_successful_model_run(
-                proposal_id=proposal_id,
-                role="character_recall_request",
-                current_world_revision=projection.world_revision,
-                expected_subject_hash=recall_request_subject_hash,
-            )
-            recall_request: CharacterRecallRequest | None = None
-            recall_request_raw: str | None = None
-            if recovered_recall_request is not None:
-                (
-                    recall_request_raw,
-                    _recall_request_repair_ordinal,
-                    recall_request_audit,
-                    _recovered_recall_capsule,
-                    _unused_manifest,
-                ) = recovered_recall_request
-                recall_request = _parse_life_character_recall_request(
-                    recall_request_raw
+            if character_decision.status != "decided":
+                return LifeDevelopmentResult(
+                    status="technical_failure",
+                    reason_code="life_development.character_interior_unavailable",
                 )
-                if recall_request is None:
-                    raise ValueError(
-                        "recovered Character recall stage has no recall request"
-                    )
-                freshly_compiled = self._compile_pinned(
-                    projection=self._ledger.project(),
-                    wake=wake,
-                )
-                if isinstance(freshly_compiled, LifeDevelopmentResult):
-                    return freshly_compiled
-                (
-                    fresh_character_capsule,
-                    _fresh_character_cursor,
-                    character_context,
-                    _character_manifest,
-                ) = freshly_compiled
-                if (
-                    hashlib.sha256(
-                        fresh_character_capsule.model_content_json.encode("utf-8")
-                    ).hexdigest()
-                    != recall_request_audit.context_model_content_hash
-                ):
-                    return LifeDevelopmentResult(
-                        status="technical_failure",
-                        reason_code=(
-                            "life_development.recovered_context_bytes_unavailable"
-                        ),
-                    )
-                character_cursor = recall_request_audit.context_cursor
-                character_capsule = _PinnedIdentity(
-                    capsule_id=recall_request_audit.capsule_id,
-                    snapshot_hash=recall_request_audit.context_snapshot_hash,
-                    world_revision=character_cursor.world_revision,
-                    deliberation_revision=character_cursor.deliberation_revision,
-                    ledger_sequence=character_cursor.ledger_sequence,
-                    model_content_json=fresh_character_capsule.model_content_json,
-                )
-            else:
-                character_pinned = self._compile_pinned(
-                    projection=projection,
-                    wake=wake,
-                )
-                if isinstance(character_pinned, LifeDevelopmentResult):
-                    return character_pinned
-                (
-                    character_capsule,
-                    character_cursor,
-                    character_context,
-                    _character_manifest,
-                ) = character_pinned
-                initial_run = await self._character_initial_choice(
-                    context=character_context,
-                    draft=draft,
-                    offered_window=offered_window,
-                    active_aspiration_source_refs=(
-                        _character_manifest.active_aspiration_source_refs
-                    ),
-                )
-                initial_role: _LifeDevelopmentRole = (
-                    "character_recall_request"
-                    if isinstance(initial_run.parsed, CharacterRecallRequest)
-                    else "character_model"
-                )
-                initial_subject_hash = (
-                    recall_request_subject_hash
-                    if initial_role == "character_recall_request"
-                    else character_subject_hash
-                )
-                try:
-                    initial_audit = self._record_model_run(
-                        proposal_id=proposal_id,
-                        role=initial_role,
-                        run=initial_run,
-                        wake=wake,
-                        capsule=character_capsule,
-                        manifest=None,
-                        decision_subject_hash=initial_subject_hash,
-                        expected_cursor=character_cursor,
-                        trace_id=trace_id,
-                        correlation_id=correlation_id,
-                    )
-                except ConcurrencyConflict:
-                    return LifeDevelopmentResult(
-                        status="stale_prefix",
-                        reason_code="life_development.model_result_prefix_stale",
-                    )
-                if not initial_run.succeeded:
-                    return LifeDevelopmentResult(
-                        status="technical_failure",
-                        reason_code="life_development.character_model_unavailable",
-                    )
-                if isinstance(initial_run.parsed, CharacterRecallRequest):
-                    recall_request = initial_run.parsed
-                    recall_request_raw = initial_run.final_raw
-                    recall_request_audit = initial_audit
-                else:
-                    character_choice = initial_run.parsed
-                    character_raw = initial_run.final_raw
-                    character_repair_ordinal = initial_run.repair_ordinal
-                    character_audit = initial_audit
-
-            if recall_request is not None:
-                if recall_request_raw is None:
-                    raise ValueError("validated Character recall stage is incomplete")
-                recall_cursor = RecallCursor(
-                    world_revision=character_cursor.world_revision,
-                    deliberation_revision=character_cursor.deliberation_revision,
-                    ledger_sequence=character_cursor.ledger_sequence,
-                )
-                accessibility_seed = (
-                    "life-development-character-recall:"
-                    + _digest(
-                        {
-                            "proposal_id": proposal_id,
-                            "trigger_ref": wake.event_id,
-                            "request": recall_request.model_dump(mode="json"),
-                        }
-                    )
-                )
-                recall_result = self._recover_character_recall_result(
+            try:
+                character_audit = self._record_character_interior_decision(
                     proposal_id=proposal_id,
-                    trigger_ref=wake.event_id,
-                    recall_request=recall_request,
-                    request_deliberation=recall_request_audit,
-                    decision_subject_hash=recall_request_subject_hash,
+                    decision=character_decision,
+                    wake=wake,
+                    decision_subject_hash=character_subject_hash,
+                    expected_cursor=character_cursor,
+                    trace_id=trace_id,
+                    correlation_id=correlation_id,
                 )
-                if recall_result is None:
-                    recall_trace: RecallAuditTrace | None = None
-                    recall_failure_code: Literal[
-                        "recall_timeout",
-                        "recall_exception",
-                        "recall_context_unavailable",
-                    ] | None = None
-                    if self._recall is None or not self._recall.is_available(
-                        recall_cursor,
-                        trigger_ref=wake.event_id,
-                    ):
-                        recall_failure_code = "recall_context_unavailable"
-                    else:
-                        try:
-                            trusted_trace = await perform_character_recall(
-                                self._recall,
-                                request=recall_request,
-                                accessibility_seed=accessibility_seed,
-                                expected_cursor=recall_cursor,
-                                trigger_ref=wake.event_id,
-                                timeout_seconds=8.0,
-                            )
-                            recall_trace = verify_trusted_recall_trace(trusted_trace)
-                        except (
-                            TimeoutError,
-                            ConnectionError,
-                            OSError,
-                            RuntimeError,
-                            ValueError,
-                            httpx.HTTPError,
-                            sqlite3.Error,
-                        ) as exc:
-                            recall_failure_code = (
-                                "recall_timeout"
-                                if isinstance(exc, TimeoutError)
-                                else "recall_exception"
-                            )
-                            _LOG.warning(
-                                "Character-selected life recall unavailable "
-                                "error_type=%s error=%s",
-                                type(exc).__name__,
-                                str(exc)[:512],
-                            )
-                    try:
-                        recall_result = self._record_character_recall_result(
-                            proposal_id=proposal_id,
-                            wake=wake,
-                            recall_request=recall_request,
-                            request_deliberation=recall_request_audit,
-                            decision_subject_hash=recall_request_subject_hash,
-                            recall_trace=recall_trace,
-                            failure_code=recall_failure_code,
-                            trace_id=trace_id,
-                            correlation_id=correlation_id,
-                        )
-                    except ConcurrencyConflict:
-                        return LifeDevelopmentResult(
-                            status="stale_prefix",
-                            reason_code=(
-                                "life_development.recall_result_prefix_stale"
-                            ),
-                        )
-                recall_trace = recall_result.recall_trace
-                recall_failure_code = recall_result.failure_code
-                character_run = await self._character_choice_after_recall(
-                    context=character_context,
-                    draft=draft,
-                    offered_window=offered_window,
-                    recall_request_raw=recall_request_raw,
-                    recall_request=recall_request,
-                    recall_trace=recall_trace,
-                    recall_failure_code=recall_failure_code,
-                    active_aspiration_source_refs=(
-                        world_manifest.active_aspiration_source_refs
-                    ),
+            except ConcurrencyConflict:
+                return LifeDevelopmentResult(
+                    status="stale_prefix",
+                    reason_code="life_development.model_result_prefix_stale",
                 )
-                try:
-                    character_audit = self._record_model_run(
-                        proposal_id=proposal_id,
-                        role="character_model",
-                        run=character_run,
-                        wake=wake,
-                        capsule=character_capsule,
-                        manifest=None,
-                        decision_subject_hash=character_subject_hash,
-                        expected_cursor=character_cursor,
-                        commit_cursor=_cursor(self._ledger.project()),
-                        trace_id=trace_id,
-                        correlation_id=correlation_id,
-                    )
-                except ConcurrencyConflict:
-                    return LifeDevelopmentResult(
-                        status="stale_prefix",
-                        reason_code="life_development.model_result_prefix_stale",
-                    )
-                if not character_run.succeeded:
-                    return LifeDevelopmentResult(
-                        status="technical_failure",
-                        reason_code="life_development.character_model_unavailable",
-                    )
-                character_choice = character_run.parsed
-                character_raw = character_run.final_raw
-                character_repair_ordinal = character_run.repair_ordinal
-        if (
-            not isinstance(
-                character_choice,
-                (CharacterChoiceAcceptDraft, CharacterChoiceNoOpDraft),
+        character_cursor = character_decision.cursor
+        try:
+            character_choice, _character_completion_json = self._materialize_character_choice(
+                decision=character_decision,
+                draft=draft,
+                offered_window=offered_window,
+                active_aspiration_source_refs=(world_manifest.active_aspiration_source_refs),
             )
-            or character_raw is None
-        ):
-            raise ValueError("validated Character run has no usable choice")
+        except (LifeDevelopmentDraftError, TypeError, ValueError):
+            return LifeDevelopmentResult(
+                status="technical_failure",
+                reason_code="life_development.character_interior_decision_invalid",
+            )
         projection = self._ledger.project()
         acceptance_cursor = _cursor(projection)
         if (
@@ -1569,8 +1324,6 @@ class LifeDevelopmentRuntime:
                 repair_ordinal=world_repair_ordinal,
                 trace_id=trace_id,
                 correlation_id=correlation_id,
-                character_raw=character_raw,
-                character_repair_ordinal=character_repair_ordinal,
                 final_decision="no_op",
                 content_bindings=bindings,
                 outcome_descriptors=outcome_descriptors,
@@ -1580,7 +1333,7 @@ class LifeDevelopmentRuntime:
                 source_closure_deliberation=source_closure_audit,
                 novel_origin_review=novel_origin_review,
                 novel_origin_deliberation=novel_origin_audit,
-                character_deliberation=character_audit,
+                character_interior_decision=character_audit,
             )
             try:
                 self._ledger.commit_at_cursor(
@@ -1619,9 +1372,7 @@ class LifeDevelopmentRuntime:
             novel_origin_review=novel_origin_review,
             novel_origin_deliberation=novel_origin_audit,
             character_choice=character_choice,
-            character_raw=character_raw,
-            character_repair_ordinal=character_repair_ordinal,
-            character_deliberation=character_audit,
+            character_interior_decision=character_audit,
             offered_window=offered_window,
             trace_id=trace_id,
             correlation_id=correlation_id,
@@ -1647,9 +1398,7 @@ class LifeDevelopmentRuntime:
         novel_origin_review: LifeDevelopmentNovelOriginReview | None,
         novel_origin_deliberation: _RecordedDeliberation | None,
         character_choice: CharacterChoiceAcceptDraft,
-        character_raw: str,
-        character_repair_ordinal: int,
-        character_deliberation: _RecordedDeliberation,
+        character_interior_decision: _RecordedCharacterInteriorDecision,
         offered_window: DueWindow,
         trace_id: str,
         correlation_id: str,
@@ -1703,8 +1452,6 @@ class LifeDevelopmentRuntime:
             effect_kind="character_plan",
             effect_ref=plan_id,
             content_bindings=bindings,
-            character_raw=character_raw,
-            character_repair_ordinal=character_repair_ordinal,
             final_decision="accept",
             outcome_descriptors=outcome_descriptors,
             character_choice=character_choice,
@@ -1713,7 +1460,7 @@ class LifeDevelopmentRuntime:
             source_closure_deliberation=source_closure_deliberation,
             novel_origin_review=novel_origin_review,
             novel_origin_deliberation=novel_origin_deliberation,
-            character_deliberation=character_deliberation,
+            character_interior_decision=character_interior_decision,
         )
         location_capability = self._selected_location_capability(
             draft=draft,
@@ -1778,16 +1525,13 @@ class LifeDevelopmentRuntime:
             payload=plan_payload,
         )
         aspiration_event: WorldEvent | None = None
-        aspiration_source_ref = (
-            character_choice.crystallized_aspiration_source_ref
-        )
+        aspiration_source_ref = character_choice.crystallized_aspiration_source_ref
         if aspiration_source_ref is not None:
             aspiration = next(
                 (
                     item
                     for item in projection.aspirations
-                    if item.status == "active"
-                    and item.planted_event_ref == aspiration_source_ref
+                    if item.status == "active" and item.planted_event_ref == aspiration_source_ref
                 ),
                 None,
             )
@@ -1800,9 +1544,7 @@ class LifeDevelopmentRuntime:
                 None,
             )
             if aspiration is None or authority is None:
-                raise ValueError(
-                    "accepted Character choice lost its active aspiration authority"
-                )
+                raise ValueError("accepted Character choice lost its active aspiration authority")
             aspiration_suffix = _digest(
                 {
                     "aspiration_id": aspiration.aspiration_id,
@@ -1811,12 +1553,8 @@ class LifeDevelopmentRuntime:
                 }
             )
             aspiration_payload = AspirationCrystallizedPayload(
-                change_id=(
-                    "change:life-development:aspiration:" + aspiration_suffix
-                ),
-                transition_id=(
-                    "transition:life-development:aspiration:" + aspiration_suffix
-                ),
+                change_id=("change:life-development:aspiration:" + aspiration_suffix),
+                transition_id=("transition:life-development:aspiration:" + aspiration_suffix),
                 expected_entity_revision=aspiration.entity_revision,
                 evidence_refs=(
                     EvidenceRef(
@@ -1834,9 +1572,7 @@ class LifeDevelopmentRuntime:
             ).model_dump(mode="json")
             aspiration_event = WorldEvent.from_payload(
                 schema_version="world-v2.1",
-                event_id=(
-                    "event:life-development:aspiration:" + aspiration_suffix
-                ),
+                event_id=("event:life-development:aspiration:" + aspiration_suffix),
                 world_id=self._ledger.world_id,
                 event_type="AspirationCrystallized",
                 logical_time=wake.logical_time,
@@ -1949,7 +1685,10 @@ class LifeDevelopmentRuntime:
             time_window=window,
             candidate_outcome_refs=tuple(item.candidate_result_ref for item in candidates),
             candidate_outcomes=candidates,
-            visibility=draft.privacy_class,
+            visibility=self._occurrence_privacy_ceiling(
+                draft=draft,
+                projection=projection,
+            ),
             status="committed",
         )
         evidence = self._evidence_refs(
@@ -2085,8 +1824,7 @@ class LifeDevelopmentRuntime:
                 context = {
                     **context,
                     "active_aspirations": [
-                        item.model_dump(mode="json")
-                        for item in aspiration_advisories
+                        item.model_dump(mode="json") for item in aspiration_advisories
                     ],
                 }
             manifest = self._manifest_compiler.compile(
@@ -2108,183 +1846,12 @@ class LifeDevelopmentRuntime:
             _LOG.warning(
                 "Life Development Context unavailable error_type=%s",
                 type(exc).__name__,
+                exc_info=True,
             )
             return LifeDevelopmentResult(
                 status="technical_failure",
                 reason_code="life_development.context_unavailable",
             )
-
-    def _character_recall_result_id(
-        self,
-        *,
-        proposal_id: str,
-        request_model_result_ref: str,
-        recall_request: CharacterRecallRequest,
-        trigger_ref: str,
-    ) -> str:
-        return "life-recall-result:" + _digest(
-            {
-                "proposal_id": proposal_id,
-                "request_model_result_ref": request_model_result_ref,
-                "recall_request_hash": _digest(
-                    recall_request.model_dump(mode="json")
-                ),
-                "trigger_ref": trigger_ref,
-            }
-        )
-
-    def _recover_character_recall_result(
-        self,
-        *,
-        proposal_id: str,
-        trigger_ref: str,
-        recall_request: CharacterRecallRequest,
-        request_deliberation: _RecordedDeliberation,
-        decision_subject_hash: str,
-    ) -> LifeDevelopmentRecallResultRecordedPayload | None:
-        result_id = self._character_recall_result_id(
-            proposal_id=proposal_id,
-            request_model_result_ref=request_deliberation.final_model_result_ref,
-            recall_request=recall_request,
-            trigger_ref=trigger_ref,
-        )
-        event_id = "event:life-development:recall-result:" + _digest(result_id)
-        existing = self._ledger.lookup_event_commit(event_id)
-        if existing is None:
-            return None
-        payload = LifeDevelopmentRecallResultRecordedPayload.model_validate_json(
-            existing[0].payload_json
-        )
-        response_hash = request_deliberation.response_hashes[-1]
-        if (
-            response_hash is None
-            or payload.result_id != result_id
-            or payload.proposal_id != proposal_id
-            or payload.trigger_ref != trigger_ref
-            or payload.decision_subject_hash != decision_subject_hash
-            or payload.context_cursor
-            != RecallCursor(
-                world_revision=request_deliberation.context_cursor.world_revision,
-                deliberation_revision=(
-                    request_deliberation.context_cursor.deliberation_revision
-                ),
-                ledger_sequence=request_deliberation.context_cursor.ledger_sequence,
-            )
-            or payload.request_model_result_event_ref
-            != request_deliberation.model_result_event_refs[-1]
-            or payload.request_model_result_event_hash
-            != request_deliberation.model_result_event_hashes[-1]
-            or payload.request_model_result_ref
-            != request_deliberation.final_model_result_ref
-            or payload.request_deliberation_result_id
-            != request_deliberation.deliberation_result_id
-            or payload.request_response_hash != response_hash
-            or payload.recall_request != recall_request
-        ):
-            raise ValueError("recovered life recall result changed its stage lineage")
-        return payload
-
-    def _record_character_recall_result(
-        self,
-        *,
-        proposal_id: str,
-        wake: WorldEvent,
-        recall_request: CharacterRecallRequest,
-        request_deliberation: _RecordedDeliberation,
-        decision_subject_hash: str,
-        recall_trace: RecallAuditTrace | None,
-        failure_code: Literal[
-            "recall_timeout",
-            "recall_exception",
-            "recall_context_unavailable",
-        ]
-        | None,
-        trace_id: str,
-        correlation_id: str,
-    ) -> LifeDevelopmentRecallResultRecordedPayload:
-        response_hash = request_deliberation.response_hashes[-1]
-        if response_hash is None:
-            raise ValueError("Character recall request audit has no response hash")
-        result_id = self._character_recall_result_id(
-            proposal_id=proposal_id,
-            request_model_result_ref=request_deliberation.final_model_result_ref,
-            recall_request=recall_request,
-            trigger_ref=wake.event_id,
-        )
-        context_cursor = RecallCursor(
-            world_revision=request_deliberation.context_cursor.world_revision,
-            deliberation_revision=request_deliberation.context_cursor.deliberation_revision,
-            ledger_sequence=request_deliberation.context_cursor.ledger_sequence,
-        )
-        payload = LifeDevelopmentRecallResultRecordedPayload(
-            result_id=result_id,
-            proposal_id=proposal_id,
-            trigger_ref=wake.event_id,
-            evaluated_world_revision=context_cursor.world_revision,
-            decision_subject_hash=decision_subject_hash,
-            context_cursor=context_cursor,
-            request_model_result_event_ref=(
-                request_deliberation.model_result_event_refs[-1]
-            ),
-            request_model_result_event_hash=(
-                request_deliberation.model_result_event_hashes[-1]
-            ),
-            request_model_result_ref=request_deliberation.final_model_result_ref,
-            request_deliberation_result_id=(
-                request_deliberation.deliberation_result_id
-            ),
-            request_response_hash=response_hash,
-            recall_request=recall_request,
-            recall_request_hash=_digest(recall_request.model_dump(mode="json")),
-            status="returned" if recall_trace is not None else "technical_failure",
-            recall_trace=recall_trace,
-            failure_code=failure_code,
-        )
-        payload_value = payload.model_dump(mode="json")
-        event_id = "event:life-development:recall-result:" + _digest(result_id)
-        event = WorldEvent.from_payload(
-            schema_version="world-v2.1",
-            event_id=event_id,
-            world_id=self._ledger.world_id,
-            event_type="LifeDevelopmentRecallResultRecorded",
-            logical_time=wake.logical_time,
-            created_at=wake.created_at,
-            actor=self._actor,
-            source="world-v2:life-development",
-            trace_id=trace_id or wake.trace_id,
-            causation_id=request_deliberation.model_result_event_refs[-1],
-            correlation_id=correlation_id or wake.correlation_id,
-            idempotency_key=(
-                domain_idempotency_key(
-                    event_type="LifeDevelopmentRecallResultRecorded",
-                    world_id=self._ledger.world_id,
-                    payload=payload_value,
-                )
-                or "life-development-recall-result:" + _digest(result_id)
-            ),
-            payload=payload_value,
-        )
-        cursor = _cursor(self._ledger.project())
-        if cursor.world_revision != context_cursor.world_revision:
-            raise ConcurrencyConflict("Character recall result World prefix changed")
-        try:
-            self._ledger.commit_at_cursor(
-                (event,),
-                expected_cursor=cursor,
-                commit_id="commit:life-development:recall-result:" + _digest(result_id),
-            )
-        except ConcurrencyConflict:
-            recovered = self._recover_character_recall_result(
-                proposal_id=proposal_id,
-                trigger_ref=wake.event_id,
-                recall_request=recall_request,
-                request_deliberation=request_deliberation,
-                decision_subject_hash=decision_subject_hash,
-            )
-            if recovered is None:
-                raise
-            return recovered
-        return payload
 
     def _record_model_run(
         self,
@@ -2438,7 +2005,6 @@ class LifeDevelopmentRuntime:
                 failure_code=attempt.failure_code,
                 slot=attempt.slot,
                 outcome=attempt.outcome,
-                recall_trace=attempt.recall_trace,
             )
             audits.append(audit)
             provider_audits.append(
@@ -2449,9 +2015,7 @@ class LifeDevelopmentRuntime:
                         parent_attempt_id=attempt_id,
                         ordinal=provider_ordinal,
                     )
-                    for provider_ordinal, trace in enumerate(
-                        attempt.source_review_attempts
-                    )
+                    for provider_ordinal, trace in enumerate(attempt.source_review_attempts)
                 )
             )
 
@@ -2478,14 +2042,24 @@ class LifeDevelopmentRuntime:
             and manifest_content_hash is not None
             and manifest_content_ref is not None
         ):
-            self._store.put_if_absent(
-                StoredLifeContent(
-                    content_ref=manifest_content_ref,
-                    content_kind="outcome_candidate",
-                    content_payload_hash=manifest_content_hash,
-                    text=manifest_text,
+            try:
+                self._store.put_if_absent(
+                    StoredLifeContent(
+                        content_ref=manifest_content_ref,
+                        content_kind="outcome_candidate",
+                        content_payload_hash=manifest_content_hash,
+                        text=manifest_text,
+                    )
                 )
-            )
+            except ValueError as exc:
+                # The full manifest value is already durable inside the model
+                # audit payload; the sidecar is a redundant replay-friendly
+                # copy.  A world with accumulated state can exceed the sidecar
+                # size bound, and that must not abort the ecology pass.
+                _LOG.warning(
+                    "life development capability manifest sidecar skipped: %s",
+                    str(exc)[:200],
+                )
         audit_proposal: MinimalProposal | None = None
         proposal_hash: str | None = None
         if run.succeeded:
@@ -2510,19 +2084,10 @@ class LifeDevelopmentRuntime:
                         "content_ref": manifest_content_ref,
                         "content_payload_hash": manifest_content_hash,
                     }
-                    if manifest_content_ref is not None
-                    and manifest_content_hash is not None
+                    if manifest_content_ref is not None and manifest_content_hash is not None
                     else None
                 ),
             }
-            if role == "character_recall_request":
-                if not isinstance(run.parsed, CharacterRecallRequest):
-                    raise ValueError(
-                        "successful Character recall stage lacks its validated request"
-                    )
-                audit_metadata["validated_output_hash"] = _digest(
-                    run.parsed.model_dump(mode="json")
-                )
             audit_proposal = MinimalProposal(
                 proposal_id=(f"proposal:life-development:model-output:{role}:{suffix}:{epoch}"),
                 trigger_ref=wake.event_id,
@@ -2612,9 +2177,7 @@ class LifeDevelopmentRuntime:
                         {
                             "capsule_id": capsule.capsule_id,
                             "proposal_hash": None,
-                            "attempt_audits": [
-                                json.loads(provider_audit_json)
-                            ],
+                            "attempt_audits": [json.loads(provider_audit_json)],
                         }
                     )
                 )
@@ -2641,9 +2204,7 @@ class LifeDevelopmentRuntime:
                         + _digest(
                             {
                                 "model_call_id": provider_audit.model_call_id,
-                                "model_result_ref": (
-                                    provider_audit.model_result_ref
-                                ),
+                                "model_result_ref": (provider_audit.model_result_ref),
                             }
                         )
                     ),
@@ -2662,8 +2223,7 @@ class LifeDevelopmentRuntime:
                             world_id=self._ledger.world_id,
                             payload=provider_payload,
                         )
-                        or "life-development-provider-subcall:"
-                        + _digest(provider_payload)
+                        or "life-development-provider-subcall:" + _digest(provider_payload)
                     ),
                     payload=provider_payload,
                 )
@@ -2719,12 +2279,8 @@ class LifeDevelopmentRuntime:
             request_hashes=tuple(attempt.request_hash for attempt in run.attempts),
             response_hashes=tuple(audit.response_hash for audit in audits),
             raw_content_refs=tuple(raw_content_refs),
-            model_result_event_refs=tuple(
-                event.event_id for event in author_model_events
-            ),
-            model_result_event_hashes=tuple(
-                event.payload_hash for event in author_model_events
-            ),
+            model_result_event_refs=tuple(event.event_id for event in author_model_events),
+            model_result_event_hashes=tuple(event.payload_hash for event in author_model_events),
             audit_proposal_event_ref=(
                 audit_proposal_event.event_id if audit_proposal_event is not None else None
             ),
@@ -2742,6 +2298,316 @@ class LifeDevelopmentRuntime:
             capability_manifest_content_ref=manifest_content_ref,
             capability_manifest_content_hash=manifest_content_hash,
         )
+
+    def _record_character_interior_decision(
+        self,
+        *,
+        proposal_id: str,
+        decision: InnerDecision,
+        wake: WorldEvent,
+        decision_subject_hash: str,
+        expected_cursor: ProjectionCursor,
+        trace_id: str,
+        correlation_id: str,
+    ) -> _RecordedCharacterInteriorDecision:
+        """Persist the actual InnerTurn lineage without inventing a role call."""
+
+        lineage = decision.author_lineage
+        if (
+            decision.status != "decided"
+            or decision.decision is None
+            or decision.snapshot_id is None
+            or decision.snapshot_hash is None
+            or lineage is None
+            or decision.cursor != expected_cursor
+        ):
+            raise ValueError("CharacterInterior life decision lineage is incomplete")
+        request_hash = lineage.request_hash.removeprefix("sha256:")
+        response_hash = lineage.response_hash.removeprefix("sha256:")
+        route = RecordedModelRoute(
+            tier="flash",
+            reason_code="life_development.character_interior",
+            router_version="character-interior-router.1",
+        )
+        decision_context = RecordedModelDecisionContext(
+            decision_subject_hash=decision_subject_hash,
+            world_revision=expected_cursor.world_revision,
+            deliberation_revision=expected_cursor.deliberation_revision,
+            ledger_sequence=expected_cursor.ledger_sequence,
+        )
+        model_result_ref = "model-result:" + sha256(
+            canonical_json(
+                {
+                    "model_call_id": lineage.model_call_id,
+                    "response_hash": response_hash,
+                }
+            )
+        )
+        audit = RecordedModelResultAudit(
+            model_call_id=lineage.model_call_id,
+            parent_model_call_id=lineage.parent_model_call_id,
+            model_result_ref=model_result_ref,
+            attempt_id=decision.inner_turn_id,
+            route=route,
+            model_id=lineage.model_id,
+            model_version=lineage.model_version,
+            request_hash=request_hash,
+            response_hash=response_hash,
+            decision_context=decision_context,
+            status="proposal_validated",
+        )
+        inner_value = decision.model_dump(mode="json")
+        inner_text = canonical_json(inner_value)
+        inner_content_hash = life_content_payload_hash(inner_text)
+        inner_content_ref = "content:life-development:character-inner-decision:" + _digest(
+            {
+                "proposal_id": proposal_id,
+                "inner_turn_id": decision.inner_turn_id,
+                "content_hash": inner_content_hash,
+            }
+        )
+        self._store.put_if_absent(
+            StoredLifeContent(
+                content_ref=inner_content_ref,
+                content_kind="raw_model_result",
+                content_payload_hash=inner_content_hash,
+                text=inner_text,
+            )
+        )
+        metadata = {
+            "contract": "character-interior-decision-audit.1",
+            "decision_subject_hash": decision_subject_hash,
+            "inner_decision_content_ref": inner_content_ref,
+            "inner_decision_content_hash": inner_content_hash,
+        }
+        audit_proposal = MinimalProposal(
+            proposal_id=(
+                "proposal:life-development:character-interior-output:"
+                + _digest(
+                    {
+                        "proposal_id": proposal_id,
+                        "inner_turn_id": decision.inner_turn_id,
+                    }
+                )
+            ),
+            trigger_ref=wake.event_id,
+            evaluated_world_revision=expected_cursor.world_revision,
+            evidence_refs=(),
+            proposed_changes=(),
+            action_intents=(),
+            confidence=10_000,
+            brief_rationale="Persist one validated CharacterInterior decision.",
+            source_model_result=model_result_ref,
+            response_text=canonical_json(metadata),
+            stance="answer_without_world_claims",
+        )
+        proposal_hash = audit_proposal.proposal_hash
+        audit_json = model_audit_json(audit)
+        deliberation_result_id = "deliberation:" + sha256(
+            canonical_json(
+                {
+                    "capsule_id": decision.snapshot_hash,
+                    "proposal_hash": proposal_hash,
+                    "attempt_audits": [json.loads(audit_json)],
+                }
+            )
+        )
+        model_payload = ModelResultRecordedPayload(
+            audit_contract="model-result-audit.1",
+            model_result_ref=model_result_ref,
+            deliberation_result_id=deliberation_result_id,
+            proposal_hash=proposal_hash,
+            model_call_id=lineage.model_call_id,
+            parent_model_call_id=lineage.parent_model_call_id,
+            attempt_id=decision.inner_turn_id,
+            capsule_id=decision.snapshot_hash,
+            trigger_ref=wake.event_id,
+            evaluated_world_revision=expected_cursor.world_revision,
+            attempt_index=0,
+            attempt_count=1,
+            audit_json=audit_json,
+            audit_hash=sha256(audit_json),
+        ).model_dump(mode="json")
+        suffix = _digest(
+            {
+                "proposal_id": proposal_id,
+                "inner_turn_id": decision.inner_turn_id,
+                "model_call_id": lineage.model_call_id,
+            }
+        )
+        model_event = WorldEvent.from_payload(
+            schema_version="world-v2.1",
+            event_id=f"event:life-development:character-interior-result:{suffix}",
+            world_id=self._ledger.world_id,
+            event_type="ModelResultRecorded",
+            logical_time=wake.logical_time,
+            created_at=wake.created_at,
+            actor=self._actor,
+            source="world-v2:character-interior",
+            trace_id=trace_id or wake.trace_id,
+            causation_id=wake.event_id,
+            correlation_id=correlation_id or wake.correlation_id,
+            idempotency_key=(
+                domain_idempotency_key(
+                    event_type="ModelResultRecorded",
+                    world_id=self._ledger.world_id,
+                    payload=model_payload,
+                )
+                or f"life-development-character-interior-result:{suffix}"
+            ),
+            payload=model_payload,
+        )
+        proposal_payload = ProposalRecordedV2Payload(
+            proposal_id=audit_proposal.proposal_id,
+            proposal_kind=audit_proposal.proposal_kind,
+            model_result_ref=model_result_ref,
+            deliberation_result_id=deliberation_result_id,
+            model_call_id=lineage.model_call_id,
+            attempt_id=decision.inner_turn_id,
+            capsule_id=decision.snapshot_hash,
+            trigger_ref=wake.event_id,
+            evaluated_world_revision=expected_cursor.world_revision,
+            proposal_json=canonical_json(audit_proposal.model_dump(mode="json")),
+            proposal_hash=proposal_hash,
+        ).model_dump(mode="json")
+        proposal_event = WorldEvent.from_payload(
+            schema_version="world-v2.1",
+            event_id=f"event:life-development:character-interior-proposal:{suffix}",
+            world_id=self._ledger.world_id,
+            event_type="ProposalRecorded",
+            logical_time=wake.logical_time,
+            created_at=wake.created_at,
+            actor=self._actor,
+            source="world-v2:character-interior",
+            trace_id=trace_id or wake.trace_id,
+            causation_id=model_event.event_id,
+            correlation_id=correlation_id or wake.correlation_id,
+            idempotency_key=(
+                domain_idempotency_key(
+                    event_type="ProposalRecorded",
+                    world_id=self._ledger.world_id,
+                    payload=proposal_payload,
+                )
+                or f"life-development-character-interior-proposal:{suffix}"
+            ),
+            payload=proposal_payload,
+        )
+        self._ledger.commit_at_cursor(
+            (model_event, proposal_event),
+            expected_cursor=expected_cursor,
+            commit_id=f"commit:life-development:character-interior:{suffix}",
+        )
+        return _RecordedCharacterInteriorDecision(
+            inner_decision=decision,
+            decision_subject_hash=decision_subject_hash,
+            model_result_event_ref=model_event.event_id,
+            model_result_event_hash=model_event.payload_hash,
+            audit_proposal_event_ref=proposal_event.event_id,
+            audit_proposal_event_hash=proposal_event.payload_hash,
+            deliberation_result_id=deliberation_result_id,
+            final_model_result_ref=model_result_ref,
+            inner_decision_content_ref=inner_content_ref,
+            inner_decision_content_hash=inner_content_hash,
+        )
+
+    def _recover_character_interior_decision(
+        self,
+        *,
+        wake_event_ref: str,
+        current_world_revision: int,
+        decision_subject_hash: str,
+    ) -> _RecordedCharacterInteriorDecision | None:
+        """Recover a canonical InnerDecision, including its actual author lineage."""
+
+        projection = self._ledger.project()
+        terminals = tuple(
+            item
+            for item in projection.model_result_audits
+            if item.trigger_ref == wake_event_ref
+            and item.evaluated_world_revision == current_world_revision
+            and item.proposal_hash is not None
+        )
+        for terminal in reversed(terminals):
+            audit = RecordedModelResultAudit.model_validate_json(terminal.audit_json)
+            context = audit.decision_context
+            if (
+                audit.route.reason_code != "life_development.character_interior"
+                or audit.route.router_version != "character-interior-router.1"
+                or context is None
+                or context.decision_subject_hash != decision_subject_hash
+                or terminal.attempt_count != 1
+                or terminal.attempt_index != 0
+            ):
+                continue
+            proposal_audits = tuple(
+                item
+                for item in projection.proposal_audits
+                if item.deliberation_result_id == terminal.deliberation_result_id
+                and item.model_result_ref == terminal.model_result_ref
+            )
+            if len(proposal_audits) != 1:
+                raise ValueError("recoverable CharacterInterior audit lacks its proposal")
+            proposal_audit = proposal_audits[0]
+            try:
+                envelope = json.loads(proposal_audit.proposal_json)
+                metadata = json.loads(envelope["response_text"])
+                inner_content_ref = metadata["inner_decision_content_ref"]
+                inner_content_hash = metadata["inner_decision_content_hash"]
+                if not isinstance(inner_content_ref, str) or not isinstance(
+                    inner_content_hash, str
+                ):
+                    raise ValueError("CharacterInterior content descriptor is invalid")
+                stored = self._store.read_exact(content_ref=inner_content_ref)
+                if (
+                    stored is None
+                    or stored.content_kind != "raw_model_result"
+                    or stored.content_payload_hash != inner_content_hash
+                    or life_content_payload_hash(stored.text) != inner_content_hash
+                ):
+                    raise ValueError("CharacterInterior decision content is unavailable")
+                inner_value = json.loads(stored.text)
+                decision = InnerDecision.model_validate_json(canonical_json(inner_value))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    "recoverable CharacterInterior decision bytes are invalid"
+                ) from exc
+            lineage = decision.author_lineage
+            expected_cursor = ProjectionCursor(
+                world_revision=context.world_revision,
+                deliberation_revision=context.deliberation_revision,
+                ledger_sequence=context.ledger_sequence,
+            )
+            if (
+                metadata.get("contract") != "character-interior-decision-audit.1"
+                or metadata.get("decision_subject_hash") != decision_subject_hash
+                or inner_content_hash != _digest(inner_value)
+                or decision.status != "decided"
+                or decision.decision is None
+                or decision.snapshot_hash != terminal.capsule_id
+                or decision.cursor != expected_cursor
+                or lineage is None
+                or lineage.model_call_id != audit.model_call_id
+                or lineage.parent_model_call_id != audit.parent_model_call_id
+                or lineage.model_id != audit.model_id
+                or lineage.model_version != audit.model_version
+                or lineage.request_hash.removeprefix("sha256:") != audit.request_hash
+                or lineage.response_hash.removeprefix("sha256:") != audit.response_hash
+                or proposal_audit.proposal_hash != terminal.proposal_hash
+            ):
+                raise ValueError("recoverable CharacterInterior decision changed lineage")
+            return _RecordedCharacterInteriorDecision(
+                inner_decision=decision,
+                decision_subject_hash=decision_subject_hash,
+                model_result_event_ref=terminal.event_ref,
+                model_result_event_hash=terminal.event_payload_hash,
+                audit_proposal_event_ref=proposal_audit.event_ref,
+                audit_proposal_event_hash=proposal_audit.event_payload_hash,
+                deliberation_result_id=terminal.deliberation_result_id,
+                final_model_result_ref=terminal.model_result_ref,
+                inner_decision_content_ref=inner_content_ref,
+                inner_decision_content_hash=inner_content_hash,
+            )
+        return None
 
     def _next_model_retry_ordinal(
         self,
@@ -2808,8 +2674,7 @@ class LifeDevelopmentRuntime:
                     (
                         item
                         for item in projection.model_result_audits
-                        if item.deliberation_result_id
-                        == terminal.deliberation_result_id
+                        if item.deliberation_result_id == terminal.deliberation_result_id
                     ),
                     key=lambda item: item.attempt_index,
                 )
@@ -2853,10 +2718,7 @@ class LifeDevelopmentRuntime:
             decision_context = audits[0].decision_context
             if (
                 decision_context is None
-                or any(
-                    item.decision_context != decision_context
-                    for item in audits
-                )
+                or any(item.decision_context != decision_context for item in audits)
                 or decision_context.decision_subject_hash != subject_hash
                 or decision_context.world_revision != current_world_revision
             ):
@@ -2985,8 +2847,7 @@ class LifeDevelopmentRuntime:
                     (
                         item
                         for item in projection.model_result_audits
-                        if item.deliberation_result_id
-                        == terminal.deliberation_result_id
+                        if item.deliberation_result_id == terminal.deliberation_result_id
                     ),
                     key=lambda item: item.attempt_index,
                 )
@@ -3014,27 +2875,20 @@ class LifeDevelopmentRuntime:
             )
             epoch = _digest(
                 {
-                    "attempt_request_hashes": [
-                        attempt.request_hash for attempt in audits
-                    ],
+                    "attempt_request_hashes": [attempt.request_hash for attempt in audits],
                     "capsule_id": terminal.capsule_id,
                     "context_cursor": context_cursor.model_dump(mode="json"),
                     "proposal_id": proposal_id,
                     "role": role,
                 }
             )
-            retry_prefix = (
-                f"attempt:life-development:{role}:{suffix}:"
-                f"epoch:{epoch}:retry:"
-            )
+            retry_prefix = f"attempt:life-development:{role}:{suffix}:epoch:{epoch}:retry:"
             retry_ordinal = terminal.attempt_id.removeprefix(retry_prefix)
             if (
                 not terminal.attempt_id.startswith(retry_prefix)
                 or not retry_ordinal.isascii()
                 or not retry_ordinal.isdecimal()
-                or any(
-                    attempt.attempt_id != terminal.attempt_id for attempt in audits
-                )
+                or any(attempt.attempt_id != terminal.attempt_id for attempt in audits)
             ):
                 continue
             return audits[-1].failure_code or "unknown_terminal_failure"
@@ -3149,24 +3003,19 @@ class LifeDevelopmentRuntime:
         final_storage = recorded_audits[-1].response_storage
         if final_storage is None:
             if stored.content_kind != "outcome_candidate":
-                raise ValueError(
-                    "legacy Life Development result changed its content kind"
-                )
+                raise ValueError("legacy Life Development result changed its content kind")
         elif (
             final_storage.disposition != "stored_exact"
             or final_storage.content_kind != "raw_model_result"
             or final_storage.content_ref != final_ref
             or final_storage.content_payload_hash != final_hash
             or final_storage.original_response_hash != final_hash
-            or final_storage.original_utf8_bytes
-            != len(stored.text.encode("utf-8"))
+            or final_storage.original_utf8_bytes != len(stored.text.encode("utf-8"))
             or final_storage.original_characters != len(stored.text)
             or final_storage.truncated
             or stored.content_kind != "raw_model_result"
         ):
-            raise ValueError(
-                "recoverable Life Development result storage binding changed"
-            )
+            raise ValueError("recoverable Life Development result storage binding changed")
         model_content_hash = context_identity.get("model_content_hash")
         snapshot_hash = context_identity.get("snapshot_hash")
         if not isinstance(model_content_hash, str) or not isinstance(
@@ -3317,8 +3166,7 @@ class LifeDevelopmentRuntime:
             provisional_places: list[ProvisionalPlaceIntroductionDescriptor] = []
             for place_index, place in enumerate(outcome.provisional_places, start=1):
                 summary_ref = (
-                    f"content:life-development:provisional-place:{suffix}:"
-                    f"{index}:{place_index}"
+                    f"content:life-development:provisional-place:{suffix}:{index}:{place_index}"
                 )
                 summary_hash = life_content_payload_hash(place.summary)
                 store_binding(
@@ -3364,15 +3212,11 @@ class LifeDevelopmentRuntime:
                                 outcome.objective_biographical_transition.coordinate_ref
                             ),
                             summary=outcome.objective_biographical_transition.summary,
-                            context_tags=(
-                                outcome.objective_biographical_transition.context_tags
-                            ),
+                            context_tags=(outcome.objective_biographical_transition.context_tags),
                             replaces_context_tag_prefixes=(
                                 outcome.objective_biographical_transition.replaces_context_tag_prefixes
                             ),
-                            privacy_class=(
-                                outcome.objective_biographical_transition.privacy_class
-                            ),
+                            privacy_class=(outcome.objective_biographical_transition.privacy_class),
                         )
                         if outcome.objective_biographical_transition is not None
                         else None
@@ -3380,6 +3224,31 @@ class LifeDevelopmentRuntime:
                 )
             )
         return tuple(records), tuple(bindings), tuple(candidates)
+
+    @staticmethod
+    @staticmethod
+    def _occurrence_privacy_ceiling(*, draft, projection) -> PrivacyClass:
+        """Never let a proposed occurrence weaken a participant NPC's privacy.
+
+        Design invariant: privacy ceiling is the strictest value across all
+        evidence, participants, and the role's own choice.  The reducer
+        rejects a weaker visibility, so compute the ceiling here instead of
+        surfacing a hard failure that aborts the whole ecology pass.
+        """
+
+        rank = {
+            "public": 0,
+            "shareable": 1,
+            "personal": 2,
+            "private": 3,
+            "withhold": 4,
+        }
+        ceiling = draft.privacy_class
+        for npc in getattr(projection, "npcs", ()):
+            npc_ref = f"npc:{getattr(npc, 'npc_id', None)}"
+            if npc_ref in draft.entity_refs and rank[npc.privacy_class] > rank[ceiling]:
+                ceiling = npc.privacy_class
+        return ceiling
 
     @staticmethod
     def _evidence_refs(
@@ -3457,9 +3326,7 @@ class LifeDevelopmentRuntime:
         if not self._source_closure_reviewer_is_independent:
             return LifeDevelopmentResult(
                 status="technical_failure",
-                reason_code=(
-                    "life_development.source_closure_reviewer_not_independent"
-                ),
+                reason_code=("life_development.source_closure_reviewer_not_independent"),
             )
         reviewed = await self._review_world_author_candidate(
             proposal_id=proposal_id,
@@ -3483,16 +3350,12 @@ class LifeDevelopmentRuntime:
                 if self._novel_origin_critic is None:
                     return LifeDevelopmentResult(
                         status="technical_failure",
-                        reason_code=(
-                            "life_development.novel_origin_critic_unavailable"
-                        ),
+                        reason_code=("life_development.novel_origin_critic_unavailable"),
                     )
                 if not self._novel_origin_critic_is_independent:
                     return LifeDevelopmentResult(
                         status="technical_failure",
-                        reason_code=(
-                            "life_development.novel_origin_critic_not_independent"
-                        ),
+                        reason_code=("life_development.novel_origin_critic_not_independent"),
                     )
                 focused = await self._review_novel_origin_candidate(
                     proposal_id=proposal_id,
@@ -3509,10 +3372,7 @@ class LifeDevelopmentRuntime:
                 if isinstance(focused, LifeDevelopmentResult):
                     return focused
                 novel_origin_review, novel_origin_deliberation = focused
-            if (
-                novel_origin_review is None
-                or novel_origin_review.decision == "supported"
-            ):
+            if novel_origin_review is None or novel_origin_review.decision == "supported":
                 return _SourceClosedWorldAuthorResult(
                     draft=draft,
                     raw=raw,
@@ -3524,33 +3384,31 @@ class LifeDevelopmentRuntime:
                     novel_origin_deliberation=novel_origin_deliberation,
                 )
 
-        rejection_review: (
-            LifeDevelopmentSourceClosureReview | LifeDevelopmentNovelOriginReview
-        ) = novel_origin_review or review
-        rejection_deliberation = (
-            novel_origin_deliberation or review_deliberation
+        rejection_review: LifeDevelopmentSourceClosureReview | LifeDevelopmentNovelOriginReview = (
+            novel_origin_review or review
         )
+        rejection_deliberation = novel_origin_deliberation or review_deliberation
 
-        rewrite_proposal_id = proposal_id + ":source-rewrite:" + _digest(
-            {
-                "rejected_world_author_raw_hash": _digest(raw),
-                "rejection_decision_subject_hash": (
-                    rejection_deliberation.decision_subject_hash
-                ),
-                "source_closure_coordinates": _world_author_rejection_coordinates(
-                    rejection_review
-                ),
-            }
+        rewrite_proposal_id = (
+            proposal_id
+            + ":source-rewrite:"
+            + _digest(
+                {
+                    "rejected_world_author_raw_hash": _digest(raw),
+                    "rejection_decision_subject_hash": (
+                        rejection_deliberation.decision_subject_hash
+                    ),
+                    "source_closure_coordinates": _world_author_rejection_coordinates(
+                        rejection_review
+                    ),
+                }
+            )
         )
         rewrite_subject_hash = _digest(
             {
                 "role": "world_author",
-                "source_closure_coordinates": _world_author_rejection_coordinates(
-                    rejection_review
-                ),
-                "rejection_decision_subject_hash": (
-                    rejection_deliberation.decision_subject_hash
-                ),
+                "source_closure_coordinates": _world_author_rejection_coordinates(rejection_review),
+                "rejection_decision_subject_hash": (rejection_deliberation.decision_subject_hash),
                 "rejected_world_author_raw_hash": _digest(raw),
                 "capability_manifest_hash": manifest.manifest_hash,
             }
@@ -3681,9 +3539,7 @@ class LifeDevelopmentRuntime:
             if not self._novel_origin_critic_is_independent:
                 return LifeDevelopmentResult(
                     status="technical_failure",
-                    reason_code=(
-                        "life_development.novel_origin_critic_not_independent"
-                    ),
+                    reason_code=("life_development.novel_origin_critic_not_independent"),
                 )
             corrected_focused = await self._review_novel_origin_candidate(
                 proposal_id=proposal_id,
@@ -3733,10 +3589,7 @@ class LifeDevelopmentRuntime:
         raw: str,
         trace_id: str,
         correlation_id: str,
-    ) -> (
-        tuple[LifeDevelopmentSourceClosureReview, _RecordedDeliberation]
-        | LifeDevelopmentResult
-    ):
+    ) -> tuple[LifeDevelopmentSourceClosureReview, _RecordedDeliberation] | LifeDevelopmentResult:
         reviewer = self._source_closure_reviewer
         if reviewer is None or self._source_closure_reviewer_model_id is None:
             raise ValueError("source-closure review was requested without a reviewer")
@@ -3757,9 +3610,7 @@ class LifeDevelopmentRuntime:
             draft=draft,
             cited_events=cited_events,
         )
-        packet_contract, _packet_hash = life_development_review_packet_identity(
-            messages
-        )
+        packet_contract, _packet_hash = life_development_review_packet_identity(messages)
         initial_request_hash = _messages_hash(messages)
         review_family_hash = _source_closure_subject_hash(
             raw=raw,
@@ -3770,9 +3621,7 @@ class LifeDevelopmentRuntime:
             wake=wake,
         )
         review_proposal_id = (
-            proposal_id
-            + ":source-review:"
-            + _digest({"review_family_hash": review_family_hash})
+            proposal_id + ":source-review:" + _digest({"review_family_hash": review_family_hash})
         )
         projection = self._ledger.project()
         if projection.world_revision != context_cursor.world_revision:
@@ -3838,12 +3687,8 @@ class LifeDevelopmentRuntime:
                 status="technical_failure",
                 reason_code=_review_terminal_reason_code(
                     failure_code=recovered_failure_code,
-                    invalid_contract=(
-                        "life_development.source_closure_reviewer_invalid_contract"
-                    ),
-                    unavailable=(
-                        "life_development.source_closure_reviewer_unavailable"
-                    ),
+                    invalid_contract=("life_development.source_closure_reviewer_invalid_contract"),
+                    unavailable=("life_development.source_closure_reviewer_unavailable"),
                 ),
             )
         if recovered is None:
@@ -3888,9 +3733,7 @@ class LifeDevelopmentRuntime:
                         invalid_contract=(
                             "life_development.source_closure_reviewer_invalid_contract"
                         ),
-                        unavailable=(
-                            "life_development.source_closure_reviewer_unavailable"
-                        ),
+                        unavailable=("life_development.source_closure_reviewer_unavailable"),
                     ),
                 )
             parsed = review_run.parsed
@@ -3932,10 +3775,7 @@ class LifeDevelopmentRuntime:
         raw: str,
         trace_id: str,
         correlation_id: str,
-    ) -> (
-        tuple[LifeDevelopmentNovelOriginReview, _RecordedDeliberation]
-        | LifeDevelopmentResult
-    ):
+    ) -> tuple[LifeDevelopmentNovelOriginReview, _RecordedDeliberation] | LifeDevelopmentResult:
         critic = self._novel_origin_critic
         if critic is None or self._novel_origin_critic_model_id is None:
             return LifeDevelopmentResult(
@@ -3947,9 +3787,7 @@ class LifeDevelopmentRuntime:
             manifest=manifest,
             draft=draft,
         )
-        packet_contract, _packet_hash = life_development_review_packet_identity(
-            messages
-        )
+        packet_contract, _packet_hash = life_development_review_packet_identity(messages)
         initial_request_hash = _messages_hash(messages)
         review_family_hash = _novel_origin_subject_hash(
             raw=raw,
@@ -4028,9 +3866,7 @@ class LifeDevelopmentRuntime:
                 status="technical_failure",
                 reason_code=_review_terminal_reason_code(
                     failure_code=recovered_failure_code,
-                    invalid_contract=(
-                        "life_development.novel_origin_critic_invalid_contract"
-                    ),
+                    invalid_contract=("life_development.novel_origin_critic_invalid_contract"),
                     unavailable="life_development.novel_origin_critic_unavailable",
                 ),
             )
@@ -4073,12 +3909,8 @@ class LifeDevelopmentRuntime:
                     status="technical_failure",
                     reason_code=_review_terminal_reason_code(
                         failure_code=review_run.attempts[-1].failure_code,
-                        invalid_contract=(
-                            "life_development.novel_origin_critic_invalid_contract"
-                        ),
-                        unavailable=(
-                            "life_development.novel_origin_critic_unavailable"
-                        ),
+                        invalid_contract=("life_development.novel_origin_critic_invalid_contract"),
+                        unavailable=("life_development.novel_origin_critic_unavailable"),
                     ),
                 )
             parsed = review_run.parsed
@@ -4190,11 +4022,7 @@ class LifeDevelopmentRuntime:
                     _LifeDevelopmentAttempt(
                         request_hash=request_hash,
                         raw_output=review_raw,
-                        status=(
-                            "main_invalid_recovered"
-                            if ordinal
-                            else "proposal_validated"
-                        ),
+                        status=("main_invalid_recovered" if ordinal else "proposal_validated"),
                         failure_code=("main_invalid_output" if ordinal else None),
                         source_review_attempts=provider_traces,
                     )
@@ -4210,9 +4038,7 @@ class LifeDevelopmentRuntime:
                         request_hash=request_hash,
                         raw_output=review_raw,
                         status=("recovery_failed" if ordinal else "main_invalid"),
-                        failure_code=(
-                            "corrective_invalid" if ordinal else "main_invalid_output"
-                        ),
+                        failure_code=("corrective_invalid" if ordinal else "main_invalid_output"),
                         slot="corrective" if ordinal else None,
                         outcome="invalid" if ordinal else None,
                         source_review_attempts=provider_traces,
@@ -4314,11 +4140,7 @@ class LifeDevelopmentRuntime:
                     _LifeDevelopmentAttempt(
                         request_hash=request_hash,
                         raw_output=review_raw,
-                        status=(
-                            "main_invalid_recovered"
-                            if ordinal
-                            else "proposal_validated"
-                        ),
+                        status=("main_invalid_recovered" if ordinal else "proposal_validated"),
                         failure_code=("main_invalid_output" if ordinal else None),
                         source_review_attempts=provider_traces,
                     )
@@ -4334,9 +4156,7 @@ class LifeDevelopmentRuntime:
                         request_hash=request_hash,
                         raw_output=review_raw,
                         status=("recovery_failed" if ordinal else "main_invalid"),
-                        failure_code=(
-                            "corrective_invalid" if ordinal else "main_invalid_output"
-                        ),
+                        failure_code=("corrective_invalid" if ordinal else "main_invalid_output"),
                         slot="corrective" if ordinal else None,
                         outcome="invalid" if ordinal else None,
                         source_review_attempts=provider_traces,
@@ -4398,9 +4218,7 @@ class LifeDevelopmentRuntime:
                 "role": "user",
                 "content": json.dumps(
                     {
-                        "source_closure_failure": (
-                            _world_author_rejection_coordinates(review)
-                        ),
+                        "source_closure_failure": (_world_author_rejection_coordinates(review)),
                         "rejected_draft_hash": _digest(rejected_raw),
                         "same_pinned_authority": {
                             "capability_manifest_hash": manifest.manifest_hash,
@@ -4444,9 +4262,7 @@ class LifeDevelopmentRuntime:
                             ),
                         },
                         "bounded_wire_profile": {
-                            "purpose": (
-                                "transport_completion_only_not_content_selection"
-                            ),
+                            "purpose": ("transport_completion_only_not_content_selection"),
                             "complete_json_required": True,
                             "maximum_outcomes": 2,
                             "maximum_claim_declarations": 4,
@@ -4494,7 +4310,7 @@ class LifeDevelopmentRuntime:
                 rewritten_raw = await complete_json_object(
                     completion_rewriter,
                     messages,
-                    temperature=0.6,
+                    temperature=(0.3 if ordinal else 0.6),
                 )
             except Exception as exc:
                 if not _is_expected_model_transport_failure(exc):
@@ -4538,10 +4354,7 @@ class LifeDevelopmentRuntime:
                     manifest=manifest,
                     logical_time=logical_time,
                 )
-                if (
-                    propose_repair_required
-                    and isinstance(parsed, LifeDevelopmentNoOpDraft)
-                ):
+                if propose_repair_required and isinstance(parsed, LifeDevelopmentNoOpDraft):
                     raise LifeDevelopmentDraftError(
                         "repair_changed_decision",
                         (
@@ -4551,9 +4364,7 @@ class LifeDevelopmentRuntime:
                         violations=(
                             {
                                 "path": "decision",
-                                "message": (
-                                    "corrective decision must remain propose"
-                                ),
+                                "message": ("corrective decision must remain propose"),
                                 "type": "literal_error",
                             },
                         ),
@@ -4564,9 +4375,7 @@ class LifeDevelopmentRuntime:
                         request_hash=request_hash,
                         raw_output=rewritten_raw,
                         status=("recovery_failed" if ordinal else "main_invalid"),
-                        failure_code=(
-                            "corrective_invalid" if ordinal else "main_invalid_output"
-                        ),
+                        failure_code=("corrective_invalid" if ordinal else "main_invalid_output"),
                         slot="corrective" if ordinal else None,
                         outcome="invalid" if ordinal else None,
                     )
@@ -4591,19 +4400,14 @@ class LifeDevelopmentRuntime:
                         attempts=tuple(attempts),
                     )
                 propose_repair_required = (
-                    _world_author_rewrite_declared_decision(rewritten_raw)
-                    == "propose"
+                    _world_author_rewrite_declared_decision(rewritten_raw) == "propose"
                 )
                 output_contract = (
                     _world_author_source_rewrite_propose_repair_output_contract()
                     if propose_repair_required
                     else _world_author_source_rewrite_output_contract()
                 )
-                allowed_decisions = (
-                    ["propose"]
-                    if propose_repair_required
-                    else ["no_op", "propose"]
-                )
+                allowed_decisions = ["propose"] if propose_repair_required else ["no_op", "propose"]
                 messages = [
                     *messages,
                     {"role": "assistant", "content": rewritten_raw},
@@ -4630,9 +4434,7 @@ class LifeDevelopmentRuntime:
                                 ),
                                 "same_pinned_authority": {
                                     "capability_manifest_hash": manifest.manifest_hash,
-                                    "capability_manifest": manifest.model_dump(
-                                        mode="json"
-                                    ),
+                                    "capability_manifest": manifest.model_dump(mode="json"),
                                     "cross_field_authority": hard_boundary_contract,
                                 },
                                 "timing_coordinates": timing_coordinates,
@@ -4716,7 +4518,10 @@ class LifeDevelopmentRuntime:
                 raw = await complete_json_object(
                     self._world_author,
                     messages,
-                    temperature=0.6,
+                    # The corrective attempt names an exact violation; a lower
+                    # temperature makes the repair deterministic instead of
+                    # resampling the same unstable high-temperature output.
+                    temperature=(0.3 if ordinal else 0.6),
                 )
             except (
                 TimeoutError,
@@ -4790,8 +4595,9 @@ class LifeDevelopmentRuntime:
                 )
                 if ordinal == 1:
                     _LOG.warning(
-                        "World Author returned two invalid drafts error_type=%s",
+                        "World Author returned two invalid drafts error_type=%s detail=%s",
                         type(exc).__name__,
+                        str(exc)[:400],
                     )
                     first = attempts[0]
                     attempts[0] = _LifeDevelopmentAttempt(
@@ -4870,12 +4676,8 @@ class LifeDevelopmentRuntime:
                                         "timing_coordinates",
                                     ],
                                     "repair_obligation": {
-                                        "first": (
-                                            "resolve_validation_failure.code_and_detail"
-                                        ),
-                                        "must_not_leave_failed_field_combination_unchanged": (
-                                            True
-                                        ),
+                                        "first": ("resolve_validation_failure.code_and_detail"),
+                                        "must_not_leave_failed_field_combination_unchanged": (True),
                                         "then": (
                                             "revalidate_complete_replacement_against_all_"
                                             "authority_inputs"
@@ -4894,370 +4696,141 @@ class LifeDevelopmentRuntime:
                 ]
         raise AssertionError("World Author retry loop did not terminate")
 
-    def _character_choice_messages(
+    def _character_choice_capability(
         self,
         *,
-        context: dict[str, object],
         draft: LifeDevelopmentPossibilityDraft,
         offered_window: DueWindow,
-        expose_recall: bool,
-    ) -> tuple[
-        list[dict[str, str]],
-        dict[str, object],
-        dict[str, object],
-    ]:
+        active_aspiration_source_refs: tuple[str, ...],
+    ) -> dict[str, object]:
         output_contract = {
             "no_op": {"decision": "no_op"},
             "accept": CharacterChoiceAcceptDraft.model_json_schema(mode="validation"),
         }
-        if expose_recall:
-            output_contract["recall_request"] = {
-                "recall_request": CharacterRecallRequest.model_json_schema(
-                    mode="validation"
-                )
-            }
         hard_boundary_contract = _character_choice_hard_boundary_contract(
             draft=draft,
             offered_window=offered_window,
         )
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are the Character Model, not the World Author. The external "
-                    "opportunity below does not decide what you want. Freely return "
-                    "exactly one no_op object, or one accept object with your own "
-                    "intention_summary and importance_bp. Accept authorizes one Plan; "
-                    "it does not select which unsettled future outcome will happen. "
-                    "That later outcome remains for its authorized resolver after "
-                    "evidence exists. You may narrow timing within the offered window "
-                    "and select any subset of offered entity refs as participant_refs. "
-                    + (
-                        "If the pinned Context is not enough for your own decision, you "
-                        "may instead return exactly one recall_request object. That opens "
-                        "one bounded read-only memory pull chosen by you, after which you "
-                        "will make the final accept or no_op choice. "
-                        if expose_recall
-                        else ""
-                    )
-                    +
-                    "Do not create new world facts, people, places or outcomes. Return "
-                    "exactly JSON."
-                ),
+        capability = {
+            "external_opportunity": draft.model_dump(mode="json"),
+            "executable_envelope": {
+                "opens_at": offered_window.opens_at.isoformat(),
+                "closes_at": offered_window.closes_at.isoformat(),
+                "participant_refs": list(draft.entity_refs),
             },
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "pinned_world_context": context,
-                        "external_opportunity": draft.model_dump(mode="json"),
-                        "executable_envelope": {
-                            "opens_at": offered_window.opens_at.isoformat(),
-                            "closes_at": offered_window.closes_at.isoformat(),
-                            "participant_refs": list(draft.entity_refs),
-                        },
-                        "output_contract": output_contract,
-                        "cross_field_authority": hard_boundary_contract,
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-            },
-        ]
-        return messages, output_contract, hard_boundary_contract
+            "active_aspiration_source_refs": list(active_aspiration_source_refs),
+            "output_contract": output_contract,
+            "cross_field_authority": hard_boundary_contract,
+        }
+        return capability
 
     async def _character_initial_choice(
         self,
         *,
-        context: dict[str, object],
         draft: LifeDevelopmentPossibilityDraft,
         offered_window: DueWindow,
         active_aspiration_source_refs: tuple[str, ...],
-    ) -> _LifeDevelopmentModelRun:
-        messages, output_contract, hard_boundary_contract = (
-            self._character_choice_messages(
-                context=context,
-                draft=draft,
-                offered_window=offered_window,
-                expose_recall=self._recall is not None,
-            )
-        )
-        return await self._run_character_choice_phase(
-            messages=messages,
-            output_contract=output_contract,
-            hard_boundary_contract=hard_boundary_contract,
+        purpose_context: InteriorPurposeContext,
+    ) -> InnerDecision:
+        capability = self._character_choice_capability(
             draft=draft,
             offered_window=offered_window,
-            allow_recall=self._recall is not None,
-            recall_trace=None,
             active_aspiration_source_refs=active_aspiration_source_refs,
         )
+        return await self._consider_character_choice(
+            capability=capability,
+            context=purpose_context,
+        )
 
-    async def _character_choice_after_recall(
+    async def _consider_character_choice(
         self,
         *,
-        context: dict[str, object],
+        capability: dict[str, object],
+        context: InteriorPurposeContext,
+    ) -> InnerDecision:
+        """Call the one public CharacterInterior choice operation directly."""
+
+        payload_json = canonical_json(capability)
+        suffix = _digest(
+            {
+                "purpose": "life_development_choice",
+                "context": context.model_dump(mode="json"),
+                "capability": capability,
+            }
+        )
+        manifest = _InteriorCapabilityManifest(
+            capability_ref=f"capability:life-development-choice:{suffix}",
+            capability_kind="life_development_choice",
+            payload_json=payload_json,
+            payload_hash="sha256:" + hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+            source_refs=context.source_refs,
+        )
+        opportunity = InteriorOpportunity(
+            opportunity_ref=f"opportunity:life-development-choice:{suffix}",
+            inner_turn_ref=context.inner_turn_ref,
+            world_id=self._ledger.world_id,
+            actor_ref=self._owner,
+            trigger_ref=context.trigger_ref,
+            cursor=context.cursor,
+            logical_time=context.logical_time,
+            purpose="life_development_choice",
+            source_refs=context.source_refs,
+            capability_manifest=manifest,
+            context_note=(
+                "A source-bound external Life possibility is available. The character "
+                "owns accept/no-op; the system owns only execution authority."
+            ),
+        )
+        result = await self._character_interior.consider(opportunity)
+        if not isinstance(result, InnerDecision):
+            raise TypeError("CharacterInterior returned no complete InnerDecision")
+        decision = result.decision
+        if result.status == "decided" and (
+            not isinstance(decision, dict)
+            or result.snapshot_id is None
+            or result.snapshot_hash is None
+            or result.author_lineage is None
+            or result.cursor != context.cursor
+            or result.opportunity_ref != opportunity.opportunity_ref
+            or result.actor_ref != self._owner
+            or result.inner_turn_id == ""
+            or result.failure_code is not None
+            or decision.get("contract") != "character-interior-purpose-decision.1"
+            or decision.get("purpose") != "life_development_choice"
+            or decision.get("capability_ref") != manifest.capability_ref
+            or decision.get("capability_payload_hash") != manifest.payload_hash
+            or tuple(decision.get("source_refs", ())) != context.source_refs
+        ):
+            raise ValueError("character_interior_life_decision_binding_invalid")
+        return result
+
+    @staticmethod
+    def _materialize_character_choice(
+        *,
+        decision: InnerDecision,
         draft: LifeDevelopmentPossibilityDraft,
         offered_window: DueWindow,
-        recall_request_raw: str,
-        recall_request: CharacterRecallRequest,
-        recall_trace: RecallAuditTrace | None,
-        recall_failure_code: str | None,
         active_aspiration_source_refs: tuple[str, ...],
-    ) -> _LifeDevelopmentModelRun:
-        messages, output_contract, hard_boundary_contract = (
-            self._character_choice_messages(
-                context=context,
-                draft=draft,
-                offered_window=offered_window,
-                expose_recall=False,
-            )
-        )
-        final_output_contract = {
-            "no_op": output_contract["no_op"],
-            "accept": output_contract["accept"],
-        }
-        if recall_trace is not None:
-            recall_evidence: dict[str, object] = {
-                "status": "returned",
-                "trace": json.loads(recall_evidence_json(recall_trace)),
-            }
-        else:
-            if recall_failure_code is None:
-                raise ValueError("character recall result is incomplete")
-            recall_evidence = {
-                "status": "technical_failure",
-                "request": recall_request.model_dump(mode="json"),
-                "failure_code": recall_failure_code,
-                "available_evidence": [],
-            }
-        messages.extend(
-            (
-                {"role": "assistant", "content": recall_request_raw},
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        {
-                            "character_selected_recall": recall_evidence,
-                            "recall_budget": {"remaining": 0},
-                            "output_contract": final_output_contract,
-                            "cross_field_authority": hard_boundary_contract,
-                            "instruction": (
-                                "The recall result is reference material, not a behavior "
-                                "instruction and not new world authority. A technical "
-                                "failure means only that this read produced no evidence; "
-                                "it is not your choice to stay silent. Make your own final "
-                                "accept or no_op choice from the pinned Context and the "
-                                "evidence actually available. Return exactly one complete "
-                                "JSON object."
-                            ),
-                        },
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
-                },
-            )
-        )
-        return await self._run_character_choice_phase(
-            messages=messages,
-            output_contract=final_output_contract,
-            hard_boundary_contract=hard_boundary_contract,
-            draft=draft,
+    ) -> tuple[CharacterChoiceAcceptDraft | CharacterChoiceNoOpDraft, str]:
+        outer = decision.decision
+        if decision.status != "decided" or not isinstance(outer, dict):
+            raise ValueError("CharacterInterior life decision is unavailable")
+        payload = outer.get("payload")
+        if (
+            not isinstance(payload, dict)
+            or payload.get("contract") != "character-interior-life-development-choice.1"
+            or set(payload) != {"contract", "completion"}
+            or not isinstance(payload.get("completion"), dict)
+        ):
+            raise ValueError("CharacterInterior life completion is invalid")
+        raw = canonical_json(payload["completion"])
+        parsed = parse_character_choice(
+            raw=raw,
+            offered=draft,
             offered_window=offered_window,
-            allow_recall=False,
-            recall_trace=recall_trace,
             active_aspiration_source_refs=active_aspiration_source_refs,
         )
-
-    async def _run_character_choice_phase(
-        self,
-        *,
-        messages: list[dict[str, str]],
-        output_contract: dict[str, object],
-        hard_boundary_contract: dict[str, object],
-        draft: LifeDevelopmentPossibilityDraft,
-        offered_window: DueWindow,
-        allow_recall: bool,
-        recall_trace: RecallAuditTrace | None,
-        active_aspiration_source_refs: tuple[str, ...],
-    ) -> _LifeDevelopmentModelRun:
-        attempts: list[_LifeDevelopmentAttempt] = []
-        for ordinal in range(2):
-            request_hash = _messages_hash(messages)
-            try:
-                raw = await complete_json_object(
-                    self._character_model,
-                    messages,
-                    temperature=0.6,
-                )
-            except (
-                TimeoutError,
-                ConnectionError,
-                OSError,
-                httpx.HTTPError,
-                ValueError,
-            ) as exc:
-                _LOG.warning(
-                    "Character Model unavailable for life choice error_type=%s",
-                    type(exc).__name__,
-                )
-                status, failure_code, outcome = _model_provider_failure(
-                    exc,
-                    corrective=ordinal > 0,
-                )
-                if ordinal and attempts[0].status != "candidate_returned":
-                    first = attempts[0]
-                    attempts[0] = _LifeDevelopmentAttempt(
-                        request_hash=first.request_hash,
-                        raw_output=first.raw_output,
-                        status=first.status,
-                        failure_code=first.failure_code,
-                        slot="primary",
-                        outcome="invalid",
-                        source_review_attempts=first.source_review_attempts,
-                        recall_trace=first.recall_trace,
-                    )
-                attempts.append(
-                    _LifeDevelopmentAttempt(
-                        request_hash=request_hash,
-                        raw_output=None,
-                        status=status,
-                        failure_code=failure_code,
-                        slot="corrective" if ordinal else "primary",
-                        outcome=outcome,
-                    )
-                )
-                return _LifeDevelopmentModelRun(
-                    model_id=self._character_model_id,
-                    parsed=None,
-                    attempts=tuple(attempts),
-                )
-            try:
-                recall_request = _parse_life_character_recall_request(raw)
-                if recall_request is not None:
-                    if not allow_recall:
-                        raise LifeDevelopmentDraftError(
-                            "character_recall_budget_consumed",
-                            "The one Character Model recall pass is already consumed; "
-                            "this phase must return the final accept or no_op choice.",
-                        )
-                    attempts.append(
-                        _LifeDevelopmentAttempt(
-                            request_hash=request_hash,
-                            raw_output=raw,
-                            status=(
-                                "main_invalid_recovered"
-                                if ordinal
-                                else "proposal_validated"
-                            ),
-                            failure_code=("main_invalid_output" if ordinal else None),
-                        )
-                    )
-                    return _LifeDevelopmentModelRun(
-                        model_id=self._character_model_id,
-                        parsed=recall_request,
-                        attempts=tuple(attempts),
-                    )
-                parsed = parse_character_choice(
-                    raw=raw,
-                    offered=draft,
-                    offered_window=offered_window,
-                    active_aspiration_source_refs=active_aspiration_source_refs,
-                )
-                attempts.append(
-                    _LifeDevelopmentAttempt(
-                        request_hash=request_hash,
-                        raw_output=raw,
-                        status=(
-                            "main_invalid_recovered"
-                            if ordinal
-                            else "proposal_validated"
-                        ),
-                        failure_code=("main_invalid_output" if ordinal else None),
-                        recall_trace=recall_trace,
-                    )
-                )
-                return _LifeDevelopmentModelRun(
-                    model_id=self._character_model_id,
-                    parsed=parsed,
-                    attempts=tuple(attempts),
-                )
-            except LifeDevelopmentDraftError as exc:
-                attempts.append(
-                    _LifeDevelopmentAttempt(
-                        request_hash=request_hash,
-                        raw_output=raw,
-                        status=("recovery_failed" if ordinal else "main_invalid"),
-                        failure_code=("corrective_invalid" if ordinal else "main_invalid_output"),
-                        slot="corrective" if ordinal else None,
-                        outcome="invalid" if ordinal else None,
-                    )
-                )
-                if ordinal == 1:
-                    _LOG.warning(
-                        "Character Model returned two invalid life choices error_type=%s",
-                        type(exc).__name__,
-                    )
-                    if attempts[0].status != "candidate_returned":
-                        first = attempts[0]
-                        attempts[0] = _LifeDevelopmentAttempt(
-                            request_hash=first.request_hash,
-                            raw_output=first.raw_output,
-                            status=first.status,
-                            failure_code=first.failure_code,
-                            slot="primary",
-                            outcome="invalid",
-                            source_review_attempts=first.source_review_attempts,
-                            recall_trace=first.recall_trace,
-                        )
-                    return _LifeDevelopmentModelRun(
-                        model_id=self._character_model_id,
-                        parsed=None,
-                        attempts=tuple(attempts),
-                    )
-                messages = [
-                    *messages,
-                    {"role": "assistant", "content": raw},
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            {
-                                "validation_failure": {
-                                    "code": exc.code,
-                                    "detail": exc.detail,
-                                    "violations": list(
-                                        _direct_authority_violations(exc.violations)
-                                    ),
-                                },
-                                "output_contract": output_contract,
-                                "cross_field_authority": hard_boundary_contract,
-                                "replacement_contract": {
-                                    "allowed_decisions": list(output_contract),
-                                    "output": "one_complete_replacement_object",
-                                    "repair_obligation": {
-                                        "first": (
-                                            "resolve_validation_failure.code_and_detail"
-                                        ),
-                                        "then": (
-                                            "revalidate_complete_replacement_against_"
-                                            "output_and_authority_contracts"
-                                        ),
-                                    },
-                                },
-                                "instruction": (
-                                    "Return one complete replacement choice within the "
-                                    "same opportunity and executable envelope. Keep the "
-                                    "accept-or-no_op decision and intention yours; fix the "
-                                    "exact shape or authority violation without selecting "
-                                    "a future outcome in this planning phase."
-                                ),
-                            },
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
-                    },
-                ]
-        raise AssertionError("Character Model retry loop did not terminate")
+        return parsed, raw
 
     def _world_author_messages(
         self,
@@ -5288,7 +4861,17 @@ class LifeDevelopmentRuntime:
                     "the Character Model; use a recorded world contingency or an "
                     "external observation. You may "
                     "write an ordinary, long-running, pleasant, difficult, or adverse "
-                    "premise and 2-4 free outcome texts. recent_life_texture presents a bounded "
+                    "premise and EXACTLY 2-4 free outcome texts (never 1, never 5+). "
+                    "Environmental color (rain, weather, small sights) is legal but a "
+                    "low-cost default; do not let it crowd out premise kinds that move "
+                    "her life or situation, such as an offer, a chance, a difficulty, "
+                    "a change in a relationship, or a long-running circumstance. Those "
+                    "belong to the world as much as the weather does. "
+                    "causal_authority=character_choice is for an opportunity she may "
+                    "choose (an invitation, a way to change her situation); prefer it "
+                    "over world_contingency when the premise exists to offer her a "
+                    "choice rather than to impose an environment. "
+                    "recent_life_texture presents a bounded "
                     "source-bound sample "
                     "of lived history so its semantic texture is visible rather than buried in "
                     "proof material. It is not a novelty target or a repetition veto. Repetition "
@@ -5306,6 +4889,7 @@ class LifeDevelopmentRuntime:
                     "authorized location_ref exactly. Omit visual_evidence when the "
                     "outcome has no defensible visual slice; never infer one merely "
                     "because a picture might be appealing. Provisional NPC local refs "
+                    "must be canonical narrative:<tag> tokens (e.g. narrative:poet) "
                     "and provisional_places are allowed inside outcomes; a selected "
                     "settlement gives a provisional place attempt-only future identity, "
                     "not proof of opening, entry, or visit success. "
@@ -5363,7 +4947,55 @@ class LifeDevelopmentRuntime:
                     "acceptance. For character-caused opportunities only, "
                     "outcome_resolution_authority independently states who may resolve "
                     "later outcomes; it is not implied by participation. "
-                    "Return exactly JSON."
+                    "When timing.mode is later, opens_at must be strictly after the "
+                    "pinned logical_time; never propose a window that has already "
+                    "opened or closed. "
+                    "Here is one exact compliant propose example. Mirror its field "
+                    "names and structure precisely (you choose different content): "
+                    + json.dumps(
+                        {
+                            "decision": "propose",
+                            "authored_subject_ref": "agent:companion",
+                            "causal_authority": "world_contingency",
+                            "outcome_resolution_authority": "world_contingency",
+                            "premise_scope": "external_opportunity",
+                            "premise": "A sudden summer thunderstorm rolls through the city in the late evening, bringing heavy rain and occasional lightning. The downpour makes staying indoors feel natural while creating a cozy, reflective atmosphere.",
+                            "premise_claim_refs": ["local:claim:storm"],
+                            "claim_declarations": [
+                                {
+                                    "claim_id": "local:claim:storm",
+                                    "summary": "A sudden summer thunderstorm with heavy rain passes through the city this evening, lasting about an hour.",
+                                    "scope": "novel_world_generation",
+                                    "subject_scope": "world_environment",
+                                    "source_refs": [],
+                                }
+                            ],
+                            "timing": {"mode": "now", "duration_minutes": 60},
+                            "anchor_refs": ["event:anchor:1"],
+                            "location_ref": None,
+                            "location_capability_ref": None,
+                            "entity_refs": [],
+                            "privacy_class": "private",
+                            "outcomes": [
+                                {
+                                    "experienced_by_ref": "agent:companion",
+                                    "text": "The storm keeps her indoors. She sits by the window, watching the rain streak down the glass and listening to the thunder, sinking into a rare sense of stillness.",
+                                    "privacy_class": "private",
+                                    "relative_plausibility_weight": 6000,
+                                    "claim_refs": ["local:claim:storm"],
+                                },
+                                {
+                                    "experienced_by_ref": "agent:companion",
+                                    "text": "The storm interrupts her evening plans and forces her to change course; she stays indoors and feels a bit restless until the rain lets up.",
+                                    "privacy_class": "private",
+                                    "relative_plausibility_weight": 4000,
+                                    "claim_refs": ["local:claim:storm"],
+                                },
+                            ],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + " Return exactly JSON."
                 ),
             },
             {
@@ -5427,12 +5059,10 @@ class LifeDevelopmentRuntime:
         effect_kind: str | None = None,
         effect_ref: str | None = None,
         content_bindings: tuple[dict[str, str], ...] = (),
-        character_raw: str | None = None,
-        character_repair_ordinal: int | None = None,
         final_decision: str | None = None,
         outcome_descriptors: tuple[OutcomeCandidateDescriptor, ...] = (),
         character_choice: CharacterChoiceAcceptDraft | CharacterChoiceNoOpDraft | None = None,
-        character_deliberation: _RecordedDeliberation | None = None,
+        character_interior_decision: _RecordedCharacterInteriorDecision | None = None,
         source_closure_review: LifeDevelopmentSourceClosureReview | None = None,
         source_closure_deliberation: _RecordedDeliberation | None = None,
         novel_origin_review: LifeDevelopmentNovelOriginReview | None = None,
@@ -5447,6 +5077,8 @@ class LifeDevelopmentRuntime:
             raise ValueError("life development source closure binding is partial")
         if (novel_origin_review is None) != (novel_origin_deliberation is None):
             raise ValueError("life development novel-origin binding is partial")
+        if (character_choice is None) != (character_interior_decision is None):
+            raise ValueError("life development CharacterInterior binding is partial")
         if isinstance(draft, LifeDevelopmentPossibilityDraft):
             if source_closure_review is None:
                 raise ValueError("life development possibility bypassed source closure")
@@ -5463,8 +5095,7 @@ class LifeDevelopmentRuntime:
             ):
                 raise ValueError("life development possibility has no supported source closure")
             if (
-                self._novel_origin_critic is not None
-                and self._requires_novel_origin_review(draft)
+                self._novel_origin_critic is not None and self._requires_novel_origin_review(draft)
             ) and (
                 novel_origin_review is None
                 or novel_origin_deliberation is None
@@ -5489,16 +5120,12 @@ class LifeDevelopmentRuntime:
                 wake=wake,
             )
             if (
-                source_closure_deliberation.role
-                != "world_author_source_reviewer"
+                source_closure_deliberation.role != "world_author_source_reviewer"
                 or source_closure_deliberation.capsule_id != capsule.capsule_id
                 or source_closure_deliberation.context_cursor != context_cursor
-                or source_closure_deliberation.decision_subject_hash
-                != expected_source_subject
+                or source_closure_deliberation.decision_subject_hash != expected_source_subject
             ):
-                raise ValueError(
-                    "life development source closure changed its reviewed subject"
-                )
+                raise ValueError("life development source closure changed its reviewed subject")
         if novel_origin_deliberation is not None:
             expected_novel_subject = _novel_origin_subject_hash(
                 raw=raw,
@@ -5509,12 +5136,10 @@ class LifeDevelopmentRuntime:
                 wake=wake,
             )
             if (
-                novel_origin_deliberation.role
-                != "world_author_novel_origin_critic"
+                novel_origin_deliberation.role != "world_author_novel_origin_critic"
                 or novel_origin_deliberation.capsule_id != capsule.capsule_id
                 or novel_origin_deliberation.context_cursor != context_cursor
-                or novel_origin_deliberation.decision_subject_hash
-                != expected_novel_subject
+                or novel_origin_deliberation.decision_subject_hash != expected_novel_subject
             ):
                 raise ValueError(
                     "life development novel-origin review changed its reviewed subject"
@@ -5548,25 +5173,19 @@ class LifeDevelopmentRuntime:
             "model_role": "world_author",
             "world_author_model": self._world_author_model,
             "world_author_raw_output_hash": _digest(raw),
-            "character_model_role": ("character_model" if character_raw is not None else None),
-            "character_model": (self._character_model_id if character_raw is not None else None),
-            "character_raw_output_hash": (
-                _digest(character_raw) if character_raw is not None else None
-            ),
             "repair_ordinal": repair_ordinal,
-            "character_repair_ordinal": character_repair_ordinal,
             "world_author_deliberation": (world_author_deliberation.authority_payload()),
             "world_author_deliberation_hash": _digest(
                 world_author_deliberation.authority_payload()
             ),
-            "character_deliberation": (
-                character_deliberation.authority_payload()
-                if character_deliberation is not None
+            "character_interior_decision": (
+                character_interior_decision.authority_payload()
+                if character_interior_decision is not None
                 else None
             ),
-            "character_deliberation_hash": (
-                _digest(character_deliberation.authority_payload())
-                if character_deliberation is not None
+            "character_interior_decision_hash": (
+                _digest(character_interior_decision.authority_payload())
+                if character_interior_decision is not None
                 else None
             ),
             "world_author_source_closure_model": (
@@ -5791,9 +5410,7 @@ class LifeDevelopmentRuntime:
             "opens_at": (choice.opens_at or offered.opens_at).isoformat(),
             "closes_at": (choice.closes_at or offered.closes_at).isoformat(),
             "participant_refs": list(choice.participant_refs),
-            "crystallized_aspiration_source_ref": (
-                choice.crystallized_aspiration_source_ref
-            ),
+            "crystallized_aspiration_source_ref": (choice.crystallized_aspiration_source_ref),
         }
 
     def _validate_content_bindings(
@@ -5905,20 +5522,14 @@ def _world_author_timing_coordinate_contract(
 
     logical_utc = logical_time.astimezone(UTC)
     timezone_names = tuple(
-        sorted(
-            {
-                capability.timezone_name
-                for capability in manifest.location_capabilities
-            }
-        )
+        sorted({capability.timezone_name for capability in manifest.location_capabilities})
     )
     return {
         "contract_version": "life-development-timing-coordinates.1",
         "pinned_logical_time": {
             "utc": logical_utc.isoformat(),
             "local_by_timezone": {
-                name: logical_utc.astimezone(ZoneInfo(name)).isoformat()
-                for name in timezone_names
+                name: logical_utc.astimezone(ZoneInfo(name)).isoformat() for name in timezone_names
             },
         },
         "timing_modes": {
@@ -5965,9 +5576,7 @@ def _location_capability_timing_coordinate(
     maximum_now_duration: int | None = None
     for opens_at, closes_at in intervals:
         copyable_open = max(opens_at, local_logical_time)
-        available_minutes = int(
-            (closes_at - copyable_open).total_seconds() // 60
-        )
+        available_minutes = int((closes_at - copyable_open).total_seconds() // 60)
         if near_term is None and available_minutes >= 5:
             near_term = {
                 "opens_at": copyable_open.isoformat(),
@@ -6073,9 +5682,7 @@ def _reviewed_schedule_interval(
     end_minutes = end_hour * 60 + end_minute
     start_minutes = start_hour * 60 + start_minute
     closes_on = (
-        candidate_date + timedelta(days=1)
-        if end_minutes <= start_minutes
-        else candidate_date
+        candidate_date + timedelta(days=1) if end_minutes <= start_minutes else candidate_date
     )
     closes_at = datetime.combine(
         closes_on,
@@ -6102,9 +5709,7 @@ def _world_author_source_rewrite_propose_repair_output_contract() -> dict[str, o
         "provider_wire_envelope": {
             "replacement": "exactly_one_complete_propose_object",
         },
-        "propose": LifeDevelopmentPossibilityDraft.model_json_schema(
-            mode="validation"
-        ),
+        "propose": LifeDevelopmentPossibilityDraft.model_json_schema(mode="validation"),
     }
 
 
@@ -6124,10 +5729,7 @@ def _world_author_rewrite_declared_decision(raw: str) -> str | None:
     if not isinstance(decoded, dict):
         return None
     replacement = decoded.get("replacement")
-    if (
-        decoded.get("decision") not in {"no_op", "propose"}
-        and isinstance(replacement, dict)
-    ):
+    if decoded.get("decision") not in {"no_op", "propose"} and isinstance(replacement, dict):
         # An invalid extra transport key does not erase the discriminator the
         # World Author already selected inside the provider envelope.
         decoded = replacement
@@ -6185,12 +5787,9 @@ def _world_author_claim_classification_contract() -> dict[str, object]:
         "unsettled_outcome": {
             "status": "candidate_not_completed_fact",
             "claim_use": (
-                "declare_and_reference_every_current_or_prior_external_fact_"
-                "the_branch_relies_on"
+                "declare_and_reference_every_current_or_prior_external_fact_the_branch_relies_on"
             ),
-            "branch_generated_events": (
-                "remain_conditional_and_need_no_existing_world_source"
-            ),
+            "branch_generated_events": ("remain_conditional_and_need_no_existing_world_source"),
         },
     }
 
@@ -6207,8 +5806,7 @@ def _world_author_hard_boundary_contract(
     )
     privacy_order = list(LIFE_DEVELOPMENT_PRIVACY_ORDER)
     allowed_outcomes = {
-        privacy: privacy_order[index:]
-        for index, privacy in enumerate(privacy_order)
+        privacy: privacy_order[index:] for index, privacy in enumerate(privacy_order)
     }
     allowed_visual_outcomes = {
         privacy: [
@@ -6231,8 +5829,7 @@ def _world_author_hard_boundary_contract(
         for capability in manifest.location_capabilities
     ]
     location_capabilities = [
-        capability.model_dump(mode="json")
-        for capability in manifest.location_capabilities
+        capability.model_dump(mode="json") for capability in manifest.location_capabilities
     ]
     return {
         "contract_version": "life-development-world-author-authority.4",
@@ -6330,9 +5927,7 @@ def _world_author_hard_boundary_contract(
                 },
             ],
             "allowed_outcome_privacy_by_proposal_privacy": allowed_outcomes,
-            "allowed_visual_outcome_privacy_by_proposal_privacy": (
-                allowed_visual_outcomes
-            ),
+            "allowed_visual_outcome_privacy_by_proposal_privacy": (allowed_visual_outcomes),
             "location_capability_privacy_envelopes": location_privacy_envelopes,
             "recipient_unbound_visual_compatibility": {
                 "compatible_proposal_privacy": ["public", "shareable"],
@@ -6384,8 +5979,7 @@ def _world_author_hard_boundary_contract(
                     "must_equal_proposal.location_ref"
                 ),
                 "semantic_kind_and_place": (
-                    "must_describe_the_same_execution_coordinate_not_an_origin_or_"
-                    "background_place"
+                    "must_describe_the_same_execution_coordinate_not_an_origin_or_background_place"
                 ),
             },
             "when_absent": None,
@@ -6513,7 +6107,9 @@ def _world_author_repair_coordinates(
             matched = True
         if "recipient-unbound life-development visual evidence" in message:
             outcome_path = violation["path"]
-            outcome_index = outcome_path.split(".")[1] if outcome_path.startswith("outcomes.") else None
+            outcome_index = (
+                outcome_path.split(".")[1] if outcome_path.startswith("outcomes.") else None
+            )
             outcomes = decoded.get("outcomes")
             outcome_privacy = None
             if (
@@ -6659,59 +6255,6 @@ def _messages_hash(messages: list[dict[str, str]]) -> str:
     return _digest(messages)
 
 
-def _parse_life_character_recall_request(
-    raw: str,
-) -> CharacterRecallRequest | None:
-    """Read the shared one-shot recall envelope without interpreting motive."""
-
-    if not isinstance(raw, str) or len(raw.encode("utf-8")) > 8_192:
-        return None
-    try:
-        decoded = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(decoded, dict) or "recall_request" not in decoded:
-        return None
-    if set(decoded) != {"recall_request"}:
-        raise LifeDevelopmentDraftError(
-            "invalid_character_recall",
-            "A Character Model recall choice must contain only recall_request.",
-        )
-    recall_value = decoded["recall_request"]
-    if not isinstance(recall_value, dict):
-        raise LifeDevelopmentDraftError(
-            "invalid_character_recall",
-            "recall_request must be one JSON object.",
-        )
-    try:
-        return CharacterRecallRequest.model_validate_json(
-            json.dumps(
-                recall_value,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-        )
-    except ValidationError as exc:
-        violations = tuple(
-            {
-                "path": "recall_request."
-                + (".".join(str(part) for part in error["loc"]) or "<root>"),
-                "message": str(error["msg"]),
-                "type": str(error["type"]),
-            }
-            for error in exc.errors(
-                include_url=False,
-                include_context=False,
-                include_input=False,
-            )
-        )
-        raise LifeDevelopmentDraftError(
-            "invalid_character_recall",
-            "Character Model recall_request violates the bounded recall schema.",
-            violations=violations,
-        ) from None
-
-
 def _wire_reselection_route_or_self(
     model: LifeDevelopmentModel,
 ) -> LifeDevelopmentModel:
@@ -6843,16 +6386,13 @@ def _source_closure_rejection_coordinates(
         "unsupported_claim_ids": list(review.unsupported_claim_ids),
         "undeclared_fact_fragments": list(review.undeclared_fact_fragments),
         "typed_location_conflicts": [
-            item.model_dump(mode="json")
-            for item in review.typed_location_conflicts
+            item.model_dump(mode="json") for item in review.typed_location_conflicts
         ],
     }
     if review.undeclared_fact_paths:
         # Preserve the exact historical rewrite identity for `.1` reviews,
         # which predate path coordinates and therefore have no serialized key.
-        coordinates["undeclared_fact_paths"] = list(
-            review.undeclared_fact_paths
-        )
+        coordinates["undeclared_fact_paths"] = list(review.undeclared_fact_paths)
     return coordinates
 
 
@@ -6866,28 +6406,20 @@ def _world_author_rejection_coordinates(
     return {
         "review_kind": "novel_origin",
         "decision": review.decision,
-        "unsupported_claims": [
-            item.model_dump(mode="json") for item in review.unsupported_claims
-        ],
+        "unsupported_claims": [item.model_dump(mode="json") for item in review.unsupported_claims],
         "unsupported_provisional_npcs": [
-            item.model_dump(mode="json")
-            for item in review.unsupported_provisional_npcs
+            item.model_dump(mode="json") for item in review.unsupported_provisional_npcs
         ],
         "unsupported_provisional_places": [
-            item.model_dump(mode="json")
-            for item in review.unsupported_provisional_places
+            item.model_dump(mode="json") for item in review.unsupported_provisional_places
         ],
         "unsupported_outcome_prerequisites": [
-            item.model_dump(mode="json")
-            for item in review.unsupported_outcome_prerequisites
+            item.model_dump(mode="json") for item in review.unsupported_outcome_prerequisites
         ],
         "unsupported_objective_transitions": [
-            item.model_dump(mode="json")
-            for item in review.unsupported_objective_transitions
+            item.model_dump(mode="json") for item in review.unsupported_objective_transitions
         ],
-        "undeclared_premise_fragments": list(
-            review.undeclared_premise_fragments
-        ),
+        "undeclared_premise_fragments": list(review.undeclared_premise_fragments),
     }
 
 

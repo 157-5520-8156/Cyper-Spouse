@@ -442,6 +442,7 @@ async def test_bridge_uses_durable_lookup_before_calling_legacy_planner() -> Non
         ("privacy_ceiling", "private"),
     ),
 )
+@pytest.mark.asyncio
 async def test_bridge_rejects_non_p0_opportunity_before_legacy_planning(field: str, value: str) -> None:
     sidecar, opportunity = _sidecar()
     legacy = _LegacyPlanner(event_media.NotRenderable(opportunity.opportunity_id, "should_not_run"))

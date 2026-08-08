@@ -399,7 +399,7 @@ def _recall_trace_text(database: Path, *, query_text: str) -> tuple[str, dict[st
 
 
 def _build_models(*, stub: bool, settings: Settings, fixture: dict[str, object]):
-    """Return (flash_model, advisory_model, closer) for the requested mode.
+    """Return (character_model, world_support_model, closer) for the requested mode.
 
     Stub mode is not a weaker version of the real run; it answers a different
     question. The stub reply model surfaces a planted value if and only if
@@ -491,9 +491,11 @@ async def run(
         PRIMARY_USER_ID="memory-eval-user",
         # An offline provider-free run supplies every model seam itself. A developer
         # machine's optional local endpoint must not leak into the result.
-        LOCAL_APPRAISAL_ENABLED=False if stub else ambient_settings.local_appraisal_enabled,
+        WORLD_V2_TEXT_ENDPOINT_ENABLED=(
+            False if stub else ambient_settings.world_v2_text_endpoint_enabled
+        ),
     )
-    flash_model, advisory_model, close_models, recorder = _build_models(
+    flash_model, world_support_model, close_models, recorder = _build_models(
         stub=stub, settings=settings, fixture=document
     )
 
@@ -533,7 +535,7 @@ async def run(
         bootstrap_at=started_at,
         delivery=delivery,
         model=flash_model,
-        advisory_model=advisory_model,
+        world_support_model=world_support_model,
         ingress_now=_virtual_now if fast else None,
         ingress_sleep=_virtual_sleep if fast else None,
         # A deterministic lexical/structured run must remain provider-free even when the

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.girl-agent.local-embedding</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/geoff/.local/share/uv/tools/mlx-lm/bin/python</string>
+    <string>/Users/geoff/Projects/Girl-Agent/scripts/run_local_embedding_server.py</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>8190</string>
+    <string>--model</string>
+    <string>BAAI/bge-m3</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/geoff/Projects/Girl-Agent</string>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/geoff/Projects/Girl-Agent/logs/embedding-server.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/geoff/Projects/Girl-Agent/logs/embedding-server.err.log</string>
+</dict>
+</plist>

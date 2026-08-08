@@ -238,7 +238,6 @@ def test_catalogue_is_closed_and_every_reachable_change_has_all_three_authority_
         "outcome",
         "interaction_bid",
         "proactive",
-        "quick_reaction",
     }
     for grammar in PRODUCTION_PROPOSAL_GRAMMARS.values():
         for capability in grammar.capabilities:
@@ -258,19 +257,31 @@ def test_catalogue_is_read_only_and_replacing_its_public_view_fails_closed(
 
 
 @pytest.mark.parametrize("lane", tuple(PRODUCTION_PROPOSAL_GRAMMARS))
-def test_every_production_deliberation_recovery_uses_its_typed_lane_grammar(
+def test_every_production_deliberation_has_typed_grammar_without_recovery_author(
     lane: str,
 ) -> None:
-    """Background no-change recovery is a DecisionProposal, never a chat MinimalReply."""
-
     deliberation = compose_production_deliberation(
         lane_id=lane,  # type: ignore[arg-type]
         router=object(),
         main_model=object(),
-        quick_recovery=object(),
     )
 
     assert deliberation._recovery_mode == "proposal_grammar"  # noqa: SLF001
+    assert deliberation._quick is None  # noqa: SLF001
+    assert deliberation._technical_recovery_enabled is False  # noqa: SLF001
+
+
+def test_production_deliberation_rejects_legacy_two_author_episode_on() -> None:
+    with pytest.raises(
+        ValueError,
+        match="production expression episode mode must be off, shadow, or stream",
+    ):
+        compose_production_deliberation(
+            lane_id="chat_reply",
+            router=object(),
+            main_model=object(),
+            expression_episode_mode="on",  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.parametrize(
@@ -291,11 +302,14 @@ def test_each_production_lane_accepts_only_its_specialized_change(
     production_proposal_grammar(lane).validate(_decision(change, action=action, affect=affect))  # type: ignore[arg-type]
 
 
-def test_interaction_appraisal_accepts_one_appraisal_with_one_exactly_bound_affect() -> None:
+@pytest.mark.parametrize("transition", ["open", "update", "resolve", "supersede"])
+def test_interaction_appraisal_accepts_one_appraisal_with_one_exactly_bound_affect(
+    transition: str,
+) -> None:
     appraisal = _change("appraisal_transition", "activate")
     affect = _change(
         "affect_transition",
-        "open",
+        transition,
         appraisal_change_refs=[appraisal.change_id],
     )
     production_proposal_grammar("interaction_appraisal").validate(
@@ -424,12 +438,11 @@ def test_interaction_appraisal_rejects_multiple_affects_defensively() -> None:
         production_proposal_grammar("interaction_appraisal").validate(proposal)
 
 
-def test_every_other_lane_rejects_the_source_bound_appraisal_affect_composite() -> None:
+def test_every_non_inbound_lane_rejects_the_source_bound_appraisal_affect_composite() -> None:
     appraisal = _change("appraisal_transition", "activate")
     affect = _change("affect_transition", "open", appraisal_change_refs=[appraisal.change_id])
     proposal = _interaction_decision((appraisal, affect))
     for lane in (
-        "chat_reply",
         "settled_world_appraisal",
         "affect",
         "relationship",
@@ -487,8 +500,6 @@ def test_production_composition_cannot_construct_an_ungrammared_deliberation() -
         and isinstance(keyword.value, ast.Constant)
         and isinstance(keyword.value.value, str)
     }
-    # ``quick_reaction`` deliberately owns no Deliberation/capsule stack: its
-    # bounded local gate produces the proposal and QuickReactionWorker
-    # validates it against production_proposal_grammar("quick_reaction")
-    # before the audit is recorded (covered by the quick-reaction vertical).
-    assert lanes == set(PRODUCTION_PROPOSAL_GRAMMARS) - {"quick_reaction"}
+    assert lanes
+    assert lanes <= set(PRODUCTION_PROPOSAL_GRAMMARS)
+    assert "quick_reaction" not in lanes

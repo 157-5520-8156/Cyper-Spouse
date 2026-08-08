@@ -15,10 +15,9 @@ from .action_pump import (
     ActionPumpResult,
     ProviderAcceptedReconciliationGate,
 )
-from .affect_trigger_runtime import AffectTriggerRunResult
 from .bounded_decision_vertical import AnchoredRunResult
 from .interaction_fact_trigger_runtime import FactTriggerRunResult
-from .interaction_appraisal_trigger_runtime import AppraisalTriggerRunResult
+from .character_interior.run_result import CharacterInteriorRunResult
 from .outcome_trigger_runtime import OutcomeTriggerRunResult
 from .expression_reconsideration_runtime import ExpressionReconsiderationRunResult
 from .social_action_worker import SocialActionRunResult
@@ -218,9 +217,8 @@ class WorldTurnRuntime:
     async def drain_background_once(
         self,
     ) -> (
-        AppraisalTriggerRunResult
+        CharacterInteriorRunResult
         | OutcomeTriggerRunResult
-        | AffectTriggerRunResult
         | FactTriggerRunResult
         | ExpressionReconsiderationRunResult
         | AnchoredRunResult

@@ -16,12 +16,9 @@ from datetime import datetime, timedelta, UTC
 import hashlib
 import json
 import logging
-import os
 from pathlib import Path
 import time
 from typing import Awaitable, Literal, Mapping, Protocol
-
-from companion_daemon import event_media
 
 from .accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from .action_pump import (
@@ -34,7 +31,6 @@ from .activity_plan_runtime import (
     ActivityPlanRuntime,
     ActivityPlanTransitionCommand,
 )
-from .activity_lifecycle_draft import ActivityLifecycleDraftAdapter, ActivityLifecycleDraftModel
 from .activity_lifecycle_runtime import (
     ActivityLifecycleAcceptanceRuntime,
     ActivityLifecycleProposalRecorder,
@@ -42,7 +38,7 @@ from .activity_lifecycle_runtime import (
 from .activity_lifecycle_worker import ActivityLifecycleWorker
 from .life_ecology_activity import ActivityOpeningCatalog
 from .deferred_reply_runtime import DeferredReplyRuntime
-from .affect_trigger_runtime import AffectTriggerRunResult
+from .reflection_scheduler import ReflectionScheduler
 from .fact_draft_adapter import FactDraftChatModel, FactObservationProposalAdapter
 from .fact_memory_candidate_lifecycle import FactMemoryCandidateLifecycle
 from .experience_memory_candidate_lifecycle import ExperienceMemoryCandidateLifecycle
@@ -50,51 +46,40 @@ from .experience_memory_decision import (
     ExperienceMemoryDecisionRecordedPayload,
     experience_memory_decision_event_id,
 )
-from .fact_memory_draft import (
-    ExperienceMemoryDraftAdapter,
-    FactMemoryDraftAdapter,
-    FactMemoryDraftChatModel,
-)
 from .fact_v2_acceptance_runtime import FactV2AcceptanceRuntime
 from .interaction_fact_trigger_runtime import FactTriggerRunResult
 from .affect_acceptance_runtime import AffectAcceptanceRuntime
-from .affect_deliberation_worker import AffectDeliberationWorker
 from .affect_proposal_compiler import AffectProposalCompiler
 from .relationship_acceptance_runtime import RelationshipAcceptanceRuntime
+from .relationship_proposal_compiler import RelationshipProposalCompiler
 from .relationship_adjustment_acceptance_runtime import (
     RelationshipAdjustmentAcceptanceRuntime,
 )
 from .relationship_adjustment_compiler import RelationshipAdjustmentCompiler
 from .relationship_adjustment_worker import RelationshipAdjustmentWorker
-from .relationship_deliberation_worker import RelationshipDeliberationWorker
-from .relationship_proposal_compiler import RelationshipProposalCompiler
 from .appraisal_acceptance_runtime import AppraisalAcceptanceRuntime
-from .appraisal_chat_model_adapter import AppraisalDraftDeliberationAdapter
 from .appraisal_proposal_compiler import AppraisalProposalCompiler
 from .appraisal_proposal_worker import AppraisalProposalWorker
 from .immediate_emotion_proposal_worker import ImmediateEmotionProposalWorker
-from .interaction_appraisal_trigger_runtime import AppraisalTriggerRunResult
+from .character_interior.run_result import CharacterInteriorRunResult
 from .outcome_acceptance_runtime import OutcomeAcceptanceRuntime
 from .outcome_candidate_reader import OutcomeCandidateReader
-from .outcome_draft_deliberation_adapter import OutcomeDraftDeliberationAdapter
 from .outcome_deliberation_turn import OutcomeDeliberationTurn
 from .outcome_proposal_compiler import OutcomeProposalCompiler
 from .outcome_proposal_worker import OutcomeProposalWorker
 from .outcome_trigger_runtime import OutcomeTriggerRunResult
-from .outcome_selection_draft import OutcomeSelectionModel
-from .interaction_bid_acceptance_runtime import InteractionBidAcceptanceRuntime
-from .interaction_bid_deliberation_turn import InteractionBidDeliberationTurn
-from .interaction_bid_proposal_compiler import InteractionBidProposalCompiler
-from .interaction_bid_proposal_worker import InteractionBidProposalWorker
-from .interaction_bid_trigger_runtime import InteractionBidTriggerRunResult
-from .media_thread_acceptance_runtime import MediaDeliveryThreadAcceptanceRuntime
-from .media_thread_proposal_compiler import MediaDeliveryThreadProposalCompiler
-from .advisory_compiler import AdvisoryCompiler
-from .deliberation import (
-    DeliberationModelAdapter,
-    ModelRouterAdapter,
-    QuickRecoveryAdapter,
+from .character_interior.outcome_materialization import (
+    _CharacterInteriorOutcomeMaterializer,
 )
+from .character_interior import CharacterInterior
+from .character_interior.inbound_relationship import InboundRelationshipSignalWorker
+from .character_interior.inbound_turn import (
+    compose_character_interior_inbound_deliberation,
+)
+from .character_interior.production import (
+    _bind_production_character_interior,
+)
+from .deliberation import ModelRouterAdapter
 from .production_proposal_grammar import compose_production_deliberation
 from .expression_episode import ExpressionEpisodeDiagnostics
 from .expression_episode_lifecycle import (
@@ -106,7 +91,6 @@ from .ledger_context_resolver import (
     context_capsule_compiler_from_ledger,
     fact_recall_items,
 )
-from .context_resolver import query_from_projection
 from .change_phase_view import change_phase_reading_prose, change_phase_readings
 from .mood_view import MOOD_LABELS
 from .npc_relationship_view import npc_relationship_readings
@@ -130,10 +114,6 @@ from .recall_index import (
 )
 from .recall_embedding import SQLiteCachedRecallEmbedding
 from .recall_runtime import RecallCoordinator
-from .event_media_planner_adapter import (
-    EventMediaPlannerAdapter,
-    EventMediaPlanningResultStore,
-)
 from .media_evidence_snapshot import MediaEvidenceSnapshotCompiler
 from .event_ecology_media import (
     EcologySourceTaxon,
@@ -146,23 +126,13 @@ from .life_ecology_runtime import (
     LifeEcologyRunResult,
     LifeEcologyRuntime,
 )
-from .aspiration_runtime import AspirationRuntime
-from .contextual_life_inspiration import ContextualLifeInspirationRuntime
-from .contextual_life_source_material import ContextualLifeSourceMaterialCompiler
-from .private_impression_producer import (
-    PrivateImpressionChatModel,
-    PrivateImpressionDraftAdapter,
-)
-from .shared_private_invitation import SharedPrivateInvitationRuntime
-from .npc_ecology import NpcEcology
+from .npc_ecology import NpcEcology, NpcEcologyModel
 from .open_world_event_draft import OpenWorldEventModel
 from .open_world_event_runtime import (
     ActivePlanSituationSource,
     OpenWorldEventRuntime,
 )
 from .life_ecology_trigger_store import LedgerLifeEcologyTriggerStore
-from .future_life_author import FutureLifeAuthorRuntime
-from .life_author_runtime import LifeAuthorRuntime
 from .life_author_seed import ReviewedLifeSeedCatalog
 from .life_development_capability import ProjectionLifeCapabilityManifestCompiler
 from .life_development_runtime import LifeDevelopmentModel, LifeDevelopmentRuntime
@@ -205,7 +175,6 @@ from .character_media_fact_binder import CharacterMediaCandidateRuntime
 from .media_selection_acceptance_runtime import MediaSelectionProposalRecorder
 from .media_selection_acceptance_runtime import MediaSelectionAcceptanceRuntime
 from .media_opportunity_authorizer import MediaOpportunityAuthorizer
-from .media_selection_draft import MediaSelectionDraftAdapter, MediaSelectionDraftModel
 from .media_selection_worker import MediaSelectionRunResult, MediaSelectionWorker
 from .media_preview_conductor import (
     MediaPreviewAcceptanceOutcome,
@@ -228,15 +197,6 @@ from .minimal_reply_acceptance import ReplyBudgetPolicy
 from .minimal_reply_atomic_recorder import MinimalReplyAtomicRecorder
 from .expression_plan_acceptance import ExpressionPlanBudgetPolicy
 from .expression_plan_atomic_recorder import ExpressionPlanAtomicRecorder
-from .expression_reconsideration_model_adapter import (
-    AuditedReplacementReconsiderationReviewer,
-    ExpressionReconsiderationChatModelAdapter,
-    reconsideration_role_context_from_capsule,
-)
-from .expression_reconsideration_runtime import (
-    ExpressionReconsiderationReviewer,
-    ExpressionReconsiderationRunResult,
-)
 from .pinned_turn import PinnedTurnCompiler
 from .interactive_turn_budget import InteractiveTurnBudgetPolicy
 from .production_latency_trace import (
@@ -250,26 +210,20 @@ from .production_performance_evidence import (
 )
 from .expression_draft import (
     ExpressionDraftCapabilities,
-    QQ_NAPCAT_EXPRESSION_CAPABILITIES,
-    TEXT_ONLY_EXPRESSION_CAPABILITIES,
+    PRODUCTION_TEXT_ONLY_EXPRESSION_CAPABILITIES,
 )
 from .social_action_acceptance import SocialDeferredPolicy
 from .social_action_worker import SocialActionRunResult, SocialActionWorker
-from .quick_reaction import QuickReactionWorker
-from .quick_reaction_vertical import QuickReactionVerticalWorker
-from .chat_model_deliberation_adapter import ChatCompletionModel, CompanionIdentityFrame
+from .model_completion import ChatCompletionModel
 from .bounded_decision_vertical import AnchoredRunResult
 from .vertical_registry import assert_bounded_vertical_coverage
 from .proactive_action import (
     ProactiveActionRuntime,
-    ProactiveDeliberationTurn,
-    ProactiveDraftAdapter,
     proactive_technical_retry_states,
 )
 from .proposal_envelope import DecisionProposal, validate_proposal_envelope
 from .social_initiative import (
     SITUATION_STIMULUS_EVENT_TYPES,
-    SocialInitiativeCompiler,
     SocialInitiativeContextPolicy,
     SocialInitiativePolicy,
     social_initiative_attempt_id,
@@ -277,13 +231,9 @@ from .social_initiative import (
 )
 from .random_authority import RandomDrawRecordedPayload
 from .memory_withdrawal_review import (
-    MemoryWithdrawalReviewAdapter,
     MemoryWithdrawalReviewRunResult,
     MemoryWithdrawalReviewRuntime,
 )
-from .settled_world_appraisal_turn import SettledWorldAppraisalTurn
-from .plan_disruption_appraisal_trigger_runtime import PlanDisruptionAppraisalTurn
-from .silence_appraisal_trigger_runtime import SilenceAppraisalTurn
 from .platform_action_executor import (
     PlatformActionExecutor,
     PlatformTransport,
@@ -291,19 +241,13 @@ from .platform_action_executor import (
     ProviderMediaActionExecutor,
     RoutedActionExecutor,
 )
-from .read_only_tool_deliberation import compose_injected_read_only_tool_deliberation
-from .read_only_tool_authorization_resolver import ProjectionReadOnlyToolAuthorizationResolver
-from .read_only_tool_executor import ReadOnlyToolActionExecutor, ReadOnlyToolTransport
-from .read_only_tool_proposal_compiler import ReadOnlyToolProposalCompiler
-from .read_only_tool_query_reader import AuditedReadOnlyToolQueryReader
-from .read_only_tool_trigger_runtime import ReadOnlyToolTriggerRuntime
-from .external_result_trigger_runtime import NoopToolResultDeliberator
 from .perception_authorization_resolver import ProjectionPerceptionAuthorizationResolver
-from .perception_deliberation import compose_injected_perception_deliberation
+from .perception_deliberation import (
+    compose_character_interior_perception_deliberation,
+)
 from .perception_executor import PerceptionActionExecutor, PerceptionTransport
 from .perception_input_source import PerceptionInputSource
 from .perception_proposal_compiler import PerceptionProposalCompiler
-from .perception_result_trigger_runtime import NoopPerceptionResultDeliberator
 from .perception_trigger_runtime import PerceptionTriggerRuntime
 from .runtime import WorldRuntime
 from .projection import ProjectionAuthority
@@ -718,7 +662,9 @@ class MediaPreviewDeployment:
 
     Each supplied stage is complete and explicit.  Grant bindings must already
     refer to independently provisioned enforcement authority; this composition
-    never manufactures or signs that authority.
+    never manufactures or signs that authority.  Character-owned candidate
+    selection is deliberately absent from this deployment value: the
+    application offers the capability through its sole ``CharacterInterior``.
     ``continuation=None`` intentionally installs only the candidate-to-plan
     prefix.  It is not a complete preview pipeline and cannot render or
     inspect; full preview requires the separate render/inspection authority.
@@ -728,15 +674,14 @@ class MediaPreviewDeployment:
     lane stops at ``MediaPreviewGenerated``.
     """
 
-    selection_model: MediaSelectionDraftModel
     planner: MediaPlanner
     acceptance: MediaSelectionAcceptanceComposition
     continuation: MediaContinuationComposition | None = None
     auto_delivery: MediaAutoDeliveryComposition | None = None
 
     def __post_init__(self) -> None:
-        if self.selection_model is None or self.planner is None or self.acceptance is None:
-            raise ValueError("media preview deployment requires selector, planner and acceptance")
+        if self.planner is None or self.acceptance is None:
+            raise ValueError("media preview deployment requires planner and acceptance")
         if self.continuation is not None and self.acceptance.account_id in {
             self.continuation.render_account_id,
             self.continuation.inspection_account_id,
@@ -762,24 +707,36 @@ class WorldV2TurnApplicationConfig:
     reply_budget_amount: int = 10
     reply_recovery_policy: str = "effect_once"
     interactive_turn_budget_policy: InteractiveTurnBudgetPolicy = InteractiveTurnBudgetPolicy()
-    # Generic/test composition is byte-compatible by default. The production
-    # QQ root explicitly selects shadow below; validation may explicitly use on.
-    expression_episode_mode: Literal["off", "shadow", "on", "stream"] = "off"
+    # ``on`` was the retired provisional/full two-author race.  Immutable
+    # events from that contract remain replayable, but no live application may
+    # create new work through it.
+    expression_episode_mode: Literal["off", "shadow", "stream"] = "off"
     recorded_cadence_mode: Literal["off", "shadow", "on"] = "off"
     expression_action_kinds: frozenset[str] = frozenset({"reply", "followup", "proactive_message"})
     # Capability is a transport fact shared with proactive authoring.  It is
     # not a behavior policy and replaces proactive's historical text-only
     # side interface.
-    expression_capabilities: ExpressionDraftCapabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES
-    appraisal_worker_owner: str = "worker:world-v2:appraisal"
-    affect_worker_owner: str = "worker:world-v2:affect"
-    relationship_worker_owner: str = "worker:world-v2:relationship"
+    expression_capabilities: ExpressionDraftCapabilities = (
+        PRODUCTION_TEXT_ONLY_EXPRESSION_CAPABILITIES
+    )
+    inner_state_settlement_owner: str = "worker:world-v2:inner-state-settlement"
+    # Production leaves this unset so each WorldRuntime instance claims with a
+    # process-unique owner (a second daemon must not be mistaken for the same
+    # in-flight provider lease).  Deterministic consumers (offline scenario
+    # suites, replay evidence) must pass a fixed owner so claim payloads and
+    # event identities are byte-identical across runs.
+    expression_episode_owner: str | None = None
+    affect_settlement_owner: str = "worker:world-v2:affect-settlement"
+    relationship_settlement_owner: str = "worker:world-v2:relationship-settlement"
     relationship_adjustment_worker_owner: str = "worker:world-v2:relationship-adjustment"
     fact_worker_owner: str = "worker:world-v2:fact"
     private_impression_worker_owner: str = "worker:world-v2:private-impression"
     memory_review_worker_owner: str = "worker:world-v2:memory-review"
+    # Capability deployment switch, not a retention policy.  When enabled,
+    # Fact/Experience retention and withdrawal review all use the one
+    # CharacterInterior author at an exact ledger cursor.
+    character_memory_enabled: bool = True
     outcome_worker_owner: str = "worker:world-v2:outcome"
-    interaction_bid_worker_owner: str = "worker:world-v2:interaction-bid"
     expression_reconsideration_owner: str = "worker:world-v2:expression-reconsideration"
     social_action_worker_owner: str = "worker:world-v2:social-action"
     media_planning_worker_owner: str = "worker:world-v2:media-planning"
@@ -792,10 +749,6 @@ class WorldV2TurnApplicationConfig:
     event_ecology_policy: EcologyPolicy | None = None
     life_ecology: LifeEcologyComposition | None = None
     media_cost_profile: CostProfile | None = None
-    tool_account_id: str = "account:world-v2:tool"
-    tool_window_id: str = "window:world-v2:tool"
-    tool_budget_limit: int = 0
-    tool_worker_owner: str = "worker:world-v2:read-only-tool"
     perception_account_id: str = "account:world-v2:perception"
     perception_window_id: str = "window:world-v2:perception"
     perception_budget_limit: int = 0
@@ -807,11 +760,6 @@ class WorldV2TurnApplicationConfig:
     proactive_amount_per_action: int = 10
     proactive_worker_owner: str = "worker:world-v2:proactive"
     social_initiative_policy: SocialInitiativePolicy = SocialInitiativePolicy()
-    # Historical isolated experiment only.  Its recorded act/hold draw lets a
-    # side vertical choose visible behavior before PrivateTurnState exists, so
-    # every production composition defaults it off.  Tests that preserve the
-    # old event/reducer replay surface must opt in explicitly.
-    quick_reaction_enabled: bool = False
     # How long the user must stay quiet after her delivered reply before she
     # gets one chance to appraise the silence.  ``0``/``None`` disables the
     # lane; the QQ composition keeps the default enabled.
@@ -820,34 +768,9 @@ class WorldV2TurnApplicationConfig:
     # losing that plan means (regret, relief, nothing).  Disabling stops
     # opening new triggers; already-open ones still drain.
     plan_disruption_appraisal_enabled: bool = True
-    # The future calendar lane: at most one successful multi-day plan per
-    # companion-local day, written by the Future Life Author from the seed
-    # catalog's reviewed ``future_openings``.  It shares the life ecology
-    # worker and model, so it only exists where life_ecology is installed.
-    future_life_author_enabled: bool = True
     # Compatibility name for the model-owned NPC Ecology lane.  The old
     # reviewed-candidate/random-act implementation is no longer composed.
-    npc_initiative_enabled: bool = True
-    # The aspiration layer: reviewed ``aspiration_seeds`` may sprout into
-    # low-stakes wishes (no due window, no lifecycle pipeline) through one
-    # recorded low-probability draw plus a bounded model confirmation per
-    # companion-local day; the same daily check probabilistically reinforces
-    # or quietly fades existing wishes.  Active wishes surface in the chat
-    # capsule as a ledger-backed read-only advisory.
-    aspiration_enabled: bool = True
-    # A wish untouched by related material for this many local days becomes
-    # fade-eligible; each daily check then rolls the recorded fade chance.
-    aspiration_fade_idle_days: int = 14
-    aspiration_fade_chance_bp: int = 1_000
-    # Deprecated replay/config compatibility only. Production no longer maps
-    # a wish to a catalog-authored future opening; open Life Development lets
-    # the Character Model decide whether an accepted Plan concretizes it.
-    aspiration_crystallize_chance_bp: int = 1_500
-    # shared_private invitations: enabled only when the catalog reviews a
-    # shared_private future opening AND the composition names the counterpart
-    # user actor.  The daily recorded chance keeps the ask rare.
-    shared_private_invitation_enabled: bool = True
-    shared_private_invite_chance_bp: int = 2_000
+    npc_ecology_enabled: bool = True
 
     def __post_init__(self) -> None:
         for name in (
@@ -855,22 +778,20 @@ class WorldV2TurnApplicationConfig:
             "companion_actor_ref",
             "reply_target",
             "action_pump_owner",
-            "appraisal_worker_owner",
-            "affect_worker_owner",
-            "relationship_worker_owner",
+            "inner_state_settlement_owner",
+            "affect_settlement_owner",
+            "relationship_settlement_owner",
             "relationship_adjustment_worker_owner",
             "fact_worker_owner",
             "private_impression_worker_owner",
             "memory_review_worker_owner",
             "outcome_worker_owner",
-            "interaction_bid_worker_owner",
             "expression_reconsideration_owner",
             "social_action_worker_owner",
             "media_planning_worker_owner",
             "event_ecology_worker_actor",
             "media_selection_worker_actor",
             "media_candidate_maintenance_actor",
-            "tool_worker_owner",
             "perception_worker_owner",
             "proactive_worker_owner",
         ):
@@ -885,14 +806,12 @@ class WorldV2TurnApplicationConfig:
             raise ValueError("chat budget limits are invalid")
         if not self.reply_recovery_policy:
             raise ValueError("reply recovery policy must not be empty")
-        if self.expression_episode_mode not in {"off", "shadow", "on", "stream"}:
-            raise ValueError("expression episode mode must be off, shadow, on, or stream")
+        if self.expression_episode_mode not in {"off", "shadow", "stream"}:
+            raise ValueError("expression episode mode must be off, shadow, or stream")
         if self.recorded_cadence_mode not in {"off", "shadow", "on"}:
             raise ValueError("recorded cadence mode must be off, shadow, or on")
         if not self.expression_action_kinds:
             raise ValueError("expression action capability set must not be empty")
-        if not self.tool_account_id or not self.tool_window_id or self.tool_budget_limit < 0:
-            raise ValueError("tool budget config is invalid")
         if (
             not self.perception_account_id
             or not self.perception_window_id
@@ -930,6 +849,8 @@ class WorldV2TurnApplication:
         self,
         *,
         turns: WorldTurnRuntime,
+        character_interior: CharacterInterior,
+        companion_actor_ref: str,
         ledger: SQLiteWorldLedger,
         life_content_store: SQLiteImmutableLifeContentStore,
         expression_payload_store: SQLiteImmutableExpressionPayloadStore,
@@ -968,7 +889,11 @@ class WorldV2TurnApplication:
         recall_coordinator: RecallCoordinator | None = None,
         owned_deliberations: tuple[_AsyncCloseable, ...] = (),
     ) -> None:
+        if not companion_actor_ref:
+            raise ValueError("production application requires companion actor identity")
         self._turns = turns
+        self._character_interior = character_interior
+        self._companion_actor_ref = companion_actor_ref
         self._ledger = ledger
         self._life_content_store = life_content_store
         self._expression_payload_store = expression_payload_store
@@ -2103,13 +2028,10 @@ class WorldV2TurnApplication:
     async def drain_background_once(
         self,
     ) -> (
-        AppraisalTriggerRunResult
+        CharacterInteriorRunResult
         | OutcomeTriggerRunResult
-        | InteractionBidTriggerRunResult
-        | AffectTriggerRunResult
         | FactTriggerRunResult
         | MemoryWithdrawalReviewRunResult
-        | ExpressionReconsiderationRunResult
         | AnchoredRunResult
         | SocialActionRunResult
         | RuntimeOutcome
@@ -2641,7 +2563,10 @@ class WorldV2TurnApplication:
         npc_views = npc_identity_views(
             projection,
             content_store=self._life_content_store,
-            relationships=npc_relationship_readings(projection),
+            relationships=npc_relationship_readings(
+                projection,
+                protagonist_actor_ref=self._companion_actor_ref,
+            ),
             reviewed_identity_summaries=self._reviewed_npc_identity_summaries,
         )
         npc_observability = (
@@ -2650,12 +2575,14 @@ class WorldV2TurnApplication:
                 projection=projection,
                 ledger=self._ledger,
                 identity_views=npc_views,
+                protagonist_actor_ref=self._companion_actor_ref,
             )
             if self._ledger.blocks_event_loop
             else npc_ecology_health_snapshot(
                 projection=projection,
                 ledger=self._ledger,
                 identity_views=npc_views,
+                protagonist_actor_ref=self._companion_actor_ref,
             )
         )
         described_npc_refs = {item.npc_ref for item in npc_views}
@@ -2815,6 +2742,7 @@ class WorldV2TurnApplication:
             }
         external_perception_downstream = external_perception_downstream_health(projection)
         return {
+            "character_interior": self._character_interior.runtime_health(),
             "initiative_last_status": last_status,
             "initiative_last_reason": last_reason,
             "pending_proactive_opportunity_count": len(opportunity_sources - processed_sources)
@@ -3111,7 +3039,6 @@ class WorldV2TurnApplication:
                 "npc_id": npc_names.get(reading.npc_ref, reading.npc_ref),
                 "closeness_bp": reading.closeness_bp,
                 "familiarity_bp": reading.familiarity_bp,
-                "friction_bp": reading.friction_bp,
                 "settled_shared_count": reading.settled_shared_count,
                 "last_shared_at": _iso(reading.last_shared_at),
                 "lifecycle_state": npc_by_ref[reading.npc_ref].status,
@@ -3131,7 +3058,10 @@ class WorldV2TurnApplication:
                     else None
                 ),
             }
-            for reading in npc_relationship_readings(projection)[:8]
+            for reading in npc_relationship_readings(
+                projection,
+                protagonist_actor_ref=self._companion_actor_ref,
+            )[:8]
         ]
 
         recent_experiences = []
@@ -3292,43 +3222,20 @@ def build_sqlite_world_v2_turn_application(
     config: WorldV2TurnApplicationConfig,
     identities: InboundIdentityResolver,
     router: ModelRouterAdapter,
-    main_model: DeliberationModelAdapter,
-    quick_recovery: QuickRecoveryAdapter,
+    character_interior: CharacterInterior,
     transport: PlatformTransport,
     media_transport: MediaProviderTransport | None = None,
     media_planner: MediaPlanner | None = None,
-    legacy_event_media_planner: event_media.MediaPlanner | None = None,
-    event_media_result_store: EventMediaPlanningResultStore | None = None,
-    advisory_compiler: AdvisoryCompiler | None = None,
-    appraisal_model: DeliberationModelAdapter | None = None,
-    affect_model: DeliberationModelAdapter | None = None,
-    relationship_model: DeliberationModelAdapter | None = None,
-    outcome_model: DeliberationModelAdapter | None = None,
-    outcome_draft_model: OutcomeSelectionModel | None = None,
-    interaction_bid_model: DeliberationModelAdapter | None = None,
     fact_model: FactDraftChatModel | None = None,
-    private_impression_model: PrivateImpressionChatModel | None = None,
-    private_impression_identity_frame: CompanionIdentityFrame | None = None,
-    memory_model: FactMemoryDraftChatModel | None = None,
-    activity_lifecycle_model: ActivityLifecycleDraftModel | None = None,
+    npc_actor_model: NpcEcologyModel | None = None,
     open_world_event_model: OpenWorldEventModel | None = None,
     life_world_author_model: LifeDevelopmentModel | None = None,
     life_world_author_source_rewriter: LifeDevelopmentModel | None = None,
-    life_character_model: LifeDevelopmentModel | None = None,
     life_source_closure_reviewer: LifeDevelopmentModel | None = None,
-    media_selection_model: MediaSelectionDraftModel | None = None,
-    read_only_tool_model: DeliberationModelAdapter | None = None,
-    read_only_tool_transport: ReadOnlyToolTransport | None = None,
-    perception_model: DeliberationModelAdapter | None = None,
     perception_input_source: PerceptionInputSource | None = None,
     perception_transport: PerceptionTransport | None = None,
-    proactive_model: ChatCompletionModel | None = None,
-    proactive_identity_frame: CompanionIdentityFrame | None = None,
     proactive_source_closure_model: ChatCompletionModel | None = None,
     proactive_candidate_external_proposition_inventory_model: ChatCompletionModel | None = None,
-    proactive_claim_binder_model: ChatCompletionModel | None = None,
-    expression_reconsideration_reviewer: ExpressionReconsiderationReviewer | None = None,
-    quick_reaction_model: ChatCompletionModel | None = None,
     semantic_recall_embedding: RecallEmbedding | None = None,
     now: datetime,
     projection_authority: ProjectionAuthority | None = None,
@@ -3341,21 +3248,27 @@ def build_sqlite_world_v2_turn_application(
     dispatch requests; it never receives a runtime or ledger writer.
     """
 
-    if media_planner is not None and legacy_event_media_planner is not None:
-        raise ValueError(
-            "inject either a World v2 media planner or legacy event-media planner, not both"
-        )
     if config.media_continuation is not None and media_transport is None:
         raise ValueError("media continuation composition requires durable media transport")
     if config.media_auto_delivery is not None and config.media_continuation is None:
         raise ValueError("media auto-delivery requires the render/inspection continuation")
-    if outcome_model is not None and outcome_draft_model is not None:
-        raise ValueError(
-            "inject either an outcome proposal adapter or an outcome draft model, not both"
-        )
-    if (life_world_author_model is None) != (life_character_model is None):
-        raise ValueError("open life development requires both World Author and Character Model")
-    open_life_requested = life_world_author_model is not None and life_character_model is not None
+    # Ordinary inbound semantics have one public author operation.  The
+    # returned Deliberation port calls CharacterInterior.consider and carries
+    # Expression + Appraisal/Affect in one cursor-pinned DecisionProposal.
+    # No Appraisal/Affect/relationship role adapter is extracted here.
+    inbound_model = compose_character_interior_inbound_deliberation(
+        interior=character_interior,
+        world_id=config.world_id,
+        actor_ref=config.companion_actor_ref,
+    )
+    has_proactive_author = "proactive_contact" in set(
+        character_interior.runtime_health()["purpose_faculties"]
+    )
+    # CharacterInterior always owns the protagonist's life faculty, including
+    # deployments that do not enable open-life development.  Only a supplied
+    # World Author activates that lane; an idle character faculty is not a
+    # second/partial composition path.
+    open_life_requested = life_world_author_model is not None
     if open_life_requested and config.life_ecology is None:
         raise ValueError("open life development requires Life Ecology")
     if life_source_closure_reviewer is not None and not open_life_requested:
@@ -3412,12 +3325,9 @@ def build_sqlite_world_v2_turn_application(
         index=recall_index,
         semantic_embedding=cached_semantic_embedding,
     )
-    installed_recall_targets: set[int] = set()
-    for adapter in (main_model, quick_recovery):
-        install_recall = getattr(adapter, "install_recall_coordinator", None)
-        if callable(install_recall) and id(adapter) not in installed_recall_targets:
-            install_recall(recall_coordinator)
-            installed_recall_targets.add(id(adapter))
+    # CharacterInterior binds its private selective-recall Faculty when the
+    # ledger-backed runtime effects are composed below.  The application never
+    # receives the underlying expression/appraisal adapters.
     _LOG.warning(
         "world v2 application sidecars ready world=%s duration_ms=%.1f",
         config.world_id,
@@ -3425,26 +3335,23 @@ def build_sqlite_world_v2_turn_application(
     )
     try:
         occurrence_content = OccurrenceContentCoordinator(ledger=ledger, store=life_content_store)
-        tool_requested = read_only_tool_model is not None or read_only_tool_transport is not None
-        if (read_only_tool_model is None) != (read_only_tool_transport is None):
-            raise ValueError(
-                "read-only tool model and transport must be explicitly injected together"
-            )
-        if tool_requested and config.tool_budget_limit <= 0:
-            raise ValueError("injected read-only tool lane needs a positive deployment budget")
-        perception_dependencies = (
-            perception_model,
-            perception_input_source,
-            perception_transport,
-        )
+        perception_dependencies = (perception_input_source, perception_transport)
         perception_requested = any(item is not None for item in perception_dependencies)
         if perception_requested and not all(item is not None for item in perception_dependencies):
             raise ValueError(
-                "perception model, durable input source and lookup-capable transport "
-                "must be explicitly injected together"
+                "perception durable input source and lookup-capable transport must be "
+                "explicitly injected together"
             )
         if perception_requested and config.perception_budget_limit <= 0:
             raise ValueError("injected perception lane needs a positive deployment budget")
+        if perception_requested and not all(
+            callable(getattr(perception_transport, method, None))
+            for method in ("dispatched_count_since", "has_result_for_input")
+        ):
+            raise ValueError(
+                "perception transport must expose durable dispatch evidence for "
+                "CharacterInterior capability restraint"
+            )
         life_seed_catalog = (
             ReviewedLifeSeedCatalog.from_yaml(
                 path=config.life_ecology.seed_catalog_path,
@@ -3496,9 +3403,8 @@ def build_sqlite_world_v2_turn_application(
             ledger=ledger,
             config=config,
             now=now,
-            include_tool=tool_requested,
             include_perception=perception_requested,
-            include_proactive=proactive_model is not None,
+            include_proactive=has_proactive_author,
             life_seed_catalog=life_seed_catalog,
             biographical_timeline=biographical_timeline,
         )
@@ -3595,8 +3501,7 @@ def build_sqlite_world_v2_turn_application(
         chat_deliberation = compose_production_deliberation(
             lane_id="chat_reply",
             router=router,
-            main_model=main_model,
-            quick_recovery=quick_recovery,
+            main_model=inbound_model,
             main_timeout_seconds=config.interactive_turn_budget_policy.total_seconds,
             quick_timeout_seconds=config.interactive_turn_budget_policy.total_seconds,
             expression_action_kinds=config.expression_action_kinds,
@@ -3608,11 +3513,7 @@ def build_sqlite_world_v2_turn_application(
             capsule_compiler=chat_capsules,
             deliberation=chat_deliberation,
             companion_actor_ref=config.companion_actor_ref,
-            advisory_compiler=advisory_compiler,
             latency_recorder=latency,
-            # Her active aspirations (ledger-backed wishes) may flow into what
-            # she says — "我一直想去日本" needs the reply model to see them.
-            aspiration_advisory=config.aspiration_enabled,
             # Expression should feel whether she is departing from or
             # returning toward baseline (Change Phase), advisory only.
             change_phase_advisory=True,
@@ -3621,11 +3522,11 @@ def build_sqlite_world_v2_turn_application(
             npc_relationship_advisory=True,
             # A pending shared_private invitation she may still need to voice.
             shared_private_invitation_advisory=True,
+            pending_expectation_advisory=True,
             recorded_cadence_mode=config.recorded_cadence_mode,
         )
         social_action_worker = SocialActionWorker(
             ledger=ledger,
-            pinned_turn=None,
             batch_issuer=issuer,
             policy=SocialDeferredPolicy(
                 expression=ExpressionPlanBudgetPolicy(
@@ -3639,359 +3540,75 @@ def build_sqlite_world_v2_turn_application(
             actor=config.companion_actor_ref,
             source=config.social_action_worker_owner,
         )
-        proactive_runtime = None
-        if proactive_model is not None:
-            proactive_adapter = ProactiveDraftAdapter(
-                model=proactive_model,
-                target=config.reply_target,
-                identity_frame=proactive_identity_frame,
-                expression_capabilities=config.expression_capabilities,
-                source_closure_reviewer=proactive_source_closure_model,
-                report_relative_reviewer=proactive_source_closure_model,
-                candidate_external_proposition_inventory_model=(
-                    proactive_candidate_external_proposition_inventory_model
-                ),
-                proactive_claim_binder_model=proactive_claim_binder_model,
-            )
-            proactive_adapter.install_recall_coordinator(recall_coordinator)
-            proactive_runtime = ProactiveActionRuntime(
-                ledger=ledger,
-                turn=ProactiveDeliberationTurn(
-                    ledger=ledger,
-                    capsule_compiler=capsules,
-                    deliberation=compose_production_deliberation(
-                        lane_id="proactive",
-                        router=router,
-                        main_model=proactive_adapter,
-                        quick_recovery=proactive_adapter,
-                        # A proactive choice gets one DeepSeek-authored draft
-                        # and its one precise candidate-local correction.  A
-                        # terminal result is retried durably; do not ask a
-                        # second author to replace her intention immediately.
-                        technical_recovery_enabled=False,
-                    ),
-                    companion_actor_ref=config.companion_actor_ref,
-                    budget_policy=config.interactive_turn_budget_policy,
-                ),
-                batch_issuer=issuer,
-                policy=ExpressionPlanBudgetPolicy(
-                    account_id=config.proactive_account_id,
-                    amount_limit_per_action=config.proactive_amount_per_action,
-                    actor=config.companion_actor_ref,
-                    allowed_targets=(config.reply_target,),
-                    recovery_policy=config.reply_recovery_policy,
-                    category="proactive",
-                ),
-                owner_id=config.proactive_worker_owner,
-                social_initiative=SocialInitiativeCompiler(
-                    ledger=ledger,
-                    policy=config.social_initiative_policy,
-                ),
-            )
-        # User interjections open durable expression-reconsideration gates on
-        # every un-dispatched beat, but a gate without a reviewer is never
-        # claimed and its frozen beat never dispatches (observed in the QQ
-        # ledger as an Opened-only backlog).  Production therefore composes
-        # the bounded closed-grammar reviewer from the same background channel
-        # that carries proactive/fact/memory cognition, unless the caller
-        # injected an explicit reviewer (tests do).
-        if expression_reconsideration_reviewer is None and proactive_model is not None:
-
-            async def reconsideration_projection(cursor):
-                return (
-                    await asyncio.to_thread(ledger.project_at, cursor)
-                    if ledger.blocks_event_loop
-                    else ledger.project_at(cursor)
-                )
-
-            async def reconsideration_role_context(
-                cursor,
-                observation_event,
-                projection,
-            ):
-                query = query_from_projection(
-                    projection,
-                    actor_ref=config.companion_actor_ref,
-                    trigger_ref=observation_event.event_id,
-                )
-                capsule = (
-                    await asyncio.to_thread(chat_capsules.compile, query)
-                    if ledger.blocks_event_loop
-                    else chat_capsules.compile(query)
-                )
-                return reconsideration_role_context_from_capsule(capsule.model_content_json)
-
-            expression_reconsideration_reviewer = AuditedReplacementReconsiderationReviewer(
-                reviewer=ExpressionReconsiderationChatModelAdapter(
-                    model=proactive_model,
-                ),
-                project_at=reconsideration_projection,
-                identity_frame=proactive_identity_frame,
-                role_context_at=reconsideration_role_context,
-            )
-        appraisal_acceptance = (
-            AppraisalAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
-            if appraisal_model is not None
-            else None
+        # One audited inbound DecisionProposal is consumed by the existing
+        # deterministic Appraisal/Affect authorities.  There is no second
+        # interaction-appraisal PinnedTurn and no background role call for the
+        # same Observation.
+        appraisal_acceptance = AppraisalAcceptanceRuntime(
+            ledger=ledger,
+            batch_issuer=issuer,
         )
-        appraisal_worker = (
-            AppraisalProposalWorker(
-                compiler=AppraisalProposalCompiler(
-                    ledger=ledger,
-                    world_appraisal_subject_ref=config.companion_actor_ref,
-                ),
-                acceptance=appraisal_acceptance,
-                actor=config.appraisal_worker_owner,
-            )
-            if appraisal_acceptance is not None
-            else None
-        )
-        appraisal_turn = (
-            PinnedTurnCompiler(
+        appraisal_worker = AppraisalProposalWorker(
+            compiler=AppraisalProposalCompiler(
                 ledger=ledger,
-                capsule_compiler=capsules,
-                deliberation=compose_production_deliberation(
-                    lane_id="interaction_appraisal",
-                    router=router,
-                    main_model=appraisal_model,
-                    quick_recovery=appraisal_model,
-                    main_timeout_seconds=config.interactive_turn_budget_policy.total_seconds,
-                    quick_timeout_seconds=config.interactive_turn_budget_policy.total_seconds,
-                    # Appraisal may precompute an expression draft, but it is
-                    # not the expression authority seam.  Shadow observation
-                    # belongs to the later chat_reply Deliberation after that
-                    # authoritative candidate has settled.
-                    expression_episode_mode="off",
-                    expression_action_kinds=config.expression_action_kinds,
-                    expression_episode_diagnostics=expression_episode_diagnostics,
-                ),
-                companion_actor_ref=config.companion_actor_ref,
-                # The combined inbound cognition pass also drafts the later
-                # expression.  Give it the same non-authoritative semantic
-                # matrix advice as the ordinary reply lane; acceptance still
-                # happens before any cached draft can become an Action.
-                advisory_compiler=advisory_compiler,
-                latency_recorder=latency,
-                # When she declared a response expectation earlier, the
-                # appraisal of the message that finally arrives should know
-                # what she was waiting for.
-                pending_expectation_advisory=True,
-                # The combined inbound-cognition pass also drafts the later
-                # expression, so it needs the same wish texture as the reply
-                # lane for "我一直想…" to surface naturally.
-                aspiration_advisory=config.aspiration_enabled,
-                # And the same Change Phase reading: appraising a message
-                # while "刚陷入低落" differs from while "正在走出低落".
-                change_phase_advisory=True,
-                npc_relationship_advisory=True,
-                shared_private_invitation_advisory=True,
-                affect_target_bounds_enabled=True,
-            )
-            if appraisal_model is not None
-            else None
-        )
-        npc_world_appraisal_turn = (
-            SettledWorldAppraisalTurn(
-                ledger=ledger,
-                capsule_compiler=capsules,
-                deliberation=compose_production_deliberation(
-                    lane_id="settled_world_appraisal",
-                    router=router,
-                    main_model=appraisal_model,
-                    quick_recovery=appraisal_model,
-                ),
-                companion_actor_ref=config.companion_actor_ref,
-            )
-            if appraisal_model is not None
-            else None
-        )
-        silence_appraisal_turn = (
-            SilenceAppraisalTurn(
-                ledger=ledger,
-                capsule_compiler=capsules,
-                deliberation=compose_production_deliberation(
-                    lane_id="silence_appraisal",
-                    router=router,
-                    main_model=appraisal_model,
-                    quick_recovery=appraisal_model,
-                ),
-                companion_actor_ref=config.companion_actor_ref,
-            )
-            if appraisal_model is not None and config.silence_appraisal_idle_seconds
-            else None
-        )
-        plan_disruption_appraisal_turn = (
-            PlanDisruptionAppraisalTurn(
-                ledger=ledger,
-                capsule_compiler=capsules,
-                deliberation=compose_production_deliberation(
-                    lane_id="plan_disruption_appraisal",
-                    router=router,
-                    main_model=appraisal_model,
-                    quick_recovery=appraisal_model,
-                ),
-                companion_actor_ref=config.companion_actor_ref,
-            )
-            if appraisal_model is not None and config.plan_disruption_appraisal_enabled
-            else None
+                world_appraisal_subject_ref=config.companion_actor_ref,
+            ),
+            acceptance=appraisal_acceptance,
+            actor=config.inner_state_settlement_owner,
         )
         outcome_reader = OutcomeCandidateReader(store=life_content_store)
-        outcome_deliberation_model = (
-            outcome_model
-            if outcome_model is not None
-            else (
-                OutcomeDraftDeliberationAdapter(
-                    ledger=ledger, candidate_reader=outcome_reader, model=outcome_draft_model
-                )
-                if outcome_draft_model is not None
-                else None
-            )
+        outcome_deliberation_model = _CharacterInteriorOutcomeMaterializer(
+            ledger=ledger,
+            candidate_reader=outcome_reader,
+            character_interior=character_interior,
+            actor_ref=config.companion_actor_ref,
         )
-        outcome_acceptance = (
-            OutcomeAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
-            if outcome_deliberation_model is not None
-            else None
+        outcome_acceptance = OutcomeAcceptanceRuntime(
+            ledger=ledger,
+            batch_issuer=issuer,
         )
-        outcome_turn = (
-            OutcomeDeliberationTurn(
+        outcome_turn = OutcomeDeliberationTurn(
+            ledger=ledger,
+            capsule_compiler=capsules,
+            deliberation=compose_production_deliberation(
+                lane_id="outcome",
+                router=router,
+                main_model=outcome_deliberation_model,
+            ),
+            candidate_reader=outcome_reader,
+            companion_actor_ref=config.companion_actor_ref,
+        )
+        outcome_worker = OutcomeProposalWorker(
+            compiler=OutcomeProposalCompiler(
                 ledger=ledger,
-                capsule_compiler=capsules,
-                deliberation=compose_production_deliberation(
-                    lane_id="outcome",
-                    router=router,
-                    main_model=outcome_deliberation_model,
-                    quick_recovery=outcome_deliberation_model,
-                ),
                 candidate_reader=outcome_reader,
-                companion_actor_ref=config.companion_actor_ref,
-            )
-            if outcome_deliberation_model is not None
-            else None
+            ),
+            acceptance=outcome_acceptance,
+            actor=config.outcome_worker_owner,
         )
-        outcome_worker = (
-            OutcomeProposalWorker(
-                compiler=OutcomeProposalCompiler(ledger=ledger, candidate_reader=outcome_reader),
-                acceptance=outcome_acceptance,
-                actor=config.outcome_worker_owner,
-            )
-            if outcome_acceptance is not None
-            else None
+        affect_acceptance = AffectAcceptanceRuntime(
+            ledger=ledger,
+            batch_issuer=issuer,
         )
-        interaction_bid_acceptance = (
-            InteractionBidAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
-            if interaction_bid_model is not None
-            else None
+        immediate_emotion_worker = ImmediateEmotionProposalWorker(
+            appraisal_worker=appraisal_worker,
+            affect_compiler=AffectProposalCompiler(ledger=ledger),
+            affect_acceptance=affect_acceptance,
+            actor=config.affect_settlement_owner,
         )
-        media_thread_acceptance = (
-            MediaDeliveryThreadAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
-            if interaction_bid_model is not None
-            else None
+        # The canonical subjective_relationship facet participates in the
+        # inbound role call. A second relationship model must not reinterpret
+        # that same Observation. Existing accepted relationship signals still
+        # use the deterministic adjustment authority below.
+        relationship_acceptance = RelationshipAcceptanceRuntime(
+            ledger=ledger,
+            batch_issuer=issuer,
         )
-        interaction_bid_turn = (
-            InteractionBidDeliberationTurn(
-                ledger=ledger,
-                capsule_compiler=capsules,
-                deliberation=compose_production_deliberation(
-                    lane_id="interaction_bid",
-                    router=router,
-                    main_model=interaction_bid_model,
-                    quick_recovery=interaction_bid_model,
-                ),
-                companion_actor_ref=config.companion_actor_ref,
-            )
-            if interaction_bid_model is not None
-            else None
-        )
-        interaction_bid_worker = (
-            InteractionBidProposalWorker(
-                compiler=InteractionBidProposalCompiler(ledger=ledger),
-                acceptance=interaction_bid_acceptance,
-                media_thread_compiler=MediaDeliveryThreadProposalCompiler(ledger=ledger),
-                media_thread_acceptance=media_thread_acceptance,
-                actor=config.interaction_bid_worker_owner,
-            )
-            if interaction_bid_acceptance is not None and media_thread_acceptance is not None
-            else None
-        )
-        immediate_emotion_enabled = (
-            isinstance(appraisal_model, AppraisalDraftDeliberationAdapter)
-            or getattr(appraisal_model, "supports_immediate_emotion", False) is True
-        )
-        affect_acceptance = (
-            AffectAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
-            if affect_model is not None or immediate_emotion_enabled
-            else None
-        )
-        affect_turn = (
-            PinnedTurnCompiler(
-                ledger=ledger,
-                capsule_compiler=capsules,
-                deliberation=compose_production_deliberation(
-                    lane_id="affect",
-                    router=router,
-                    main_model=affect_model,
-                    quick_recovery=affect_model,
-                ),
-                companion_actor_ref=config.companion_actor_ref,
-                affect_target_bounds_enabled=True,
-            )
-            if affect_model is not None
-            else None
-        )
-        affect_worker = (
-            AffectDeliberationWorker(
-                ledger=ledger,
-                pinned_turn=affect_turn,
-                compiler=AffectProposalCompiler(ledger=ledger),
-                acceptance=affect_acceptance,
-                actor=config.affect_worker_owner,
-            )
-            if affect_acceptance is not None and affect_turn is not None
-            else None
-        )
-        immediate_emotion_worker = (
-            ImmediateEmotionProposalWorker(
-                appraisal_worker=appraisal_worker,
-                affect_compiler=AffectProposalCompiler(ledger=ledger),
-                affect_acceptance=affect_acceptance,
-                actor=config.affect_worker_owner,
-            )
-            if immediate_emotion_enabled
-            and appraisal_worker is not None
-            and affect_acceptance is not None
-            else None
-        )
-        relationship_acceptance = (
-            RelationshipAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
-            if relationship_model is not None
-            else None
-        )
-        relationship_turn = (
-            PinnedTurnCompiler(
-                ledger=ledger,
-                capsule_compiler=capsules,
-                deliberation=compose_production_deliberation(
-                    lane_id="relationship",
-                    router=router,
-                    main_model=relationship_model,
-                    quick_recovery=relationship_model,
-                ),
-                companion_actor_ref=config.companion_actor_ref,
-                relationship_evaluation=True,
-            )
-            if relationship_model is not None
-            else None
-        )
-        relationship_worker = (
-            RelationshipDeliberationWorker(
-                ledger=ledger,
-                pinned_turn=relationship_turn,
-                compiler=RelationshipProposalCompiler(ledger=ledger),
-                acceptance=relationship_acceptance,
-                actor=config.relationship_worker_owner,
-            )
-            if relationship_acceptance is not None and relationship_turn is not None
-            else None
+        inbound_relationship_worker = InboundRelationshipSignalWorker(
+            ledger=ledger,
+            compiler=RelationshipProposalCompiler(ledger=ledger),
+            acceptance=relationship_acceptance,
+            owner_id=config.relationship_settlement_owner,
         )
         relationship_adjustment_acceptance = (
             RelationshipAdjustmentAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
@@ -4013,44 +3630,23 @@ def build_sqlite_world_v2_turn_application(
             if fact_model is not None
             else None
         )
-        tool_turn = (
-            PinnedTurnCompiler(
-                ledger=ledger,
-                capsule_compiler=capsules,
-                deliberation=compose_injected_read_only_tool_deliberation(
-                    router=router, model=read_only_tool_model
-                ),
-                companion_actor_ref=config.companion_actor_ref,
-            )
-            if read_only_tool_model is not None
-            else None
-        )
-        tool_trigger_runtime = (
-            ReadOnlyToolTriggerRuntime(
-                ledger=ledger,
-                turn=tool_turn,  # type: ignore[arg-type]
-                compiler=ReadOnlyToolProposalCompiler(
-                    ledger=ledger,
-                    authorization_resolver=ProjectionReadOnlyToolAuthorizationResolver(),
-                    actor_ref=config.companion_actor_ref,
-                    budget_account_id=config.tool_account_id,
-                    budget_limit=config.tool_budget_limit,
-                ),
-                owner_id=config.tool_worker_owner,
-            )
-            if tool_turn is not None
-            else None
-        )
         perception_turn = (
             PinnedTurnCompiler(
                 ledger=ledger,
                 capsule_compiler=capsules,
-                deliberation=compose_injected_perception_deliberation(
-                    router=router, model=perception_model
+                deliberation=compose_character_interior_perception_deliberation(
+                    router=router,
+                    character_interior=character_interior,
+                    input_source=perception_input_source,  # type: ignore[arg-type]
+                    dispatch_evidence=perception_transport,  # type: ignore[arg-type]
+                    budget_account_id=config.perception_account_id,
+                    budget_limit=config.perception_budget_limit,
+                    daily_limit=config.perception_budget_limit,
+                    local_timezone=config.local_timezone,
                 ),
                 companion_actor_ref=config.companion_actor_ref,
             )
-            if perception_model is not None
+            if perception_requested
             else None
         )
         perception_trigger_runtime = (
@@ -4078,14 +3674,6 @@ def build_sqlite_world_v2_turn_application(
             latency_recorder=latency,
         )
         action_executor: ActionExecutor = platform_executor
-        tool_executor = (
-            ReadOnlyToolActionExecutor(
-                queries=AuditedReadOnlyToolQueryReader(ledger=ledger),
-                transport=read_only_tool_transport,
-            )
-            if read_only_tool_transport is not None
-            else None
-        )
         perception_executor = (
             PerceptionActionExecutor(
                 inputs=perception_input_source,  # type: ignore[arg-type]
@@ -4094,11 +3682,7 @@ def build_sqlite_world_v2_turn_application(
             if perception_transport is not None
             else None
         )
-        if (
-            media_transport is not None
-            or tool_executor is not None
-            or perception_executor is not None
-        ):
+        if media_transport is not None or perception_executor is not None:
             action_executor = RoutedActionExecutor(
                 platform=platform_executor,
                 media=(
@@ -4109,7 +3693,6 @@ def build_sqlite_world_v2_turn_application(
                     if media_transport is not None
                     else None
                 ),
-                tool=tool_executor,
                 perception=perception_executor,
             )
         expression_policy = ExpressionPlanBudgetPolicy(
@@ -4120,35 +3703,34 @@ def build_sqlite_world_v2_turn_application(
             recovery_policy=config.reply_recovery_policy,
         )
         expression_recorder = ExpressionPlanAtomicRecorder(batch_issuer=issuer)
-        # Same-turn quick reaction lane.  It composes only when every seam is
-        # proven: the deployment's expression closure includes ``reaction``
-        # (today that is the NapCat dialect exactly) and a bounded local
-        # checkpoint is installed. Production reuses the appraisal adapter's
-        # local model instead of constructing another client; tests may inject
-        # a fixture model directly.
-        if quick_reaction_model is None:
-            quick_reaction_model = getattr(appraisal_model, "local_appraisal_model", None)
-        # BoundedDecisionVertical pilot switch for the quick-reaction lane.
-        quick_reaction_class = (
-            QuickReactionWorker if _bdv_pilot_disabled() else QuickReactionVerticalWorker
-        )
-        quick_reaction_worker = (
-            quick_reaction_class(
-                ledger=ledger,
-                model=quick_reaction_model,
-                capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
-                expression_policy=expression_policy,
-                expression_recorder=expression_recorder,
-                executor=action_executor,
-                pump_owner=f"{config.action_pump_owner}:quick-reaction",
-                actor=config.companion_actor_ref,
-            )
-            if (
-                config.quick_reaction_enabled
-                and "reaction" in config.expression_action_kinds
-                and quick_reaction_model is not None
-            )
-            else None
+        _bind_production_character_interior(
+            interior=character_interior,
+            ledger=ledger,
+            proactive_capsules=capsules,
+            router=router,
+            recall_coordinator=recall_coordinator,
+            batch_issuer=issuer,
+            companion_actor_ref=config.companion_actor_ref,
+            reply_target=config.reply_target,
+            expression_capabilities=config.expression_capabilities,
+            proactive_source_closure_model=proactive_source_closure_model,
+            proactive_candidate_external_proposition_inventory_model=(
+                proactive_candidate_external_proposition_inventory_model
+            ),
+            interactive_turn_budget_policy=config.interactive_turn_budget_policy,
+            proactive_account_id=config.proactive_account_id,
+            proactive_amount_per_action=config.proactive_amount_per_action,
+            reply_recovery_policy=config.reply_recovery_policy,
+            proactive_worker_owner=config.proactive_worker_owner,
+            social_initiative_policy=config.social_initiative_policy,
+            private_impression_worker_owner=config.private_impression_worker_owner,
+            private_reflection_content_reader=read_private_reflection_content,
+            expression_reconsideration_owner=config.expression_reconsideration_owner,
+            immediate_emotion_worker=immediate_emotion_worker,
+            inner_state_settlement_owner=config.inner_state_settlement_owner,
+            silence_appraisal_idle_seconds=config.silence_appraisal_idle_seconds,
+            plan_disruption_appraisal_enabled=config.plan_disruption_appraisal_enabled,
+            perception_result_reader=perception_transport,
         )
         runtime = WorldRuntime(
             world_id=config.world_id,
@@ -4157,6 +3739,7 @@ def build_sqlite_world_v2_turn_application(
             latency_recorder=latency,
             pinned_turn=pinned,
             expression_retry_budget_policy=config.interactive_turn_budget_policy,
+            expression_episode_owner=config.expression_episode_owner,
             reply_policy=ReplyBudgetPolicy(
                 account_id=config.chat_account_id,
                 amount_limit=config.reply_budget_amount,
@@ -4168,31 +3751,25 @@ def build_sqlite_world_v2_turn_application(
             expression_policy=expression_policy,
             expression_recorder=expression_recorder,
             expression_payload_store=expression_payload_store,
-            interaction_appraisal_owner=(
-                config.appraisal_worker_owner if appraisal_turn is not None else None
-            ),
+            inbound_state_owner=config.inner_state_settlement_owner,
             appraisal_acceptance=appraisal_acceptance,
             appraisal_acceptance_actor=(
-                config.appraisal_worker_owner if appraisal_acceptance is not None else None
+                config.inner_state_settlement_owner if appraisal_acceptance is not None else None
             ),
             appraisal_worker=appraisal_worker,
-            interaction_appraisal_turn=appraisal_turn,
+            reflection_scheduler=(
+                ReflectionScheduler(
+                    ledger=ledger,
+                    actor=config.life_ecology.worker_actor,
+                )
+                if config.life_ecology is not None
+                else None
+            ),
             immediate_emotion_worker=immediate_emotion_worker,
-            npc_world_appraisal_turn=npc_world_appraisal_turn,
-            silence_appraisal_turn=silence_appraisal_turn,
-            silence_appraisal_idle_seconds=config.silence_appraisal_idle_seconds,
-            plan_disruption_appraisal_turn=plan_disruption_appraisal_turn,
-            plan_disruption_appraisal_enabled=config.plan_disruption_appraisal_enabled,
+            inbound_relationship_worker=inbound_relationship_worker,
             outcome_deliberation_turn=outcome_turn,
             outcome_worker=outcome_worker,
-            outcome_deliberation_owner=(
-                config.outcome_worker_owner if outcome_worker is not None else None
-            ),
-            interaction_bid_turn=interaction_bid_turn,
-            interaction_bid_worker=interaction_bid_worker,
-            interaction_bid_owner=(
-                config.interaction_bid_worker_owner if interaction_bid_worker is not None else None
-            ),
+            outcome_deliberation_owner=config.outcome_worker_owner,
             interaction_fact_owner=(
                 config.fact_worker_owner if fact_acceptance is not None else None
             ),
@@ -4200,55 +3777,35 @@ def build_sqlite_world_v2_turn_application(
             fact_adapter=(
                 FactObservationProposalAdapter(model=fact_model) if fact_model is not None else None
             ),
-            fact_memory_adapter=(
-                FactMemoryDraftAdapter(model=memory_model)
-                if fact_acceptance is not None and memory_model is not None
-                else None
-            ),
             fact_memory_lifecycle=(
                 FactMemoryCandidateLifecycle(
                     ledger=ledger,
                     actor=config.fact_worker_owner,
                     source="world-v2:fact-memory-lifecycle",
                 )
-                if fact_acceptance is not None and memory_model is not None
+                if fact_acceptance is not None and config.character_memory_enabled
                 else None
             ),
-            private_impression_owner=(
-                config.private_impression_worker_owner
-                if private_impression_model is not None
+            fact_memory_actor_ref=(
+                config.companion_actor_ref
+                if fact_acceptance is not None and config.character_memory_enabled
                 else None
             ),
-            private_impression_adapter=(
-                PrivateImpressionDraftAdapter(
-                    model=private_impression_model,
-                    identity_frame=private_impression_identity_frame,
-                    content_reader=read_private_reflection_content,
-                )
-                if private_impression_model is not None
-                else None
-            ),
+            character_interior=character_interior,
             memory_withdrawal_review=(
                 MemoryWithdrawalReviewRuntime(
                     ledger=ledger,
-                    reviewer=MemoryWithdrawalReviewAdapter(model=memory_model),
+                    character_interior=character_interior,
+                    actor_ref=config.companion_actor_ref,
                     owner_id=config.memory_review_worker_owner,
                 )
-                if memory_model is not None
+                if config.character_memory_enabled
                 else None
             ),
-            affect_deliberation_owner=(
-                config.affect_worker_owner if affect_worker is not None else None
-            ),
-            affect_worker=affect_worker,
             affect_acceptance=affect_acceptance,
             affect_acceptance_actor=(
-                config.affect_worker_owner if affect_acceptance is not None else None
+                config.affect_settlement_owner if affect_acceptance is not None else None
             ),
-            relationship_deliberation_owner=(
-                config.relationship_worker_owner if relationship_worker is not None else None
-            ),
-            relationship_worker=relationship_worker,
             relationship_adjustment_owner=(
                 config.relationship_adjustment_worker_owner
                 if relationship_adjustment_worker is not None
@@ -4262,37 +3819,11 @@ def build_sqlite_world_v2_turn_application(
             # executor permitted to take these Actions; generic delivery must
             # not hand their snapshot bytes to a render/provider transport.
             action_pump_excluded_kinds=frozenset({"media_planning"}),
-            expression_reconsideration_owner=(
-                config.expression_reconsideration_owner
-                if expression_reconsideration_reviewer is not None
-                else None
-            ),
-            expression_reconsideration_reviewer=expression_reconsideration_reviewer,
             social_action_worker=social_action_worker,
-            quick_reaction_worker=quick_reaction_worker,
-            proactive_action_runtime=proactive_runtime,
-            read_only_tool_owner=(
-                config.tool_worker_owner if tool_trigger_runtime is not None else None
-            ),
-            read_only_tool_trigger_runtime=tool_trigger_runtime,
             perception_owner=(
                 config.perception_worker_owner if perception_trigger_runtime is not None else None
             ),
             perception_trigger_runtime=perception_trigger_runtime,
-            external_result_owner=(
-                config.tool_worker_owner if tool_trigger_runtime is not None else None
-            ),
-            external_result_deliberator=(
-                NoopToolResultDeliberator() if tool_trigger_runtime is not None else None
-            ),
-            perception_result_owner=(
-                config.perception_worker_owner if perception_trigger_runtime is not None else None
-            ),
-            perception_result_deliberator=(
-                NoopPerceptionResultDeliberator()
-                if perception_trigger_runtime is not None
-                else None
-            ),
         )
         media_execution = MediaExecutionRuntime(
             ledger=ledger,
@@ -4336,12 +3867,6 @@ def build_sqlite_world_v2_turn_application(
         )
         media_planning = MediaPlanningRuntime(ledger=ledger, sidecar=media_payload_store)
         composed_media_planner = media_planner
-        if legacy_event_media_planner is not None and event_media_result_store is not None:
-            composed_media_planner = EventMediaPlannerAdapter(
-                sidecar=media_payload_store,
-                legacy_planner=legacy_event_media_planner,
-                result_store=event_media_result_store,
-            )
         ecology_policy = (
             config.life_ecology.media_policy
             if config.life_ecology is not None
@@ -4363,11 +3888,12 @@ def build_sqlite_world_v2_turn_application(
         media_selection_worker = (
             MediaSelectionWorker(
                 ledger=ledger,
-                draft_adapter=MediaSelectionDraftAdapter(model=media_selection_model),
+                character_interior=character_interior,
+                character_actor_ref=config.companion_actor_ref,
                 proposal_recorder=MediaSelectionProposalRecorder(ledger=ledger),
                 catalog_version=ecology_policy.catalog_version + ":selection.1",
             )
-            if ecology_policy is not None and media_selection_model is not None
+            if ecology_policy is not None and config.media_selection_acceptance is not None
             else None
         )
         media_selection_acceptance = (
@@ -4391,47 +3917,15 @@ def build_sqlite_world_v2_turn_application(
             ActivityLifecycleWorker(
                 ledger=ledger,
                 catalog=ActivityOpeningCatalog(owner_actor_ref=config.companion_actor_ref),
-                draft_adapter=ActivityLifecycleDraftAdapter(model=activity_lifecycle_model),
+                character_interior=character_interior,
+                owner_actor_ref=config.companion_actor_ref,
                 proposal_recorder=ActivityLifecycleProposalRecorder(ledger=ledger),
                 acceptance_runtime=ActivityLifecycleAcceptanceRuntime(
                     ledger=ledger, batch_issuer=issuer
                 ),
                 ecology_catalog_version=config.life_ecology.catalog_version,
             )
-            if config.life_ecology is not None and activity_lifecycle_model is not None
-            else None
-        )
-        life_author = (
-            LifeAuthorRuntime(
-                ledger=ledger,
-                catalog=life_seed_catalog,
-                model=activity_lifecycle_model,
-                owner_actor_ref=config.companion_actor_ref,
-                capsule_compiler=capsules,
-                actor=config.life_ecology.worker_actor,
-            )
-            if (
-                not open_life_requested
-                and config.life_ecology is not None
-                and activity_lifecycle_model is not None
-            )
-            else None
-        )
-        future_life_author = (
-            FutureLifeAuthorRuntime(
-                ledger=ledger,
-                catalog=life_seed_catalog,
-                model=activity_lifecycle_model,
-                owner_actor_ref=config.companion_actor_ref,
-                capsule_compiler=capsules,
-                actor=config.life_ecology.worker_actor,
-            )
-            if (
-                config.life_ecology is not None
-                and not open_life_requested
-                and activity_lifecycle_model is not None
-                and config.future_life_author_enabled
-            )
+            if config.life_ecology is not None
             else None
         )
         life_aftermath = (
@@ -4441,7 +3935,7 @@ def build_sqlite_world_v2_turn_application(
                 occurrence_content=occurrence_content,
                 content_store=life_content_store,
                 owner_actor_ref=config.companion_actor_ref,
-                capsule_compiler=capsules,
+                character_interior=character_interior,
                 actor=config.life_ecology.worker_actor,
                 experience_memory_lifecycle=(
                     ExperienceMemoryCandidateLifecycle(
@@ -4450,13 +3944,7 @@ def build_sqlite_world_v2_turn_application(
                         source="world-v2:experience-memory-lifecycle",
                         content_store=life_content_store,
                     )
-                    if memory_model is not None
-                    else None
-                ),
-                outcome_selection_model=outcome_draft_model,
-                memory_adapter=(
-                    ExperienceMemoryDraftAdapter(model=memory_model)
-                    if memory_model is not None
+                    if config.character_memory_enabled
                     else None
                 ),
             )
@@ -4479,7 +3967,10 @@ def build_sqlite_world_v2_turn_application(
                 ledger=ledger,
                 content_store=life_content_store,
                 occurrence_content=occurrence_content,
-                actor_model=life_character_model,
+                # This author speaks as the selected NPC, not as the
+                # protagonist.  Keep the low-cost NPC actor outside the
+                # protagonist's private CharacterInterior.
+                actor_model=npc_actor_model,
                 world_author=life_world_author_model,
                 protagonist_actor_ref=config.companion_actor_ref,
                 catalog=life_seed_catalog,
@@ -4488,68 +3979,8 @@ def build_sqlite_world_v2_turn_application(
             if (
                 open_life_requested
                 and config.life_ecology is not None
-                and config.npc_initiative_enabled
-            )
-            else None
-        )
-        aspiration = (
-            AspirationRuntime(
-                ledger=ledger,
-                catalog=life_seed_catalog,
-                model=activity_lifecycle_model,
-                owner_actor_ref=config.companion_actor_ref,
-                actor=config.life_ecology.worker_actor,
-                fade_idle_days=config.aspiration_fade_idle_days,
-                fade_chance_bp=config.aspiration_fade_chance_bp,
-                crystallize_chance_bp=config.aspiration_crystallize_chance_bp,
-            )
-            if (
-                not open_life_requested
-                and config.life_ecology is not None
-                and life_seed_catalog is not None
-                and activity_lifecycle_model is not None
-                and config.aspiration_enabled
-            )
-            else None
-        )
-        contextual_life_inspiration = (
-            ContextualLifeInspirationRuntime(
-                ledger=ledger,
-                model=activity_lifecycle_model,
-                capsule_compiler=capsules,
-                source_material_compiler=ContextualLifeSourceMaterialCompiler(
-                    ledger=ledger,
-                    life_content_store=life_content_store,
-                ),
-                reviewed_followup=aspiration,
-                owner_actor_ref=config.companion_actor_ref,
-                actor=config.life_ecology.worker_actor,
-            )
-            if aspiration is not None
-            else None
-        )
-        shared_private_invitation = (
-            SharedPrivateInvitationRuntime(
-                ledger=ledger,
-                catalog=life_seed_catalog,
-                model=activity_lifecycle_model,
-                owner_actor_ref=config.companion_actor_ref,
-                user_participant_ref=config.counterpart_actor_ref,
-                actor=config.life_ecology.worker_actor,
-                invite_chance_bp=config.shared_private_invite_chance_bp,
-            )
-            if (
-                not open_life_requested
-                and config.life_ecology is not None
-                and life_seed_catalog is not None
-                and activity_lifecycle_model is not None
-                and config.shared_private_invitation_enabled
-                and config.counterpart_actor_ref is not None
-                and config.counterpart_actor_ref.startswith("user:")
-                and any(
-                    item.social_shape == "shared_private"
-                    for item in life_seed_catalog.reviewed_future_openings
-                )
+                and config.npc_ecology_enabled
+                and npc_actor_model is not None
             )
             else None
         )
@@ -4577,10 +4008,9 @@ def build_sqlite_world_v2_turn_application(
                 content_store=life_content_store,
                 world_author=life_world_author_model,
                 world_author_source_rewriter=life_world_author_source_rewriter,
-                character_model=life_character_model,
+                character_interior=character_interior,
                 source_closure_reviewer=life_source_closure_reviewer,
                 capsule_compiler=capsules,
-                recall_coordinator=recall_coordinator,
                 capability_manifest_compiler=ProjectionLifeCapabilityManifestCompiler(
                     owner_actor_ref=config.companion_actor_ref,
                     catalog=life_seed_catalog,
@@ -4617,15 +4047,11 @@ def build_sqlite_world_v2_turn_application(
                     lease_seconds=config.life_ecology.lease_seconds,
                 ),
                 media_followup=media_ecology,
-                life_author_followup=life_author,
-                future_life_author_followup=future_life_author,
                 activity_followup=activity_lifecycle,
                 aftermath_followup=life_aftermath,
                 biographical_followup=biographical_lifecycle,
                 life_development_followup=life_development,
                 npc_initiative_followup=npc_initiative,
-                aspiration_followup=contextual_life_inspiration or aspiration,
-                shared_private_followup=shared_private_invitation,
                 open_world_followup=open_world_event,
                 visual_evidence_followup=visual_evidence_author,
                 availability=LifeEcologyAvailability(
@@ -4644,6 +4070,8 @@ def build_sqlite_world_v2_turn_application(
                 interactive_turn_budget_policy=config.interactive_turn_budget_policy,
                 latency_recorder=latency,
             ),
+            character_interior=character_interior,
+            companion_actor_ref=config.companion_actor_ref,
             ledger=ledger,
             life_content_store=life_content_store,
             expression_payload_store=expression_payload_store,
@@ -4655,9 +4083,6 @@ def build_sqlite_world_v2_turn_application(
             media_planning_worker=MediaPlanningWorker(
                 ledger=ledger,
                 runtime=media_planning,
-                # An injected legacy planner is not executable without a
-                # durable lookup store; leaving this unavailable is safer than
-                # retrying an untracked provider call after a restart.
                 planner=composed_media_planner,
                 owner_id=config.media_planning_worker_owner,
             ),
@@ -4720,22 +4145,6 @@ def build_sqlite_world_v2_turn_application(
         raise
 
 
-def _bdv_pilot_disabled() -> bool:
-    """Environment-level hot rollback for the quick-reaction pilot.
-
-    ``WORLD_V2_BDV_PILOT_DISABLED=1`` routes quick reaction through the frozen
-    hand-written implementation.  Its identity strings are proven byte-equal
-    between both editions, so flipping this switch never forks ledger history.
-    """
-
-    return os.environ.get("WORLD_V2_BDV_PILOT_DISABLED", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
 def build_platform_action_executor(
     *,
     ledger: SQLiteWorldLedger,
@@ -4776,7 +4185,6 @@ def _bootstrap(
     ledger: SQLiteWorldLedger,
     config: WorldV2TurnApplicationConfig,
     now: datetime,
-    include_tool: bool = False,
     include_perception: bool = False,
     include_proactive: bool = False,
     life_seed_catalog: ReviewedLifeSeedCatalog | None = None,
@@ -4823,15 +4231,6 @@ def _bootstrap(
             limit=config.chat_budget_limit,
         ),
     ]
-    if include_tool:
-        accounts.append(
-            BudgetAccount(
-                account_id=config.tool_account_id,
-                category="tool",
-                window_id=config.tool_window_id,
-                limit=config.tool_budget_limit,
-            )
-        )
     if include_perception:
         accounts.append(
             BudgetAccount(

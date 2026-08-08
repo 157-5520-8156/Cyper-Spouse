@@ -9,13 +9,10 @@ from companion_daemon.llm import (
     FakeCompanionModel,
     OpenAICompatibleChatModel,
 )
-from companion_daemon.world_v2.chat_model_deliberation_adapter import (
-    ChatCompletionModel,
-    RoutedChatModelDeliberationAdapter,
+from companion_daemon.world_v2.model_completion import ChatCompletionModel
+from companion_daemon.world_v2.expression_draft import (
+    PRODUCTION_TEXT_ONLY_EXPRESSION_CAPABILITIES,
 )
-from companion_daemon.world_v2.appraisal_chat_model_adapter import AppraisalDraftDeliberationAdapter
-from companion_daemon.world_v2.affect_chat_model_adapter import AffectDraftDeliberationAdapter
-from companion_daemon.world_v2.relationship_draft_deliberation_adapter import RelationshipDraftDeliberationAdapter
 from companion_daemon.world_v2.deliberation import ModelRoute, RouteRequest
 from companion_daemon.world_v2.production_turn_application import (
     LifeEcologyComposition,
@@ -24,6 +21,9 @@ from companion_daemon.world_v2.production_turn_application import (
 )
 from companion_daemon.world_v2.life_development_model_adapter import (
     RoleBoundLifeDevelopmentModelAdapter,
+)
+from companion_daemon.world_v2.semantic_chat_composition import (
+    build_semantic_chat_composition,
 )
 from companion_daemon.world_v2.simulator_adapters import (
     CaptureSimulatorTransport,
@@ -58,6 +58,7 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
     now = datetime.now(UTC)
     transport = CaptureSimulatorTransport(received_at=now)
     owned_models: list[DeepSeekChatModel] = []
+    source_reviewer: ChatCompletionModel | None = None
     life_source_reviewer: ChatCompletionModel | None = None
     if fake:
         flash_model: ChatCompletionModel = FakeCompanionModel()
@@ -68,7 +69,7 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
         flash_model = DeepSeekChatModel(
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
-            model="deepseek-v4-flash",
+            model=settings.deepseek_model,
             thinking_enabled=False,
         )
         owned_models.append(flash_model)
@@ -78,32 +79,41 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
             # installs the independently configured OpenAI lane when present;
             # without it, factful life proposals fail closed while no-op
             # ecology remains available.
-            life_source_reviewer = OpenAICompatibleChatModel(
-                api_key=settings.openai_api_key,
-                base_url=settings.openai_base_url,
-                model=settings.world_v2_source_review_fallback_model,
+            reviewer_options = {
+                "api_key": settings.openai_api_key,
+                "base_url": settings.openai_base_url,
+                "model": settings.world_v2_source_review_fallback_model,
                 # GPT-4.1/4o Chat Completions reject this optional field.
                 # Empty means omit it at the transport boundary.
-                reasoning_effort="",
-                max_completion_tokens=1_200,
-                proxy_url=settings.openai_proxy_url,
-            )
-            owned_models.append(life_source_reviewer)
+                "reasoning_effort": "",
+                "max_completion_tokens": 1_200,
+                "proxy_url": settings.openai_proxy_url,
+            }
+            # These are separate semantic authorities even when they use the
+            # same provider/model configuration. Sharing one client here made
+            # simulator validation violate the production self-review boundary.
+            source_reviewer_client = OpenAICompatibleChatModel(**reviewer_options)
+            life_source_reviewer_client = OpenAICompatibleChatModel(**reviewer_options)
+            source_reviewer = source_reviewer_client
+            life_source_reviewer = life_source_reviewer_client
+            owned_models.extend((source_reviewer_client, life_source_reviewer_client))
         thinking_model = None
         if thinking:
             thinking_model = DeepSeekChatModel(
                 api_key=settings.deepseek_api_key,
                 base_url=settings.deepseek_base_url,
-                model=settings.deepseek_model,
+                model=settings.deepseek_character_thinking_model,
                 thinking_enabled=True,
-                reasoning_effort=settings.deepseek_reasoning_effort,
+                reasoning_effort=settings.deepseek_character_thinking_reasoning_effort,
             )
             owned_models.append(thinking_model)
-    adapter = RoutedChatModelDeliberationAdapter(
+    semantic_chat = build_semantic_chat_composition(
+        settings=settings,
         flash_model=flash_model,
         thinking_model=thinking_model,
-        flash_model_id="deepseek-v4-flash" if not fake else "fake-world-v2-flash",
-        thinking_model_id=settings.deepseek_model if thinking and not fake else "fake-world-v2-thinking",
+        source_closure_model=source_reviewer,
+        life_source_closure_model=life_source_reviewer,
+        model_id_prefix="world-v2-simulator",
     )
     app = build_sqlite_world_v2_turn_application(
         path=settings.database_path,
@@ -112,19 +122,15 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
             companion_actor_ref="agent:companion",
             reply_target=f"user:{settings.primary_user_id}",
             action_pump_owner="pump:companion-simulator-v2",
+            expression_capabilities=PRODUCTION_TEXT_ONLY_EXPRESSION_CAPABILITIES,
             life_ecology=LifeEcologyComposition.production_v1(),
         ),
         identities=SimulatorIdentityResolver(canonical_user_id=settings.primary_user_id),
         router=_SimulationRouter(thinking=thinking),
-        main_model=adapter,
-        quick_recovery=adapter,
+        character_interior=semantic_chat.character_interior,
         transport=transport,
-        appraisal_model=AppraisalDraftDeliberationAdapter(model=flash_model),
-        affect_model=AffectDraftDeliberationAdapter(model=flash_model),
-        relationship_model=RelationshipDraftDeliberationAdapter(model=flash_model),
         fact_model=flash_model,
-        memory_model=flash_model,
-        activity_lifecycle_model=flash_model,
+        npc_actor_model=flash_model,
         life_world_author_model=RoleBoundLifeDevelopmentModelAdapter(
             model=flash_model,
             role="world_author",
@@ -132,10 +138,6 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
         life_world_author_source_rewriter=RoleBoundLifeDevelopmentModelAdapter(
             model=flash_model,
             role="world_author",
-        ),
-        life_character_model=RoleBoundLifeDevelopmentModelAdapter(
-            model=flash_model,
-            role="character_model",
         ),
         life_source_closure_reviewer=(
             RoleBoundLifeDevelopmentModelAdapter(
@@ -167,6 +169,7 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
         print(f"[reply:{outcome.status}] {transport.bodies[-1]}")
     finally:
         app.close()
+        await semantic_chat.aclose()
         for model in owned_models:
             await model.aclose()
 

@@ -571,6 +571,7 @@ class TriggerProcess(FrozenModel):
         "proactive_action_deliberation",
         "afterthought_author",
         "expression_episode",
+        "life_reflection",
     ]
     source_evidence_ref: str | None = None
     state: Literal["open", "claimed", "terminal"]
@@ -621,6 +622,7 @@ class TriggerProcess(FrozenModel):
                 "proactive_action_deliberation",
                 "afterthought_author",
                 "expression_episode",
+                "life_reflection",
             }
             and self.source_evidence_ref is not None
         ):
@@ -2572,7 +2574,7 @@ class LifeArcProjection(FrozenModel):
 
 
 class AspirationProjection(FrozenModel):
-    """One low-stakes wish: no due window, no fulfillment pipeline, no rot.
+    """One character-owned direction: no due window and no mechanical rot.
 
     An aspiration is deliberately *not* a Private Commitment.  Commitments are
     dated responsibilities whose clock reducer forces open → due → broken at a
@@ -2580,28 +2582,42 @@ class AspirationProjection(FrozenModel):
     expires mechanically.  It only ever moves through reinforcement (related
     lived material touched it again), quiet fading, or — rarely — the
     crystallization seam that hands it to the ordinary calendar pipeline.
-    ``text`` is copied verbatim from a reviewed seed (anti-fabrication) and
-    ``planted_event_ref`` names this projection's own accepting ledger event,
-    so expression context can always cite committed authority for the wish.
+    Historical entries may originate in a reviewed seed.  New entries are
+    authored by the Character Model inside one source-bound ``InnerTurn``;
+    deterministic code never supplies a catalog direction.  Revisions and an
+    optional open-text tension remain typed, source-bound World history.
+    ``planted_event_ref`` always names the accepting planting event while
+    ``revision_event_ref`` names the latest character-authored revision.
     """
 
     aspiration_id: str = Field(min_length=1)
     entity_revision: int = Field(ge=1)
     owner_actor_ref: str = Field(min_length=1)
     seed_id: str = Field(min_length=1)
+    origin_kind: Literal["reviewed_seed", "character_authored"] = "reviewed_seed"
     text: str = Field(min_length=1, max_length=240)
     privacy_class: PrivacyClass
-    status: Literal["active", "faded", "crystallized"] = "active"
+    status: Literal["active", "faded", "crystallized", "abandoned"] = "active"
     planted_at: datetime
     planted_event_ref: str = Field(min_length=1)
     source_event_ref: str = Field(min_length=1)
+    tension_summary: str | None = Field(default=None, min_length=1, max_length=480)
+    tension_source_refs: tuple[str, ...] = Field(default=(), max_length=16)
+    last_revised_at: datetime | None = None
+    revision_event_ref: str | None = Field(default=None, min_length=1)
     last_reinforced_at: datetime | None = None
     reinforcement_count: int = Field(default=0, ge=0)
     faded_at: datetime | None = None
     crystallized_plan_ref: str | None = None
+    abandoned_at: datetime | None = None
+    abandonment_event_ref: str | None = Field(default=None, min_length=1)
+    abandonment_summary: str | None = Field(default=None, min_length=1, max_length=480)
+    abandonment_source_refs: tuple[str, ...] = Field(default=(), max_length=16)
 
     @model_validator(mode="after")
     def lifecycle_is_consistent(self) -> AspirationProjection:
+        if self.status not in {"active", "faded", "crystallized", "abandoned"}:
+            raise ValueError("unknown aspiration lifecycle status")
         if (self.status == "faded") != (self.faded_at is not None):
             raise ValueError("faded aspiration must carry exactly its fade time")
         if (self.status == "crystallized") != (self.crystallized_plan_ref is not None):
@@ -2610,6 +2626,27 @@ class AspirationProjection(FrozenModel):
             raise ValueError("aspiration reinforcement count and time must appear together")
         if self.last_reinforced_at is not None and self.last_reinforced_at < self.planted_at:
             raise ValueError("aspiration cannot be reinforced before it was planted")
+        if (self.tension_summary is None) != (not self.tension_source_refs):
+            raise ValueError("aspiration tension needs both summary and source refs")
+        if len(self.tension_source_refs) != len(set(self.tension_source_refs)):
+            raise ValueError("aspiration tension source refs must be unique")
+        if (self.last_revised_at is None) != (self.revision_event_ref is None):
+            raise ValueError("aspiration revision time and event ref must appear together")
+        if self.last_revised_at is not None and self.last_revised_at < self.planted_at:
+            raise ValueError("aspiration cannot be revised before it was planted")
+        abandoned = self.status == "abandoned"
+        if abandoned != (self.abandoned_at is not None):
+            raise ValueError("abandoned aspiration must carry exactly its terminal time")
+        if abandoned != (self.abandonment_event_ref is not None):
+            raise ValueError("abandoned aspiration must carry its terminal event ref")
+        if abandoned != (self.abandonment_summary is not None):
+            raise ValueError("abandoned aspiration must carry its character-authored reason")
+        if abandoned != bool(self.abandonment_source_refs):
+            raise ValueError("abandoned aspiration must carry its source closure")
+        if len(self.abandonment_source_refs) != len(set(self.abandonment_source_refs)):
+            raise ValueError("aspiration abandonment source refs must be unique")
+        if self.abandoned_at is not None and self.abandoned_at < self.planted_at:
+            raise ValueError("aspiration cannot be abandoned before it was planted")
         return self
 
 
@@ -2742,6 +2779,7 @@ class OutcomeProposalProjection(FrozenModel):
             "life-aftermath-context.1",
             "life-aftermath-context.2",
             "life-aftermath-context.3",
+            "life-aftermath-context.4",
         ]
         | None
     ) = None
@@ -3546,38 +3584,21 @@ class WorldOccurrenceProjection(FrozenModel):
 
 class AppraisalHypothesis(FrozenModel):
     hypothesis_id: str = Field(min_length=1)
-    meaning: Literal[
-        "ordinary",
-        "care",
-        "support",
-        "shared_joy",
-        "goal_progress",
-        "uncertainty",
-        "misunderstanding",
-        "disappointment",
-        "dismissal",
-        "boundary_violation",
-        "dehumanization",
-        "coercion",
-        "control_pressure",
-        "betrayal",
-        "loss",
-        "user_withdrawing",
-        "user_confused",
-        "repair_attempt",
-        "reliability_confirmed",
-        "reliability_broken",
-        "restorative_solitude",
-        "creative_satisfaction",
-        "social_warmth",
-        "goal_strain",
-        "npc_conflict",
-        "family_connection",
-    ]
+    # A meaning is the character's source-bound, fallible interpretation. It
+    # is deliberately not a behavior-driving taxonomy; old enum labels remain
+    # valid strings and therefore replay byte-for-byte.
+    meaning: str = Field(min_length=1, max_length=128)
     attribution: Literal["user", "companion", "npc", "situation", "third_party", "unknown"]
     controllability: Literal["controllable", "partly_controllable", "uncontrollable"]
     severity: Literal["low", "moderate", "high", "acute"]
     weight_bp: int = Field(ge=1, le=10_000)
+
+    @field_validator("meaning")
+    @classmethod
+    def meaning_is_canonical_free_text(cls, value: str) -> str:
+        if value != value.strip():
+            raise ValueError("appraisal meaning cannot have surrounding whitespace")
+        return value
 
 
 class AppraisalOrigin(FrozenModel):
@@ -4309,6 +4330,7 @@ class PrivateImpressionProposalProjection(FrozenModel):
         Literal[
             "private-impression-draft.3",
             "private-impression-draft.4",
+            "character-interior-private-impression-transition.1",
         ]
         | None
     ) = None
@@ -5770,7 +5792,7 @@ from .external_perception_acceptance_manifest import (  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.51"
+    reducer_bundle_version: str = "world-v2-reducers.52"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)

@@ -12,19 +12,24 @@ is real.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from world_v2_application import (
+    build_sqlite_world_v2_test_application,
+    compose_fixture_character_interior,
+    compose_fixture_character_purpose,
+)
 
 from companion_daemon import event_media
-from companion_daemon.world_v2.event_ecology_media import EcologyPolicy
 from companion_daemon.world_v2.activity_plan_runtime import (
     ActivityPlanCommand,
     ActivityPlanTransitionCommand,
 )
+from companion_daemon.world_v2.event_ecology_media import EcologyPolicy
 from companion_daemon.world_v2.image_evidence_contract import ImageEvidenceV1
 from companion_daemon.world_v2.image_evidence_runtime import (
     ImageEvidenceDeclarationCommand,
@@ -49,13 +54,11 @@ from companion_daemon.world_v2.production_turn_application import (
     MediaContinuationComposition,
     MediaSelectionAcceptanceComposition,
     WorldV2TurnApplicationConfig,
-    build_sqlite_world_v2_turn_application,
 )
 from companion_daemon.world_v2.qq_c2c_host import QQC2CPlatformTransport, qq_c2c_target
 from companion_daemon.world_v2.schemas import ProviderMediaGrantBinding
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from companion_daemon.world_v2.world_turn_runtime import InboundTurn
-
 
 NOW = datetime(2026, 7, 20, 4, 0, tzinfo=UTC)
 WORLD_ID = "world:media-production-pipeline"
@@ -68,7 +71,7 @@ class _Identities:
 
 
 class _NoModel:
-    async def deliberate(self, **_kwargs):  # type: ignore[no-untyped-def]
+    async def propose(self, _request):  # type: ignore[no-untyped-def]
         raise AssertionError("pipeline test does not deliberate visible replies")
 
 
@@ -174,6 +177,7 @@ def _config() -> WorldV2TurnApplicationConfig:
         companion_actor_ref="agent:companion",
         reply_target=qq_c2c_target(RECIPIENT),
         action_pump_owner="pump:media-production-pipeline",
+        character_memory_enabled=False,
         event_ecology_policy=EcologyPolicy(max_candidates_per_drain=1),
         media_selection_acceptance=MediaSelectionAcceptanceComposition(
             grant=ProviderMediaGrantBinding(
@@ -231,13 +235,20 @@ async def test_full_media_pipeline_delivers_through_world_owned_policy_without_a
         transport = SQLiteDurableMediaProviderTransport(
             path=str(path), world_id=WORLD_ID, renderer=renderer
         )
-        app = build_sqlite_world_v2_turn_application(
+        app = build_sqlite_world_v2_test_application(
             path=path,
             config=_config(),
             identities=_Identities(),
             router=_Router(),
-            main_model=_NoModel(),
-            quick_recovery=_NoModel(),
+            character_interior=compose_fixture_character_interior(
+                inbound_author=_NoModel(),
+                purpose_faculties=(
+                    compose_fixture_character_purpose(
+                        purpose="media_selection",
+                        provider=_SelectionModel(),
+                    ),
+                ),
+            ),
             transport=QQC2CPlatformTransport(
                 delivery=delivery,
                 recipients_by_target={qq_c2c_target(RECIPIENT): RECIPIENT},
@@ -245,7 +256,6 @@ async def test_full_media_pipeline_delivers_through_world_owned_policy_without_a
             ),
             media_transport=transport,
             media_planner=planner,
-            media_selection_model=_SelectionModel(),
             now=NOW,
         )
         return app, transport

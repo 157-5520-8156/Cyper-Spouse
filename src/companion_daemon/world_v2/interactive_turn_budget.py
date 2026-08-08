@@ -46,13 +46,13 @@ class InteractiveTurnBudgetPolicy:
     """Composition-owned timing policy for one interactive reply."""
 
     # Normal latency is still whatever the winning provider actually takes;
-    # this is only the cancellation ceiling. Live CN-midnight audits moved
-    # beyond the earlier 5-10s sample and repeatedly crossed a 10.8s author
-    # deadline. 18s preserves the fast path while avoiding deterministic
-    # cancellation of a still-progressing official Flash call.
-    total_seconds: float = 18.0
-    hedge_after_seconds: float = 2.5
-    acceptance_dispatch_reserve_seconds: float = 1.2
+    # this is only the cancellation ceiling. Interactive source review is
+    # retired (2026-08-07): the author call is the only semantic provider on
+    # the critical path, so the ceiling no longer needs to cover review
+    # retry chains.
+    total_seconds: float = 12.0
+    hedge_after_seconds: float = 2.0
+    acceptance_dispatch_reserve_seconds: float = 1.0
     # One soft ingress-to-first-provider budget for API-external work. QQ's
     # durable sender-rhythm window consumes part of this same interval; Recall
     # may use only what remains instead of adding another independent wait.
@@ -61,23 +61,12 @@ class InteractiveTurnBudgetPolicy:
     # above 8s. This window opens only after a real author failure, so raising
     # the ceiling does not slow an ordinary successful turn.
     technical_recovery_seconds: float = 12.0
-    # Source review has a measured 22s per-attempt cancellation ceiling. Open
-    # one fixed 46s candidate-local phase before the first dispatch so a real
-    # first timeout and one complete retry both fit with 2s scheduling margin.
-    # The second call is still conditional on an actual first failure, and
-    # neither call can renew this deadline.
-    validation_recovery_seconds: float = 46.0
-    # An explicit unsupported verdict may then require the one doctrine-owned
-    # same-role re-selection, a fresh primary review, and candidate external-
-    # proposition coverage. These are
-    # serial provider calls, so they need a separate one-shot window rather
-    # than competing with the earlier reviewer retry. Eight seconds of bounded
-    # role repair plus the two concurrent review branches fit in 52s when no
-    # provider retries. Each branch may retry one malformed/transport result:
-    # inventory 44s then focused authority 44s is the longest finite chain,
-    # plus 8s repair and scheduling margin. This 100s ceiling exists only
-    # after a hard rejection; it never slows an ordinary successful reply.
-    validation_reselection_seconds: float = 100.0
+    # One bounded re-authorization after a real author failure: a single
+    # recovery call and one retry fit in this window.
+    validation_recovery_seconds: float = 8.0
+    # A same-role re-selection plus one fresh materialization; the old 100s
+    # chain budgeted inventory/coverage review branches that no longer run.
+    validation_reselection_seconds: float = 20.0
     clock: Clock = time.monotonic
     sleep: Sleeper = __import__("asyncio").sleep
     wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC)

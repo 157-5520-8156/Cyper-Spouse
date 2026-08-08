@@ -44,6 +44,24 @@ from .schema_core import FrozenModel
 logger = logging.getLogger(__name__)
 
 _TRACE_AUTHORITY_KEY = secrets.token_bytes(32)
+
+
+def install_trace_authority_key(key: bytes) -> None:
+    """Pin the recall-trace HMAC authority key.
+
+    Production keeps a fresh process-unique key (``secrets.token_bytes``),
+    which is intentional: a trace seal must not be forgeable across daemon
+    restarts.  Offline fixtures and the frozen scenario suite, however, must
+    be byte-deterministic across separate processes, so they install one
+    fixed key before composing the application.
+    """
+
+    global _TRACE_AUTHORITY_KEY
+    if len(key) != 32:
+        raise ValueError("recall trace authority key must be 32 bytes")
+    _TRACE_AUTHORITY_KEY = key
+
+
 _MAX_PINNED_RECALL_CONTEXTS = 16
 # The first cognition call may wait this long for a local prefetch that is
 # still searching.  A lexical search over the in-process index finishes in a

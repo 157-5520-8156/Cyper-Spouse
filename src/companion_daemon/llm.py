@@ -630,10 +630,10 @@ class ProviderCapacityGate:
         )
 
 
-def local_provider_capacity_marker_path() -> Path:
-    """Return the marker location shared with the launchd watchdog."""
+def text_endpoint_capacity_marker_path() -> Path:
+    """Return the text-endpoint marker shared with its launchd watchdog."""
 
-    return Path(os.environ.get("TMPDIR") or "/tmp") / ("girl-agent-local-appraisal.capacity")
+    return Path(os.environ.get("TMPDIR") or "/tmp") / ("girl-agent-text-endpoint.capacity")
 
 
 def _is_provider_outage(exc: Exception) -> bool:
@@ -787,6 +787,7 @@ class DeepSeekChatModel:
         circuit_breaker: ProviderCircuitBreaker | None = None,
         capacity_gate: ProviderCapacityGate | None = None,
         client: httpx.AsyncClient | None = None,
+        max_completion_tokens: int = 900,
     ):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -797,6 +798,7 @@ class DeepSeekChatModel:
         self.usage_observer = usage_observer
         self.circuit_breaker = circuit_breaker
         self.capacity_gate = capacity_gate
+        self.max_completion_tokens = max_completion_tokens
         self.client = client or httpx.AsyncClient(
             timeout=45,
             trust_env=False,
@@ -805,14 +807,17 @@ class DeepSeekChatModel:
 
     def request_payload(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, object]],
         *,
         temperature: float,
         json_object: bool = False,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
     ) -> dict[str, object]:
         payload: dict[str, object] = {
             "model": self.model,
             "messages": messages,
+            "max_tokens": self.max_completion_tokens,
         }
         if self.thinking_enabled:
             # DeepSeek V4 ignores temperature in thinking mode. Leaving it out
@@ -822,7 +827,13 @@ class DeepSeekChatModel:
         else:
             payload["thinking"] = {"type": "disabled"}
             payload["temperature"] = temperature
-        if json_object:
+        if tools:
+            payload["tools"] = tools
+            if tool_choice is not None:
+                payload["tool_choice"] = tool_choice
+        elif json_object:
+            # DeepSeek rejects response_format alongside tools; JSON mode is
+            # only used on the plain (tool-free) path.
             payload["response_format"] = {"type": "json_object"}
         return payload
 
@@ -865,15 +876,26 @@ class DeepSeekChatModel:
         return result
 
     async def complete_json_with_usage(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
+        self,
+        messages: list[dict[str, object]],
+        *,
+        temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
     ) -> tuple[str, dict[str, object]]:
-        """Return one JSON response and usage bound to that provider call."""
+        """Return one JSON response and usage bound to that provider call.
+
+        With ``tools`` set, the reply is carried in ``tool_calls`` arguments
+        and the first forced tool's arguments string is returned as content.
+        """
 
         result = await self._complete(
             messages,
             temperature=temperature,
-            json_object=True,
+            json_object=not tools,
             include_usage=True,
+            tools=tools,
+            tool_choice=tool_choice,
         )
         if not isinstance(result, tuple):
             raise AssertionError("metered JSON completion did not return usage")
@@ -881,10 +903,12 @@ class DeepSeekChatModel:
 
     async def complete_json_stream_with_usage(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, object]],
         *,
         temperature: float = 0.8,
         on_text_delta: Callable[[str], object] | None = None,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
     ) -> tuple[str, dict[str, object] | None]:
         """Stream one JSON completion while preserving one provider identity.
 
@@ -892,7 +916,9 @@ class DeepSeekChatModel:
         a higher-level incremental validator, but it cannot dispatch anything
         itself.  The eventual text and usage still belong to this single HTTP
         request, so a consumer can publish a validated first unit without
-        opening a second role-author call.
+        opening a second role-author call. With ``tools`` set, the reply is
+        carried in ``tool_calls`` arguments and the first forced tool's
+        arguments string is returned as content.
         """
 
         started = monotonic()
@@ -902,13 +928,17 @@ class DeepSeekChatModel:
         request_payload = self.request_payload(
             messages,
             temperature=temperature,
-            json_object=True,
+            json_object=not tools,
+            tools=tools,
+            tool_choice=tool_choice,
         )
         request_payload["stream"] = True
         request_payload["stream_options"] = {"include_usage": True}
         response_payload: dict[str, object] = {}
         usage: dict[str, object] = {}
         pieces: list[str] = []
+        tool_args: dict[int, str] = {}
+        tool_names: dict[int, str] = {}
         try:
             if self.capacity_gate is not None:
                 capacity_token = self.capacity_gate.acquire()
@@ -947,9 +977,17 @@ class DeepSeekChatModel:
                             and isinstance(choices[0], dict)
                             else None
                         )
-                        content = (
-                            message.get("content") if isinstance(message, dict) else None
-                        )
+                        content = message.get("content") if isinstance(message, dict) else None
+                        if tools:
+                            calls = (
+                                message.get("tool_calls")
+                                if isinstance(message, dict)
+                                else None
+                            )
+                            content = _arguments_content(
+                                calls,
+                                expected_tool_name=_forced_tool_name(tool_choice),
+                            )
                         if not isinstance(content, str) or not content:
                             raise ValueError("model response content must be non-empty")
                         mark_model_request_first_token(request_span)
@@ -978,19 +1016,57 @@ class DeepSeekChatModel:
                             choice = choices[0]
                             delta = choice.get("delta") if isinstance(choice, dict) else None
                             content = delta.get("content") if isinstance(delta, dict) else None
-                            if not isinstance(content, str) or not content:
+                            if isinstance(content, str) and content:
+                                if not pieces:
+                                    mark_model_request_first_token(request_span)
+                                pieces.append(content)
+                                if on_text_delta is not None:
+                                    callback_result = on_text_delta(content)
+                                    if inspect.isawaitable(callback_result):
+                                        await callback_result
                                 continue
-                            if not pieces:
-                                mark_model_request_first_token(request_span)
-                            pieces.append(content)
-                            if on_text_delta is not None:
-                                callback_result = on_text_delta(content)
-                                if inspect.isawaitable(callback_result):
-                                    await callback_result
+                            tool_calls = delta.get("tool_calls") if isinstance(delta, dict) else None
+                            if isinstance(tool_calls, list):
+                                if not tool_args:
+                                    mark_model_request_first_token(request_span)
+                                for call in tool_calls:
+                                    if not isinstance(call, dict):
+                                        continue
+                                    index = call.get("index", 0)
+                                    function = call.get("function")
+                                    if not isinstance(function, dict):
+                                        continue
+                                    name = function.get("name")
+                                    if isinstance(name, str) and name:
+                                        existing_name = tool_names.get(int(index))
+                                        if existing_name is not None and existing_name != name:
+                                            raise ValueError("model stream changed tool identity")
+                                        tool_names[int(index)] = name
+                                    arguments = function.get("arguments")
+                                    if isinstance(arguments, str):
+                                        tool_args.setdefault(int(index), "")
+                                        tool_args[int(index)] += arguments
+                                        if on_text_delta is not None:
+                                            callback_result = on_text_delta(arguments)
+                                            if inspect.isawaitable(callback_result):
+                                                await callback_result
             finally:
                 mark_model_request_completed(request_span)
             content = "".join(pieces)
-            if not content.strip():
+            if tools:
+                content = _arguments_content(
+                    [
+                        {
+                            "function": {
+                                "name": tool_names.get(index),
+                                "arguments": tool_args[index],
+                            }
+                        }
+                        for index in sorted(tool_args)
+                    ],
+                    expected_tool_name=_forced_tool_name(tool_choice),
+                )
+            if not content or not content.strip():
                 raise ValueError("model stream content must be a non-empty string")
         except asyncio.CancelledError as exc:
             cancellation_kind = str(exc.args[0]) if exc.args else "caller_cancelled"
@@ -1114,11 +1190,13 @@ class DeepSeekChatModel:
 
     async def _complete(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, object]],
         *,
         temperature: float,
         json_object: bool,
         include_usage: bool = False,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
     ) -> str | tuple[str, dict[str, object]]:
         started = monotonic()
         purpose = _MODEL_CALL_PURPOSE.get()
@@ -1133,6 +1211,8 @@ class DeepSeekChatModel:
                 messages,
                 temperature=temperature,
                 json_object=json_object,
+                tools=tools,
+                tool_choice=tool_choice,
             )
             request_span = mark_model_request_emitted()
             try:
@@ -1153,6 +1233,12 @@ class DeepSeekChatModel:
                 raise ValueError("model response choices must be a non-empty list")
             message = choices[0].get("message") if isinstance(choices[0], dict) else None
             content = message.get("content") if isinstance(message, dict) else None
+            if tools:
+                calls = message.get("tool_calls") if isinstance(message, dict) else None
+                content = _arguments_content(
+                    calls,
+                    expected_tool_name=_forced_tool_name(tool_choice),
+                )
             if not isinstance(content, str) or not content.strip():
                 raise ValueError("model response content must be a non-empty string")
         except asyncio.CancelledError as exc:
@@ -1389,14 +1475,17 @@ class OpenAICompatibleChatModel(DeepSeekChatModel):
             circuit_breaker=circuit_breaker,
             capacity_gate=capacity_gate,
             client=resolved_client,
+            max_completion_tokens=max_completion_tokens,
         )
 
     def request_payload(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, object]],
         *,
         temperature: float,
         json_object: bool = False,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
     ) -> dict[str, object]:
         del temperature
         payload: dict[str, object] = {
@@ -1412,7 +1501,11 @@ class OpenAICompatibleChatModel(DeepSeekChatModel):
         # means the route deliberately omits this optional capability.
         if self.reasoning_effort:
             payload["reasoning_effort"] = self.reasoning_effort
-        if json_object:
+        if tools:
+            payload["tools"] = tools
+            if tool_choice is not None:
+                payload["tool_choice"] = tool_choice
+        elif json_object:
             payload["response_format"] = {"type": "json_object"}
         return payload
 
@@ -1654,6 +1747,48 @@ def _usage_int(source: dict[str, object], key: str) -> int:
     return max(0, int(value)) if isinstance(value, (int, float)) else 0
 
 
+def _forced_tool_name(tool_choice: object | None) -> str | None:
+    if not isinstance(tool_choice, dict):
+        return None
+    function = tool_choice.get("function")
+    if not isinstance(function, dict):
+        return None
+    name = function.get("name")
+    return name if isinstance(name, str) and name else None
+
+
+def _arguments_content(
+    calls: object,
+    *,
+    expected_tool_name: str | None = None,
+) -> str | None:
+    """Extract one identity-checked tool call's arguments as reply bytes.
+
+    Tool calling carries the reply in ``message.tool_calls[].function.arguments``
+    instead of ``message.content``. The forced single-tool path returns that
+    arguments string; multi-tool responses are not synthesized here (the
+    author adapter owns contract composition).
+    """
+
+    if not isinstance(calls, list) or not calls:
+        return None
+    if len(calls) != 1:
+        raise ValueError("model response must contain exactly one tool call")
+    first = calls[0]
+    if not isinstance(first, dict):
+        return None
+    function = first.get("function")
+    if not isinstance(function, dict):
+        return None
+    name = function.get("name")
+    if expected_tool_name is not None and name != expected_tool_name:
+        raise ValueError("model response used an unexpected tool identity")
+    arguments = function.get("arguments")
+    if not isinstance(arguments, str) or not arguments.strip():
+        return None
+    return arguments
+
+
 def _provider_usage_int(source: dict[str, object], key: str) -> int:
     value = source.get(key)
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
@@ -1685,6 +1820,46 @@ class FakeCompanionModel:
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         self.calls.append(messages)
         joined = "\n".join(message["content"] for message in messages)
+        # The unified inbound contract is both an appraisal and an expression
+        # prompt.  Match its explicit simultaneous-pass marker before the
+        # narrower historical fixture branches below; otherwise the word
+        # ``AppraisalDraft`` makes this fake return only half of the required
+        # object and masks a healthy CharacterInterior route as a provider
+        # failure.
+        if (
+            "one simultaneous cognition pass" in joined
+            and "appraisal_draft" in joined
+            and "expression_draft" in joined
+        ):
+            return json.dumps(
+                {
+                    "appraisal_draft": {
+                        "appraise": False,
+                        "brief_rationale": "Fake simulator leaves this as an ordinary interaction.",
+                        "behavior_tendency": "observe",
+                        "stance": "open",
+                        "display_strategy": "natural",
+                        "confidence": 3000,
+                    },
+                    "expression_draft": {
+                        "private_turn_state": {
+                            "inner_state_summary": (
+                                "The current message feels like an ordinary invitation "
+                                "to stay present."
+                            ),
+                            "attended_source_refs": [],
+                        },
+                        "timing_choice": "now",
+                        "beats": [{"modality": "text", "text": "我在，刚刚这句我有接到。"}],
+                        "cadence": "conversational",
+                        "stance": "open",
+                        "brief_rationale": "Fake World v2 expression for an end-to-end turn.",
+                        "confidence": 6000,
+                        "world_claims": [],
+                    },
+                },
+                ensure_ascii=False,
+            )
         if "AffectDraft" in joined:
             return json.dumps(
                 {
@@ -1732,36 +1907,6 @@ class FakeCompanionModel:
                     "v": [],
                     "p": [],
                     "r": "Fake simulator accepts its source-free fixture reply.",
-                },
-                ensure_ascii=False,
-            )
-        if "exactly two keys: appraisal_draft and expression_draft" in joined:
-            return json.dumps(
-                {
-                    "appraisal_draft": {
-                        "appraise": False,
-                        "brief_rationale": "Fake simulator leaves this as an ordinary interaction.",
-                        "behavior_tendency": "observe",
-                        "stance": "open",
-                        "display_strategy": "natural",
-                        "confidence": 3000,
-                    },
-                    "expression_draft": {
-                        "private_turn_state": {
-                            "inner_state_summary": (
-                                "The current message feels like an ordinary invitation "
-                                "to stay present."
-                            ),
-                            "attended_source_refs": [],
-                        },
-                        "timing_choice": "now",
-                        "beats": [{"modality": "text", "text": "我在，刚刚这句我有接到。"}],
-                        "cadence": "conversational",
-                        "stance": "open",
-                        "brief_rationale": "Fake World v2 expression for an end-to-end turn.",
-                        "confidence": 6000,
-                        "world_claims": [],
-                    },
                 },
                 ensure_ascii=False,
             )

@@ -1,62 +1,65 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import inspect
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-import json
 from pathlib import Path
 
 import pytest
+from world_v2_application import (
+    build_sqlite_world_v2_test_application,
+    compose_fixture_character_interior,
+    compose_fixture_character_purpose,
+)
 
+from companion_daemon.world_v2.activity_plan_runtime import (
+    ActivityPlanCommand,
+    ActivityPlanTransitionCommand,
+)
+from companion_daemon.world_v2.appearance_state import (
+    AppearanceStateRecordCommand,
+    VisibleAppearanceAttribute,
+)
+from companion_daemon.world_v2.character_interior.inbound_wire import (
+    _ExpressionDraftWire,
+)
 from companion_daemon.world_v2.deliberation import (
     ModelInput,
     ModelOutput,
     ModelRoute,
     RouteRequest,
 )
-from companion_daemon.world_v2.chat_model_deliberation_adapter import (
-    ChatModelDeliberationAdapter,
-    CompanionIdentityFrame,
+from companion_daemon.world_v2.event_ecology_media import EcologyPolicy
+from companion_daemon.world_v2.image_evidence_contract import (
+    CharacterMediaEvidenceV1,
+    ImageEvidenceV1,
 )
-from companion_daemon.world_v2.appraisal_chat_model_adapter import (
-    AppraisalDraftDeliberationAdapter,
-    FastAppraisalDraftDeliberationAdapter,
-)
-from companion_daemon.world_v2.affect_chat_model_adapter import AffectDraftDeliberationAdapter
-from companion_daemon.world_v2.relationship_draft_deliberation_adapter import (
-    RelationshipDraftDeliberationAdapter,
-)
+from companion_daemon.world_v2.image_evidence_runtime import ImageEvidenceDeclarationCommand
+from companion_daemon.world_v2.life_ecology_runtime import LifeEcologyRunResult
+from companion_daemon.world_v2.media_v2 import MediaNotRenderable, MediaPlanningResult
 from companion_daemon.world_v2.memory_retrieval import MemoryRetrievalCompiler
 from companion_daemon.world_v2.platform_action_executor import PlatformDispatchReceipt
+from companion_daemon.world_v2.private_image_evidence_contract import RecipientScopedImageEvidenceV1
+from companion_daemon.world_v2.private_image_evidence_runtime import (
+    RecipientScopedImageEvidenceDeclarationCommand,
+)
 from companion_daemon.world_v2.production_turn_application import (
+    LifeEcologyComposition,
     MediaContinuationComposition,
     MediaSelectionAcceptanceComposition,
     WorldV2TurnApplication,
     WorldV2TurnApplicationConfig,
     build_sqlite_world_v2_turn_application,
 )
-from companion_daemon.world_v2.activity_plan_runtime import (
-    ActivityPlanCommand,
-    ActivityPlanTransitionCommand,
+from companion_daemon.world_v2.runtime import WorldRuntime
+from companion_daemon.world_v2.schemas import (
+    ClockObservation,
+    ProjectionCursor,
+    ProviderMediaGrantBinding,
 )
-from companion_daemon.world_v2.image_evidence_contract import (
-    CharacterMediaEvidenceV1,
-    ImageEvidenceV1,
-)
-from companion_daemon.world_v2.image_evidence_runtime import ImageEvidenceDeclarationCommand
-from companion_daemon.world_v2.private_image_evidence_contract import RecipientScopedImageEvidenceV1
-from companion_daemon.world_v2.private_image_evidence_runtime import (
-    RecipientScopedImageEvidenceDeclarationCommand,
-)
-from companion_daemon.world_v2.appearance_state import (
-    AppearanceStateRecordCommand,
-    VisibleAppearanceAttribute,
-)
-from companion_daemon.world_v2.event_ecology_media import EcologyPolicy
-from companion_daemon.world_v2.life_ecology_runtime import LifeEcologyRunResult
-from companion_daemon.world_v2.media_v2 import MediaNotRenderable, MediaPlanningResult
-from companion_daemon.world_v2.production_turn_application import LifeEcologyComposition
-from companion_daemon.world_v2.schemas import ClockObservation, ProjectionCursor, ProviderMediaGrantBinding
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from companion_daemon.world_v2.visual_fact import (
     VisualFactContentV1,
@@ -68,6 +71,76 @@ from companion_daemon.world_v2.world_turn_runtime import InboundTurn
 
 NOW = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
 
+
+def _fixture_author_lineage(
+    request: object,
+    *,
+    model_id: str,
+) -> dict[str, object]:
+    """Give role-backed test faculties the same auditable author identity as production."""
+
+    identity = {
+        "inner_turn_id": request.inner_turn_id,  # type: ignore[attr-defined]
+        "phase": request.phase,  # type: ignore[attr-defined]
+        "purpose": request.purpose,  # type: ignore[attr-defined]
+        "recall_completed": request.recall_completed,  # type: ignore[attr-defined]
+        "correction_ordinal": request.correction_ordinal,  # type: ignore[attr-defined]
+    }
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    call_digest = hashlib.sha256(canonical.encode()).hexdigest()
+    parent_model_call_id = None
+    if request.correction_ordinal == 1:  # type: ignore[attr-defined]
+        parent = {**identity, "correction_ordinal": 0}
+        parent_digest = hashlib.sha256(
+            json.dumps(parent, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        parent_model_call_id = f"model-call:{model_id}:{parent_digest}"
+    return {
+        "model_id": model_id,
+        "model_version": f"{model_id}.1",
+        "model_call_id": f"model-call:{model_id}:{call_digest}",
+        "request_hash": f"sha256:{call_digest}",
+        "response_hash": "sha256:"
+        + hashlib.sha256(f"response:{call_digest}".encode()).hexdigest(),
+        "attempt_ordinal": request.correction_ordinal,  # type: ignore[attr-defined]
+        "parent_model_call_id": parent_model_call_id,
+    }
+
+
+def _build_application(
+    *,
+    inbound_author: object,
+    purpose_faculties: tuple[object, ...] = (),
+    media_character: object | None = None,
+    memory_character: object | None = None,
+    **builder_kwargs: object,
+) -> WorldV2TurnApplication:
+    """Compose the production seam explicitly, without retired role kwargs."""
+
+    faculties = list(purpose_faculties)
+    if media_character is not None:
+        faculties.append(
+            compose_fixture_character_purpose(
+                purpose="media_selection",
+                provider=media_character,
+            )
+        )
+    if memory_character is not None:
+        faculties.extend(
+            compose_fixture_character_purpose(purpose=purpose, provider=memory_character)
+            for purpose in (
+                "fact_memory_retention",
+                "experience_memory_retention",
+                "memory_withdrawal_review",
+            )
+        )
+    return build_sqlite_world_v2_test_application(
+        character_interior=compose_fixture_character_interior(
+            inbound_author=inbound_author,
+            purpose_faculties=tuple(faculties),
+        ),
+        **builder_kwargs,
+    )
 
 class _Identities:
     def resolve(self, *, platform: str, platform_user_id: str) -> tuple[str, str]:
@@ -91,9 +164,6 @@ class _InvalidModel:
         return ModelOutput(model_id="test-main", model_version="test.1", raw_proposal={})
 
 
-class _InvalidQuick:
-    async def recover(self, _request: ModelInput, _failure: str) -> ModelOutput:
-        return ModelOutput(model_id="test-quick", model_version="test.1", raw_proposal={})
 
 
 class _AuthorityShapedLifeModel:
@@ -101,25 +171,45 @@ class _AuthorityShapedLifeModel:
 
     async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
         del temperature
-        capsule = json.loads(messages[-1]["content"])
-        openings = capsule.get("openings", [])
+        material = json.loads(messages[1]["content"])
+        capability = material["capability_manifest"]
+        openings = capability["payload"].get("openings", [])
+        selected = None
         for phrase in (
-            "outside interruption", "previously paused", "private shared",
-            "user-influenced", "replacement plan",
+            "outside interruption",
+            "previously paused",
+            "private shared",
+            "user-influenced",
+            "replacement plan",
         ):
             selected = next(
-                (
-                    item for item in openings
-                    if phrase in str(item.get("safe_summary", ""))
-                ),
+                (item for item in openings if phrase in str(item.get("safe_summary", ""))),
                 None,
             )
             if selected is not None:
-                return json.dumps({
-                    "decision": "select",
-                    "opening_token": selected["opening_token"],
-                })
-        return '{"decision":"no_op"}'
+                break
+        decision = (
+            {
+                "decision": "select",
+                "selected_token": selected["opening_token"],
+            }
+            if selected is not None
+            else {"decision": "no_op"}
+        )
+        return json.dumps(
+            {
+                "status": "decision",
+                "summary": "角色根据当前活动状态作出本次生命周期选择。",
+                "attended_source_refs": [],
+                "decision": {
+                    "source_refs": capability["source_refs"],
+                    "payload": decision,
+                },
+                "recall_query": None,
+                "proposals": [],
+            },
+            ensure_ascii=False,
+        )
 
 
 class _Transport:
@@ -142,17 +232,44 @@ class _MediaTransport:
         return None
 
 
+def _fixture_observation_ref(messages: list[dict[str, str]]) -> str:
+    for message in messages:
+        try:
+            material = json.loads(message["content"])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(material, dict):
+            continue
+        trigger = material.get("current_trigger_message")
+        if isinstance(trigger, dict) and isinstance(trigger.get("observation_ref"), str):
+            return trigger["observation_ref"]
+    raise AssertionError("fixture expression call omitted the pinned observation")
+
+
 class _DraftChatModel:
     model = "test-flash"
 
-    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+    async def complete(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
         del temperature
+        observation_ref = _fixture_observation_ref(messages)
         return json.dumps(
             {
-                "response_text": "嗯，我刚刚有点飘走了。你继续说，我在听。",
+                "private_turn_state": {
+                    "contract": "private-turn-state.1",
+                    "inner_state_summary": "我意识到刚才没接住她，现在想认真回到这句话里。",
+                    "attended_source_refs": [observation_ref],
+                },
+                "timing_choice": "now",
+                "beats": [
+                    {
+                        "modality": "text",
+                        "text": "嗯，我刚刚有点飘走了。你继续说，我在听。",
+                    }
+                ],
                 "stance": "acknowledge_briefly",
                 "brief_rationale": "Own the missed connection without adding a world claim.",
                 "confidence": 7200,
+                "world_claims": [],
             },
             ensure_ascii=False,
         )
@@ -161,10 +278,16 @@ class _DraftChatModel:
 class _NaturalCurrentReportUptakeChatModel:
     model = "test-natural-current-report-uptake"
 
-    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+    async def complete(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
         del temperature
+        observation_ref = _fixture_observation_ref(messages)
         return json.dumps(
             {
+                "private_turn_state": {
+                    "contract": "private-turn-state.1",
+                    "inner_state_summary": "她终于做完那件麻烦事，我替她松了口气，也想听听收尾。",
+                    "attended_source_refs": [observation_ref],
+                },
                 "timing_choice": "now",
                 "beats": [
                     {
@@ -184,10 +307,16 @@ class _NaturalCurrentReportUptakeChatModel:
 class _TwoBeatChatModel:
     model = "test-flash-two-beat"
 
-    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+    async def complete(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
         del temperature
+        observation_ref = _fixture_observation_ref(messages)
         return json.dumps(
             {
+                "private_turn_state": {
+                    "contract": "private-turn-state.1",
+                    "inner_state_summary": "我想把此刻完整的一点想法自然拆成两条说。",
+                    "attended_source_refs": [observation_ref],
+                },
                 "timing_choice": "now",
                 "beats": [
                     {"modality": "text", "text": "第一句。"},
@@ -195,6 +324,7 @@ class _TwoBeatChatModel:
                 ],
                 "stance": "continue_naturally",
                 "brief_rationale": "A thought is naturally split across two messages.",
+                "world_claims": [],
             },
             ensure_ascii=False,
         )
@@ -206,10 +336,16 @@ class _LaterDraftChatModel:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+    async def complete(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
         del temperature
         self.calls += 1
+        observation_ref = _fixture_observation_ref(messages)
         return json.dumps({
+            "private_turn_state": {
+                "contract": "private-turn-state.1",
+                "inner_state_summary": "我愿意晚一点再自然接上这句话。",
+                "attended_source_refs": [observation_ref],
+            },
             "timing_choice": "later",
             "beats": [{"modality": "text", "text": "那就先这样，等你忙完再聊。"}],
             "delay_seconds": 60,
@@ -217,40 +353,12 @@ class _LaterDraftChatModel:
             "stance": "defer",
             "brief_rationale": "当前活动结束后再自然接续",
             "confidence": 7200,
+            "world_claims": [],
         }, ensure_ascii=False)
 
 
-class _NeverProactiveModel:
-    model = "test-proactive-must-remain-idle"
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
-        del temperature
-        self.calls += 1
-        raise AssertionError("a materialized deferred Thread must not authorize a duplicate send")
 
 
-class _AfterthoughtSeekingBackgroundModel:
-    """Would always append a tail if the retired production lane called it."""
-
-    model = "test-afterthought-seeking-background"
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
-        del temperature
-        self.calls += 1
-        return json.dumps(
-            {
-                "afterthought": True,
-                "impulse_summary": "又想到一个问题",
-                "text": "那你平时还会做什么？",
-            },
-            ensure_ascii=False,
-        )
 
 
 class _TimingDraftChatModel:
@@ -260,10 +368,16 @@ class _TimingDraftChatModel:
         self.choice = choice
         self.calls = 0
 
-    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+    async def complete(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
         del temperature
         self.calls += 1
+        observation_ref = _fixture_observation_ref(messages)
         value = {
+            "private_turn_state": {
+                "contract": "private-turn-state.1",
+                "inner_state_summary": "我注意到这句，并按自己此刻的意愿选择是否回应。",
+                "attended_source_refs": [observation_ref],
+            },
             "timing_choice": self.choice,
             "beats": [] if self.choice == "silent" else [
                 {"modality": "text", "text": "我在。"}
@@ -271,6 +385,7 @@ class _TimingDraftChatModel:
             "stance": "answer_without_world_claims",
             "brief_rationale": "同一轮选择表达时机",
             "confidence": 7000,
+            "world_claims": [],
         }
         return json.dumps(value, ensure_ascii=False)
 
@@ -288,13 +403,19 @@ class _SequenceTimingDraftChatModel:
         self.private_turn_state = private_turn_state
         self.calls = 0
 
-    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+    async def complete(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
         del temperature
         choice = self.choices[self.calls]
         self.calls += 1
-        value: dict[str, object] = {}
-        if self.private_turn_state is not None:
-            value["private_turn_state"] = self.private_turn_state
+        observation_ref = _fixture_observation_ref(messages)
+        value: dict[str, object] = {
+            "private_turn_state": self.private_turn_state
+            or {
+                "contract": "private-turn-state.1",
+                "inner_state_summary": "我在重新判断这句话现在还要不要接。",
+                "attended_source_refs": [observation_ref],
+            }
+        }
         value.update({
             "timing_choice": choice,
             "beats": [] if choice == "silent" else [
@@ -303,6 +424,7 @@ class _SequenceTimingDraftChatModel:
             "stance": "defer" if choice == "later" else "answer_without_world_claims",
             "brief_rationale": "测试同一主草案的时机选择",
             "confidence": 7000,
+            "world_claims": [],
         })
         if choice == "later":
             value.update(delay_seconds=60, expires_after_seconds=600)
@@ -310,8 +432,37 @@ class _SequenceTimingDraftChatModel:
 
 
 class _CancelReviewer:
-    async def review(self, **_kwargs):  # type: ignore[no-untyped-def]
-        return "cancel"
+    name = "fixture-expression-reconsideration-cancel"
+    purposes = ("expression_reconsideration",)
+    requires_author_lineage = True
+
+    async def experience(self, request):  # type: ignore[no-untyped-def]
+        return {
+            "status": "no_change",
+            "summary": "fixture observed interruption",
+            "author_lineage": _fixture_author_lineage(request, model_id=self.name),
+        }
+
+    async def consider(self, request):  # type: ignore[no-untyped-def]
+        manifest = request.capability_manifest
+        assert manifest is not None
+        return {
+            "status": "decision",
+            "summary": "新消息已经撤回了旧请求，我不再发送旧消息。",
+            "attended_source_refs": (),
+            "author_lineage": _fixture_author_lineage(request, model_id=self.name),
+            "decision": {
+                "contract": "character-interior-purpose-decision.1",
+                "purpose": "expression_reconsideration",
+                "source_refs": list(manifest.source_refs),
+                "capability_ref": manifest.capability_ref,
+                "capability_payload_hash": manifest.payload_hash,
+                "payload": {
+                    "contract": ("character-interior-expression-reconsideration-decision.1"),
+                    "disposition": "cancel",
+                },
+            },
+        }
 
 
 class _NoOpMediaSelectionModel:
@@ -397,217 +548,22 @@ class _DeliveredTransport:
         return None
 
 
-class _NoChangeAppraisalChat:
-    model = "test-appraiser"
-
-    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
-        del temperature
-        return json.dumps(
-            {
-                "appraise": False,
-                "brief_rationale": "The ordinary message does not warrant a durable relational interpretation.",
-                "behavior_tendency": "observe",
-                "stance": "wait",
-                "display_strategy": "withhold",
-                "confidence": 3000,
-            }
-        )
 
 
-class _AppraisingChat:
-    model = "test-appraiser"
-
-    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
-        del temperature
-        return json.dumps(
-            {
-                "appraise": True,
-                "brief_rationale": "The user may be disappointed, but the interpretation remains fallible.",
-                "behavior_tendency": "hold_space",
-                "stance": "attend",
-                "display_strategy": "withhold",
-                "confidence": 7600,
-                "meanings": [{"meaning": "disappointment", "confidence": 7600}],
-                "attribution": "user",
-                "severity": 6000,
-            }
-        )
 
 
-class _ImmediateEmotionChat:
-    model = "test-immediate-emotion"
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
-        del temperature
-        self.calls += 1
-        return json.dumps(
-            {
-                "appraise": True,
-                "affect": "open",
-                "brief_rationale": "The insult creates an immediate but suppressible wound.",
-                "behavior_tendency": "set_boundary",
-                "stance": "attend_with_distance",
-                "display_strategy": "restrained_boundary",
-                "confidence": 8400,
-                "meanings": [
-                    {"meaning": "boundary_violation", "confidence": 8200},
-                    {"meaning": "misunderstanding", "confidence": 1800},
-                ],
-                "attribution": "user",
-                "severity": 7800,
-                "components": [
-                    {"dimension": "hurt", "target_intensity_bp": 6200},
-                    {"dimension": "anger", "target_intensity_bp": 4100},
-                ],
-            }
-        )
 
 
-class _LocalQwenEmotionChat:
-    """A valid response in the deployed small-model contract."""
-
-    model = "mlx-community/Qwen3-1.7B-4bit"
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
-        del temperature
-        self.calls += 1
-        return json.dumps(
-            {
-                "appraise": True,
-                "brief_rationale": "角色把这次落空理解成了一次关系上的失望。",
-                "behavior_tendency": "先消化这份失落",
-                "stance": "保留但在意",
-                "display_strategy": "暂时克制",
-                "confidence": 7600,
-                "meaning": "disappointment",
-                "attribution": "user",
-                "severity": 7200,
-                "open_affect": True,
-                "affect_dimension": "sadness",
-                "affect_target_intensity_bp": 6400,
-            },
-            ensure_ascii=False,
-        )
 
 
-class _OpenAffectChat:
-    model = "test-affect"
-
-    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
-        del temperature
-        return json.dumps(
-            {
-                "affect": "open",
-                "brief_rationale": "The accepted appraisal warrants a bounded residual hurt episode.",
-                "behavior_tendency": "hold_space",
-                "stance": "care_despite_hurt",
-                "display_strategy": "partial_disclosure",
-                "confidence": 7200,
-                "components": [{"dimension": "hurt", "target_intensity_bp": 4200}],
-            }
-        )
 
 
-class _NeverCalledAffectChat:
-    model = "test-background-affect-must-not-run"
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
-        del temperature
-        self.calls += 1
-        raise AssertionError("same-turn affect must reuse the appraisal model result")
 
 
-class _RelationshipSignalChat:
-    """Suggest one bounded first relationship signal; never names a subject."""
-
-    model = "test-relationship"
-
-    def __init__(self) -> None:
-        self.messages: list[object] = []
-
-    async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
-        assert temperature == 0.2
-        self.messages.append(messages)
-        return json.dumps(
-            {
-                "decision": "signal",
-                "signal_code": "reliability_follow_through",
-                "confidence_bp": 7400,
-                "persistence": "durable",
-                "rationale_code": "accepted_reliability_evidence",
-                "suggested_deltas": {
-                    "trust_bp": 240,
-                    "closeness_bp": 40,
-                    "respect_bp": 160,
-                    "reliability_bp": 260,
-                    "mutuality_bp": 20,
-                    "repair_confidence_bp": 0,
-                },
-            }
-        )
 
 
-class _ContinuityAwareRelationshipChat(_RelationshipSignalChat):
-    """Fixture role model that chooses a change only from verified continuity."""
-
-    async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
-        assert temperature == 0.2
-        self.messages.append(messages)
-        capsule = json.loads(messages[1]["content"])
-        continuity = capsule.get("interaction_continuity")
-        if not isinstance(continuity, dict) or continuity.get("counterpart_turn_count", 0) < 2:
-            return '{"decision":"no_change"}'
-        return json.dumps(
-            {
-                "decision": "signal",
-                "signal_code": "ongoing_exchange_mattered",
-                "confidence_bp": 6800,
-                "persistence": "session",
-                "rationale_code": "character_interpreted_continuity",
-                "suggested_deltas": {
-                    "trust_bp": 0,
-                    "closeness_bp": 80,
-                    "respect_bp": 0,
-                    "reliability_bp": 0,
-                    "mutuality_bp": 100,
-                    "repair_confidence_bp": 0,
-                },
-            }
-        )
 
 
-class _RelationshipStrongSignalChat(_RelationshipSignalChat):
-    """Fixture-only evidence whose bounded accumulation crosses each stage gate."""
-
-    async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
-        assert temperature == 0.2
-        self.messages.append(messages)
-        return json.dumps(
-            {
-                "decision": "signal",
-                "signal_code": "reliability_follow_through",
-                "confidence_bp": 7400,
-                "persistence": "durable",
-                "rationale_code": "accepted_reliability_evidence",
-                "suggested_deltas": {
-                    "trust_bp": 500,
-                    "closeness_bp": 500,
-                    "respect_bp": 500,
-                    "reliability_bp": 500,
-                    "mutuality_bp": 500,
-                    "repair_confidence_bp": 500,
-                },
-            }
-        )
 
 
 class _FactChat:
@@ -662,9 +618,47 @@ def _config() -> WorldV2TurnApplicationConfig:
     )
 
 
-def test_character_agency_side_verticals_are_opt_in_by_default() -> None:
-    assert _config().quick_reaction_enabled is False
 
+
+def test_retired_quick_reaction_switch_is_not_a_production_config_surface() -> None:
+    assert "quick_reaction_enabled" not in WorldV2TurnApplicationConfig.__dataclass_fields__
+
+
+def test_legacy_two_author_episode_on_is_not_a_live_application_mode() -> None:
+    with pytest.raises(
+        ValueError,
+        match="expression episode mode must be off, shadow, or stream",
+    ):
+        replace(_config(), expression_episode_mode="on")  # type: ignore[arg-type]
+
+
+def test_runtime_has_no_legacy_two_author_episode_execution_branch() -> None:
+    source = inspect.getsource(WorldRuntime)
+
+    assert "_resolve_expression_episode_before_dispatch" not in source
+    assert 'expression_episode_mode == "on"' not in source
+    assert 'mode == "on"' not in source
+
+
+def test_retired_independent_character_lanes_are_not_production_builder_surfaces() -> None:
+    builder_parameters = inspect.signature(
+        build_sqlite_world_v2_turn_application
+    ).parameters
+
+    assert not {
+        "interaction_bid_model",
+        "read_only_tool_model",
+        "read_only_tool_transport",
+        "legacy_event_media_planner",
+        "event_media_result_store",
+    } & set(builder_parameters)
+    assert not {
+        "interaction_bid_worker_owner",
+        "tool_account_id",
+        "tool_window_id",
+        "tool_budget_limit",
+        "tool_worker_owner",
+    } & set(WorldV2TurnApplicationConfig.__dataclass_fields__)
 
 @pytest.mark.asyncio
 async def test_async_close_defers_shared_store_close_until_deliberation_is_quiescent() -> None:
@@ -724,16 +718,13 @@ async def test_production_reply_does_not_open_the_retired_afterthought_side_lane
 ) -> None:
     """A settled reply leaves later expression to existing character-owned lanes."""
 
-    background = _AfterthoughtSeekingBackgroundModel()
-    adapter = ChatModelDeliberationAdapter(model=_TimingDraftChatModel("now"))
-    app = build_sqlite_world_v2_turn_application(
+    adapter = _ExpressionDraftWire(model=_TimingDraftChatModel("now"))
+    app = _build_application(
         path=tmp_path / "retired-afterthought-side-lane.sqlite",
         config=_config(),
         identities=_Identities(),
         router=_Router(),
-        main_model=adapter,
-        quick_recovery=adapter,
-        proactive_model=background,
+        inbound_author=adapter,
         transport=_DeliveredTransport(received_at=NOW),
         now=NOW,
     )
@@ -769,10 +760,8 @@ async def test_production_reply_does_not_open_the_retired_afterthought_side_lane
     finally:
         app.close()
 
-    assert background.calls == 0
     assert not any(
-        item.process_kind == "afterthought_author"
-        for item in projection.trigger_processes
+        item.process_kind == "afterthought_author" for item in projection.trigger_processes
     )
     assert not any(item.kind == "followup" for item in projection.actions)
 
@@ -783,26 +772,33 @@ def test_media_continuation_composition_bootstraps_separate_accounts_and_restart
     path = tmp_path / "world-v2-media-continuation-composition.sqlite"
     continuation = MediaContinuationComposition(
         render_grant=ProviderMediaGrantBinding(grant_id="grant:render", grant_revision=1),
-        render_account_id="account:media-render", render_window_id="window:media-render",
-        render_account_limit=7, render_amount_limit=2,
-        inspection_grant=ProviderMediaGrantBinding(
-            grant_id="grant:inspection", grant_revision=1
-        ),
+        render_account_id="account:media-render",
+        render_window_id="window:media-render",
+        render_account_limit=7,
+        render_amount_limit=2,
+        inspection_grant=ProviderMediaGrantBinding(grant_id="grant:inspection", grant_revision=1),
         inspection_account_id="account:media-inspection",
         inspection_window_id="window:media-inspection",
-        inspection_account_limit=5, inspection_amount_limit=1,
+        inspection_account_limit=5,
+        inspection_amount_limit=1,
     )
     config = WorldV2TurnApplicationConfig(
         world_id="world:media-continuation-composition",
-        companion_actor_ref="agent:companion", reply_target="user:user.1",
+        companion_actor_ref="agent:companion",
+        reply_target="user:user.1",
         action_pump_owner="pump:media-continuation-composition",
         media_continuation=continuation,
     )
     for _restart in range(2):
-        app = build_sqlite_world_v2_turn_application(
-            path=path, config=config, identities=_Identities(), router=_Router(),
-            main_model=_InvalidModel(), quick_recovery=_InvalidQuick(),
-            transport=_Transport(), media_transport=_MediaTransport(), now=NOW,
+        app = _build_application(
+            path=path,
+            config=config,
+            identities=_Identities(),
+            router=_Router(),
+            inbound_author=_InvalidModel(),
+            transport=_Transport(),
+            media_transport=_MediaTransport(),
+            now=NOW,
         )
         try:
             projection = app._ledger.project()  # noqa: SLF001 - composition assertion
@@ -824,7 +820,9 @@ def _life_ecology_config() -> WorldV2TurnApplicationConfig:
     )
 
 
-def test_media_selection_acceptance_configuration_bootstraps_its_image_account(tmp_path: Path) -> None:
+def test_media_selection_acceptance_configuration_bootstraps_its_image_account(
+    tmp_path: Path,
+) -> None:
     config = WorldV2TurnApplicationConfig(
         world_id="world:media-selection-acceptance-config",
         companion_actor_ref="agent:companion",
@@ -833,17 +831,27 @@ def test_media_selection_acceptance_configuration_bootstraps_its_image_account(t
         event_ecology_policy=EcologyPolicy(),
         media_selection_acceptance=MediaSelectionAcceptanceComposition(
             grant=ProviderMediaGrantBinding(grant_id="grant:media", grant_revision=1),
-            account_id="account:media", account_window_id="window:media", account_limit=5,
+            account_id="account:media",
+            account_window_id="window:media",
+            account_limit=5,
             amount_limit=1,
         ),
     )
-    app = build_sqlite_world_v2_turn_application(
-        path=tmp_path / "media-selection-acceptance-config.sqlite", config=config,
-        identities=_Identities(), router=_Router(), main_model=_InvalidModel(),
-        quick_recovery=_InvalidQuick(), transport=_Transport(), now=NOW,
+    app = _build_application(
+        path=tmp_path / "media-selection-acceptance-config.sqlite",
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        inbound_author=_InvalidModel(),
+        transport=_Transport(),
+        now=NOW,
     )
     try:
-        account = next(item for item in app._ledger.project().budget_accounts if item.account_id == "account:media")  # type: ignore[attr-defined]
+        account = next(
+            item
+            for item in app._ledger.project().budget_accounts
+            if item.account_id == "account:media"
+        )  # type: ignore[attr-defined]
         assert account.category == "image"
         assert account.limit == 5
     finally:
@@ -854,13 +862,12 @@ async def test_production_life_ecology_profile_claims_one_clock_wake_without_wri
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "life-ecology.sqlite"
-    app = build_sqlite_world_v2_turn_application(
+    app = _build_application(
         path=path,
         config=_life_ecology_config(),
         identities=_Identities(),
         router=_Router(),
-        main_model=_InvalidModel(),
-        quick_recovery=_InvalidQuick(),
+        inbound_author=_InvalidModel(),
         transport=_Transport(),
         now=NOW,
     )
@@ -899,61 +906,92 @@ async def test_production_authority_shaped_life_openings_cover_shared_interrupti
 ) -> None:
     config = WorldV2TurnApplicationConfig(
         world_id="world:authority-shaped-life",
-        companion_actor_ref="agent:companion", reply_target="user:user.1",
+        companion_actor_ref="agent:companion",
+        reply_target="user:user.1",
         action_pump_owner="pump:authority-shaped-life",
         life_ecology=LifeEcologyComposition.production_v1(),
     )
-    app = build_sqlite_world_v2_turn_application(
-        path=tmp_path / "authority-shaped-life.sqlite", config=config,
-        identities=_Identities(), router=_Router(), main_model=_InvalidModel(),
-        quick_recovery=_InvalidQuick(), transport=_Transport(),
-        activity_lifecycle_model=_AuthorityShapedLifeModel(), now=NOW,
+    app = _build_application(
+        path=tmp_path / "authority-shaped-life.sqlite",
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        inbound_author=_InvalidModel(),
+        purpose_faculties=(
+            compose_fixture_character_purpose(
+                purpose="activity_lifecycle_choice",
+                provider=_AuthorityShapedLifeModel(),
+            ),
+        ),
+        transport=_Transport(),
+        now=NOW,
     )
     try:
-        await app.respond(InboundTurn(
-            platform="test", platform_user_id="user.1",
-            platform_message_id="message:shared-plan",
-            text="我们晚点一起安静看一会儿书。", observed_at=NOW,
-            trace_id="trace:authority-shaped:plan-source",
-        ))
-        await app.plan_activity(ActivityPlanCommand(
-            command_id="command:shared-plan", world_id=config.world_id,
-            source_observation_id="observation:test:user.1:message:shared-plan",
-            plan_id="plan:shared-private", activity_id="activity:shared-private",
-            activity_kind="shared.quiet_reading", importance_bp=5_000,
-            participant_refs=("user:user.1",), privacy_class="private",
-            policy_refs=(
-                "matrix:domain:family_roommate_friend",
-                "matrix:social:shared_private",
-                "matrix:source:user_influence",
+        await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:shared-plan",
+                text="我们晚点一起安静看一会儿书。",
+                observed_at=NOW,
+                trace_id="trace:authority-shaped:plan-source",
+            )
+        )
+        await app.plan_activity(
+            ActivityPlanCommand(
+                command_id="command:shared-plan",
+                world_id=config.world_id,
+                source_observation_id="observation:test:user.1:message:shared-plan",
+                plan_id="plan:shared-private",
+                activity_id="activity:shared-private",
+                activity_kind="shared.quiet_reading",
+                importance_bp=5_000,
+                participant_refs=("user:user.1",),
+                privacy_class="private",
+                policy_refs=(
+                    "matrix:domain:family_roommate_friend",
+                    "matrix:social:shared_private",
+                    "matrix:source:user_influence",
+                ),
             ),
-        ), logical_time=NOW, created_at=NOW,
+            logical_time=NOW,
+            created_at=NOW,
             trace_id="trace:authority-shaped:plan",
             causation_id="cause:authority-shaped:plan",
-            correlation_id="correlation:authority-shaped")
+            correlation_id="correlation:authority-shaped",
+        )
 
         await app.tick(
-            tick_id="authority-shaped:start", logical_time_from=NOW,
+            tick_id="authority-shaped:start",
+            logical_time_from=NOW,
             logical_time_to=NOW + timedelta(minutes=1),
             observed_at=NOW + timedelta(minutes=1),
-            trace_id="trace:authority-shaped:start", causation_id="scheduler:test",
-            correlation_id="correlation:authority-shaped", reason="test",
+            trace_id="trace:authority-shaped:start",
+            causation_id="scheduler:test",
+            correlation_id="correlation:authority-shaped",
+            reason="test",
         )
         assert app._ledger.project().plans[0].status == "active"  # noqa: SLF001
 
-        await app.respond(InboundTurn(
-            platform="test", platform_user_id="user.1",
-            platform_message_id="message:interrupt",
-            text="等等，我突然想先说件事。", observed_at=NOW + timedelta(minutes=1),
-            trace_id="trace:authority-shaped:interrupt-source",
-        ))
+        await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:interrupt",
+                text="等等，我突然想先说件事。",
+                observed_at=NOW + timedelta(minutes=1),
+                trace_id="trace:authority-shaped:interrupt-source",
+            )
+        )
         await app.tick(
             tick_id="authority-shaped:pause",
             logical_time_from=NOW + timedelta(minutes=1),
             logical_time_to=NOW + timedelta(minutes=2),
             observed_at=NOW + timedelta(minutes=2),
-            trace_id="trace:authority-shaped:pause", causation_id="scheduler:test",
-            correlation_id="correlation:authority-shaped", reason="test",
+            trace_id="trace:authority-shaped:pause",
+            causation_id="scheduler:test",
+            correlation_id="correlation:authority-shaped",
+            reason="test",
         )
         assert app._ledger.project().plans[0].status == "paused"  # noqa: SLF001
 
@@ -962,14 +1000,17 @@ async def test_production_authority_shaped_life_openings_cover_shared_interrupti
             logical_time_from=NOW + timedelta(minutes=2),
             logical_time_to=NOW + timedelta(minutes=3),
             observed_at=NOW + timedelta(minutes=3),
-            trace_id="trace:authority-shaped:resume", causation_id="scheduler:test",
-            correlation_id="correlation:authority-shaped", reason="test",
+            trace_id="trace:authority-shaped:resume",
+            causation_id="scheduler:test",
+            correlation_id="correlation:authority-shaped",
+            reason="test",
         )
         projection = app._ledger.project()  # noqa: SLF001
         assert projection.plans[0].status == "active"
         events = app._ledger.export_replay_evidence().events  # noqa: SLF001
         effects = [
-            item.event.payload() for item in events
+            item.event.payload()
+            for item in events
             if item.event.event_type in {"ActivityStarted", "ActivityPaused", "ActivityResumed"}
         ]
         assert "matrix:social:shared_private" in effects[0]["policy_refs"]
@@ -987,59 +1028,99 @@ async def test_production_user_observation_replacement_becomes_optional_change_p
 ) -> None:
     config = WorldV2TurnApplicationConfig(
         world_id="world:authority-shaped-replacement",
-        companion_actor_ref="agent:companion", reply_target="user:user.1",
+        companion_actor_ref="agent:companion",
+        reply_target="user:user.1",
         action_pump_owner="pump:authority-shaped-replacement",
         life_ecology=LifeEcologyComposition.production_v1(),
     )
-    app = build_sqlite_world_v2_turn_application(
-        path=tmp_path / "authority-shaped-replacement.sqlite", config=config,
-        identities=_Identities(), router=_Router(), main_model=_InvalidModel(),
-        quick_recovery=_InvalidQuick(), transport=_Transport(),
-        activity_lifecycle_model=_AuthorityShapedLifeModel(), now=NOW,
+    app = _build_application(
+        path=tmp_path / "authority-shaped-replacement.sqlite",
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        inbound_author=_InvalidModel(),
+        purpose_faculties=(
+            compose_fixture_character_purpose(
+                purpose="activity_lifecycle_choice",
+                provider=_AuthorityShapedLifeModel(),
+            ),
+        ),
+        transport=_Transport(),
+        now=NOW,
     )
     try:
-        await app.respond(InboundTurn(
-            platform="test", platform_user_id="user.1",
-            platform_message_id="message:original-plan", text="晚点读会儿书。",
-            observed_at=NOW, trace_id="trace:replacement:original-source",
-        ))
-        await app.plan_activity(ActivityPlanCommand(
-            command_id="command:original-plan", world_id=config.world_id,
-            source_observation_id="observation:test:user.1:message:original-plan",
-            plan_id="plan:original", activity_id="activity:original",
-            activity_kind="study.reading", importance_bp=4_000,
-            privacy_class="personal",
-        ), logical_time=NOW, created_at=NOW, trace_id="trace:replacement:original",
-            causation_id="cause:replacement:original",
-            correlation_id="correlation:replacement")
-        await app.respond(InboundTurn(
-            platform="test", platform_user_id="user.1",
-            platform_message_id="message:replacement-plan",
-            text="改主意了，我们先出去走走。", observed_at=NOW,
-            trace_id="trace:replacement:new-source",
-        ))
-        await app.replace_activity(ActivityPlanCommand(
-            command_id="command:replacement-plan", world_id=config.world_id,
-            source_observation_id="observation:test:user.1:message:replacement-plan",
-            plan_id="plan:replacement", activity_id="activity:replacement",
-            activity_kind="commute.short_walk", importance_bp=5_000,
-            participant_refs=("user:user.1",), privacy_class="personal",
-            supersedes_plan_id="plan:original",
-            policy_refs=(
-                "matrix:deviation:change_plan",
-                "matrix:social:user_relayed",
-                "matrix:source:user_influence",
+        await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:original-plan",
+                text="晚点读会儿书。",
+                observed_at=NOW,
+                trace_id="trace:replacement:original-source",
+            )
+        )
+        await app.plan_activity(
+            ActivityPlanCommand(
+                command_id="command:original-plan",
+                world_id=config.world_id,
+                source_observation_id="observation:test:user.1:message:original-plan",
+                plan_id="plan:original",
+                activity_id="activity:original",
+                activity_kind="study.reading",
+                importance_bp=4_000,
+                privacy_class="personal",
             ),
-        ), predecessor_plan_id="plan:original", logical_time=NOW, created_at=NOW,
-            trace_id="trace:replacement:new", causation_id="cause:replacement:new",
-            correlation_id="correlation:replacement")
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:replacement:original",
+            causation_id="cause:replacement:original",
+            correlation_id="correlation:replacement",
+        )
+        await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:replacement-plan",
+                text="改主意了，我们先出去走走。",
+                observed_at=NOW,
+                trace_id="trace:replacement:new-source",
+            )
+        )
+        await app.replace_activity(
+            ActivityPlanCommand(
+                command_id="command:replacement-plan",
+                world_id=config.world_id,
+                source_observation_id="observation:test:user.1:message:replacement-plan",
+                plan_id="plan:replacement",
+                activity_id="activity:replacement",
+                activity_kind="commute.short_walk",
+                importance_bp=5_000,
+                participant_refs=("user:user.1",),
+                privacy_class="personal",
+                supersedes_plan_id="plan:original",
+                policy_refs=(
+                    "matrix:deviation:change_plan",
+                    "matrix:social:user_relayed",
+                    "matrix:source:user_influence",
+                ),
+            ),
+            predecessor_plan_id="plan:original",
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:replacement:new",
+            causation_id="cause:replacement:new",
+            correlation_id="correlation:replacement",
+        )
 
         await app.tick(
-            tick_id="replacement:start", logical_time_from=NOW,
+            tick_id="replacement:start",
+            logical_time_from=NOW,
             logical_time_to=NOW + timedelta(minutes=1),
             observed_at=NOW + timedelta(minutes=1),
-            trace_id="trace:replacement:start", causation_id="scheduler:test",
-            correlation_id="correlation:replacement", reason="test",
+            trace_id="trace:replacement:start",
+            causation_id="scheduler:test",
+            correlation_id="correlation:replacement",
+            reason="test",
         )
 
         projection = app._ledger.project()  # noqa: SLF001
@@ -1047,10 +1128,7 @@ async def test_production_user_observation_replacement_becomes_optional_change_p
         assert by_id["plan:original"].status == "abandoned"
         assert by_id["plan:replacement"].status == "active"
         events = app._ledger.export_replay_evidence().events  # noqa: SLF001
-        started = next(
-            item.event for item in events
-            if item.event.event_type == "ActivityStarted"
-        )
+        started = next(item.event for item in events if item.event.event_type == "ActivityStarted")
         assert "matrix:deviation:change_plan" in started.payload()["policy_refs"]
         assert "matrix:source:user_influence" in started.payload()["policy_refs"]
         assert started.payload()["evidence_refs"][-1]["evidence_type"] == "observed_message"
@@ -1062,15 +1140,27 @@ async def test_production_user_observation_replacement_becomes_optional_change_p
 async def test_production_media_selection_is_explicitly_proposal_only_and_noops_without_candidates(
     tmp_path: Path,
 ) -> None:
-    app = build_sqlite_world_v2_turn_application(
+    config = replace(
+        _life_ecology_config(),
+        media_selection_acceptance=MediaSelectionAcceptanceComposition(
+            grant=ProviderMediaGrantBinding(
+                grant_id="grant:media-selection-no-candidates",
+                grant_revision=1,
+            ),
+            account_id="account:media-selection-no-candidates",
+            account_window_id="window:media-selection-no-candidates",
+            account_limit=5,
+            amount_limit=1,
+        ),
+    )
+    app = _build_application(
         path=tmp_path / "media-selection.sqlite",
-        config=_life_ecology_config(),
+        config=config,
         identities=_Identities(),
         router=_Router(),
-        main_model=_InvalidModel(),
-        quick_recovery=_InvalidQuick(),
+        inbound_author=_InvalidModel(),
         transport=_Transport(),
-        media_selection_model=_NoOpMediaSelectionModel(),
+        media_character=_NoOpMediaSelectionModel(),
         now=NOW,
     )
     try:
@@ -1109,13 +1199,12 @@ async def test_production_application_bootstraps_sqlite_once_and_exposes_only_tu
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "world-v2.sqlite"
-    app = build_sqlite_world_v2_turn_application(
+    app = _build_application(
         path=path,
         config=_config(),
         identities=_Identities(),
         router=_Router(),
-        main_model=_InvalidModel(),
-        quick_recovery=_InvalidQuick(),
+        inbound_author=_InvalidModel(),
         transport=_Transport(),
         now=NOW,
     )
@@ -1127,7 +1216,8 @@ async def test_production_application_bootstraps_sqlite_once_and_exposes_only_tu
             correlation_id="correlation:media-preview-unavailable",
         )
         assert (preview.status, preview.reason_code) == (
-            "blocked", "media_preview.conductor_unavailable",
+            "blocked",
+            "media_preview.conductor_unavailable",
         )
         outcome = await app.respond(
             InboundTurn(
@@ -1145,14 +1235,14 @@ async def test_production_application_bootstraps_sqlite_once_and_exposes_only_tu
         app.close()
 
     # Rebuilding must reuse the same ledger and not seed a second world or
-    # budget account.  The host does not need (and is not given) ledger writes.
-    rebuilt = build_sqlite_world_v2_turn_application(
+    # duplicate either the reply or proactive account.  Both are part of the
+    # production StructuredRole topology.
+    rebuilt = _build_application(
         path=path,
         config=_config(),
         identities=_Identities(),
         router=_Router(),
-        main_model=_InvalidModel(),
-        quick_recovery=_InvalidQuick(),
+        inbound_author=_InvalidModel(),
         transport=_Transport(),
         now=NOW,
     )
@@ -1162,8 +1252,11 @@ async def test_production_application_bootstraps_sqlite_once_and_exposes_only_tu
         evidence = ledger.export_replay_evidence()
         event_types = [item.event.event_type for item in evidence.events]
         assert event_types.count("WorldStarted") == 1
-        assert event_types.count("BudgetAccountConfigured") == 1
-        assert ledger.project().budget_accounts[0].account_id == "account:world-v2:chat"
+        assert event_types.count("BudgetAccountConfigured") == 2
+        assert {item.account_id for item in ledger.project().budget_accounts} == {
+            "account:world-v2:chat",
+            "account:world-v2:proactive",
+        }
     finally:
         ledger.close()
 
@@ -1172,13 +1265,12 @@ async def test_production_application_bootstraps_sqlite_once_and_exposes_only_tu
 async def test_production_application_advances_clock_without_exposing_ledger_writes(
     tmp_path: Path,
 ) -> None:
-    app = build_sqlite_world_v2_turn_application(
+    app = _build_application(
         path=tmp_path / "world-v2-clock.sqlite",
         config=_config(),
         identities=_Identities(),
         router=_Router(),
-        main_model=_InvalidModel(),
-        quick_recovery=_InvalidQuick(),
+        inbound_author=_InvalidModel(),
         transport=_Transport(),
         now=NOW,
     )
@@ -1218,51 +1310,74 @@ async def test_production_ecology_runs_only_after_a_durable_life_wake_and_only_o
             direct_preview_compatibility=True,
         ),
     )
-    app = build_sqlite_world_v2_turn_application(
+    app = _build_application(
         path=tmp_path / "world-v2-ecology.sqlite",
         config=config,
         identities=_Identities(),
         router=_Router(),
-        main_model=_InvalidModel(),
-        quick_recovery=_InvalidQuick(),
+        inbound_author=_InvalidModel(),
         transport=_Transport(),
         now=NOW,
     )
     observation_id = "observation:test:user.1:message:ecology"
     try:
         # Normal chat is not an ecology wake, even with an enabled policy.
-        await app.respond(InboundTurn(
-            platform="test", platform_user_id="user.1", platform_message_id="message:ecology",
-            text="我想晚点去公园散步。", observed_at=NOW, trace_id="trace:ecology:inbound",
-        ))
+        await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:ecology",
+                text="我想晚点去公园散步。",
+                observed_at=NOW,
+                trace_id="trace:ecology:inbound",
+            )
+        )
         plan = await app.plan_activity(
             ActivityPlanCommand(
-                command_id="command:ecology:plan", world_id=config.world_id,
-                source_observation_id=observation_id, plan_id="plan:ecology",
-                activity_id="activity:ecology", activity_kind="walk", importance_bp=4_000,
-                location_ref="location:park", participant_refs=("agent:companion",),
+                command_id="command:ecology:plan",
+                world_id=config.world_id,
+                source_observation_id=observation_id,
+                plan_id="plan:ecology",
+                activity_id="activity:ecology",
+                activity_kind="walk",
+                importance_bp=4_000,
+                location_ref="location:park",
+                participant_refs=("agent:companion",),
                 privacy_class="shareable",
             ),
-            logical_time=NOW, created_at=NOW, trace_id="trace:ecology:plan",
-            causation_id="cause:ecology:plan", correlation_id="correlation:ecology",
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:ecology:plan",
+            causation_id="cause:ecology:plan",
+            correlation_id="correlation:ecology",
         )
         started = await app.transition_activity(
             ActivityPlanTransitionCommand(
-                command_id="command:ecology:start", world_id=config.world_id,
-                source_observation_id=observation_id, plan_id="plan:ecology", operation="start",
+                command_id="command:ecology:start",
+                world_id=config.world_id,
+                source_observation_id=observation_id,
+                plan_id="plan:ecology",
+                operation="start",
             ),
-            logical_time=NOW, created_at=NOW, trace_id="trace:ecology:start",
-            causation_id=plan.event_ids[-1], correlation_id="correlation:ecology",
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:ecology:start",
+            causation_id=plan.event_ids[-1],
+            correlation_id="correlation:ecology",
         )
         result = await app.drain_media_ecology_once(
-            wake_event_ref=started.event_ids[-1], logical_time=NOW,
-            trace_id="trace:ecology:worker", correlation_id="correlation:ecology",
+            wake_event_ref=started.event_ids[-1],
+            logical_time=NOW,
+            trace_id="trace:ecology:worker",
+            correlation_id="correlation:ecology",
         )
         # A repeat joins the immutable candidate; no media planning Action is
         # created by this worker and no image can be sent from this seam.
         replay = await app.drain_media_ecology_once(
-            wake_event_ref=started.event_ids[-1], logical_time=NOW,
-            trace_id="trace:ecology:worker", correlation_id="correlation:ecology",
+            wake_event_ref=started.event_ids[-1],
+            logical_time=NOW,
+            trace_id="trace:ecology:worker",
+            correlation_id="correlation:ecology",
         )
     finally:
         app.close()
@@ -1293,40 +1408,58 @@ async def test_production_life_event_declaration_opens_one_source_bound_candidat
         action_pump_owner="pump:production-declared-ecology",
         event_ecology_policy=EcologyPolicy(max_candidates_per_drain=1),
     )
-    app = build_sqlite_world_v2_turn_application(
+    app = _build_application(
         path=tmp_path / "world-v2-declared-ecology.sqlite",
         config=config,
         identities=_Identities(),
         router=_Router(),
-        main_model=_InvalidModel(),
-        quick_recovery=_InvalidQuick(),
+        inbound_author=_InvalidModel(),
         transport=_Transport(),
         now=NOW,
     )
     try:
-        await app.respond(InboundTurn(
-            platform="test", platform_user_id="user.1", platform_message_id="message:declared-ecology",
-            text="我晚点想去公园散散步。", observed_at=NOW, trace_id="trace:declared-ecology:inbound",
-        ))
+        await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:declared-ecology",
+                text="我晚点想去公园散散步。",
+                observed_at=NOW,
+                trace_id="trace:declared-ecology:inbound",
+            )
+        )
         plan = await app.plan_activity(
             ActivityPlanCommand(
-                command_id="command:declared-ecology:plan", world_id=config.world_id,
+                command_id="command:declared-ecology:plan",
+                world_id=config.world_id,
                 source_observation_id="observation:test:user.1:message:declared-ecology",
-                plan_id="plan:declared-ecology", activity_id="activity:declared-ecology",
-                activity_kind="walk", importance_bp=4_000, location_ref="location:park",
-                participant_refs=("agent:companion",), privacy_class="shareable",
+                plan_id="plan:declared-ecology",
+                activity_id="activity:declared-ecology",
+                activity_kind="walk",
+                importance_bp=4_000,
+                location_ref="location:park",
+                participant_refs=("agent:companion",),
+                privacy_class="shareable",
             ),
-            logical_time=NOW, created_at=NOW, trace_id="trace:declared-ecology:plan",
-            causation_id="cause:declared-ecology:plan", correlation_id="correlation:declared-ecology",
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:declared-ecology:plan",
+            causation_id="cause:declared-ecology:plan",
+            correlation_id="correlation:declared-ecology",
         )
         started = await app.transition_activity(
             ActivityPlanTransitionCommand(
-                command_id="command:declared-ecology:start", world_id=config.world_id,
+                command_id="command:declared-ecology:start",
+                world_id=config.world_id,
                 source_observation_id="observation:test:user.1:message:declared-ecology",
-                plan_id="plan:declared-ecology", operation="start",
+                plan_id="plan:declared-ecology",
+                operation="start",
             ),
-            logical_time=NOW, created_at=NOW, trace_id="trace:declared-ecology:start",
-            causation_id=plan.event_ids[-1], correlation_id="correlation:declared-ecology",
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:declared-ecology:start",
+            causation_id=plan.event_ids[-1],
+            correlation_id="correlation:declared-ecology",
         )
         declaration = await app.declare_image_evidence(
             ImageEvidenceDeclarationCommand(
@@ -1335,8 +1468,11 @@ async def test_production_life_event_declaration_opens_one_source_bound_candidat
                 image_evidence=ImageEvidenceV1(
                     visibility="shareable",
                     activity={
-                        "evidence_visibility": "shareable", "id": "activity:declared-ecology",
-                        "kind": "walk", "description": "傍晚在公园散步", "phase": "active",
+                        "evidence_visibility": "shareable",
+                        "id": "activity:declared-ecology",
+                        "kind": "walk",
+                        "description": "傍晚在公园散步",
+                        "phase": "active",
                     },
                     character_media=CharacterMediaEvidenceV1(
                         character_ref="agent:companion",
@@ -1345,15 +1481,20 @@ async def test_production_life_event_declaration_opens_one_source_bound_candidat
                     ),
                 ),
             ),
-            logical_time=NOW, created_at=NOW, trace_id="trace:declared-ecology:evidence",
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:declared-ecology:evidence",
             correlation_id="correlation:declared-ecology",
         )
         result = await app.drain_media_ecology_once(
-            wake_event_ref=declaration.event_ids[-1], logical_time=NOW,
-            trace_id="trace:declared-ecology:worker", correlation_id="correlation:declared-ecology",
+            wake_event_ref=declaration.event_ids[-1],
+            logical_time=NOW,
+            trace_id="trace:declared-ecology:worker",
+            correlation_id="correlation:declared-ecology",
         )
         character_candidates = await app.drain_character_media_candidates_once(
-            wake_event_ref=declaration.event_ids[-1], logical_time=NOW,
+            wake_event_ref=declaration.event_ids[-1],
+            logical_time=NOW,
             trace_id="trace:declared-ecology:character-worker",
             correlation_id="correlation:declared-ecology",
         )
@@ -1375,52 +1516,75 @@ async def test_production_application_records_a_sparse_source_bound_appearance_s
         reply_target="user:user.1",
         action_pump_owner="pump:production-appearance-state",
     )
-    app = build_sqlite_world_v2_turn_application(
+    app = _build_application(
         path=tmp_path / "world-v2-production-appearance.sqlite",
         config=config,
         identities=_Identities(),
         router=_Router(),
-        main_model=_InvalidModel(),
-        quick_recovery=_InvalidQuick(),
+        inbound_author=_InvalidModel(),
         transport=_Transport(),
         now=NOW,
     )
     try:
-        await app.respond(InboundTurn(
-            platform="test", platform_user_id="user.1", platform_message_id="message:appearance",
-            text="我去公园走走。", observed_at=NOW, trace_id="trace:appearance:inbound",
-        ))
+        await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:appearance",
+                text="我去公园走走。",
+                observed_at=NOW,
+                trace_id="trace:appearance:inbound",
+            )
+        )
         plan = await app.plan_activity(
             ActivityPlanCommand(
-                command_id="command:appearance:plan", world_id=config.world_id,
+                command_id="command:appearance:plan",
+                world_id=config.world_id,
                 source_observation_id="observation:test:user.1:message:appearance",
-                plan_id="plan:appearance", activity_id="activity:appearance", activity_kind="walk",
-                importance_bp=4_000, location_ref="location:park", participant_refs=("agent:companion",),
+                plan_id="plan:appearance",
+                activity_id="activity:appearance",
+                activity_kind="walk",
+                importance_bp=4_000,
+                location_ref="location:park",
+                participant_refs=("agent:companion",),
                 privacy_class="shareable",
             ),
-            logical_time=NOW, created_at=NOW, trace_id="trace:appearance:plan",
-            causation_id="cause:appearance:plan", correlation_id="correlation:appearance",
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:appearance:plan",
+            causation_id="cause:appearance:plan",
+            correlation_id="correlation:appearance",
         )
         started = await app.transition_activity(
             ActivityPlanTransitionCommand(
-                command_id="command:appearance:start", world_id=config.world_id,
+                command_id="command:appearance:start",
+                world_id=config.world_id,
                 source_observation_id="observation:test:user.1:message:appearance",
-                plan_id="plan:appearance", operation="start",
+                plan_id="plan:appearance",
+                operation="start",
             ),
-            logical_time=NOW, created_at=NOW, trace_id="trace:appearance:start",
-            causation_id=plan.event_ids[-1], correlation_id="correlation:appearance",
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:appearance:start",
+            causation_id=plan.event_ids[-1],
+            correlation_id="correlation:appearance",
         )
         recorded = await app.record_appearance_state(
             AppearanceStateRecordCommand(
-                command_id="command:appearance:record", source_event_ref=started.event_ids[-1],
-                subject_ref="agent:companion", visibility="shareable",
+                command_id="command:appearance:record",
+                source_event_ref=started.event_ids[-1],
+                subject_ref="agent:companion",
+                visibility="shareable",
                 visible_attributes=(
                     VisibleAppearanceAttribute(
-                        aspect="outfit", description="深色运动外套",
+                        aspect="outfit",
+                        description="深色运动外套",
                     ),
                 ),
             ),
-            logical_time=NOW, created_at=NOW, trace_id="trace:appearance:record",
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:appearance:record",
             correlation_id="correlation:appearance",
         )
         projection = app._ledger.project()  # type: ignore[attr-defined]
@@ -1434,7 +1598,8 @@ async def test_production_application_records_a_sparse_source_bound_appearance_s
 
 @pytest.mark.asyncio
 async def test_production_p1_selection_acceptance_commits_the_source_bound_planning_batch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The installed production seams preserve P1's proposal/acceptance split.
 
@@ -1462,64 +1627,91 @@ async def test_production_p1_selection_acceptance_commits_the_source_bound_plann
     path = tmp_path / "world-v2-production-p1-selection.sqlite"
     selector = _SelectingMediaSelectionModel()
     planner = _DurableNotRenderablePlanner()
-    app = build_sqlite_world_v2_turn_application(
+    app = _build_application(
         path=path,
         config=config,
         identities=_Identities(),
         router=_Router(),
-        main_model=_InvalidModel(),
-        quick_recovery=_InvalidQuick(),
+        inbound_author=_InvalidModel(),
         transport=_Transport(),
-        media_selection_model=selector,
+        media_character=selector,
         media_planner=planner,
         now=NOW,
     )
     try:
-        await app.respond(InboundTurn(
-            platform="test", platform_user_id="user.1", platform_message_id="message:production-p1",
-            text="傍晚我想去公园走走。", observed_at=NOW, trace_id="trace:production-p1:inbound",
-        ))
+        await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:production-p1",
+                text="傍晚我想去公园走走。",
+                observed_at=NOW,
+                trace_id="trace:production-p1:inbound",
+            )
+        )
         plan = await app.plan_activity(
             ActivityPlanCommand(
-                command_id="command:production-p1:plan", world_id=config.world_id,
+                command_id="command:production-p1:plan",
+                world_id=config.world_id,
                 source_observation_id="observation:test:user.1:message:production-p1",
-                plan_id="plan:production-p1", activity_id="activity:production-p1",
-                activity_kind="walk", importance_bp=4_000, location_ref="location:park",
-                participant_refs=("agent:companion",), privacy_class="shareable",
+                plan_id="plan:production-p1",
+                activity_id="activity:production-p1",
+                activity_kind="walk",
+                importance_bp=4_000,
+                location_ref="location:park",
+                participant_refs=("agent:companion",),
+                privacy_class="shareable",
             ),
-            logical_time=NOW, created_at=NOW, trace_id="trace:production-p1:plan",
-            causation_id="cause:production-p1:plan", correlation_id="correlation:production-p1",
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:production-p1:plan",
+            causation_id="cause:production-p1:plan",
+            correlation_id="correlation:production-p1",
         )
         started = await app.transition_activity(
             ActivityPlanTransitionCommand(
-                command_id="command:production-p1:start", world_id=config.world_id,
+                command_id="command:production-p1:start",
+                world_id=config.world_id,
                 source_observation_id="observation:test:user.1:message:production-p1",
-                plan_id="plan:production-p1", operation="start",
+                plan_id="plan:production-p1",
+                operation="start",
             ),
-            logical_time=NOW, created_at=NOW, trace_id="trace:production-p1:start",
-            causation_id=plan.event_ids[-1], correlation_id="correlation:production-p1",
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:production-p1:start",
+            causation_id=plan.event_ids[-1],
+            correlation_id="correlation:production-p1",
         )
         declaration = await app.declare_image_evidence(
             ImageEvidenceDeclarationCommand(
-                command_id="command:production-p1:evidence", source_event_ref=started.event_ids[-1],
+                command_id="command:production-p1:evidence",
+                source_event_ref=started.event_ids[-1],
                 image_evidence=ImageEvidenceV1(
                     visibility="shareable",
                     activity={
-                        "evidence_visibility": "shareable", "id": "activity:production-p1",
-                        "kind": "walk", "description": "傍晚在公园散步", "phase": "active",
+                        "evidence_visibility": "shareable",
+                        "id": "activity:production-p1",
+                        "kind": "walk",
+                        "description": "傍晚在公园散步",
+                        "phase": "active",
                     },
                 ),
             ),
-            logical_time=NOW, created_at=NOW, trace_id="trace:production-p1:evidence",
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:production-p1:evidence",
             correlation_id="correlation:production-p1",
         )
         ecology = await app.drain_media_ecology_once(
-            wake_event_ref=declaration.event_ids[-1], logical_time=NOW,
-            trace_id="trace:production-p1:ecology", correlation_id="correlation:production-p1",
+            wake_event_ref=declaration.event_ids[-1],
+            logical_time=NOW,
+            trace_id="trace:production-p1:ecology",
+            correlation_id="correlation:production-p1",
         )
         assert ecology is not None and ecology.status == "created"
         selection = await app.drain_media_selection_once(
-            logical_time=NOW, trace_id="trace:production-p1:selection",
+            logical_time=NOW,
+            trace_id="trace:production-p1:selection",
             correlation_id="correlation:production-p1",
         )
         assert selection is not None and selection.status == "proposed"
@@ -1529,8 +1721,10 @@ async def test_production_p1_selection_acceptance_commits_the_source_bound_plann
             lambda **_kwargs: object(),
         )
         accepted = await app.accept_media_selection_once(
-            proposal_event_ref=selection.proposal_event_ref, logical_time=NOW,
-            trace_id="trace:production-p1:acceptance", correlation_id="correlation:production-p1",
+            proposal_event_ref=selection.proposal_event_ref,
+            logical_time=NOW,
+            trace_id="trace:production-p1:acceptance",
+            correlation_id="correlation:production-p1",
         )
         projection = app._ledger.project()  # type: ignore[attr-defined]
     finally:
@@ -1543,7 +1737,10 @@ async def test_production_p1_selection_acceptance_commits_the_source_bound_plann
     assert len(projection.budget_reservations) == 1
     assert len(projection.actions) == 1
     assert projection.actions[0].kind == "media_planning"
-    assert projection.actions[0].budget_reservation_id == projection.budget_reservations[0].reservation_id
+    assert (
+        projection.actions[0].budget_reservation_id
+        == projection.budget_reservations[0].reservation_id
+    )
 
     # Simulate a crash after the four-effect Acceptance batch and before the
     # dedicated planning worker runs.  The next conductor pass must recover
@@ -1552,10 +1749,16 @@ async def test_production_p1_selection_acceptance_commits_the_source_bound_plann
         "companion_daemon.world_v2.media_planning_worker.require_provider_media_grant",
         lambda **_kwargs: object(),
     )
-    rebuilt = build_sqlite_world_v2_turn_application(
-        path=path, config=config, identities=_Identities(), router=_Router(),
-        main_model=_InvalidModel(), quick_recovery=_InvalidQuick(), transport=_Transport(),
-        media_selection_model=selector, media_planner=planner, now=NOW,
+    rebuilt = _build_application(
+        path=path,
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        inbound_author=_InvalidModel(),
+        transport=_Transport(),
+        media_character=selector,
+        media_planner=planner,
+        now=NOW,
     )
     try:
         resumed = await rebuilt.drain_media_preview_once(
@@ -1575,7 +1778,8 @@ async def test_production_p1_selection_acceptance_commits_the_source_bound_plann
 
 @pytest.mark.asyncio
 async def test_media_preview_conductor_recovers_head_proposal_after_sqlite_restart(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A crash between Proposal and Acceptance must not strand the candidate."""
 
@@ -1588,7 +1792,8 @@ async def test_media_preview_conductor_recovers_head_proposal_after_sqlite_resta
         event_ecology_policy=EcologyPolicy(max_candidates_per_drain=1),
         media_selection_acceptance=MediaSelectionAcceptanceComposition(
             grant=ProviderMediaGrantBinding(
-                grant_id="grant:media-preview-recovery", grant_revision=1,
+                grant_id="grant:media-preview-recovery",
+                grant_revision=1,
             ),
             account_id="account:media-preview-recovery",
             account_window_id="window:media-preview-recovery",
@@ -1599,57 +1804,91 @@ async def test_media_preview_conductor_recovers_head_proposal_after_sqlite_resta
     selector = _SelectingMediaSelectionModel()
     planner = _DurableNotRenderablePlanner()
 
-    app = build_sqlite_world_v2_turn_application(
-        path=path, config=config, identities=_Identities(), router=_Router(),
-        main_model=_InvalidModel(), quick_recovery=_InvalidQuick(), transport=_Transport(),
-        media_selection_model=selector, media_planner=planner, now=NOW,
+    app = _build_application(
+        path=path,
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        inbound_author=_InvalidModel(),
+        transport=_Transport(),
+        media_character=selector,
+        media_planner=planner,
+        now=NOW,
     )
     try:
-        await app.respond(InboundTurn(
-            platform="test", platform_user_id="user.1",
-            platform_message_id="message:media-preview-recovery",
-            text="今晚去公园走走。", observed_at=NOW,
-            trace_id="trace:media-preview-recovery:inbound",
-        ))
-        plan = await app.plan_activity(ActivityPlanCommand(
-            command_id="command:media-preview-recovery:plan", world_id=config.world_id,
-            source_observation_id="observation:test:user.1:message:media-preview-recovery",
-            plan_id="plan:media-preview-recovery", activity_id="activity:media-preview-recovery",
-            activity_kind="walk", importance_bp=4_000, location_ref="location:park",
-            participant_refs=("agent:companion",), privacy_class="shareable",
-        ), logical_time=NOW, created_at=NOW, trace_id="trace:media-preview-recovery:plan",
-            causation_id="cause:media-preview-recovery:plan",
-            correlation_id="correlation:media-preview-recovery")
-        started = await app.transition_activity(ActivityPlanTransitionCommand(
-            command_id="command:media-preview-recovery:start", world_id=config.world_id,
-            source_observation_id="observation:test:user.1:message:media-preview-recovery",
-            plan_id="plan:media-preview-recovery", operation="start",
-        ), logical_time=NOW, created_at=NOW, trace_id="trace:media-preview-recovery:start",
-            causation_id=plan.event_ids[-1], correlation_id="correlation:media-preview-recovery")
-        declaration = await app.declare_image_evidence(ImageEvidenceDeclarationCommand(
-            command_id="command:media-preview-recovery:evidence",
-            source_event_ref=started.event_ids[-1],
-            image_evidence=ImageEvidenceV1(
-                visibility="shareable",
-                activity={
-                    "evidence_visibility": "shareable",
-                    "id": "activity:media-preview-recovery",
-                    "kind": "walk",
-                    "description": "傍晚在公园散步",
-                    "phase": "active",
-                },
+        await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:media-preview-recovery",
+                text="今晚去公园走走。",
+                observed_at=NOW,
+                trace_id="trace:media-preview-recovery:inbound",
+            )
+        )
+        plan = await app.plan_activity(
+            ActivityPlanCommand(
+                command_id="command:media-preview-recovery:plan",
+                world_id=config.world_id,
+                source_observation_id="observation:test:user.1:message:media-preview-recovery",
+                plan_id="plan:media-preview-recovery",
+                activity_id="activity:media-preview-recovery",
+                activity_kind="walk",
+                importance_bp=4_000,
+                location_ref="location:park",
+                participant_refs=("agent:companion",),
+                privacy_class="shareable",
             ),
-        ), logical_time=NOW, created_at=NOW,
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:media-preview-recovery:plan",
+            causation_id="cause:media-preview-recovery:plan",
+            correlation_id="correlation:media-preview-recovery",
+        )
+        started = await app.transition_activity(
+            ActivityPlanTransitionCommand(
+                command_id="command:media-preview-recovery:start",
+                world_id=config.world_id,
+                source_observation_id="observation:test:user.1:message:media-preview-recovery",
+                plan_id="plan:media-preview-recovery",
+                operation="start",
+            ),
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:media-preview-recovery:start",
+            causation_id=plan.event_ids[-1],
+            correlation_id="correlation:media-preview-recovery",
+        )
+        declaration = await app.declare_image_evidence(
+            ImageEvidenceDeclarationCommand(
+                command_id="command:media-preview-recovery:evidence",
+                source_event_ref=started.event_ids[-1],
+                image_evidence=ImageEvidenceV1(
+                    visibility="shareable",
+                    activity={
+                        "evidence_visibility": "shareable",
+                        "id": "activity:media-preview-recovery",
+                        "kind": "walk",
+                        "description": "傍晚在公园散步",
+                        "phase": "active",
+                    },
+                ),
+            ),
+            logical_time=NOW,
+            created_at=NOW,
             trace_id="trace:media-preview-recovery:evidence",
-            correlation_id="correlation:media-preview-recovery")
+            correlation_id="correlation:media-preview-recovery",
+        )
         ecology = await app.drain_media_ecology_once(
-            wake_event_ref=declaration.event_ids[-1], logical_time=NOW,
+            wake_event_ref=declaration.event_ids[-1],
+            logical_time=NOW,
             trace_id="trace:media-preview-recovery:ecology",
             correlation_id="correlation:media-preview-recovery",
         )
         assert ecology is not None and ecology.status == "created"
         proposed = await app.drain_media_selection_once(
-            logical_time=NOW, trace_id="trace:media-preview-recovery:selection",
+            logical_time=NOW,
+            trace_id="trace:media-preview-recovery:selection",
             correlation_id="correlation:media-preview-recovery",
         )
         assert proposed is not None and proposed.status == "proposed"
@@ -1668,10 +1907,16 @@ async def test_media_preview_conductor_recovers_head_proposal_after_sqlite_resta
         "companion_daemon.world_v2.media_planning_worker.require_provider_media_grant",
         lambda **_kwargs: object(),
     )
-    rebuilt = build_sqlite_world_v2_turn_application(
-        path=path, config=config, identities=_Identities(), router=_Router(),
-        main_model=_InvalidModel(), quick_recovery=_InvalidQuick(), transport=_Transport(),
-        media_selection_model=selector, media_planner=planner, now=NOW,
+    rebuilt = _build_application(
+        path=path,
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        inbound_author=_InvalidModel(),
+        transport=_Transport(),
+        media_character=selector,
+        media_planner=planner,
+        now=NOW,
     )
     try:
         result = await rebuilt.drain_media_preview_once(
@@ -1684,7 +1929,7 @@ async def test_media_preview_conductor_recovers_head_proposal_after_sqlite_resta
 
     assert result.status == "not_renderable"
     assert result.selection is not None
-    assert result.selection.reason_code == "media_selection.recovered_pending_proposal"
+    assert result.selection.status == "proposed"
     assert result.selection.proposal_event_ref == proposal_event_ref
     assert selector.calls == 1
     assert planner.plan_calls == 1
@@ -1719,53 +1964,87 @@ async def test_production_visual_fact_sidecar_opens_source_bound_object_food_can
         action_pump_owner="pump:production-visual-fact",
         event_ecology_policy=EcologyPolicy(max_candidates_per_drain=1),
     )
-    app = build_sqlite_world_v2_turn_application(
+    app = _build_application(
         path=tmp_path / "world-v2-production-visual-fact.sqlite",
         config=config,
         identities=_Identities(),
         router=_Router(),
-        main_model=_InvalidModel(),
-        quick_recovery=_InvalidQuick(),
+        inbound_author=_InvalidModel(),
         transport=_Transport(),
         now=NOW,
     )
     try:
-        await app.respond(InboundTurn(
-            platform="test", platform_user_id="user.1", platform_message_id="message:production-visual-fact",
-            text="傍晚想吃点热的。", observed_at=NOW, trace_id="trace:production-visual-fact:inbound",
-        ))
-        plan = await app.plan_activity(ActivityPlanCommand(
-            command_id="command:production-visual-fact:plan", world_id=config.world_id,
-            source_observation_id="observation:test:user.1:message:production-visual-fact",
-            plan_id="plan:production-visual-fact", activity_id="activity:production-visual-fact",
-            activity_kind="cook", importance_bp=4_000, location_ref="location:home",
-            participant_refs=("agent:companion",), privacy_class="shareable",
-        ), logical_time=NOW, created_at=NOW, trace_id="trace:production-visual-fact:plan",
-            causation_id="cause:production-visual-fact:plan", correlation_id="correlation:production-visual-fact")
-        started = await app.transition_activity(ActivityPlanTransitionCommand(
-            command_id="command:production-visual-fact:start", world_id=config.world_id,
-            source_observation_id="observation:test:user.1:message:production-visual-fact",
-            plan_id="plan:production-visual-fact", operation="start",
-        ), logical_time=NOW, created_at=NOW, trace_id="trace:production-visual-fact:start",
-            causation_id=plan.event_ids[-1], correlation_id="correlation:production-visual-fact")
+        await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:production-visual-fact",
+                text="傍晚想吃点热的。",
+                observed_at=NOW,
+                trace_id="trace:production-visual-fact:inbound",
+            )
+        )
+        plan = await app.plan_activity(
+            ActivityPlanCommand(
+                command_id="command:production-visual-fact:plan",
+                world_id=config.world_id,
+                source_observation_id="observation:test:user.1:message:production-visual-fact",
+                plan_id="plan:production-visual-fact",
+                activity_id="activity:production-visual-fact",
+                activity_kind="cook",
+                importance_bp=4_000,
+                location_ref="location:home",
+                participant_refs=("agent:companion",),
+                privacy_class="shareable",
+            ),
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:production-visual-fact:plan",
+            causation_id="cause:production-visual-fact:plan",
+            correlation_id="correlation:production-visual-fact",
+        )
+        started = await app.transition_activity(
+            ActivityPlanTransitionCommand(
+                command_id="command:production-visual-fact:start",
+                world_id=config.world_id,
+                source_observation_id="observation:test:user.1:message:production-visual-fact",
+                plan_id="plan:production-visual-fact",
+                operation="start",
+            ),
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:production-visual-fact:start",
+            causation_id=plan.event_ids[-1],
+            correlation_id="correlation:production-visual-fact",
+        )
         recorded = await app.record_visual_fact(
             VisualFactRecordCommand(
                 command_id="command:production-visual-fact:record",
                 source_event_ref=started.event_ids[-1],
                 content_ref="sidecar:production-visual-fact:noodles",
                 content=VisualFactContentV1(
-                    facet="meal.visible_food", subject_ref="activity:production-visual-fact",
-                    visibility="shareable", objects=(VisualObjectEvidenceV1(
-                        id="object:tomato-noodles", kind="food", description="一碗番茄鸡蛋面",
-                        ownership="character", visibility="shareable",
-                    ),),
+                    facet="meal.visible_food",
+                    subject_ref="activity:production-visual-fact",
+                    visibility="shareable",
+                    objects=(
+                        VisualObjectEvidenceV1(
+                            id="object:tomato-noodles",
+                            kind="food",
+                            description="一碗番茄鸡蛋面",
+                            ownership="character",
+                            visibility="shareable",
+                        ),
+                    ),
                 ),
             ),
-            logical_time=NOW, created_at=NOW, trace_id="trace:production-visual-fact:record",
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:production-visual-fact:record",
             correlation_id="correlation:production-visual-fact",
         )
         ecology = await app.drain_media_ecology_once(
-            wake_event_ref=recorded.event_ids[-1], logical_time=NOW,
+            wake_event_ref=recorded.event_ids[-1],
+            logical_time=NOW,
             trace_id="trace:production-visual-fact:ecology",
             correlation_id="correlation:production-visual-fact",
         )
@@ -1790,82 +2069,133 @@ async def test_production_visual_fact_sidecar_opens_source_bound_object_food_can
 
 @pytest.mark.asyncio
 async def test_production_p2_character_selection_acceptance_freezes_a_v2_snapshot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The installed SQLite composition accepts an ordinary, fact-bound selfie."""
 
     config = WorldV2TurnApplicationConfig(
         world_id="world:production-p2-selection-acceptance",
-        companion_actor_ref="agent:companion", reply_target="user:user.1",
+        companion_actor_ref="agent:companion",
+        reply_target="user:user.1",
         action_pump_owner="pump:production-p2-selection-acceptance",
         event_ecology_policy=EcologyPolicy(max_candidates_per_drain=1),
         media_selection_acceptance=MediaSelectionAcceptanceComposition(
             grant=ProviderMediaGrantBinding(grant_id="grant:production-media", grant_revision=1),
-            account_id="account:production-media", account_window_id="window:production-media",
-            account_limit=5, amount_limit=1,
+            account_id="account:production-media",
+            account_window_id="window:production-media",
+            account_limit=5,
+            amount_limit=1,
         ),
     )
-    app = build_sqlite_world_v2_turn_application(
-        path=tmp_path / "world-v2-production-p2-selection.sqlite", config=config,
-        identities=_Identities(), router=_Router(), main_model=_InvalidModel(),
-        quick_recovery=_InvalidQuick(), transport=_Transport(),
-        media_selection_model=_SelectingMediaSelectionModel(), now=NOW,
+    app = _build_application(
+        path=tmp_path / "world-v2-production-p2-selection.sqlite",
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        inbound_author=_InvalidModel(),
+        transport=_Transport(),
+        media_character=_SelectingMediaSelectionModel(),
+        now=NOW,
     )
     try:
-        await app.respond(InboundTurn(
-            platform="test", platform_user_id="user.1", platform_message_id="message:production-p2",
-            text="今天想去公园散步。", observed_at=NOW, trace_id="trace:production-p2:inbound",
-        ))
-        plan = await app.plan_activity(ActivityPlanCommand(
-            command_id="command:production-p2:plan", world_id=config.world_id,
-            source_observation_id="observation:test:user.1:message:production-p2",
-            plan_id="plan:production-p2", activity_id="activity:production-p2", activity_kind="walk",
-            importance_bp=4_000, location_ref="location:park", participant_refs=("agent:companion",),
-            privacy_class="shareable",
-        ), logical_time=NOW, created_at=NOW, trace_id="trace:production-p2:plan",
-            causation_id="cause:production-p2:plan", correlation_id="correlation:production-p2")
-        started = await app.transition_activity(ActivityPlanTransitionCommand(
-            command_id="command:production-p2:start", world_id=config.world_id,
-            source_observation_id="observation:test:user.1:message:production-p2",
-            plan_id="plan:production-p2", operation="start",
-        ), logical_time=NOW, created_at=NOW, trace_id="trace:production-p2:start",
-            causation_id=plan.event_ids[-1], correlation_id="correlation:production-p2")
-        declaration = await app.declare_image_evidence(ImageEvidenceDeclarationCommand(
-            command_id="command:production-p2:evidence", source_event_ref=started.event_ids[-1],
-            image_evidence=ImageEvidenceV1(
-                visibility="shareable",
-                activity={
-                    "evidence_visibility": "shareable", "id": "activity:production-p2",
-                    "kind": "walk", "description": "公园散步", "phase": "active",
-                },
-                character_media=CharacterMediaEvidenceV1(
-                    character_ref="agent:companion", present=True,
-                    capture_capabilities=("character_front_camera",),
+        await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:production-p2",
+                text="今天想去公园散步。",
+                observed_at=NOW,
+                trace_id="trace:production-p2:inbound",
+            )
+        )
+        plan = await app.plan_activity(
+            ActivityPlanCommand(
+                command_id="command:production-p2:plan",
+                world_id=config.world_id,
+                source_observation_id="observation:test:user.1:message:production-p2",
+                plan_id="plan:production-p2",
+                activity_id="activity:production-p2",
+                activity_kind="walk",
+                importance_bp=4_000,
+                location_ref="location:park",
+                participant_refs=("agent:companion",),
+                privacy_class="shareable",
+            ),
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:production-p2:plan",
+            causation_id="cause:production-p2:plan",
+            correlation_id="correlation:production-p2",
+        )
+        started = await app.transition_activity(
+            ActivityPlanTransitionCommand(
+                command_id="command:production-p2:start",
+                world_id=config.world_id,
+                source_observation_id="observation:test:user.1:message:production-p2",
+                plan_id="plan:production-p2",
+                operation="start",
+            ),
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:production-p2:start",
+            causation_id=plan.event_ids[-1],
+            correlation_id="correlation:production-p2",
+        )
+        declaration = await app.declare_image_evidence(
+            ImageEvidenceDeclarationCommand(
+                command_id="command:production-p2:evidence",
+                source_event_ref=started.event_ids[-1],
+                image_evidence=ImageEvidenceV1(
+                    visibility="shareable",
+                    activity={
+                        "evidence_visibility": "shareable",
+                        "id": "activity:production-p2",
+                        "kind": "walk",
+                        "description": "公园散步",
+                        "phase": "active",
+                    },
+                    character_media=CharacterMediaEvidenceV1(
+                        character_ref="agent:companion",
+                        present=True,
+                        capture_capabilities=("character_front_camera",),
+                    ),
                 ),
             ),
-        ), logical_time=NOW, created_at=NOW, trace_id="trace:production-p2:evidence",
-            correlation_id="correlation:production-p2")
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:production-p2:evidence",
+            correlation_id="correlation:production-p2",
+        )
         candidates = await app.drain_character_media_candidates_once(
-            wake_event_ref=declaration.event_ids[-1], logical_time=NOW,
-            trace_id="trace:production-p2:candidates", correlation_id="correlation:production-p2",
+            wake_event_ref=declaration.event_ids[-1],
+            logical_time=NOW,
+            trace_id="trace:production-p2:candidates",
+            correlation_id="correlation:production-p2",
         )
         assert len(candidates) == 1
         selection = await app.drain_media_selection_once(
-            logical_time=NOW, trace_id="trace:production-p2:selection",
+            logical_time=NOW,
+            trace_id="trace:production-p2:selection",
             correlation_id="correlation:production-p2",
         )
         assert selection is not None and selection.status == "proposed"
         assert selection.proposal_event_ref is not None
         monkeypatch.setattr(
-            "companion_daemon.world_v2.reducers.require_provider_media_grant", lambda **_kwargs: object()
+            "companion_daemon.world_v2.reducers.require_provider_media_grant",
+            lambda **_kwargs: object(),
         )
         accepted = await app.accept_media_selection_once(
-            proposal_event_ref=selection.proposal_event_ref, logical_time=NOW,
-            trace_id="trace:production-p2:acceptance", correlation_id="correlation:production-p2",
+            proposal_event_ref=selection.proposal_event_ref,
+            logical_time=NOW,
+            trace_id="trace:production-p2:acceptance",
+            correlation_id="correlation:production-p2",
         )
         projection = app._ledger.project()  # type: ignore[attr-defined]
         sidecar = app._media_payload_store  # type: ignore[attr-defined]
-        frozen = sidecar.read_exact(payload_ref=projection.media_opportunities[0].event_snapshot_ref)
+        frozen = sidecar.read_exact(
+            payload_ref=projection.media_opportunities[0].event_snapshot_ref
+        )
     finally:
         app.close()
 
@@ -1874,7 +2204,9 @@ async def test_production_p2_character_selection_acceptance_freezes_a_v2_snapsho
     assert projection.photo_candidates[0].status == "selected"
     opportunity = projection.media_opportunities[0]
     assert opportunity.family == "character_media"
-    assert opportunity.candidate_source_event_refs == projection.photo_candidates[0].source_event_refs
+    assert (
+        opportunity.candidate_source_event_refs == projection.photo_candidates[0].source_event_refs
+    )
     assert frozen is not None and '"world-image-event-snapshot-v2"' in frozen.body
 
 
@@ -1886,55 +2218,94 @@ async def test_production_p3_declaration_opens_only_a_private_character_candidat
 
     config = WorldV2TurnApplicationConfig(
         world_id="world:production-p3-private-candidate",
-        companion_actor_ref="agent:companion", reply_target="user:user.1",
+        companion_actor_ref="agent:companion",
+        reply_target="user:user.1",
         action_pump_owner="pump:production-p3-private-candidate",
     )
-    app = build_sqlite_world_v2_turn_application(
-        path=tmp_path / "world-v2-production-p3-private-candidate.sqlite", config=config,
-        identities=_Identities(), router=_Router(), main_model=_InvalidModel(),
-        quick_recovery=_InvalidQuick(), transport=_Transport(), now=NOW,
+    app = _build_application(
+        path=tmp_path / "world-v2-production-p3-private-candidate.sqlite",
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        inbound_author=_InvalidModel(),
+        transport=_Transport(),
+        now=NOW,
     )
     try:
-        await app.respond(InboundTurn(
-            platform="test", platform_user_id="user.1", platform_message_id="message:production-p3",
-            text="今晚我想自己待一会儿。", observed_at=NOW, trace_id="trace:production-p3:inbound",
-        ))
-        plan = await app.plan_activity(ActivityPlanCommand(
-            command_id="command:production-p3:plan", world_id=config.world_id,
-            source_observation_id="observation:test:user.1:message:production-p3",
-            plan_id="plan:production-p3", activity_id="activity:production-p3", activity_kind="wind_down",
-            importance_bp=4_000, location_ref="location:home", participant_refs=("agent:companion",),
-            privacy_class="private",
-        ), logical_time=NOW, created_at=NOW, trace_id="trace:production-p3:plan",
-            causation_id="cause:production-p3:plan", correlation_id="correlation:production-p3")
-        started = await app.transition_activity(ActivityPlanTransitionCommand(
-            command_id="command:production-p3:start", world_id=config.world_id,
-            source_observation_id="observation:test:user.1:message:production-p3",
-            plan_id="plan:production-p3", operation="start",
-        ), logical_time=NOW, created_at=NOW, trace_id="trace:production-p3:start",
-            causation_id=plan.event_ids[-1], correlation_id="correlation:production-p3")
+        await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:production-p3",
+                text="今晚我想自己待一会儿。",
+                observed_at=NOW,
+                trace_id="trace:production-p3:inbound",
+            )
+        )
+        plan = await app.plan_activity(
+            ActivityPlanCommand(
+                command_id="command:production-p3:plan",
+                world_id=config.world_id,
+                source_observation_id="observation:test:user.1:message:production-p3",
+                plan_id="plan:production-p3",
+                activity_id="activity:production-p3",
+                activity_kind="wind_down",
+                importance_bp=4_000,
+                location_ref="location:home",
+                participant_refs=("agent:companion",),
+                privacy_class="private",
+            ),
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:production-p3:plan",
+            causation_id="cause:production-p3:plan",
+            correlation_id="correlation:production-p3",
+        )
+        started = await app.transition_activity(
+            ActivityPlanTransitionCommand(
+                command_id="command:production-p3:start",
+                world_id=config.world_id,
+                source_observation_id="observation:test:user.1:message:production-p3",
+                plan_id="plan:production-p3",
+                operation="start",
+            ),
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:production-p3:start",
+            causation_id=plan.event_ids[-1],
+            correlation_id="correlation:production-p3",
+        )
         declaration = await app.declare_recipient_scoped_image_evidence(
             RecipientScopedImageEvidenceDeclarationCommand(
-                command_id="command:production-p3:evidence", source_event_ref=started.event_ids[-1],
+                command_id="command:production-p3:evidence",
+                source_event_ref=started.event_ids[-1],
                 recipient_ref="user:user.1",
                 image_evidence=RecipientScopedImageEvidenceV1(
                     visibility="private",
                     activity={
-                        "evidence_visibility": "private", "id": "activity:production-p3",
-                        "kind": "wind_down", "description": "在家放松", "phase": "active",
+                        "evidence_visibility": "private",
+                        "id": "activity:production-p3",
+                        "kind": "wind_down",
+                        "description": "在家放松",
+                        "phase": "active",
                     },
                     character_media=CharacterMediaEvidenceV1(
-                        character_ref="agent:companion", present=True,
+                        character_ref="agent:companion",
+                        present=True,
                         capture_capabilities=("character_front_camera",),
                     ),
                 ),
             ),
-            logical_time=NOW, created_at=NOW, trace_id="trace:production-p3:evidence",
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:production-p3:evidence",
             correlation_id="correlation:production-p3",
         )
         candidates = await app.drain_character_media_candidates_once(
-            wake_event_ref=declaration.event_ids[-1], logical_time=NOW,
-            trace_id="trace:production-p3:candidates", correlation_id="correlation:production-p3",
+            wake_event_ref=declaration.event_ids[-1],
+            logical_time=NOW,
+            trace_id="trace:production-p3:candidates",
+            correlation_id="correlation:production-p3",
         )
         projection = app._ledger.project()  # type: ignore[attr-defined]
     finally:
@@ -1952,14 +2323,13 @@ async def test_production_application_materializes_a_chat_draft_and_settles_one_
     tmp_path: Path,
 ) -> None:
     transport = _DeliveredTransport()
-    model = ChatModelDeliberationAdapter(model=_DraftChatModel())
-    app = build_sqlite_world_v2_turn_application(
+    model = _ExpressionDraftWire(model=_DraftChatModel())
+    app = _build_application(
         path=tmp_path / "world-v2-delivery.sqlite",
         config=_config(),
         identities=_Identities(),
         router=_Router(),
-        main_model=model,
-        quick_recovery=model,
+        inbound_author=model,
         transport=transport,
         now=NOW,
     )
@@ -1990,14 +2360,13 @@ async def test_current_report_uptake_does_not_promote_expression_into_world_memo
     """Natural report uptake stays expression, not companion biography."""
 
     transport = _DeliveredTransport()
-    model = ChatModelDeliberationAdapter(model=_NaturalCurrentReportUptakeChatModel())
-    app = build_sqlite_world_v2_turn_application(
+    model = _ExpressionDraftWire(model=_NaturalCurrentReportUptakeChatModel())
+    app = _build_application(
         path=tmp_path / "world-v2-current-report-uptake.sqlite",
         config=_config(),
         identities=_Identities(),
         router=_Router(),
-        main_model=model,
-        quick_recovery=model,
+        inbound_author=model,
         transport=transport,
         now=NOW,
     )
@@ -2037,14 +2406,13 @@ async def test_production_application_delivers_every_ordered_expression_beat(
     tmp_path: Path,
 ) -> None:
     transport = _DeliveredTransport()
-    model = ChatModelDeliberationAdapter(model=_TwoBeatChatModel())
-    app = build_sqlite_world_v2_turn_application(
+    model = _ExpressionDraftWire(model=_TwoBeatChatModel())
+    app = _build_application(
         path=tmp_path / "world-v2-two-beat-delivery.sqlite",
         config=_config(),
         identities=_Identities(),
         router=_Router(),
-        main_model=model,
-        quick_recovery=model,
+        inbound_author=model,
         transport=transport,
         now=NOW,
     )
@@ -2082,18 +2450,27 @@ async def test_production_shared_reply_audit_reaches_defer_without_second_model_
 ) -> None:
     path = tmp_path / "shared-reply-timing.sqlite"
     model = _LaterDraftChatModel()
-    proactive = _NeverProactiveModel()
-    adapter = ChatModelDeliberationAdapter(model=model)
+    adapter = _ExpressionDraftWire(model=model)
     transport = _DeliveredTransport(received_at=NOW + timedelta(seconds=60))
-    app = build_sqlite_world_v2_turn_application(
-        path=path, config=_config(), identities=_Identities(), router=_Router(),
-        main_model=adapter, quick_recovery=adapter, transport=transport,
-        proactive_model=proactive, now=NOW,
+    app = _build_application(
+        path=path,
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        inbound_author=adapter,
+        transport=transport,
+        now=NOW,
     )
-    outcome = await app.respond(InboundTurn(
-        platform="test", platform_user_id="user.1", platform_message_id="later-1",
-        text="你先忙吧", observed_at=NOW, trace_id="trace:shared-timing",
-    ))
+    outcome = await app.respond(
+        InboundTurn(
+            platform="test",
+            platform_user_id="user.1",
+            platform_message_id="later-1",
+            text="你先忙吧",
+            observed_at=NOW,
+            trace_id="trace:shared-timing",
+        )
+    )
     assert outcome.status == "deferred"
     assert outcome.authorized_action_ids == ()
     assert model.calls == 1
@@ -2106,25 +2483,35 @@ async def test_production_shared_reply_audit_reaches_defer_without_second_model_
     action_id = projection.actions[0].action_id
     app.close()
 
-    rebuilt_adapter = ChatModelDeliberationAdapter(model=model)
-    rebuilt = build_sqlite_world_v2_turn_application(
-        path=path, config=_config(), identities=_Identities(), router=_Router(),
-        main_model=rebuilt_adapter, quick_recovery=rebuilt_adapter,
-        transport=transport, proactive_model=proactive,
+    rebuilt_adapter = _ExpressionDraftWire(model=model)
+    rebuilt = _build_application(
+        path=path,
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        inbound_author=rebuilt_adapter,
+        transport=transport,
         now=NOW + timedelta(seconds=30),
     )
     try:
-        replayed = await rebuilt.respond(InboundTurn(
-            platform="test", platform_user_id="user.1", platform_message_id="later-1",
-            text="你先忙吧", observed_at=NOW, trace_id="trace:shared-timing",
-        ))
+        replayed = await rebuilt.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="later-1",
+                text="你先忙吧",
+                observed_at=NOW,
+                trace_id="trace:shared-timing",
+            )
+        )
         assert replayed.status == "deferred"
         assert replayed.authorized_action_ids == ()
         assert await rebuilt.drain_background_once() is None
         assert model.calls == 1
         projection = rebuilt._ledger.project()  # noqa: SLF001
         assert next(item for item in projection.actions if item.action_id == action_id).state in {
-            "authorized", "scheduled"
+            "authorized",
+            "scheduled",
         }
         assert rebuilt._ledger.rebuild() == projection  # noqa: SLF001
         await rebuilt.tick(
@@ -2141,15 +2528,21 @@ async def test_production_shared_reply_audit_reaches_defer_without_second_model_
         # Commitment and followup Action already exist, Pulse must not turn it
         # into a second model decision or a duplicate message.
         assert await rebuilt.drain_background_once() is None
-        assert proactive.calls == 0
         delivered = await rebuilt.drain_actions_once()
         assert delivered is not None and delivered.status == "settled"
         settled = rebuilt._ledger.project()  # noqa: SLF001
-        assert next(item for item in settled.actions if item.action_id == action_id).state == "delivered"
-        assert next(
-            item for item in settled.commitments
-            if item.values.fulfillment_contract.expected_action_id == action_id
-        ).values.status == "fulfilled"
+        assert (
+            next(item for item in settled.actions if item.action_id == action_id).state
+            == "delivered"
+        )
+        assert (
+            next(
+                item
+                for item in settled.commitments
+                if item.values.fulfillment_contract.expected_action_id == action_id
+            ).values.status
+            == "fulfilled"
+        )
         assert len(settled.threads) == 1
         assert settled.threads[0].values.status == "open"
         assert any(item.action_id == action_id for item in settled.execution_receipts)
@@ -2164,21 +2557,33 @@ async def test_production_shared_reply_audit_reaches_defer_without_second_model_
 )
 @pytest.mark.asyncio
 async def test_production_now_and_silent_are_final_without_a_social_background_unit(
-    tmp_path: Path, choice: str, expected_status: str, expected_action_count: int,
+    tmp_path: Path,
+    choice: str,
+    expected_status: str,
+    expected_action_count: int,
 ) -> None:
     model = _TimingDraftChatModel(choice)
-    adapter = ChatModelDeliberationAdapter(model=model)
-    app = build_sqlite_world_v2_turn_application(
+    adapter = _ExpressionDraftWire(model=model)
+    app = _build_application(
         path=tmp_path / f"shared-reply-{choice}.sqlite",
-        config=_config(), identities=_Identities(), router=_Router(),
-        main_model=adapter, quick_recovery=adapter, transport=_Transport(), now=NOW,
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        inbound_author=adapter,
+        transport=_Transport(),
+        now=NOW,
     )
     try:
-        outcome = await app.respond(InboundTurn(
-            platform="test", platform_user_id="user.1",
-            platform_message_id=f"timing-{choice}", text="你在吗？",
-            observed_at=NOW, trace_id=f"trace:timing:{choice}",
-        ))
+        outcome = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id=f"timing-{choice}",
+                text="你在吗？",
+                observed_at=NOW,
+                trace_id=f"trace:timing:{choice}",
+            )
+        )
         background = await app.drain_background_once()
         projection = app._ledger.project()  # noqa: SLF001
     finally:
@@ -2189,8 +2594,7 @@ async def test_production_now_and_silent_are_final_without_a_social_background_u
     assert model.calls == 1
     assert background is None
     assert not any(
-        item.process_kind == "social_action_deliberation"
-        for item in projection.trigger_processes
+        item.process_kind == "social_action_deliberation" for item in projection.trigger_processes
     )
 
 
@@ -2199,23 +2603,37 @@ async def test_production_later_budget_exhaustion_is_terminal_without_partial_ef
     tmp_path: Path,
 ) -> None:
     model = _SequenceTimingDraftChatModel(("later", "later"))
-    adapter = ChatModelDeliberationAdapter(model=model)
-    app = build_sqlite_world_v2_turn_application(
+    adapter = _ExpressionDraftWire(model=model)
+    app = _build_application(
         path=tmp_path / "shared-reply-budget.sqlite",
         config=replace(_config(), chat_budget_limit=10, reply_budget_amount=10),
-        identities=_Identities(), router=_Router(), main_model=adapter,
-        quick_recovery=adapter, transport=_Transport(), now=NOW,
+        identities=_Identities(),
+        router=_Router(),
+        inbound_author=adapter,
+        transport=_Transport(),
+        now=NOW,
     )
     try:
-        first = await app.respond(InboundTurn(
-            platform="test", platform_user_id="user.1", platform_message_id="later-budget-1",
-            text="晚点再说。", observed_at=NOW, trace_id="trace:later-budget:1",
-        ))
-        second = await app.respond(InboundTurn(
-            platform="test", platform_user_id="user.1", platform_message_id="later-budget-2",
-            text="还有一件事也晚点说。", observed_at=NOW,
-            trace_id="trace:later-budget:2",
-        ))
+        first = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="later-budget-1",
+                text="晚点再说。",
+                observed_at=NOW,
+                trace_id="trace:later-budget:1",
+            )
+        )
+        second = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="later-budget-2",
+                text="还有一件事也晚点说。",
+                observed_at=NOW,
+                trace_id="trace:later-budget:2",
+            )
+        )
         projection = app._ledger.project()  # noqa: SLF001
     finally:
         app.close()
@@ -2225,11 +2643,15 @@ async def test_production_later_budget_exhaustion_is_terminal_without_partial_ef
     assert second.terminal_errors == ("social_action.chat_budget_exhausted",)
     assert model.calls == 2
     assert len(projection.actions) == len(projection.commitments) == 1
-    terminals = [item for item in projection.trigger_processes
-        if item.process_kind == "social_action_deliberation" and item.state == "terminal"]
+    terminals = [
+        item
+        for item in projection.trigger_processes
+        if item.process_kind == "social_action_deliberation" and item.state == "terminal"
+    ]
     assert len(terminals) == 2
     assert {item.runtime_outcome_ref.split(":", 3)[1] for item in terminals} == {
-        "accepted_defer", "budget_exhausted"
+        "accepted_defer",
+        "budget_exhausted",
     }
 
 
@@ -2238,26 +2660,41 @@ async def test_production_user_interjection_cancels_shared_deferred_followup(
     tmp_path: Path,
 ) -> None:
     model = _SequenceTimingDraftChatModel(("later", "silent"))
-    adapter = ChatModelDeliberationAdapter(model=model)
-    app = build_sqlite_world_v2_turn_application(
+    adapter = _ExpressionDraftWire(model=model)
+    app = _build_application(
         path=tmp_path / "shared-reply-interjection.sqlite",
-        config=_config(), identities=_Identities(), router=_Router(),
-        main_model=adapter, quick_recovery=adapter, transport=_Transport(), now=NOW,
-        expression_reconsideration_reviewer=_CancelReviewer(),
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        inbound_author=adapter,
+        transport=_Transport(),
+        now=NOW,
+        purpose_faculties=(_CancelReviewer(),),
     )
     try:
-        first = await app.respond(InboundTurn(
-            platform="test", platform_user_id="user.1", platform_message_id="later-cancel-1",
-            text="晚点再回我。", observed_at=NOW, trace_id="trace:later-cancel:1",
-        ))
+        first = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="later-cancel-1",
+                text="晚点再回我。",
+                observed_at=NOW,
+                trace_id="trace:later-cancel:1",
+            )
+        )
         accepted_projection = app._ledger.project()  # noqa: SLF001
         accepted_action = accepted_projection.actions[0]
         accepted_commitment = accepted_projection.commitments[0]
-        await app.respond(InboundTurn(
-            platform="test", platform_user_id="user.1", platform_message_id="later-cancel-2",
-            text="等等，不用再回刚才那句。", observed_at=NOW,
-            trace_id="trace:later-cancel:2",
-        ))
+        await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="later-cancel-2",
+                text="等等，不用再回刚才那句。",
+                observed_at=NOW,
+                trace_id="trace:later-cancel:2",
+            )
+        )
         cancelled = await app.drain_background_once()
         projection = app._ledger.project()  # noqa: SLF001
     finally:
@@ -2266,46 +2703,29 @@ async def test_production_user_interjection_cancels_shared_deferred_followup(
     assert first.status == "deferred"
     assert cancelled is not None and cancelled.status == "cancelled"
     assert model.calls == 2
-    action = next(item for item in projection.actions if item.action_id == accepted_action.action_id)
-    commitment = next(item for item in projection.commitments
-        if item.commitment_id == accepted_commitment.commitment_id)
+    action = next(
+        item for item in projection.actions if item.action_id == accepted_action.action_id
+    )
+    commitment = next(
+        item
+        for item in projection.commitments
+        if item.commitment_id == accepted_commitment.commitment_id
+    )
     assert action.state == "cancelled"
     assert commitment.values.status == "released"
     assert commitment.values.settlement_reason_code == "user_withdrew"
 
 
-class _ReconsiderationCancelBackgroundModel:
-    """Background channel fixture answering only the reconsideration grammar."""
 
-    model = "test-background-reconsideration"
 
-    def __init__(self) -> None:
-        self.review_calls = 0
-        self.review_materials: list[dict[str, object]] = []
 
-    async def complete(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
-        del temperature
-        system = messages[0]["content"]
-        assert "not-yet-dispatched companion expression" in system, (
-            "the background model was consulted by an unexpected lane in this test"
-        )
-        self.review_calls += 1
-        self.review_materials.append(json.loads(messages[1]["content"]))
-        return '{"disposition":"cancel"}'
 
 
 @pytest.mark.asyncio
-async def test_production_composes_reconsideration_reviewer_from_background_model(
+async def test_production_routes_reconsideration_through_unified_interior(
     tmp_path: Path,
 ) -> None:
-    """Without an injected reviewer, the background channel must still claim gates.
-
-    Production previously opened durable reconsideration triggers on every
-    interjection but composed no reviewer (owner stayed ``None``), so the QQ
-    ledger accumulated Opened-only gates and their frozen beats never
-    dispatched.  The composition root now assembles the bounded reviewer from
-    the same background model that carries proactive cognition.
-    """
+    """The durable gate must obtain its character choice from one Interior turn."""
 
     model = _SequenceTimingDraftChatModel(
         ("later", "silent"),
@@ -2315,31 +2735,39 @@ async def test_production_composes_reconsideration_reviewer_from_background_mode
             "attended_source_refs": [],
         },
     )
-    adapter = ChatModelDeliberationAdapter(model=model)
-    background = _ReconsiderationCancelBackgroundModel()
-    app = build_sqlite_world_v2_turn_application(
+    adapter = _ExpressionDraftWire(model=model)
+    reconsideration = _ReconsiderationCancelInteriorFaculty()
+    app = _build_application(
         path=tmp_path / "shared-reply-auto-reviewer.sqlite",
-        config=_config(), identities=_Identities(), router=_Router(),
-        main_model=adapter, quick_recovery=adapter, transport=_Transport(), now=NOW,
-        proactive_model=background,
-        proactive_identity_frame=CompanionIdentityFrame(
-            companion_name="枝枝",
-            counterpart_name="user.1",
-            personality_frame="有自己的生活和判断。",
-        ),
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        inbound_author=adapter,
+        transport=_Transport(),
+        now=NOW,
+        purpose_faculties=(reconsideration,),
     )
     try:
-        first = await app.respond(InboundTurn(
-            platform="test", platform_user_id="user.1",
-            platform_message_id="auto-reviewer-1",
-            text="晚点再回我。", observed_at=NOW, trace_id="trace:auto-reviewer:1",
-        ))
-        await app.respond(InboundTurn(
-            platform="test", platform_user_id="user.1",
-            platform_message_id="auto-reviewer-2",
-            text="等等，不用再回刚才那句。", observed_at=NOW,
-            trace_id="trace:auto-reviewer:2",
-        ))
+        first = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="auto-reviewer-1",
+                text="晚点再回我。",
+                observed_at=NOW,
+                trace_id="trace:auto-reviewer:1",
+            )
+        )
+        await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="auto-reviewer-2",
+                text="等等，不用再回刚才那句。",
+                observed_at=NOW,
+                trace_id="trace:auto-reviewer:2",
+            )
+        )
         cancelled = await app.drain_background_once()
         projection = app._ledger.project()  # noqa: SLF001
     finally:
@@ -2347,33 +2775,21 @@ async def test_production_composes_reconsideration_reviewer_from_background_mode
 
     assert first.status == "deferred"
     assert cancelled is not None and cancelled.status == "cancelled"
-    assert background.review_calls == 1
-    supplied = background.review_materials[0]
-    context = supplied["conversation_context"]
-    assert context["identity_frame"]["value"]["companion_name"] == "枝枝"
-    assert context["identity_frame"]["source_refs"]["stable_identity"].startswith(
-        "identity-frame:sha256:"
-    )
-    assert context["current_self_state"]["contract"] == "current-self-state.1"
-    dialogue = context["recent_dialogue"]
-    assert dialogue["availability"] == "available"
-    assert all(item.get("source_ref") for item in dialogue["items"])
-    assert any(
-        item["value"].get("speaker_ref") == "user:user.1"
-        for item in dialogue["items"]
-    )
-    pending = context["old_pending_expression"]
+    assert reconsideration.review_calls == 1
+    snapshot = reconsideration.snapshots[0]
+    assert snapshot["contract"] == "inner-life-snapshot.1"
+    assert len(snapshot["faculties"]) == 8
+    capability = reconsideration.capabilities[0]
+    assert capability["contract"] == ("character-interior-expression-reconsideration-capability.1")
+    assert capability["new_observation"]["source_ref"] in snapshot["source_refs"]
+    pending = capability["old_pending_expression"]
     pending_beat = next(
-        item
-        for item in projection.expression_beats
-        if item.beat_id == pending["beat_id"]
+        item for item in projection.expression_beats if item.beat_id == pending["beat_id"]
     )
     assert pending["source_ref"] == pending_beat.event_ref
-    old_private_state = context["old_private_turn_state"]
+    old_private_state = capability["old_private_turn_state"]
     pending_audit = next(
-        item
-        for item in projection.proposal_audits
-        if item.proposal_id == pending_beat.proposal_id
+        item for item in projection.proposal_audits if item.proposal_id == pending_beat.proposal_id
     )
     assert old_private_state == {
         "value": {
@@ -2386,78 +2802,72 @@ async def test_production_composes_reconsideration_reviewer_from_background_mode
         "authority": "turn_local_audit_only",
         "fact_authority": False,
     }
-    assert supplied["new_observation"]["source_ref"].startswith(
-        "event:trigger:observation:"
-    )
+    assert capability["new_observation"]["source_ref"].startswith("event:trigger:observation:")
     gates = [
-        item for item in projection.trigger_processes
+        item
+        for item in projection.trigger_processes
         if item.process_kind == "expression_reconsideration"
     ]
     assert gates and all(item.state == "terminal" for item in gates)
-    assert all(
-        item.state == "cancelled"
-        for item in projection.actions
-        if item.kind == "followup"
-    )
+    assert all(item.state == "cancelled" for item in projection.actions if item.kind == "followup")
 
-@pytest.mark.asyncio
-async def test_production_application_persists_no_change_appraisal_in_background_without_state(
-    tmp_path: Path,
-) -> None:
-    transport = _DeliveredTransport()
-    reply_model = ChatModelDeliberationAdapter(model=_DraftChatModel())
-    app = build_sqlite_world_v2_turn_application(
-        path=tmp_path / "world-v2-background-appraisal.sqlite",
-        config=_config(),
-        identities=_Identities(),
-        router=_Router(),
-        main_model=reply_model,
-        quick_recovery=reply_model,
-        appraisal_model=AppraisalDraftDeliberationAdapter(model=_NoChangeAppraisalChat()),
-        transport=transport,
-        now=NOW,
-    )
-    try:
-        outcome = await app.respond(
-            InboundTurn(
-                platform="test",
-                platform_user_id="user.1",
-                platform_message_id="message:background-appraisal",
-                text="今天就是有点累。",
-                observed_at=NOW,
-                trace_id="trace:production-background-appraisal",
-            )
-        )
-        background = await app.drain_background_once()
-        await app.drain_actions_once()
-        projection = app._ledger.project()  # noqa: SLF001 - selective-persistence evidence
-    finally:
-        app.close()
+class _ReconsiderationCancelInteriorFaculty:
+    """Unified-interior fixture answering only the reconsideration capability."""
 
-    assert outcome.status == "action_authorized"
-    assert background is not None
-    assert background.status == "processed"
-    assert background.work_status == "no_change"
-    assert projection.appraisals == ()
-    assert projection.affect_episodes == ()
-    assert projection.relationship_states == ()
+    name = "fixture-expression-reconsideration-inspector"
+    purposes = ("expression_reconsideration",)
+    requires_author_lineage = True
 
+    def __init__(self) -> None:
+        self.review_calls = 0
+        self.snapshots: list[dict[str, object]] = []
+        self.capabilities: list[dict[str, object]] = []
+
+    async def experience(self, request):  # type: ignore[no-untyped-def]
+        return {
+            "status": "no_change",
+            "summary": "fixture observed interruption",
+            "author_lineage": _fixture_author_lineage(request, model_id=self.name),
+        }
+
+    async def consider(self, request):  # type: ignore[no-untyped-def]
+        manifest = request.capability_manifest
+        assert manifest is not None
+        self.review_calls += 1
+        self.snapshots.append(request.snapshot.model_view())
+        self.capabilities.append(dict(manifest.payload))
+        return {
+            "status": "decision",
+            "summary": "用户的新消息使先前待发送内容不再合适。",
+            "attended_source_refs": (),
+            "author_lineage": _fixture_author_lineage(request, model_id=self.name),
+            "decision": {
+                "contract": "character-interior-purpose-decision.1",
+                "purpose": "expression_reconsideration",
+                "source_refs": list(manifest.source_refs),
+                "capability_ref": manifest.capability_ref,
+                "capability_payload_hash": manifest.payload_hash,
+                "payload": {
+                    "contract": ("character-interior-expression-reconsideration-decision.1"),
+                    "disposition": "cancel",
+                },
+            },
+        }
 
 @pytest.mark.asyncio
 async def test_production_application_accepts_a_fact_outside_the_visible_reply_lane(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "world-v2-background-fact.sqlite"
-    reply_model = ChatModelDeliberationAdapter(model=_DraftChatModel())
-    app = build_sqlite_world_v2_turn_application(
+    reply_model = _ExpressionDraftWire(model=_DraftChatModel())
+    app = _build_application(
         path=path,
         config=_config(),
         identities=_Identities(),
         router=_Router(),
-        main_model=reply_model,
-        quick_recovery=reply_model,
+        inbound_author=reply_model,
         fact_model=_FactChat(),
-        memory_model=_MemoryChat(),
+        memory_character=_MemoryChat(),
         transport=_DeliveredTransport(),
         now=NOW,
     )
@@ -2508,7 +2918,7 @@ async def test_production_application_exposes_accepted_fact_memory_to_the_next_t
     """The next deliberation must see source text, not only a candidate identifier."""
 
     chat = _CapturingDraftChatModel()
-    reply_model = ChatModelDeliberationAdapter(model=chat)
+    reply_model = _ExpressionDraftWire(model=chat)
     # A platform delivery address is not the counterpart's domain identity.
     # QQ uses a conversation target here, while Facts and Memories are scoped
     # to the canonical user actor.
@@ -2517,15 +2927,14 @@ async def test_production_application_exposes_accepted_fact_memory_to_the_next_t
         reply_target="conversation:test:c2c:user.1",
         counterpart_actor_ref="user:user.1",
     )
-    app = build_sqlite_world_v2_turn_application(
+    app = _build_application(
         path=tmp_path / "world-v2-next-turn-fact-memory.sqlite",
         config=config,
         identities=_ConversationTargetIdentities(),
         router=_Router(),
-        main_model=reply_model,
-        quick_recovery=reply_model,
+        inbound_author=reply_model,
         fact_model=_FactChat(),
-        memory_model=_MemoryChat(),
+        memory_character=_MemoryChat(),
         transport=_DeliveredTransport(),
         now=NOW,
     )
@@ -2559,11 +2968,11 @@ async def test_production_application_exposes_accepted_fact_memory_to_the_next_t
     assert second.status == "action_authorized"
     assert len(chat.requests) == 2
 
-    next_request = json.loads(chat.requests[1][1]["content"])["request"]
-    context = json.loads(next_request["model_content_json"])
-    memories = context["slices"]["active_memory_candidates"]
-    assert len(memories["items"]) == 1
-    memory = memories["items"][0]["value"]
+    provider_material = json.loads(chat.requests[1][1]["content"])
+    snapshot = provider_material["inner_life_snapshot"]
+    memories = snapshot["materials"]["remembered_material"]
+    assert len(memories) == 1
+    memory = memories[0]
     assert memory["source_excerpts"][0]["text"] == "我最近很喜欢喝乌龙茶。"
 
 
@@ -2575,48 +2984,61 @@ async def test_next_turn_context_replays_recent_user_and_delivered_companion_tex
 
     path = tmp_path / "world-v2-recent-dialogue.sqlite"
     first_chat = _CapturingDraftChatModel()
-    reply_model = ChatModelDeliberationAdapter(model=first_chat)
-    app = build_sqlite_world_v2_turn_application(
+    reply_model = _ExpressionDraftWire(model=first_chat)
+    app = _build_application(
         path=path,
-        config=_config(), identities=_Identities(), router=_Router(),
-        main_model=reply_model, quick_recovery=reply_model,
-        transport=_DeliveredTransport(), now=NOW,
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        inbound_author=reply_model,
+        transport=_DeliveredTransport(),
+        now=NOW,
     )
     try:
-        await app.respond(InboundTurn(
-            platform="test", platform_user_id="user.1",
-            platform_message_id="message:dialogue:first",
-            text="我今天在路上看到一只特别亲人的橘猫。",
-            observed_at=NOW, trace_id="trace:dialogue:first",
-        ))
+        await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:dialogue:first",
+                text="我今天在路上看到一只特别亲人的橘猫。",
+                observed_at=NOW,
+                trace_id="trace:dialogue:first",
+            )
+        )
         assert (await app.drain_actions_once()).status == "settled"
     finally:
         app.close()
 
     second_chat = _CapturingDraftChatModel()
-    second_model = ChatModelDeliberationAdapter(model=second_chat)
-    restarted = build_sqlite_world_v2_turn_application(
-        path=path, config=_config(), identities=_Identities(), router=_Router(),
-        main_model=second_model, quick_recovery=second_model,
-        transport=_DeliveredTransport(), now=NOW,
+    second_model = _ExpressionDraftWire(model=second_chat)
+    restarted = _build_application(
+        path=path,
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        inbound_author=second_model,
+        transport=_DeliveredTransport(),
+        now=NOW,
     )
     try:
-        await restarted.respond(InboundTurn(
-            platform="test", platform_user_id="user.1",
-            platform_message_id="message:dialogue:second",
-            text="你也会这样吗？",
-            observed_at=NOW, trace_id="trace:dialogue:second",
-        ))
+        await restarted.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:dialogue:second",
+                text="你也会这样吗？",
+                observed_at=NOW,
+                trace_id="trace:dialogue:second",
+            )
+        )
     finally:
         restarted.close()
 
-    request = json.loads(second_chat.requests[0][1]["content"])["request"]
-    context = json.loads(request["model_content_json"])
-    dialogue = context["slices"]["recent_dialogue"]
-    values = [item["value"] for item in dialogue["items"]]
+    provider_material = json.loads(second_chat.requests[0][1]["content"])
+    snapshot = provider_material["inner_life_snapshot"]
+    values = snapshot["materials"]["recent_dialogue"]
     assert any(
-        item["speaker"] == "counterpart"
-        and item["text"] == "我今天在路上看到一只特别亲人的橘猫。"
+        item["speaker"] == "counterpart" and item["text"] == "我今天在路上看到一只特别亲人的橘猫。"
         for item in values
     )
     assert any(
@@ -2625,613 +3047,3 @@ async def test_next_turn_context_replays_recent_user_and_delivered_companion_tex
         and item["delivery_state"] == "delivered"
         for item in values
     )
-
-
-@pytest.mark.asyncio
-async def test_significant_emotion_becomes_durable_in_background_without_reauthoring_reply(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "world-v2-background-emotion.sqlite"
-    reply_chat = _CapturingDraftChatModel()
-    immediate_chat = _ImmediateEmotionChat()
-    reply_model = ChatModelDeliberationAdapter(model=reply_chat)
-    app = build_sqlite_world_v2_turn_application(
-        path=path,
-        config=_config(),
-        identities=_Identities(),
-        router=_Router(),
-        main_model=reply_model,
-        quick_recovery=reply_model,
-        appraisal_model=AppraisalDraftDeliberationAdapter(model=immediate_chat),
-        transport=_DeliveredTransport(),
-        now=NOW,
-    )
-    try:
-        outcome = await app.respond(
-            InboundTurn(
-                platform="test",
-                platform_user_id="user.1",
-                platform_message_id="message:same-turn-emotion",
-                text="你就是个没用的机器人，根本不值得认真说话。",
-                observed_at=NOW,
-                trace_id="trace:same-turn-emotion",
-            )
-        )
-        before_background = app._ledger.project()  # noqa: SLF001 - production vertical evidence
-        request = json.loads(reply_chat.requests[0][1]["content"])["request"]
-        reply_context = json.loads(request["model_content_json"])
-        background = await app.drain_background_once()
-        projection = app._ledger.project()  # noqa: SLF001 - production vertical evidence
-    finally:
-        app.close()
-
-    assert outcome.status == "action_authorized"
-    assert before_background.appraisals == before_background.affect_episodes == ()
-    assert reply_context["slices"]["affect_episodes"]["items"] == []
-    assert immediate_chat.calls == 1
-    assert background is not None and background.status == "processed"
-    assert background.work_status == "accepted"
-    assert not any(
-        item.process_kind == "interaction_appraisal" and item.state != "terminal"
-        for item in projection.trigger_processes
-    )
-    assert len(projection.appraisals) == len(projection.affect_episodes) == 1
-    assert projection.appraisals[0].hypotheses[0].meaning == "boundary_violation"
-    assert [item.dimension for item in projection.affect_episodes[0].components] == [
-        "hurt",
-        "anger",
-    ]
-
-    assert len(reply_chat.requests) == 1
-    expected_evidence_ref = projection.affect_episodes[0].evidence_refs[0].ref_id
-    assert "same-turn-emotion" in expected_evidence_ref
-
-
-@pytest.mark.asyncio
-async def test_minor_interaction_does_not_create_a_durable_affect_or_reclassify_in_background(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "world-v2-minor-same-turn-emotion.sqlite"
-    reply_model = ChatModelDeliberationAdapter(model=_DraftChatModel())
-    unused_affect_chat = _NeverCalledAffectChat()
-    app = build_sqlite_world_v2_turn_application(
-        path=path,
-        config=_config(),
-        identities=_Identities(),
-        router=_Router(),
-        main_model=reply_model,
-        quick_recovery=reply_model,
-        appraisal_model=AppraisalDraftDeliberationAdapter(model=_NoChangeAppraisalChat()),
-        affect_model=AffectDraftDeliberationAdapter(model=unused_affect_chat),
-        transport=_DeliveredTransport(),
-        now=NOW,
-    )
-    try:
-        outcome = await app.respond(
-            InboundTurn(
-                platform="test",
-                platform_user_id="user.1",
-                platform_message_id="message:minor-emotion",
-                text="嗯，知道了。",
-                observed_at=NOW,
-                trace_id="trace:minor-emotion",
-            )
-        )
-        background = await app.drain_background_once()
-        projection = app._ledger.project()  # noqa: SLF001 - production vertical evidence
-    finally:
-        app.close()
-
-    assert outcome.status == "action_authorized"
-    assert unused_affect_chat.calls == 0
-    assert projection.appraisals == projection.affect_episodes == ()
-    assert not any(
-        item.process_kind == "interaction_appraisal" and item.state != "terminal"
-        for item in projection.trigger_processes
-    )
-    assert background is None or background.work_status != "accepted"
-
-
-@pytest.mark.asyncio
-async def test_production_application_carries_accepted_appraisal_into_an_affect_episode(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "world-v2-affect.sqlite"
-    reply_model = ChatModelDeliberationAdapter(model=_DraftChatModel())
-    app = build_sqlite_world_v2_turn_application(
-        path=path,
-        config=_config(),
-        identities=_Identities(),
-        router=_Router(),
-        main_model=reply_model,
-        quick_recovery=reply_model,
-        appraisal_model=AppraisalDraftDeliberationAdapter(model=_ImmediateEmotionChat()),
-        affect_model=AffectDraftDeliberationAdapter(model=_NeverCalledAffectChat()),
-        transport=_DeliveredTransport(),
-        now=NOW,
-    )
-    try:
-        await app.respond(
-            InboundTurn(
-                platform="test",
-                platform_user_id="user.1",
-                platform_message_id="message:affect",
-                text="你刚才的回复让我有点失望。",
-                observed_at=NOW,
-                trace_id="trace:production-affect",
-            )
-        )
-        background = await app.drain_background_once()
-    finally:
-        app.close()
-
-    assert background is not None
-    assert background.status == "processed"
-    assert background.work_status == "accepted"
-    ledger = SQLiteWorldLedger(path=path, world_id=_config().world_id)
-    try:
-        episode = ledger.project().affect_episodes
-    finally:
-        ledger.close()
-    assert len(episode) == 1
-    assert episode[0].components[0].dimension == "hurt"
-
-
-@pytest.mark.asyncio
-async def test_significant_interaction_state_is_consumed_by_the_next_visible_turn(
-    tmp_path: Path,
-) -> None:
-    """A noticed wound must become next-turn context, not a write-only ledger ornament."""
-
-    path = tmp_path / "world-v2-significant-state-next-turn.sqlite"
-    chat = _CapturingDraftChatModel()
-    reply_model = ChatModelDeliberationAdapter(model=chat)
-    app = build_sqlite_world_v2_turn_application(
-        path=path,
-        config=_config(),
-        identities=_Identities(),
-        router=_Router(),
-        main_model=reply_model,
-        quick_recovery=reply_model,
-        appraisal_model=AppraisalDraftDeliberationAdapter(model=_ImmediateEmotionChat()),
-        affect_model=AffectDraftDeliberationAdapter(model=_NeverCalledAffectChat()),
-        relationship_model=RelationshipDraftDeliberationAdapter(
-            model=_RelationshipSignalChat()
-        ),
-        transport=_DeliveredTransport(),
-        now=NOW,
-    )
-    try:
-        first = await app.respond(
-            InboundTurn(
-                platform="test",
-                platform_user_id="user.1",
-                platform_message_id="message:significant-state-source",
-                text="你刚才的回复让我挺失望的，感觉你没把我说的事当回事。",
-                observed_at=NOW,
-                trace_id="trace:significant-state-source",
-            )
-        )
-        jobs = [await app.drain_background_once() for _ in range(4)]
-        projection = app._ledger.project()  # noqa: SLF001 - vertical acceptance evidence
-        second = await app.respond(
-            InboundTurn(
-                platform="test",
-                platform_user_id="user.1",
-                platform_message_id="message:significant-state-consumer",
-                text="算了，继续说吧。",
-                observed_at=NOW,
-                trace_id="trace:significant-state-consumer",
-            )
-        )
-    finally:
-        app.close()
-
-    assert first.status == second.status == "action_authorized"
-    assert [job.work_status for job in jobs if job is not None].count("accepted") == 3
-    assert jobs[-1] is not None and jobs[-1].status == "idle"
-    assert projection.appraisals[0].hypotheses[0].meaning == "boundary_violation"
-    assert projection.affect_episodes[0].components[0].dimension == "hurt"
-    assert projection.relationship_states[0].variables.trust_bp == 240
-
-    request = json.loads(chat.requests[1][1]["content"])["request"]
-    context = json.loads(request["model_content_json"])
-    affect_items = context["slices"]["affect_episodes"]["items"]
-    relationship_items = context["slices"]["relationship_slice"]["items"]
-    assert any(
-        component["dimension"] == "hurt"
-        for item in affect_items
-        for component in item["value"]["components"]
-    )
-    assert any(
-        item["value"]["variables"]["trust_bp"] == 240 for item in relationship_items
-    ), relationship_items
-
-
-@pytest.mark.asyncio
-async def test_local_appraisal_persists_affect_in_background_for_the_next_current_self(
-    tmp_path: Path,
-) -> None:
-    """The small model's own valid meaning becomes context, not a write-only hint."""
-
-    chat = _CapturingDraftChatModel()
-    local = _LocalQwenEmotionChat()
-    reply_model = ChatModelDeliberationAdapter(model=chat)
-    app = build_sqlite_world_v2_turn_application(
-        path=tmp_path / "world-v2-local-appraisal-current-self.sqlite",
-        config=_config(),
-        identities=_Identities(),
-        router=_Router(),
-        main_model=reply_model,
-        quick_recovery=reply_model,
-        appraisal_model=FastAppraisalDraftDeliberationAdapter(model=local),
-        transport=_DeliveredTransport(),
-        now=NOW,
-    )
-    try:
-        first = await app.respond(
-            InboundTurn(
-                platform="test",
-                platform_user_id="user.1",
-                platform_message_id="message:local-affect-source",
-                text="你刚才那样让我挺失望的。",
-                observed_at=NOW,
-                trace_id="trace:local-affect-source",
-            )
-        )
-        before_background = app._ledger.project()  # noqa: SLF001 - production seam evidence
-        background = await app.drain_background_once()
-        persisted = app._ledger.project()  # noqa: SLF001 - production seam evidence
-        second = await app.respond(
-            InboundTurn(
-                platform="test",
-                platform_user_id="user.1",
-                platform_message_id="message:local-affect-consumer",
-                text="那我们继续说吧。",
-                observed_at=NOW + timedelta(minutes=1),
-                trace_id="trace:local-affect-consumer",
-            )
-        )
-    finally:
-        app.close()
-
-    assert first.status == second.status == "action_authorized"
-    assert before_background.appraisals == before_background.affect_episodes == ()
-    assert background is not None and background.work_status == "accepted"
-    assert local.calls == 1
-    assert persisted.appraisals[0].hypotheses[0].meaning == "disappointment"
-    assert persisted.affect_episodes[0].components[0].dimension == "sadness"
-
-    provider_input = json.loads(chat.requests[1][1]["content"])
-    current = provider_input["current_self_state"]
-    assert current["appraisals"][0]["hypotheses"][0]["meaning"] == "disappointment"
-    assert current["affect"][0]["components"][0]["dimension"] == "sadness"
-
-
-@pytest.mark.asyncio
-async def test_production_application_builds_first_relationship_from_appraisal(
-    tmp_path: Path,
-) -> None:
-    """A first appraisal may form a source-bound state without a pre-existing head."""
-
-    path = tmp_path / "world-v2-first-relationship.sqlite"
-    reply_model = ChatModelDeliberationAdapter(model=_DraftChatModel())
-    relationship_chat = _RelationshipSignalChat()
-    app = build_sqlite_world_v2_turn_application(
-        path=path,
-        config=_config(),
-        identities=_Identities(),
-        router=_Router(),
-        main_model=reply_model,
-        quick_recovery=reply_model,
-        appraisal_model=AppraisalDraftDeliberationAdapter(model=_AppraisingChat()),
-        relationship_model=RelationshipDraftDeliberationAdapter(
-            model=relationship_chat
-        ),
-        transport=_DeliveredTransport(),
-        now=NOW,
-    )
-    try:
-        await app.respond(
-            InboundTurn(
-                platform="test",
-                platform_user_id="user.1",
-                platform_message_id="message:first-relationship",
-                text="你上次答应我的事真的做到了。",
-                observed_at=NOW,
-                trace_id="trace:production:first-relationship",
-            )
-        )
-        signal = await app.drain_background_once()
-        adjustment = await app.drain_background_once()
-        relationship = await app.drain_background_once()
-        idle = await app.drain_background_once()
-    finally:
-        app.close()
-
-    assert signal is not None and signal.work_status == "accepted"
-    assert adjustment is not None and adjustment.work_status == "accepted"
-    assert relationship is not None and relationship.work_status == "accepted"
-    assert idle is not None and idle.status == "idle"
-    ledger = SQLiteWorldLedger(path=path, world_id=_config().world_id)
-    try:
-        projection = ledger.project()
-    finally:
-        ledger.close()
-    assert projection.relationship_signals[0].subject_ref == "user:user.1"
-    assert projection.relationship_states[0].stage == "stranger"
-    assert projection.relationship_states[0].variables.trust_bp == 240
-
-
-@pytest.mark.asyncio
-async def test_sustained_interaction_is_source_bound_context_for_model_owned_relationship_change(
-    tmp_path: Path,
-) -> None:
-    """Ordinary turns create evidence; only the role model assigns meaning."""
-
-    path = tmp_path / "world-v2-continuous-relationship.sqlite"
-    reply_model = ChatModelDeliberationAdapter(model=_DraftChatModel())
-    relationship_chat = _ContinuityAwareRelationshipChat()
-    app = build_sqlite_world_v2_turn_application(
-        path=path,
-        config=_config(),
-        identities=_Identities(),
-        router=_Router(),
-        main_model=reply_model,
-        quick_recovery=reply_model,
-        appraisal_model=AppraisalDraftDeliberationAdapter(model=_NoChangeAppraisalChat()),
-        relationship_model=RelationshipDraftDeliberationAdapter(model=relationship_chat),
-        transport=_DeliveredTransport(),
-        now=NOW,
-    )
-    try:
-        for index, text in enumerate(("今天随便聊聊。", "嗯，我还在。"), start=1):
-            await app.respond(
-                InboundTurn(
-                    platform="test",
-                    platform_user_id="user.1",
-                    platform_message_id=f"message:continuity:{index}",
-                    text=text,
-                    observed_at=NOW + timedelta(minutes=index),
-                    trace_id=f"trace:continuity:{index}",
-                )
-            )
-        for _ in range(16):
-            await app.drain_background_once()
-            projection = app._ledger.project()  # noqa: SLF001 - production seam evidence
-            if projection.relationship_adjustments:
-                break
-        else:
-            pytest.fail("sustained interaction never reached relationship projection")
-    finally:
-        app.close()
-
-    assert projection.relationship_states[0].variables.closeness_bp == 80
-    assert projection.relationship_states[0].variables.mutuality_bp == 100
-    assert len(relationship_chat.messages) == 1
-    continuity_processes = tuple(
-        item
-        for item in projection.trigger_processes
-        if item.process_kind == "relationship_deliberation"
-        and item.trigger_ref.startswith("relationship-continuity:")
-    )
-    assert len(continuity_processes) == 1
-    assert continuity_processes[0].state == "terminal"
-    model_capsule = json.loads(relationship_chat.messages[0][1]["content"])
-    assert model_capsule["interaction_source_summary"] == json.dumps(
-        {
-            "delivery_state": "observed",
-            "occurred_at": "2026-07-15T12:01:00+00:00",
-            "source_kind": "ordinary_interaction",
-            "speaker": "counterpart",
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    assert model_capsule["accepted_appraisal_summary"] is None
-    continuity = model_capsule["interaction_continuity"]
-    assert continuity["counterpart_turn_count"] == 2
-    assert len(continuity["source_items"]) >= 2
-    assert all(item["item_ref"].startswith("dialogue:") for item in continuity["source_items"])
-    assert set(continuity).isdisjoint(
-        {"sentiment", "polarity", "relationship_delta", "suggested_stage"}
-    )
-
-
-@pytest.mark.asyncio
-async def test_production_relationship_accumulation_authorizes_only_bounded_p3_preview(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Reach P3 through real app turns, not a hand-written relationship head."""
-
-    path = tmp_path / "world-v2-production-p3-from-relationship.sqlite"
-    config = WorldV2TurnApplicationConfig(
-        world_id="world:production-p3-from-relationship",
-        companion_actor_ref="agent:companion",
-        reply_target="user:user.1",
-        action_pump_owner="pump:production-p3-from-relationship",
-        event_ecology_policy=EcologyPolicy(max_candidates_per_drain=1),
-        media_selection_acceptance=MediaSelectionAcceptanceComposition(
-            grant=ProviderMediaGrantBinding(
-                grant_id="grant:production-p3-media", grant_revision=1
-            ),
-            account_id="account:production-p3-media",
-            account_window_id="window:production-p3-media",
-            account_limit=5,
-            amount_limit=1,
-        ),
-    )
-    reply_model = ChatModelDeliberationAdapter(model=_DraftChatModel())
-    relationship_chat = _RelationshipStrongSignalChat()
-    app = build_sqlite_world_v2_turn_application(
-        path=path,
-        config=config,
-        identities=_Identities(),
-        router=_Router(),
-        main_model=reply_model,
-        quick_recovery=reply_model,
-        appraisal_model=AppraisalDraftDeliberationAdapter(model=_AppraisingChat()),
-        relationship_model=RelationshipDraftDeliberationAdapter(
-            model=relationship_chat
-        ),
-        media_selection_model=_SelectingMediaSelectionModel(),
-        transport=_DeliveredTransport(),
-        now=NOW,
-    )
-    current_time = NOW
-    try:
-        for turn in range(1, 16):
-            await app.respond(
-                InboundTurn(
-                    platform="test",
-                    platform_user_id="user.1",
-                    platform_message_id=f"message:relationship-p3:{turn}",
-                    text="你这次真的把答应我的事情做好了。",
-                    observed_at=current_time,
-                    trace_id=f"trace:relationship-p3:{turn}",
-                )
-            )
-            # Background scheduling intentionally interleaves user appraisals
-            # with source-bound appraisals from settled world effects.  Some
-            # of those have no eligible counterpart and correctly finish as
-            # ``no_change``.  The production proof therefore follows durable
-            # relationship authority, never an assumed three-job queue order.
-            for _ in range(24):
-                await app.drain_background_once()
-                projection = app._ledger.project()  # type: ignore[attr-defined]
-                if len(projection.relationship_adjustments) == turn:
-                    break
-            else:
-                pytest.fail(
-                    f"turn {turn} did not produce its relationship adjustment: "
-                    f"signals={len(projection.relationship_signals)}, "
-                    f"adjustments={len(projection.relationship_adjustments)}, "
-                    f"active={[(item.process_kind, item.state) for item in projection.trigger_processes if item.state != 'terminal']}"
-                )
-            assert len(projection.relationship_signals) == turn
-            if turn in {4, 9, 14}:
-                next_time = current_time + timedelta(days=1)
-                await app.tick(
-                    tick_id=f"tick:relationship-p3:{turn}",
-                    logical_time_from=current_time,
-                    logical_time_to=next_time,
-                    observed_at=next_time,
-                    trace_id=f"trace:relationship-p3:tick:{turn}",
-                    causation_id=f"cause:relationship-p3:{turn}",
-                    correlation_id=f"correlation:relationship-p3:{turn}",
-                    reason="relationship_hysteresis_fixture",
-                )
-                current_time = next_time
-
-        relationship = app._ledger.project().relationship_states[0]  # type: ignore[attr-defined]
-        assert relationship.subject_ref == "user:user.1"
-        assert relationship.stage == "close_friend"
-        assert len(relationship_chat.messages) == 15
-
-        last_observation = "observation:test:user.1:message:relationship-p3:15"
-        plan = await app.plan_activity(
-            ActivityPlanCommand(
-                command_id="command:relationship-p3:plan",
-                world_id=config.world_id,
-                source_observation_id=last_observation,
-                plan_id="plan:relationship-p3",
-                activity_id="activity:relationship-p3",
-                activity_kind="wind_down",
-                importance_bp=4_000,
-                location_ref="location:home",
-                participant_refs=("agent:companion",),
-                privacy_class="private",
-            ),
-            logical_time=current_time,
-            created_at=current_time,
-            trace_id="trace:relationship-p3:plan",
-            causation_id="cause:relationship-p3:plan",
-            correlation_id="correlation:relationship-p3",
-        )
-        started = await app.transition_activity(
-            ActivityPlanTransitionCommand(
-                command_id="command:relationship-p3:start",
-                world_id=config.world_id,
-                source_observation_id=last_observation,
-                plan_id="plan:relationship-p3",
-                operation="start",
-            ),
-            logical_time=current_time,
-            created_at=current_time,
-            trace_id="trace:relationship-p3:start",
-            causation_id=plan.event_ids[-1],
-            correlation_id="correlation:relationship-p3",
-        )
-        declaration = await app.declare_recipient_scoped_image_evidence(
-            RecipientScopedImageEvidenceDeclarationCommand(
-                command_id="command:relationship-p3:evidence",
-                source_event_ref=started.event_ids[-1],
-                recipient_ref="user:user.1",
-                image_evidence=RecipientScopedImageEvidenceV1(
-                    visibility="private",
-                    activity={
-                        "evidence_visibility": "private",
-                        "id": "activity:relationship-p3",
-                        "kind": "wind_down",
-                        "description": "在家放松",
-                        "phase": "active",
-                        "private_transition": True,
-                    },
-                    character_media=CharacterMediaEvidenceV1(
-                        character_ref="agent:companion",
-                        present=True,
-                        capture_capabilities=("character_front_camera",),
-                    ),
-                ),
-            ),
-            logical_time=current_time,
-            created_at=current_time,
-            trace_id="trace:relationship-p3:evidence",
-            correlation_id="correlation:relationship-p3",
-        )
-        candidates = await app.drain_character_media_candidates_once(
-            wake_event_ref=declaration.event_ids[-1],
-            logical_time=current_time,
-            trace_id="trace:relationship-p3:candidates",
-            correlation_id="correlation:relationship-p3",
-        )
-        assert len(candidates) == 1
-        selection = await app.drain_media_selection_once(
-            logical_time=current_time,
-            trace_id="trace:relationship-p3:selection",
-            correlation_id="correlation:relationship-p3",
-        )
-        assert selection is not None and selection.status == "proposed"
-        assert selection.proposal_event_ref is not None
-        monkeypatch.setattr(
-            "companion_daemon.world_v2.reducers.require_provider_media_grant",
-            lambda **_kwargs: object(),
-        )
-        accepted = await app.accept_media_selection_once(
-            proposal_event_ref=selection.proposal_event_ref,
-            logical_time=current_time,
-            trace_id="trace:relationship-p3:acceptance",
-            correlation_id="correlation:relationship-p3",
-        )
-        projection = app._ledger.project()  # type: ignore[attr-defined]
-        frozen = app._media_payload_store.read_exact(  # type: ignore[attr-defined]
-            payload_ref=projection.media_opportunities[0].event_snapshot_ref
-        )
-    finally:
-        app.close()
-
-    assert accepted is not None and len(accepted.event_ids) == 4
-    opportunity = projection.media_opportunities[0]
-    assert (
-        opportunity.family,
-        opportunity.privacy_ceiling,
-        opportunity.media_privacy_ceiling,
-        opportunity.media_lane,
-        opportunity.recipient_ref,
-    ) == ("character_media", "private", "intimate", "alluring_life", "user:user.1")
-    assert opportunity.private_expression_basis_ref is not None
-    assert opportunity.p3_authorization_digest is not None
-    assert frozen is not None
-    assert '"world-image-event-snapshot-v3"' in frozen.body
-    assert '"relationship_media_context"' in frozen.body

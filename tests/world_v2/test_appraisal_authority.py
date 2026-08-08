@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime, timedelta
 import json
 from types import SimpleNamespace
@@ -8,21 +7,20 @@ from types import SimpleNamespace
 import pytest
 
 from companion_daemon.world_v2.appraisal_events import appraisal_mutation_hash
+from companion_daemon.world_v2.appraisal_trigger import (
+    CHARACTER_INTERIOR_INBOUND_ATTEMPT_PREFIX,
+)
 from companion_daemon.world_v2.affect_events import (
     AffectBaselineAdjustedPayload,
     AffectEpisodeResolvedPayload,
     affect_mutation_hash,
 )
-from companion_daemon.world_v2.affect_trigger import affect_deliberation_trigger_events
 from companion_daemon.world_v2.batch_invariants import (
     interaction_appraisal_trigger_identity,
 )
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.errors import IdempotencyConflict
 from companion_daemon.world_v2.ledger import WorldLedger
-from companion_daemon.world_v2.interaction_appraisal_trigger_runtime import (
-    InteractionAppraisalTriggerRuntime,
-)
 from companion_daemon.world_v2.runtime import WorldRuntime
 from companion_daemon.world_v2.relationship_trigger import (
     relationship_continuity_trigger_id,
@@ -144,11 +142,13 @@ def prepare_claimed_interaction(
             "state": "claimed",
             "claim_lease": ClaimLease(
                 owner_id="worker:interaction-appraisal",
-                attempt_id="attempt:interaction:1",
+                attempt_id=CHARACTER_INTERIOR_INBOUND_ATTEMPT_PREFIX + "interaction:1",
                 acquired_at=NOW,
                 expires_at=NOW + timedelta(minutes=2),
             ),
-            "attempt_ids": ("attempt:interaction:1",),
+            "attempt_ids": (
+                CHARACTER_INTERIOR_INBOUND_ATTEMPT_PREFIX + "interaction:1",
+            ),
         }
     )
     commit(
@@ -297,7 +297,7 @@ def authorized_batch(trigger: TriggerProcess, payload: dict[str, object]) -> lis
             {
                 "trigger_id": trigger.trigger_id,
                 "owner_id": "worker:interaction-appraisal",
-                "attempt_id": "attempt:interaction:1",
+                "attempt_id": CHARACTER_INTERIOR_INBOUND_ATTEMPT_PREFIX + "interaction:1",
                 "completed_at": NOW.isoformat(),
                 "runtime_outcome_ref": "appraisal:appraisal:interaction:1",
             },
@@ -340,7 +340,7 @@ def test_sqlite_replays_the_complete_interaction_appraisal_authority_path(
 
 @pytest.mark.parametrize("persistent", [False, True])
 @pytest.mark.asyncio
-async def test_accepted_appraisal_can_open_affect_through_an_independent_authority_path(
+async def test_typed_affect_acceptance_replays_and_decays(
     tmp_path, persistent: bool
 ) -> None:
     path = tmp_path / "affect-authority.sqlite3"
@@ -531,38 +531,38 @@ async def test_accepted_appraisal_opens_a_replayable_relationship_trigger(
     )
     commit(ledger, list(trigger_events))
 
+    # The independent relationship-deliberation author was retired by the
+    # CharacterInterior migration.  Opening and claiming the trigger must now
+    # derive a deterministic retired-technical outcome instead of invoking a
+    # parallel worker: the process is terminal, replayable, and no worker is
+    # ever asked to produce a second character decision.
+    projection = ledger.project()
+    trigger_id = relationship_deliberation_trigger_id(
+        world_id=WORLD_ID, appraisal_event_id="interaction-appraisal-accepted"
+    )
+    process = next(
+        item for item in projection.trigger_processes if item.trigger_id == trigger_id
+    )
+    assert process.state == "terminal"
+    assert process.runtime_outcome_ref == (
+        "retired-technical:appraisal-sourced-relationship-author-removed"
+    )
+    assert trigger_id in projection.completed_trigger_ids
+    assert ledger.rebuild() == projection
+
     class _Worker:
         calls: list[str] = []
 
         async def process(self, *, world_id, cursor, source_event):  # type: ignore[no-untyped-def]
-            assert world_id == WORLD_ID
-            assert source_event.event_id == "interaction-appraisal-accepted"
-            assert cursor == ProjectionCursor(
-                world_revision=ledger.project().world_revision,
-                deliberation_revision=ledger.project().deliberation_revision,
-                ledger_sequence=ledger.project().ledger_sequence,
-            )
-            self.calls.append(source_event.event_id)
-            return SimpleNamespace(status="no_change")
+            self.calls.append((world_id, cursor, source_event.event_id))
 
     worker = _Worker()
     runtime = RelationshipTriggerRuntime(
         ledger=ledger, worker=worker, owner_id="worker:relationship"
     )
     result = await runtime.drain_one()
-    projection = ledger.project()
-
-    trigger_id = relationship_deliberation_trigger_id(
-        world_id=WORLD_ID, appraisal_event_id="interaction-appraisal-accepted"
-    )
-    assert result.trigger_id == trigger_id
-    assert result.status == "processed"
-    assert result.work_status == "no_change"
-    assert worker.calls == ["interaction-appraisal-accepted"]
-    assert projection.trigger_processes[-1].state == "terminal"
-    assert projection.trigger_processes[-1].runtime_outcome_ref.endswith(":no_change")
-    assert ledger.rebuild() == projection
-    assert (await runtime.drain_one()).status == "idle"
+    assert result.status == "idle"
+    assert worker.calls == []
     if persistent:
         ledger.close()
         reopened = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
@@ -630,61 +630,8 @@ async def test_ordinary_relationship_opportunity_recovers_after_sqlite_restart(
     reopened.close()
 
 
-@pytest.mark.asyncio
-async def test_concurrent_ordinary_turns_coalesce_one_open_relationship_opportunity(
+def test_delayed_relationship_trigger_claims_at_current_logical_time_and_replays(
     tmp_path,
-) -> None:
-    ledger, _, _ = prepare_claimed_interaction(
-        SQLiteWorldLedger(
-            path=tmp_path / "relationship-continuity-concurrent.sqlite3",
-            world_id=WORLD_ID,
-        )
-    )
-    commit(
-        ledger,
-        [
-            event(
-                "message-event:2",
-                "ObservationRecorded",
-                message_payload("message:2"),
-            )
-        ],
-    )
-    first = ledger.lookup_event_commit("message-event:1")[0]
-    second = ledger.lookup_event_commit("message-event:2")[0]
-    runtime = InteractionAppraisalTriggerRuntime(
-        ledger=ledger,
-        pinned_turn=object(),  # type: ignore[arg-type]
-        worker=SimpleNamespace(ledger=ledger),  # type: ignore[arg-type]
-        owner_id="worker:appraisal",
-        relationship_owner_id="worker:relationship",
-    )
-
-    await asyncio.gather(
-        runtime._open_relationship_continuity_trigger(source_event=first),  # noqa: SLF001
-        runtime._open_relationship_continuity_trigger(source_event=second),  # noqa: SLF001
-    )
-
-    projection = ledger.project()
-    opportunities = tuple(
-        item
-        for item in projection.trigger_processes
-        if item.process_kind == "relationship_deliberation"
-        and item.trigger_ref.startswith("relationship-continuity:")
-    )
-    assert len(opportunities) == 1
-    assert opportunities[0].state == "open"
-    assert ledger.rebuild() == projection
-    ledger.close()
-
-
-@pytest.mark.parametrize(
-    "trigger_events",
-    [affect_deliberation_trigger_events, relationship_deliberation_trigger_events],
-    ids=["affect", "relationship"],
-)
-def test_delayed_downstream_trigger_claims_at_current_logical_time_and_replays(
-    tmp_path, trigger_events
 ) -> None:
     path = tmp_path / "delayed-downstream-trigger.sqlite3"
     ledger, trigger, evidence = prepare_claimed_interaction(
@@ -710,7 +657,7 @@ def test_delayed_downstream_trigger_claims_at_current_logical_time_and_replays(
         ],
     )
 
-    opened, claimed = trigger_events(
+    opened, claimed = relationship_deliberation_trigger_events(
         appraisal_event=appraisal_event,
         owner_id="worker:downstream",
         claimed_at=claimed_at,
@@ -733,22 +680,17 @@ def test_delayed_downstream_trigger_claims_at_current_logical_time_and_replays(
     reopened.close()
 
 
-@pytest.mark.parametrize(
-    "trigger_events",
-    [affect_deliberation_trigger_events, relationship_deliberation_trigger_events],
-    ids=["affect", "relationship"],
-)
-def test_downstream_trigger_rejects_an_invalid_claim_time(trigger_events) -> None:
+def test_relationship_trigger_rejects_an_invalid_claim_time() -> None:
     appraisal_event = event("event:accepted-appraisal", "AppraisalAccepted", {})
 
     with pytest.raises(ValueError, match="timezone-aware"):
-        trigger_events(
+        relationship_deliberation_trigger_events(
             appraisal_event=appraisal_event,
             owner_id="worker:downstream",
             claimed_at=NOW.replace(tzinfo=None),
         )
     with pytest.raises(ValueError, match="cannot precede"):
-        trigger_events(
+        relationship_deliberation_trigger_events(
             appraisal_event=appraisal_event,
             owner_id="worker:downstream",
             claimed_at=NOW - timedelta(microseconds=1),

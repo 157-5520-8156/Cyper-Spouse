@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import json
 
 import pytest
 
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from companion_daemon.world_v2.activity_lifecycle_proposal import ActivityLifecycleProposalCompiler
-from companion_daemon.world_v2.activity_lifecycle_draft import ActivityLifecycleDraftAdapter
 from companion_daemon.world_v2.activity_lifecycle_runtime import (
     ActivityLifecycleAcceptanceRuntime,
     ActivityLifecycleProposalRecorder,
 )
 from companion_daemon.world_v2.activity_lifecycle_worker import ActivityLifecycleWorker
+from companion_daemon.world_v2.character_interior.contracts import (
+    InnerDecision,
+    _InstantPrivateSelf,
+    _InteriorAuthorLineage,
+    _PrivateSelfLineage,
+)
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.life_ecology_activity import ActivityOpeningCatalog
@@ -233,20 +239,77 @@ def test_interruption_acceptance_records_source_bound_change_plan_coordinates() 
     assert effect["evidence_refs"][-1]["ref_id"] == observation.observation_id
 
 
-class _Model:
-    model = "test-flash"
+class _Interior:
+    def __init__(self, *, technical_failure: bool = False) -> None:
+        self.technical_failure = technical_failure
+        self.opportunities = []
 
-    async def complete(self, messages, *, temperature=0.2):  # type: ignore[no-untyped-def]
-        token = __import__("json").loads(messages[1]["content"])["openings"][0]["opening_token"]
-        return '{"decision":"select","opening_token":"' + token + '"}'
-
-
-class _InvalidModel:
-    model = "test-invalid"
-
-    async def complete(self, messages, *, temperature=0.2):  # type: ignore[no-untyped-def]
-        del messages, temperature
-        return "not-json"
+    async def consider(self, opportunity):  # type: ignore[no-untyped-def]
+        self.opportunities.append(opportunity)
+        if self.technical_failure:
+            return type(
+                "Decision",
+                (),
+                {
+                    "status": "technical_failure",
+                    "failure_code": "role_result_not_json",
+                    "decision": None,
+                    "author_lineage": None,
+                },
+            )()
+        manifest = opportunity.capability_manifest
+        assert manifest is not None
+        token = manifest.payload["openings"][0]["opening_token"]
+        author = _InteriorAuthorLineage(
+            model_id="character-interior",
+            model_version="fixture.1",
+            model_call_id="model-call:activity-lifecycle:fixture",
+            request_hash="sha256:" + "1" * 64,
+            response_hash="sha256:" + "2" * 64,
+            attempt_ordinal=0,
+        )
+        private_self = _InstantPrivateSelf(
+            summary="她选择顺着当前生活安排往前走。",
+            attended_source_refs=opportunity.source_refs,
+        )
+        snapshot_hash = "3" * 64
+        private_lineage = _PrivateSelfLineage(
+            relation="single_pass",
+            initial_private_self=private_self,
+            initial_snapshot_id=f"inner-life-snapshot:sha256:{snapshot_hash}",
+            initial_snapshot_hash=snapshot_hash,
+            initial_author_lineage=author,
+            final_private_self=private_self,
+            final_snapshot_id=f"inner-life-snapshot:sha256:{snapshot_hash}",
+            final_snapshot_hash=snapshot_hash,
+            final_author_lineage=author,
+        )
+        return InnerDecision(
+            inner_turn_id="character-inner-turn:sha256:" + "4" * 64,
+            opportunity_ref=opportunity.opportunity_ref,
+            actor_ref=opportunity.actor_ref,
+            cursor=opportunity.cursor,
+            snapshot_id=f"inner-life-snapshot:sha256:{snapshot_hash}",
+            snapshot_hash=snapshot_hash,
+            status="decided",
+            summary=private_self.summary,
+            attended_source_refs=private_self.attended_source_refs,
+            instant_private_self=private_self,
+            private_self_lineage=private_lineage,
+            decision={
+                "contract": "character-interior-purpose-decision.1",
+                "purpose": "activity_lifecycle_choice",
+                "capability_ref": manifest.capability_ref,
+                "capability_payload_hash": manifest.payload_hash,
+                "source_refs": list(manifest.source_refs),
+                "payload": {
+                    "contract": "character-interior-activity-lifecycle-choice.1",
+                    "decision": "select",
+                    "selected_token": token,
+                },
+            },
+            author_lineage=author,
+        )
 
 
 @pytest.mark.asyncio
@@ -254,10 +317,12 @@ async def test_worker_turns_one_claimed_wake_into_one_accepted_transition() -> N
     projection, trigger_id = _claimed_projection()
     ledger = _Ledger(projection)
     ledger.issuer = AcceptedLedgerBatchIssuer()
+    interior = _Interior()
     worker = ActivityLifecycleWorker(
         ledger=ledger,
         catalog=_catalog(),
-        draft_adapter=ActivityLifecycleDraftAdapter(model=_Model()),
+        character_interior=interior,
+        owner_actor_ref="actor:companion",
         proposal_recorder=ActivityLifecycleProposalRecorder(ledger=ledger),
         acceptance_runtime=ActivityLifecycleAcceptanceRuntime(ledger=ledger, batch_issuer=ledger.issuer),
         ecology_catalog_version=ECOLOGY_CATALOG_VERSION,
@@ -274,17 +339,34 @@ async def test_worker_turns_one_claimed_wake_into_one_accepted_transition() -> N
 
     assert result.status == "transitioned"
     assert [item.event_type for item in ledger.accepted] == ["AcceptanceRecorded", "ActivityStarted"]
+    assert len(interior.opportunities) == 1
+    assert interior.opportunities[0].purpose == "activity_lifecycle_choice"
+    capability = interior.opportunities[0].capability_manifest.payload
+    assert capability["contract"] == (
+        "character-interior-activity-lifecycle-capability.2"
+    )
+    assert "mood_context" not in capability
+    proposal_event = next(iter(ledger.events.values()))
+    recorded_model = proposal_event.payload()["character_interior_model_result"]
+    assert recorded_model["audit_contract"] == "model-result-audit.7"
+    assert (
+        json.loads(recorded_model["audit_json"])["character_interior_lineage"][
+            "purpose"
+        ]
+        == "activity_lifecycle_choice"
+    )
 
 
 @pytest.mark.asyncio
-async def test_worker_isolates_invalid_model_output_from_the_life_scheduler() -> None:
+async def test_worker_reports_character_interior_failure_without_forging_no_op() -> None:
     projection, trigger_id = _claimed_projection()
     ledger = _Ledger(projection)
     ledger.issuer = AcceptedLedgerBatchIssuer()
     worker = ActivityLifecycleWorker(
         ledger=ledger,
         catalog=_catalog(),
-        draft_adapter=ActivityLifecycleDraftAdapter(model=_InvalidModel()),
+        character_interior=_Interior(technical_failure=True),
+        owner_actor_ref="actor:companion",
         proposal_recorder=ActivityLifecycleProposalRecorder(ledger=ledger),
         acceptance_runtime=ActivityLifecycleAcceptanceRuntime(ledger=ledger, batch_issuer=ledger.issuer),
         ecology_catalog_version=ECOLOGY_CATALOG_VERSION,
@@ -299,8 +381,8 @@ async def test_worker_isolates_invalid_model_output_from_the_life_scheduler() ->
         correlation_id="correlation:invalid-model",
     )
 
-    assert result.status == "blocked"
-    assert result.reason_code == "activity_lifecycle.model_unavailable"
+    assert result.status == "technical_failure"
+    assert result.reason_code == "activity_lifecycle.role_result_not_json"
     assert ledger.accepted == ()
 
 
@@ -401,7 +483,8 @@ async def test_worker_replays_a_real_ledger_from_claimed_clock_to_accepted_activ
     worker = ActivityLifecycleWorker(
         ledger=ledger,
         catalog=ActivityOpeningCatalog(owner_actor_ref="actor:companion"),
-        draft_adapter=ActivityLifecycleDraftAdapter(model=_Model()),
+        character_interior=_Interior(),
+        owner_actor_ref="actor:companion",
         proposal_recorder=ActivityLifecycleProposalRecorder(ledger=ledger),
         acceptance_runtime=ActivityLifecycleAcceptanceRuntime(ledger=ledger, batch_issuer=issuer),
         ecology_catalog_version=catalog_version,

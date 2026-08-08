@@ -86,12 +86,13 @@ runtime 当成已上线能力。
 仍然是后续阶段、不能声称已经完成的部分：
 
 - 主角→NPC 目前仍是来源绑定的派生 relationship reading；NPC→主角已经是模型拥有的八维
-  状态。主角侧独立八维慢变量及语义修订尚未接入统一 `CharacterInterior.reflect`；
+  状态。主角侧独立八维慢变量及语义修订尚未接入统一 `CharacterInterior.experience`；
 - 动态 NPC 的客观地点、组织、Life Arc、dormant/departed/reappearance 还没有统一的开放
   effect contract；现有 reviewed NPC 传记生命周期可运行，但不能代表动态 NPC 闭环完成；
 - 本地小模型 shadow qualification、多个 NPC 的共享批次调用以及高 materiality 云端升级仍
   未落地；当前生产只在真实事件/到期计划/低频 ambient 时调用既有背景模型；
-- `CharacterInterior` 统一读取与反思 seam 属于 P2/P5，不在本次 NPC Ecology 核心切片中。
+- `CharacterInterior` 的 `project/experience/consider` 统一 seam 属于本轮重大迁移；最终合同见
+  `docs/design/unified-character-interior.md` 与 ADR-0016。
 
 这些未完成项继续保留在下文 P2/P3/P4/P5，避免把“schema 存在”写成“生产能力完成”。
 
@@ -286,19 +287,18 @@ NPC 已经作出了决定。
 
 ### 5.1 当前问题
 
-当前 `NpcRelationshipReading` 主要从共同事件次数、七天内新近程度和 active
-`npc_conflict` Appraisal 推导 closeness/familiarity/friction。这适合最初的低成本 view，
-不足以表达持续社会关系。
-
-更严重的是，现有 friction 计算没有按 appraisal 的具体 NPC subject 过滤。一个针对某 NPC
-的 `npc_conflict` 可能进入每个 NPC 的 friction。
+当前 `NpcRelationshipReading` 只从双方已结算的共同事件次数与七天内新近程度推导
+closeness/familiarity。这是故意收窄的可观察 view：NPC 域不得读取主角 private Appraisal、
+active Affect 或 residue，也不能以这些材料推导 NPC 所知的 friction。它因此不会跨人物泄漏
+主角内心，但仍不足以表达持续社会关系；friction/tension 必须将来由对应 actor 在有来源的
+互动后写入方向明确的关系状态，不能恢复旧的私有投影旁路。
 
 ### 5.2 TODO：先修正确性
 
-- [ ] 每条 NPC Appraisal 必须绑定精确 `npc_ref` 或精确共同 occurrence participant；
-- [ ] `npc_relationship_readings` 只消费属于当前 NPC 的 Appraisal；
-- [ ] 缺 subject 的历史 Appraisal 只保留旧重放语义，不得推断归属；
-- [ ] 增加两个 NPC 同时存在、只与其中一人冲突的隔离回归；
+- [x] NPC Ecology 与 relationship reading 不消费主角 private Appraisal/Affect/residue；
+- [x] World Author payload 只保留 NPC actor proposal、可用世界参与者与地点，不暴露主角内心；
+- [x] 历史 Appraisal/Affect 只保留 reducer 重放语义，不再成为 NPC Ecology wake、关系读模或关系权重输入；
+- [x] 增加 projection 访问陷阱与 World Author payload 防泄漏回归；
 - [ ] 修复 advisory 显示：解析受信人物简介/称呼，不把 `content:*` 或裸 hash 当成人名；
 - [ ] 健康接口报告无 subject 的 NPC appraisal 和跨 NPC 污染拒绝数。
 
@@ -403,8 +403,8 @@ register。它们通常没有组织、住处、Life Arc、可用时间和退出�
 
 ### 8.3 Character Core 与长期人格变化
 
-- [ ] 为生产世界初始化来源明确的 `CharacterCore`，不再让 `current_self_state.stable_self`
-  依赖外部 prompt 的隐式人格；
+- [ ] 为生产世界初始化来源明确的 `CharacterCore`，不再让
+  `InnerLifeSnapshot.stable_identity` 依赖外部 prompt 的隐式人格；
 - [ ] Character Core 区分不可变身份、运营者治理字段、慢变化倾向和值得长期保留的自我认识；
 - [ ] 慢变化只能由跨场景、跨时间的已结算证据支持，单次情绪不能改写人格；
 - [ ] 人格变化由角色模型提出，系统验证证据窗口、变化幅度和治理权限；
@@ -456,189 +456,130 @@ register。它们通常没有组织、住处、Life Arc、可用时间和退出�
 
 ## 9. 统一人物内心：现状判断
 
-当前没有一个统一、耐久、可复用的“人物内心” Module。
+生产现状仍是多个角色语义入口和上下文拼装点。`current-self-state.1` 只解决过一部分紧凑读取，
+普通入站、主动联系、Life、Affect/Relationship/Private Impression 后处理、媒体和感知仍可能
+分别构造角色上下文或调用角色 Adapter。它们虽然复用同一账本，却没有共同的 `InnerTurn`
+身份，也不能保证在同一 cursor 上看见同一个完整人物。
 
-现有三层含义不同：
+最终结论由 ADR-0016 固定：
 
-1. `current_self_state`
-   - 从已验证 Context slices 派生的紧凑只读工作视图；
-   - 当前会汇总稳定自我、传记、情境、关系、Appraisal、Affect、Memory、PrivateImpression、
-     近期自身经历和 advisories；
-   - 它不拥有这些状态的形成、生命周期和写入；
-   - 不同消费者仍可能使用不同 PinnedTurn 配置和裁剪，未保证所有 Module 看到同一快照。
-2. `PrivateTurnState`
-   - 角色模型在一次表达中形成的瞬时自由文本状态；
-   - 记录她这一刻注意什么、想什么、抗拒什么；
-   - 是 Proposal audit，不是耐久 World Fact，下一轮不能直接把它当成历史事实。
-3. 分散的耐久机制
-   - Appraisal、Affect、Relationship、PrivateImpression、MemoryCandidate、Aspiration、Goal、
-     Thread、Commitment、ResponseExpectation 等分别拥有事件、reducer、worker 和上下文注入；
-   - 它们的领域权威分离是合理的，但读取、联合、反思触发和下游消费过于分散。
+- 统一的是主观整合与角色选择的生产边界，不是把 typed psychological authorities 合成一个
+  可变对象；
+- `InnerLifeSnapshot` 是 canonical read model，不是新账本或第二真相源；
+- `PrivateTurnState` 是每个 `InnerTurn` 内由模型形成的瞬时私人自我，不是耐久事实；
+- Appraisal、Affect、Relationship、Memory 等现有 event/reducer 保持各自权限，但新的角色
+  提议只能经 `CharacterInterior` 路由；
+- `current-self-state.1` 只保留历史 replay，不能成为兼容生产旁路。
 
-结论：需要统一的是“人物内心的读取与反思 seam”，不是把所有领域事件合成一个可变大对象。
+详细设计、八项 Faculty、不变量、迁移删除矩阵和发布验收以
+`docs/design/unified-character-interior.md` 为唯一实施基线。
 
 ## 10. `CharacterInterior` 深 Module 设计
 
-### 10.1 外部 Interface
+### 10.1 最终 Interface
 
-第一阶段只建立一个可靠读取 Interface：
-
-```python
-class CharacterInterior:
-    def snapshot(self, request: InnerLifeSnapshotRequest) -> InnerLifeSnapshot: ...
-```
-
-第二阶段增加事件后反思：
+旧的 `snapshot/reflect` 分阶段方案作废，不保留兼容别名。最终生产 Interface 一次性固定为：
 
 ```python
 class CharacterInterior:
-    def snapshot(self, request: InnerLifeSnapshotRequest) -> InnerLifeSnapshot: ...
-    async def reflect(self, stimulus: InteriorStimulus) -> InteriorReflectionResult: ...
+    async def project(
+        self, subject: InteriorStimulus | InteriorOpportunity
+    ) -> InnerLifeSnapshot: ...
+    async def experience(self, stimulus: InteriorStimulus) -> InnerTransition: ...
+    async def consider(self, opportunity: InteriorOpportunity) -> InnerDecision: ...
 ```
 
-调用方只需要 actor、精确 cursor、viewer/privacy scope 和预算。它不应传入“应该安慰”“是否
-追问”“想让她主动”这类行为参数。
+- `project` 只做同一 actor/cursor/scope 的确定性 canonical projection，不调用模型；
+- `experience` 让角色吸收一个已提交且不要求立即外部行为的刺激，并向既有 typed authority
+  提出零个或多个主观变化；
+- `consider` 在一个 `InnerTurn` 中处理需要角色作选择的机会，可同时吸收当前刺激、选择
+  Recall、形成最终 `PrivateTurnState`、提出内在变化并返回业务 decision；
+- 带即时表达的 Observation 只调用 `consider`，不得再并行调用独立 appraisal/affect 角色
+  作者。
 
-### 10.2 `InnerLifeSnapshot`
+### 10.2 本轮必须纳入的八项 Faculty
 
-统一快照至少包含：
+- [ ] 瞬时私人自我与当前注意；
+- [ ] 由角色当前自我、情绪、关系与目标控制的选择性 Recall；
+- [ ] Appraisal 与 Affect 使用同一私人上下文；
+- [ ] 连续情绪、余波、抑制、恢复与再解释；
+- [ ] 方向明确、可错且有来源的主观关系取向；
+- [ ] Aspiration、Goal、价值张力与内在冲突；
+- [ ] 开放的自主冲动与 Action intention，不建立动机枚举；
+- [ ] ExpressionDraft 必须消费同一 `InnerTurn` 的最终内在立场。
 
-- `actor_ref`、pinned cursor、Logical Time、contract/version；
-- 稳定身份与 Character Core；
-- 当前活动、注意力、可用性、资源压力和身体/生活事实；
-- 并存的 Affect episodes 与变化阶段；
-- 当前 Appraisal 及其可竞争解释；
-- 主角对用户和各 NPC 的关系取向；
-- NPC 对主角的可访问关系取向，保持方向标签；
-- Active PrivateImpression 与置信/反证/过期；
-- Aspiration、Goal、Thread、Commitment、ResponseExpectation；
-- 近期自身经历、共同经历、事件余波；
-- actor-scoped Memory 候选、已选择 Recall 和情绪联想；
-- 外界感知和当前传记情境；
-- 未解决冲突、开放问题和可撤回倾向；
-- 每个 item 的 source refs、privacy、availability 与 expiry；
-- snapshot identity/hash，供所有消费者绑定同一人。
+这些 Faculty 只提供材料和模型能力，不规定处理顺序、行为类别或输出结果。完整语义见统一设计
+第 5 节。
 
-Snapshot 只陈列来源绑定状态和可错的私人判断，不给出“因此应如何行为”的宿主结论。
+### 10.3 权威与 NPC 复用
 
-### 10.3 Canonical Snapshot 与消费视图
+- [ ] 不新增覆盖全部心理状态的事件；现有 Appraisal、Affect、Relationship、Memory、Goal 等
+  reducer 继续拥有最终状态；
+- [ ] `CharacterInterior` 只拥有 canonical join、角色侧整合、选择性 Recall、模型身份与 typed
+  proposal routing；
+- [ ] World Author、事实、隐私/同意、安全、Action、媒体 render/inspection、perception
+  acquisition 和 receipt 保持外部硬边界；
+- [ ] 主角合同从第一天 actor-scoped；NPC 保留成本受控、actor-isolated 的自主域，不复制
+  主角完整 Interior，主角也不能读取 NPC 私有 capsule；
+- [ ] NPC 自主判断绑定自己的 actor ref、私有 capsule 和关系方向；其结果以来源绑定 stimulus
+  进入主角 Interior。若未来为某个 NPC 启用完整 Interior，必须是独立 actor-scoped 实例；
+- [ ] 测试 Adapter 可固定返回值，生产不得用固定话术或另一角色模型伪造成功。
 
-- [ ] 在一个 cursor 上先生成 canonical snapshot；
-- [ ] Chat、Proactive、Life Character、Appraisal、Media、Perception 从 canonical snapshot 做
-  deterministic budget/redaction view；
-- [ ] 裁剪只能减少材料，不能改写含义或生成行为建议；
-- [ ] 相同 source item 在不同 view 中保持同一 identity；
-- [ ] 极端预算下保留稳定身份、当前情境、最新关系/Affect、未解决事项和至少一条近期自身经历；
-- [ ] health 报告每个消费者实际收到哪些 lane、数量和 snapshot hash；
-- [ ] `current_self_state` 迁移为该 Module 的兼容 Adapter，最终删除各调用点重复拼装。
+### 10.4 不保留兼容旁路
 
-### 10.4 统一反思，不统一成第二真相源
-
-`reflect(stimulus)` 接收已提交的：
-
-- 用户 Observation；
-- World occurrence settlement；
-- 主角/NPC Action receipt；
-- 外界 Perception；
-- Commitment/Thread/Life Arc 变化；
-- 有意义的沉默窗口或计划打断。
-
-它让对应 actor 模型在同一 `InnerLifeSnapshot` 上自由提出零个或多个主观变化，例如 Affect、
-PrivateImpression、Relationship、MemoryCandidate、Aspiration 或未解决事项。模型也可以认为
-没有值得持久化的变化。
-
-Module 内部把结果路由到现有 typed authority：
-
-```text
-InteriorReflectionProposal
-  -> AppraisalAccepted
-  -> AffectEpisode*
-  -> RelationshipSignalAccepted / NPC relationship transition
-  -> PrivateImpressionAccepted
-  -> MemoryCandidate*
-  -> Aspiration / Goal / Thread / Commitment proposal
-```
-
-不得新增 `InnerLifeStateReplaced` 这类覆盖全部心理状态的事件。现有领域 reducer 继续是各自
-事实来源，`CharacterInterior` 负责深层联合、同一角色视角、来源闭包和原子协调。
-
-### 10.5 `PrivateTurnState` 的位置
-
-- [ ] 保留 `PrivateTurnState` 作为角色在一次决策里的瞬时私人自我；
-- [ ] 它必须引用同一 `InnerLifeSnapshot` 中的 attention refs；
-- [ ] Recall 后重新形成最终 PrivateTurnState；
-- [ ] 不将其持久化为 World Fact、Memory 或 Character Core；
-- [ ] 如果其中的内容形成可见事实、Action 或耐久变化，在对应 effect seam 重新完成来源闭包；
-- [ ] Chat、主动联系、Life Character 和重要 NPC 决策复用同一“snapshot → private state →
-  choice”因果结构。
-
-### 10.6 Module 不应拥有的权力
-
-- [ ] 不决定主角/NPC 是否回复、邀请、追问、沉默或和好；
-- [ ] 不把情绪数值映射为表达模板；
-- [ ] 不根据关键词制造心理变化；
-- [ ] 不用角色自己的旧表达证明用户或 NPC 事实；
-- [ ] 不让 memory similarity 成为行为命令；
-- [ ] 不把 World Author 的候选结果提前当成已发生经历；
-- [ ] 不绕过 Action、privacy、consent、safety、CAS 和 receipt；
-- [ ] 不持久化模型隐藏推理。
-
-### 10.7 复用到 NPC
-
-`CharacterInterior` 的 schema 和编译逻辑应 actor-scoped，而不是写死 `agent:companion`。但第一
-阶段只为主角装配完整版本。
-
-- background NPC 使用缩减的 `NpcInteriorSnapshot` view；
-- recurring NPC 复用关系、记忆、目标、日程和反思接口；
-- scene-critical NPC 可以使用完整 snapshot；
-- NPC 的私有 snapshot 默认不向主角可见，只通过 NPC 已执行行为、已说的话或已结算事件形成
-  主角可观察证据；
-- 主角对 NPC 的猜测只能进入自己的 PrivateImpression，不能直接读取 NPC private state；
-- 测试 Adapter 可使用内存 ledger 和固定模型，但生产不得用固定模型答案替代自由选择。
+- [ ] `current-self-state.1` 只由历史 codec 读取，新生产不生成该 key；
+- [ ] 删除普通入站、Affect、Relationship、Private Impression、Proactive、Life Character、
+  Media 和 Perception 的直接角色 Adapter/模型参数；
+- [ ] 有价值的旧算法只能改名迁入 Module 私有实现，不能留下 public wrapper；
+- [ ] 新 Expression、Life、主动、媒体和注意 decision 都绑定 `inner_turn_id + snapshot_hash`；
+- [ ] 架构测试禁止 production import replay package、旧 Adapter 或重复 current-self builder；
+- [ ] health 中 legacy invocation、parallel role author 和 dual write 必须为零。
 
 ## 11. 迁移顺序
 
-### P0：立即正确性与可观察性
+`CharacterInterior` 不按“先保留旧接口、逐步分流”的方式上线。开发可以按下列顺序完成，但同一
+生产版本只有在所有 production caller 都切换且旧入口删除后才允许发布。
 
-- [ ] 修复 NPC conflict 按 subject 隔离；
-- [ ] 修复动态 NPC descriptor 在后续 Context 中不可见；
-- [ ] 增加孤儿 NPC、再次引用、per-NPC 关系来源和当前模型调用成本 health；
-- [ ] 为本清单中的生产基线建立只读审计命令，不修改账本。
+### I0：归档、合同与红测试
 
-### P1：NPC 身份连续性
+- [ ] 保存并推送切换前 commit，建立可恢复基线；
+- [ ] 固定 ADR-0016、统一设计、domain vocabulary 与三方法 Interface；
+- [ ] 为八项 Faculty、同 cursor snapshot、Inner Turn、错误语义和历史冷重放建立 Interface red
+  tests；
+- [ ] 建立 AST/import/signature guard，列出所有旧角色 Adapter、builder 参数和 Context key。
 
-- [ ] 实现 promotion edge、`NpcIdentityView`、首次共同 Experience 绑定；
-- [ ] 接入 Life、Recall、CharacterInterior 和 source review；
-- [ ] 冷重放和错误合并测试。
+### I1：深 Module 与 canonical self
 
-### P2：统一人物内心读取 seam
+- [ ] 实现 `project/experience/consider`、`InnerLifeSnapshot`、`InnerTurn` 和稳定 identity；
+- [ ] 把选择性 Recall、私人状态、一次受约束重选和 typed proposal routing 收进 Module；
+- [ ] 让当前 Observation 的 Appraisal/Affect 与 Expression 共用同一 turn；
+- [ ] 保留各领域 event/reducer，不增加通用 mind-state write authority。
 
-- [ ] 实现 canonical `InnerLifeSnapshot`；
-- [ ] 先迁移 Chat 和 Life Character；
-- [ ] 再迁移 Proactive、Appraisal、Media、Perception；
-- [ ] 建立 Interface 级测试后删除重复的浅层上下文拼装测试。
+### I2：迁移所有生产消费者并删除旧入口
 
-### P3：双向 NPC 关系与生命周期
+- [ ] 迁移 Chat、Proactive、Life Character、Appraisal/Affect、Relationship、Private
+  Impression、Media 与 Perception；
+- [ ] 删除旧 public Adapter、production builder 参数、composition 字段、runtime worker、配置和
+  direct role provider call；
+- [ ] 新 decision 强制携带 inner-turn lineage；
+- [ ] 将旧 `current-self-state.1` 和旧 wire 隔离到 historical replay package；
+- [ ] 全仓 guard 证明没有旧接口、新旧并行、双写或 silent fallback。
 
-- [ ] 主角→NPC、NPC→主角独立关系；
-- [ ] NPC 组织、地点、日程、Life Arc 与 dormant/reappearance；
-- [ ] 双向 Appraisal/Memory/relationship settlement。
+### I3：兼容、完整验证与原子切换
 
-### P4：低成本 NPC 自主性
+- [ ] 在生产库副本比较 event/head hash、关键 Projection、Action 与冷重放；
+- [ ] 验证旧 terminal decision 不重开、已授权 Action 不重发、未完成旧 lease 安全释放；
+- [ ] 运行相关测试、完整测试、静态检查和双路 code review；
+- [ ] 重启 production daemon，验证 QQ、主动、Life、NPC、媒体、感知和 recovery；
+- [ ] 使用真实 daemon/model 多轮对聊验证延迟、同批多消息、情绪即时性、Recall、打断与自然度；
+- [ ] health 证明 legacy invocation、parallel role author、dual write 全部为零。
 
-- [ ] 实现 `NpcEcology` 深 Module；
-- [ ] 事件刺激合并、工作集和可重放机会调度；
-- [ ] 本地 NPC 模型 shadow qualification；
-- [ ] 云端高 materiality 路由；
-- [ ] 真实生成质量、成本和恢复验收。
+### I4：继续未完成的 NPC/世界闭环
 
-### P5：统一反思与其他 dormant 权威
-
-- [ ] `CharacterInterior.reflect` 协调现有心理 vertical；
-- [ ] 激活开放 Aspiration/Goal/Thread/Commitment producer；
-- [ ] Character Core 生产初始化和长期修订；
-- [ ] 重大生平迁移下游原子重配；
-- [ ] 外界感知、媒体、主动联系和 Life 可靠性闭环。
+- [ ] 完成主角→NPC 独立慢关系、动态 NPC Life Arc 与 dormant/reappearance；
+- [ ] 完成本地 NPC 模型 qualification、共享批次和高 materiality 路由；
+- [ ] 激活开放 Aspiration/Goal/Thread/Commitment producer 与 Character Core 长期修订；
+- [ ] 完成重大生平迁移、外界感知、媒体和主动联系的长期体验验收。
 
 ## 12. 总体验收
 
@@ -662,15 +603,27 @@ InteriorReflectionProposal
 
 ### 12.3 人物内心真正统一
 
-- [ ] 所有主角决策消费者绑定同一 cursor 的 snapshot identity；
-- [ ] 世界事件、NPC、用户互动和外界感知能通过统一反思影响后续状态；
-- [ ] Affect、关系、记忆、愿望和近期经历可以相互影响，但不形成硬编码行为矩阵；
-- [ ] PrivateTurnState 仍是模型自由形成的瞬时私人自我；
+- [ ] 所有主角决策消费者绑定同一 cursor 的 `InnerLifeSnapshot` 与 `InnerTurn` identity；
+- [ ] 世界事件、NPC、用户互动和外界感知能通过 `experience/consider` 影响后续 typed state；
+- [ ] 八项 Faculty 全部可用，Affect、关系、记忆、愿望和近期经历可以相互影响，但不形成
+  硬编码行为矩阵；
+- [ ] `PrivateTurnState` 仍是模型自由形成的瞬时私人自我，Recall 后由同一 turn 重新形成；
+- [ ] ExpressionDraft、主动联系、Life、媒体和注意选择不能绕过最终私人状态；
 - [ ] 任何可见事实和外部 Action 仍通过完整来源与授权链；
 - [ ] 删除 `CharacterInterior` 时复杂度会重新散到所有调用点，证明该 Module 具有真实深度和
   Locality，而不是一层转发包装。
 
-### 12.4 体验验收
+### 12.4 兼容与运行可靠性
+
+- [ ] 历史 V2 events、旧 Model Results 与 `current-self-state.1` 冷重放字节等价且零 live model
+  calls；
+- [ ] 新生产不生成旧 contract，不 import replay package，不接受旧 builder/model 参数；
+- [ ] 同一 opportunity 最多一个 live character author；新旧并行、双写和旧接口调用均为零；
+- [ ] 技术失败不成为 silent/no-op/no-change，角色真正选择的沉默则保持 effect-once；
+- [ ] 已授权 Action 在重启与切换后不重复生成或发送，旧迟到 provider result 不能越过新 cursor；
+- [ ] daemon 重启、首次恢复、QQ 收发、主动、Life、NPC、媒体和感知入口均可运行。
+
+### 12.5 体验验收
 
 - [ ] 使用真实 daemon/model 路径连续运行至少 14 天；
 - [ ] 人工检查 NPC 是否只会重复邀请、争吵或谈心；
@@ -678,4 +631,5 @@ InteriorReflectionProposal
 - [ ] 检查主角是否因为 NPC 事件形成可感知但不模板化的情绪和后续选择；
 - [ ] 检查用户互动是否能间接影响角色日常，同时不存在关键词到剧情的硬映射；
 - [ ] 对比本地 NPC 路线和云端路线的身份连续性、自然度和事实错误率；
+- [ ] 直接对聊验证同批多消息、近期 Recall、情绪当轮体现、多 Beat、主动插话/被打断与首条延迟；
 - [ ] 测试只能验证来源、连续性、开放选择、成本与恢复，不能固定要求某个 NPC 必须做某事。

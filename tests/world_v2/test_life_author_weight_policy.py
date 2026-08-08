@@ -4,10 +4,8 @@ from datetime import UTC, datetime, timedelta
 import json
 from types import SimpleNamespace
 
-from companion_daemon.world_v2.life_author_runtime import (
-    LifeAuthorWeightPolicy,
-    compile_life_decision_context,
-)
+from companion_daemon.world_v2.life_author_weight_policy import LifeAuthorWeightPolicy
+from companion_daemon.world_v2.life_context import compile_life_decision_context
 from companion_daemon.world_v2.life_author_seed import (
     ReviewedLifeSeedCandidate,
     ReviewedLifeSeedOpening,

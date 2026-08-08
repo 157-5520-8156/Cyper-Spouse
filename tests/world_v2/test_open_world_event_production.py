@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from world_v2_application import (
+    build_sqlite_world_v2_test_application,
+    compose_fixture_character_interior,
+    compose_fixture_character_purpose,
+)
 
 from companion_daemon.world_v2.activity_plan_runtime import (
     ActivityPlanCommand,
@@ -13,10 +18,8 @@ from companion_daemon.world_v2.activity_plan_runtime import (
 from companion_daemon.world_v2.production_turn_application import (
     LifeEcologyComposition,
     WorldV2TurnApplicationConfig,
-    build_sqlite_world_v2_turn_application,
 )
 from companion_daemon.world_v2.world_turn_runtime import InboundTurn
-
 
 NOW = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
 
@@ -33,11 +36,6 @@ class _Router:
 
 class _MainModel:
     async def propose(self, _request):  # type: ignore[no-untyped-def]
-        raise AssertionError("open-world production seam does not deliberate a reply")
-
-
-class _QuickRecovery:
-    async def recover(self, _request, _failure):  # type: ignore[no-untyped-def]
         raise AssertionError("open-world production seam does not deliberate a reply")
 
 
@@ -72,13 +70,26 @@ class _OpenWorldModel:
 class _OutcomeModel:
     model = "test-open-world-outcome-model"
 
-    async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
-        del temperature
-        candidates = json.loads(messages[-1]["content"])["candidates"]
+    async def complete(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        assert temperature == 0.8
+        request = json.loads(messages[-1]["content"])
+        capability = request["capability_manifest"]
+        source_ref = capability["source_refs"][0]
+        selected_token = capability["payload"]["offered_tokens"][0]
         return json.dumps(
             {
-                "candidate_result_ref": candidates[0]["candidate_result_ref"],
-                "adopt_proposed_life_direction": False,
+                "status": "decision",
+                "summary": "The lived result now feels settled.",
+                "attended_source_refs": [source_ref],
+                "decision": {
+                    "source_refs": [source_ref],
+                    "payload": {
+                        "selected_token": selected_token,
+                        "character_life_direction": None,
+                    },
+                },
+                "recall_query": None,
+                "proposals": [],
             }
         )
 
@@ -108,20 +119,27 @@ life_author_catalog:
         companion_actor_ref="agent:companion",
         reply_target="user:user.1",
         action_pump_owner="pump:open-world-production",
+        character_memory_enabled=False,
         life_ecology=LifeEcologyComposition.production_v1(
             seed_catalog_path=seed
         ),
     )
-    app = build_sqlite_world_v2_turn_application(
+    app = build_sqlite_world_v2_test_application(
         path=tmp_path / "open-world-production.sqlite",
         config=config,
         identities=_Identities(),
         router=_Router(),
-        main_model=_MainModel(),
-        quick_recovery=_QuickRecovery(),
+            character_interior=compose_fixture_character_interior(
+                inbound_author=_MainModel(),
+                purpose_faculties=(
+                    compose_fixture_character_purpose(
+                        purpose="outcome_selection",
+                        provider=_OutcomeModel(),
+                    ),
+                ),
+            ),
         transport=_Transport(),
         open_world_event_model=_OpenWorldModel(),
-        outcome_draft_model=_OutcomeModel(),
         now=NOW,
     )
     try:

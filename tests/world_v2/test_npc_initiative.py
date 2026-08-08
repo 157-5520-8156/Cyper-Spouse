@@ -1,22 +1,25 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from world_v2_application import (
+    build_sqlite_world_v2_test_application,
+    compose_fixture_character_interior,
+)
 
 from companion_daemon.world_v2.life_author_seed import ReviewedLifeSeedCatalog
 from companion_daemon.world_v2.local_chronology import LocalChronology
-from companion_daemon.world_v2.npc_initiative import (
+from companion_daemon.world_v2.npc_initiative_weight_policy import (
     NOTHING_CANDIDATE_REF,
     NpcInitiativeWeightPolicy,
 )
 from companion_daemon.world_v2.production_turn_application import (
     LifeEcologyComposition,
     WorldV2TurnApplicationConfig,
-    build_sqlite_world_v2_turn_application,
 )
 
 # 2026-07-17 is a Friday; 01:30 UTC is 09:30 Asia/Shanghai — inside 范予安's
@@ -38,11 +41,6 @@ class _Router:
 
 class _MainModel:
     async def propose(self, _request):  # type: ignore[no-untyped-def]
-        raise AssertionError("npc initiative tests do not run a chat turn")
-
-
-class _QuickRecovery:
-    async def recover(self, _request, _failure):  # type: ignore[no-untyped-def]
         raise AssertionError("npc initiative tests do not run a chat turn")
 
 
@@ -203,6 +201,7 @@ def _config(seed_path: Path, **overrides) -> WorldV2TurnApplicationConfig:
         companion_actor_ref="agent:companion",
         reply_target="user:user.1",
         action_pump_owner="pump:npc-initiative",
+        character_memory_enabled=False,
         local_timezone="Asia/Shanghai",
         life_ecology=LifeEcologyComposition.production_v1(seed_catalog_path=seed_path),
         **overrides,
@@ -213,12 +212,16 @@ def _build(
     tmp_path: Path, seed_path: Path, model: _LifeModel, *, name: str,
     now: datetime = NOW, **overrides,
 ):
-    return build_sqlite_world_v2_turn_application(
+    return build_sqlite_world_v2_test_application(
         path=tmp_path / f"{name}.sqlite",
         config=_config(seed_path, **overrides),
-        identities=_Identities(), router=_Router(), main_model=_MainModel(),
-        quick_recovery=_QuickRecovery(), transport=_Transport(),
-        activity_lifecycle_model=model, outcome_draft_model=model, now=now,
+        identities=_Identities(),
+        router=_Router(),
+        character_interior=compose_fixture_character_interior(
+            inbound_author=_MainModel(),
+        ),
+        transport=_Transport(),
+        npc_actor_model=model, now=now,
     )
 
 
@@ -357,7 +360,7 @@ async def test_npc_initiative_can_be_disabled_by_composition(
     model = _LifeModel()
     app = _build(
         tmp_path, _seed(tmp_path / "seed.yaml"), model, name="disabled",
-        npc_initiative_enabled=False,
+        npc_ecology_enabled=False,
     )
     try:
         await _tick(app, tick_id="disabled:a", frm=NOW, to=NOW + timedelta(hours=1))

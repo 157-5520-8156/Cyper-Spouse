@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from companion_daemon.world_v2.chat_model_deliberation_adapter import (
+from companion_daemon.world_v2.character_interior.inbound_wire import (
     review_candidate_external_proposition_coverage,
 )
 from companion_daemon.world_v2.deliberation import (
@@ -284,6 +284,7 @@ class _SameConversationPrivateAuthorityInventory(_SequenceJsonModel):
         ),
     ),
 )
+@pytest.mark.asyncio
 async def test_v5_inventory_directly_grants_same_conversation_mental_continuity(
     text: str,
 ) -> None:
@@ -401,6 +402,7 @@ class _DefeasibleSelfConceptionInventory(_SequenceJsonModel):
         ),
     ),
 )
+@pytest.mark.asyncio
 async def test_v5_inventory_directly_grants_defeasible_current_self_conception(
     text: str,
 ) -> None:
@@ -449,6 +451,7 @@ async def test_v5_inventory_directly_grants_defeasible_current_self_conception(
         pytest.param("我刚洗完澡。", id="unsupported-current-activity"),
     ),
 )
+@pytest.mark.asyncio
 async def test_v5_current_private_authority_does_not_grant_external_life_state(
     text: str,
 ) -> None:
@@ -911,6 +914,7 @@ async def test_v5_report_closure_disagreement_cannot_swap_counterpart_rain_to_co
         ),
     ),
 )
+@pytest.mark.asyncio
 async def test_v5_narrow_authority_distinguishes_specific_scene_from_world_unbound_discourse(
     air_claim: str,
     narrow_decision: str,

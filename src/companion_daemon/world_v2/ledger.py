@@ -1076,6 +1076,7 @@ def _committed_ref(stored: _StoredEvent) -> CommittedWorldEventRef:
         continuation_refs=(
             (str(event.payload()["appraisal_trigger_ref"]),)
             if event.event_type == "WorldOccurrenceSettled"
+            and event.payload().get("appraisal_trigger_ref") is not None
             else ()
         ),
     )

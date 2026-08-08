@@ -172,6 +172,7 @@ class PrivateImpressionAuthorizedPayload(FrozenModel):
     reflection_contract: Literal[
         "private-impression-draft.3",
         "private-impression-draft.4",
+        "character-interior-private-impression-transition.1",
     ] | None = None
     reflection_decision: Literal["retain", "consolidate", "supersede"] | None = None
     reflection_source_refs: tuple[str, ...] = ()
@@ -207,7 +208,11 @@ class PrivateImpressionAuthorizedPayload(FrozenModel):
             raise ValueError("private impression reflection lineage is incomplete")
         if (
             self.reflection_decision is not None
-            and self.reflection_contract != "private-impression-draft.4"
+            and self.reflection_contract
+            not in {
+                "private-impression-draft.4",
+                "character-interior-private-impression-transition.1",
+            }
         ):
             raise ValueError("private impression decision lacks its v4 reflection contract")
         if self.reflection_source_refs != tuple(dict.fromkeys(self.reflection_source_refs)):
@@ -222,7 +227,10 @@ class PrivateImpressionAuthorizedPayload(FrozenModel):
                 or self.reflection_decision is not None
             ):
                 raise ValueError("private impression v3 reflection can only open an impression")
-        elif self.reflection_contract == "private-impression-draft.4":
+        elif self.reflection_contract in {
+            "private-impression-draft.4",
+            "character-interior-private-impression-transition.1",
+        }:
             if self.reflection_decision != (
                 "retain" if self.transition_kind == "open" else self.transition_kind
             ):
@@ -311,7 +319,11 @@ def private_impression_reflection_digest(
     return private_impression_reflection_value_digest(
         decision=(
             value.reflection_decision
-            if value.reflection_contract == "private-impression-draft.4"
+            if value.reflection_contract
+            in {
+                "private-impression-draft.4",
+                "character-interior-private-impression-transition.1",
+            }
             else None
         ),
         predecessor_refs=tuple(

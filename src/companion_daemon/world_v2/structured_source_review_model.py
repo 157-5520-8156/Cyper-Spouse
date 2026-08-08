@@ -1532,15 +1532,19 @@ class StructuredSourceReviewModel(OpenAICompatibleChatModel):
 
     def request_payload(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, object]],
         *,
         temperature: float,
         json_object: bool = False,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
     ) -> dict[str, object]:
         payload = super().request_payload(
             messages,
             temperature=temperature,
             json_object=json_object,
+            tools=tools,
+            tool_choice=tool_choice,
         )
         # ``reasoning_effort`` is not part of Chat Completions for every
         # schema-capable checkpoint (notably the direct GPT-4o/4.1 families).

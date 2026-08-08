@@ -268,7 +268,6 @@ class LifeDevelopmentNpcCapability(FrozenModel):
     active_plan_refs: tuple[str, ...] = ()
     current_location_ref: str | None = None
     protagonist_closeness_bp: int | None = Field(default=None, ge=0, le=10_000)
-    protagonist_friction_bp: int | None = Field(default=None, ge=0, le=10_000)
 
     @model_validator(mode="after")
     def refs_are_canonical(self) -> "LifeDevelopmentNpcCapability":

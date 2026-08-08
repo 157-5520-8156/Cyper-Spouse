@@ -3,6 +3,9 @@ import json
 
 import pytest
 
+from companion_daemon.world_v2.character_interior.snapshot_compiler import (
+    compile_inner_life_snapshot,
+)
 from companion_daemon.world_v2.context_capsule import FactRecallItem
 from companion_daemon.world_v2.life_content import (
     LifeContentExcerpt,
@@ -625,8 +628,14 @@ def test_recalled_counterpart_report_keeps_its_speaker_and_epistemic_scope_in_mo
     assert recalled["speaker_ref"] == "user:primary"
     assert recalled["subject_refs"] == ["user:primary"]
     assert recalled["text"] == "我今天跟学校门口那个摊贩吵了一架，烦死了。"
-    assert compact["current_self_state"]["availability"] == "unavailable"
-    assert compact["current_self_state"]["recent_self_experiences"] == {
+    assert "inner_life_snapshot" not in compact
+    inner_life = compile_inner_life_snapshot(compact).model_view()
+    assert inner_life["availability"] == "available"
+    assert dialogue.source_item_ref in inner_life["source_refs"]
+    assert inner_life["materials"]["recent_dialogue"][0]["speaker_ref"] == (
+        "user:primary"
+    )
+    assert inner_life["materials"]["recent_self_experiences"] == {
         "availability": "unavailable"
     }
 

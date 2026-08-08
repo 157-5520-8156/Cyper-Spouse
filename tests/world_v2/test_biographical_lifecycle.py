@@ -20,6 +20,10 @@ from companion_daemon.world_v2.batch_invariants import (
     appraisal_trigger_identity,
     validate_commit_batch,
 )
+from companion_daemon.world_v2.character_interior.contracts import (
+    InnerDecision,
+    _InteriorAuthorLineage,
+)
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.life_aftermath_runtime import (
     LifeAftermathModelFailure,
@@ -210,9 +214,7 @@ def test_selected_objective_outcome_atomically_replaces_the_coordinate_head(
         path=tmp_path / "objective-transition.sqlite",
         world_id=world_id,
     )
-    assert reopened.project().biographical_coordinates == (
-        coordinate,
-    )
+    assert reopened.project().biographical_coordinates == (coordinate,)
     tampered = projection.model_dump(mode="python")
     changed = BiographicalCoordinateReplacement.create(
         coordinate_ref="biography:education",
@@ -419,9 +421,7 @@ def test_life_arc_is_event_sourced_and_cold_replays(tmp_path: Path) -> None:
     )
 
     projected = ledger.project()
-    accepted_arc = arc.model_copy(
-        update={"accepted_event_ref": started.event_id}
-    )
+    accepted_arc = arc.model_copy(update={"accepted_event_ref": started.event_id})
     assert projected.life_arcs == (accepted_arc,)
     ledger.close()
 
@@ -494,7 +494,7 @@ def test_life_arc_is_event_sourced_and_cold_replays(tmp_path: Path) -> None:
 
     migrated = SQLiteWorldLedger(path=path, world_id=world_id)
     reopened = migrated.project()
-    assert reopened.reducer_bundle_version == "world-v2-reducers.51"
+    assert reopened.reducer_bundle_version == "world-v2-reducers.52"
     assert reopened.life_arcs == projected.life_arcs
     assert migrated.rebuild() == reopened
     migrated.close()
@@ -557,8 +557,7 @@ def test_life_catalog_obeys_academic_phase_and_active_life_arc(
         wake_event_ref="clock:graduated",
         plans=(),
         npcs=tuple(
-            SimpleNamespace(npc_id=item.npc_id, status="active")
-            for item in catalog.reviewed_npcs
+            SimpleNamespace(npc_id=item.npc_id, status="active") for item in catalog.reviewed_npcs
         ),
         life_arcs=(),
     )
@@ -584,8 +583,7 @@ def test_graduated_catalog_removes_student_only_life_without_flattening_city_lif
         chronology=LocalChronology("Asia/Shanghai"),
     )
     active_npcs = tuple(
-        SimpleNamespace(npc_id=item.npc_id, status="active")
-        for item in catalog.reviewed_npcs
+        SimpleNamespace(npc_id=item.npc_id, status="active") for item in catalog.reviewed_npcs
     )
     offered: set[str] = set()
     for local_day in (3, 8):  # Monday and Saturday cover weekday/weekend life.
@@ -682,7 +680,7 @@ def test_life_arc_opens_and_retires_its_contextual_npc_on_clock_boundaries(
     runtime = BiographicalLifecycleRuntime(
         ledger=ledger,
         catalog=ReviewedLifeSeedCatalog.from_yaml(
-                path=legacy_story_seed_path,
+            path=legacy_story_seed_path,
             chronology=LocalChronology("Asia/Shanghai"),
         ),
         owner_actor_ref="actor:companion",
@@ -790,9 +788,16 @@ async def test_long_lived_outcome_model_failure_cannot_fall_back_to_random() -> 
         catalog_hash="c" * 64,
     )
     runtime = object.__new__(LifeAftermathRuntime)
-    runtime._outcome_selection = _FailingOutcomeSelection()  # noqa: SLF001
+    runtime._character_interior = _CapturingLongLivedOutcomeModel(  # noqa: SLF001
+        selected_ref="candidate:accept",
+        fail_calls=1,
+    )
+    runtime._ledger = SimpleNamespace(world_id="world:test")  # noqa: SLF001
+    runtime._owner_actor_ref = "actor:character"  # noqa: SLF001
     runtime._candidate_text = lambda *_args: "reviewed outcome"  # type: ignore[method-assign]  # noqa: SLF001
     occurrence = SimpleNamespace(
+        occurrence_id="occurrence:test",
+        entity_revision=1,
         candidate_outcomes=(
             OutcomeCandidateDescriptor(
                 candidate_result_ref="candidate:accept",
@@ -809,15 +814,28 @@ async def test_long_lived_outcome_model_failure_cannot_fall_back_to_random() -> 
                 result_payload_hash="d" * 64,
                 privacy_class="personal",
             ),
-        )
+        ),
     )
 
-    with pytest.raises(LifeAftermathModelFailure, match="model unavailable"):
-        await runtime._select_long_lived_outcome(  # noqa: SLF001
-            occurrence=occurrence,
-            projection=SimpleNamespace(affect_episodes=()),
-            decision_context={"current_self_state": {}},
-        )
+    chosen, failure = await runtime._select_long_lived_outcome(  # noqa: SLF001
+        occurrence=occurrence,
+        projection=SimpleNamespace(
+            logical_time=datetime(2026, 1, 1, tzinfo=UTC),
+            biographical_coordinates=(),
+        ),
+        observation_event=SimpleNamespace(event_id="event:observation:test"),
+        observation_id="observation:test",
+        cursor=ProjectionCursor(
+            world_revision=1,
+            deliberation_revision=0,
+            ledger_sequence=1,
+        ),
+        retry_ordinal=0,
+    )
+
+    assert chosen is None
+    assert failure.status == "technical_failure"
+    assert failure.failure_code == "role_faculty_unavailable"
 
 
 def test_long_lived_outcome_proposal_records_complete_pinned_context_identity() -> None:
@@ -938,7 +956,6 @@ async def test_long_lived_outcome_is_atomic_and_restart_does_not_repeat_the_mode
             "privacy_class": "personal",
         },
     )
-    capsules = _PinnedCapsuleCompiler(ledger=ledger)
     runtime = LifeAftermathRuntime(
         ledger=ledger,
         catalog=SimpleNamespace(),
@@ -948,8 +965,7 @@ async def test_long_lived_outcome_is_atomic_and_restart_does_not_repeat_the_mode
         ),
         content_store=content_store,
         owner_actor_ref="actor:companion",
-        capsule_compiler=capsules,
-        outcome_selection_model=model,
+        character_interior=model,
     )
 
     record_model_result = runtime._record_outcome_model_result  # noqa: SLF001
@@ -968,16 +984,18 @@ async def test_long_lived_outcome_is_atomic_and_restart_does_not_repeat_the_mode
 
     assert model.calls == 2
     assert ledger.project().world_occurrences[0].status == "settled"
-    assert len(ledger.project().model_result_audits) == 2
-    audited_calls = [
-        json.loads(item.audit_json)
-        for item in ledger.project().model_result_audits
-    ]
-    assert audited_calls[0]["request_hash"] != audited_calls[1]["request_hash"]
-    assert ledger.lookup_event_commit(
-        "event:life-aftermath:outcome-proposal:consequential"
-    ) is not None
-    assert model.last_material["current_character_context"] == capsules.context
+    assert len(ledger.project().model_result_audits) == 1
+    audited_calls = [json.loads(item.audit_json) for item in ledger.project().model_result_audits]
+    # The correction is an internal CharacterInterior concern.  LifeAftermath
+    # receives and durably audits only the final bound semantic decision.
+    assert audited_calls[0]["status"] == "proposal_validated"
+    assert audited_calls[0]["slot"] == "corrective"
+    assert (
+        ledger.lookup_event_commit("event:life-aftermath:outcome-proposal:consequential")
+        is not None
+    )
+    assert model.last_material["allow_character_life_direction"] is True
+    assert model.last_material["candidate_matrix_hash"]
 
     recovery_at = wake_at + timedelta(minutes=10)
     recovery_wake = _event(
@@ -1000,8 +1018,7 @@ async def test_long_lived_outcome_is_atomic_and_restart_does_not_repeat_the_mode
         ),
         content_store=content_store,
         owner_actor_ref="actor:companion",
-        capsule_compiler=_PinnedCapsuleCompiler(ledger=ledger),
-        outcome_selection_model=model,
+        character_interior=model,
     )
 
     recovered = await restarted.advance_once(
@@ -1022,22 +1039,18 @@ async def test_long_lived_outcome_is_atomic_and_restart_does_not_repeat_the_mode
         "event:life-aftermath:outcome-proposal:consequential"
     )
     _, settlement_commit = ledger.lookup_event_commit(settlement_ref.event_id)
-    proposal = OutcomeProposalRecordedPayload.model_validate_json(
-        proposal_event.payload_json
-    )
+    proposal = OutcomeProposalRecordedPayload.model_validate_json(proposal_event.payload_json)
     assert proposal.context_cursor is not None
     assert proposal.context_cursor.world_revision == proposal.evaluated_world_revision
-    assert proposal.context_capsule_id == capsules.last_capsule.capsule_id
-    assert proposal.context_identity_version == "life-aftermath-context.3"
+    assert proposal.context_capsule_id == "2" * 64
+    assert proposal.context_identity_version == "life-aftermath-context.4"
     assert proposal.decision_model_result_ref is not None
     assert proposal.decision_model_result_event_ref is not None
     assert proposal.decision_audit_proposal_event_ref is not None
     assert proposal.decision_audit_proposal_event_payload_hash is not None
     assert proposal.decision_model == model.model
     assert proposal_commit.event_ids == settlement_commit.event_ids
-    semantic_audit = json.loads(
-        ledger.project().proposal_audits[-1].proposal_json
-    )
+    semantic_audit = json.loads(ledger.project().proposal_audits[-1].proposal_json)
     bound_choice = json.loads(semantic_audit["response_text"])
     assert bound_choice["candidate_result_ref"] == proposal.candidate_result_ref
     assert bound_choice["adopt_proposed_life_direction"] is False
@@ -1045,9 +1058,7 @@ async def test_long_lived_outcome_is_atomic_and_restart_does_not_repeat_the_mode
         "biography:direction.work"
     )
     assert len(settled.biographical_coordinates) == 1
-    assert settled.biographical_coordinates[0].settlement_event_ref == (
-        settlement_ref.event_id
-    )
+    assert settled.biographical_coordinates[0].settlement_event_ref == (settlement_ref.event_id)
     assert settled.biographical_coordinates[0].entity_revision == 1
 
 
@@ -1059,11 +1070,11 @@ async def test_long_lived_outcome_is_atomic_and_restart_does_not_repeat_the_mode
         "calls_after_failure",
     ),
     (
-        ("timeout", {"fail_first": True}, ("main_timeout",), 1),
+        ("timeout", {"fail_first": True}, ("main_exception",), 1),
         (
             "double-invalid",
             {"invalid_responses": 2},
-            ("main_invalid", "recovery_failed"),
+            ("main_invalid",),
             2,
         ),
     ),
@@ -1118,8 +1129,7 @@ async def test_long_lived_model_failure_retries_on_a_later_wake_without_a_second
         ),
         content_store=content_store,
         owner_actor_ref="actor:companion",
-        capsule_compiler=_PinnedCapsuleCompiler(ledger=ledger),
-        outcome_selection_model=model,
+        character_interior=model,
     )
     failed_wake = _clock_advance(
         world_id=world_id,
@@ -1140,11 +1150,13 @@ async def test_long_lived_model_failure_retries_on_a_later_wake_without_a_second
     assert len(failed_audits) == len(expected_audit_statuses)
     decoded_audits = [json.loads(item.audit_json) for item in failed_audits]
     assert tuple(item["status"] for item in decoded_audits) == expected_audit_statuses
-    assert len({item["request_hash"] for item in decoded_audits}) == len(
-        decoded_audits
-    )
+    assert len({item["request_hash"] for item in decoded_audits}) == len(decoded_audits)
     if failure_kind == "double-invalid":
-        assert all(item["response_hash"] for item in decoded_audits)
+        # Raw correction attempts are private to CharacterInterior.  The
+        # consumer receives one precise terminal boundary failure, not an old
+        # adapter-shaped two-attempt transcript.
+        assert decoded_audits[0]["response_hash"] is None
+        assert decoded_audits[0]["failure_code"] == ("invalid_role_result_after_correction")
         assert ledger.project().proposal_audits == ()
 
     early_wake = _clock_advance(
@@ -1230,8 +1242,7 @@ async def test_outcome_retry_lane_backs_off_ten_thirty_then_one_twenty_minutes(
         ),
         content_store=store,
         owner_actor_ref="actor:companion",
-        capsule_compiler=_PinnedCapsuleCompiler(ledger=ledger),
-        outcome_selection_model=model,
+        character_interior=model,
     )
 
     async def advance_at(
@@ -1269,11 +1280,12 @@ async def test_outcome_retry_lane_backs_off_ten_thirty_then_one_twenty_minutes(
         json.loads(item.audit_json)
         for item in ledger.project().model_result_audits
         if ":retry:" in item.attempt_id
+        and json.loads(item.audit_json)["status"] != "proposal_validated"
     ]
     assert [item["status"] for item in failure_audits] == [
-        "main_timeout",
-        "main_timeout",
-        "main_timeout",
+        "main_exception",
+        "main_exception",
+        "main_exception",
     ]
 
 
@@ -1333,28 +1345,27 @@ def test_frozen_effect_is_excluded_from_legacy_semantic_hash_material() -> None:
         world_revision=1,
     )
 
-    assert "life_arc_effect" not in legacy["world_occurrences"][0][
-        "candidate_outcomes"
-    ][0]
+    assert "life_arc_effect" not in legacy["world_occurrences"][0]["candidate_outcomes"][0]
     legacy_42 = state.semantic_payload(
         world_id="world:legacy-effect-hash",
         world_revision=1,
         reducer_bundle_version="world-v2-reducers.42",
     )
+    assert "settled_dynamic_life_direction_adopted" not in legacy_42["world_occurrences"][0]
     assert (
-        "settled_dynamic_life_direction_adopted"
-        not in legacy_42["world_occurrences"][0]
+        current["world_occurrences"][0]["candidate_outcomes"][0]["life_arc_effect"][
+            "descriptor_hash"
+        ]
+        == effect.descriptor_hash
     )
-    assert current["world_occurrences"][0]["candidate_outcomes"][0][
-        "life_arc_effect"
-    ]["descriptor_hash"] == effect.descriptor_hash
     assert (
         "objective_biographical_transition"
         not in v47["world_occurrences"][0]["candidate_outcomes"][0]
     )
-    assert v41["world_occurrences"][0]["candidate_outcomes"][0][
-        "life_arc_effect"
-    ]["descriptor_hash"] == effect.descriptor_hash
+    assert (
+        v41["world_occurrences"][0]["candidate_outcomes"][0]["life_arc_effect"]["descriptor_hash"]
+        == effect.descriptor_hash
+    )
 
 
 def test_life_arc_acceptance_is_excluded_from_v41_semantic_hash_material() -> None:
@@ -1384,10 +1395,7 @@ def test_life_arc_acceptance_is_excluded_from_v41_semantic_hash_material() -> No
     )
 
     assert "accepted_event_ref" not in legacy["life_arcs"][0]
-    assert (
-        current["life_arcs"][0]["accepted_event_ref"]
-        == arc.accepted_event_ref
-    )
+    assert current["life_arcs"][0]["accepted_event_ref"] == arc.accepted_event_ref
 
 
 def test_recovery_orders_frozen_effects_and_preserves_their_effective_time() -> None:
@@ -1552,9 +1560,7 @@ def test_expired_recovered_effect_starts_and_completes_atomically(
     assert arc.closed_at == arc.ends_at
     assert len(arc_commits) == 2
     assert arc_commits[0].event_ids == arc_commits[1].event_ids
-    assert len(
-        [event_id for event_id in arc_commits[0].event_ids if ":life-arc:" in event_id]
-    ) == 2
+    assert len([event_id for event_id in arc_commits[0].event_ids if ":life-arc:" in event_id]) == 2
     assert not final_projection.pending_biographical_settlements
 
 
@@ -1656,15 +1662,9 @@ def test_selected_open_outcome_registers_npc_and_only_adopted_dynamic_arc_once(
     assert projection.npcs[0].source_event_ref == settlement.event_id
     assert projection.npcs[0].effect_descriptor_hash == npc.descriptor_hash
     assert projection.npcs[0].promotion_edge is not None
-    assert projection.npcs[0].promotion_edge.provisional_entity_ref == (
-        npc.provisional_entity_ref
-    )
-    assert projection.npcs[0].promotion_edge.stable_npc_ref == (
-        f"npc:{projection.npcs[0].npc_id}"
-    )
-    assert projection.npcs[0].promotion_edge.origin_settlement_event_ref == (
-        settlement.event_id
-    )
+    assert projection.npcs[0].promotion_edge.provisional_entity_ref == (npc.provisional_entity_ref)
+    assert projection.npcs[0].promotion_edge.stable_npc_ref == (f"npc:{projection.npcs[0].npc_id}")
+    assert projection.npcs[0].promotion_edge.origin_settlement_event_ref == (settlement.event_id)
     assert projection.npcs[0].promotion_edge.descriptor_hash == npc.descriptor_hash
     assert len(projection.life_arcs) == expected_arc_count
     if adopt_direction:
@@ -1673,9 +1673,7 @@ def test_selected_open_outcome_registers_npc_and_only_adopted_dynamic_arc_once(
         assert projection.life_arcs[0].context_tags == tuple(
             sorted({*arc.narrative_tags, *arc.context_tags})
         )
-        assert projection.life_arcs[0].supersedes_context_tag_prefixes == (
-            "occupation:",
-        )
+        assert projection.life_arcs[0].supersedes_context_tag_prefixes == ("occupation:",)
     assert not projection.pending_biographical_settlements
     assert ledger.rebuild().npcs[0].promotion_edge == projection.npcs[0].promotion_edge
 
@@ -1746,12 +1744,9 @@ class _NoNpcCatalog:
         return ()
 
 
-class _FailingOutcomeSelection:
-    async def deliberate(self, **_kwargs):
-        raise TimeoutError("provider unavailable")
-
-
 class _CapturingLongLivedOutcomeModel:
+    """A direct CharacterInterior seam used by LifeAftermath interface tests."""
+
     model = "test-character-consequential-outcome"
 
     def __init__(
@@ -1776,58 +1771,127 @@ class _CapturingLongLivedOutcomeModel:
         self.calls = 0
         self.last_material: dict[str, object] = {}
 
-    async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
-        assert temperature == 0.2
-        self.calls += 1
-        self.last_material = json.loads(messages[1]["content"])
-        if self.calls <= self._fail_calls:
-            raise TimeoutError("simulated first provider failure")
-        if self.calls <= self._invalid_responses:
-            return json.dumps(
-                {
-                    "candidate_result_ref": "candidate:not-offered",
-                    "adopt_proposed_life_direction": False,
-                }
+    async def consider(self, opportunity):  # type: ignore[no-untyped-def]
+        self.last_material = dict(opportunity.capability_manifest.payload)
+        for correction_ordinal in range(2):
+            self.calls += 1
+            if self.calls <= self._fail_calls:
+                return InnerDecision(
+                    inner_turn_id=opportunity.inner_turn_ref,
+                    opportunity_ref=opportunity.opportunity_ref,
+                    actor_ref=opportunity.actor_ref,
+                    cursor=opportunity.cursor,
+                    snapshot_id="inner-life-snapshot:test",
+                    snapshot_hash="2" * 64,
+                    status="technical_failure",
+                    failure_code="role_faculty_unavailable",
+                )
+            selected_ref = (
+                "candidate:not-offered"
+                if self.calls <= self._invalid_responses
+                else self._selected_ref
             )
-        return json.dumps(
-            {
-                "candidate_result_ref": self._selected_ref,
-                "character_life_direction": self._life_direction,
-            }
-        )
-
-
-class _PinnedCapsuleCompiler:
-    context = {
-        "current_self_state": {
-            "character_core": {"values": ["autonomy"]},
-            "personality_state": {"availability": "present"},
-        },
-        "relationships": [{"subject_ref": "user:test", "stage": "friend"}],
-        "active_affect": [{"dimension": "sadness", "intensity_bp": 4100}],
-        "active_memory_candidates": [
-            {"candidate_id": "memory:user-encouraged-publishing"}
-        ],
-        "aspirations": [{"aspiration_id": "aspiration:publishing"}],
-        "commitments": [{"commitment_id": "commitment:user-followup"}],
-    }
-
-    def __init__(self, *, ledger: SQLiteWorldLedger) -> None:
-        self._ledger = ledger
-        self.last_capsule = None
-
-    def compile_for_deliberation(self, _query):  # type: ignore[no-untyped-def]
-        projection = self._ledger.project()
-        self.last_capsule = SimpleNamespace(
-            capsule_id="1" * 64,
-            snapshot_hash="2" * 64,
-            world_revision=projection.world_revision,
-            deliberation_revision=projection.deliberation_revision,
-            ledger_sequence=projection.ledger_sequence,
-            logical_time=projection.logical_time,
-            model_content_json=json.dumps(self.context, ensure_ascii=False),
-        )
-        return SimpleNamespace(capsule=self.last_capsule)
+            if selected_ref not in self.last_material["offered_tokens"]:
+                if correction_ordinal == 0:
+                    continue
+                return InnerDecision(
+                    inner_turn_id=opportunity.inner_turn_ref,
+                    opportunity_ref=opportunity.opportunity_ref,
+                    actor_ref=opportunity.actor_ref,
+                    cursor=opportunity.cursor,
+                    snapshot_id="inner-life-snapshot:test",
+                    snapshot_hash="2" * 64,
+                    status="technical_failure",
+                    failure_code="invalid_role_result_after_correction",
+                )
+            raw = json.dumps(
+                {
+                    "selected_token": selected_ref,
+                    "character_life_direction": self._life_direction,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            request_hash = (
+                "sha256:"
+                + hashlib.sha256(
+                    json.dumps(
+                        {
+                            "inner_turn_ref": opportunity.inner_turn_ref,
+                            "correction_ordinal": correction_ordinal,
+                        },
+                        sort_keys=True,
+                    ).encode()
+                ).hexdigest()
+            )
+            call_id = (
+                "model-call:test-outcome:"
+                + hashlib.sha256(
+                    (opportunity.inner_turn_ref + str(correction_ordinal)).encode()
+                ).hexdigest()
+            )
+            parent = (
+                None
+                if correction_ordinal == 0
+                else "model-call:test-outcome:"
+                + hashlib.sha256((opportunity.inner_turn_ref + "0").encode()).hexdigest()
+            )
+            summary = "The observed outcome now feels like part of my life."
+            author_lineage = _InteriorAuthorLineage(
+                model_id=self.model,
+                model_version="fixture.1",
+                model_call_id=call_id,
+                request_hash=request_hash,
+                response_hash="sha256:" + hashlib.sha256(raw.encode()).hexdigest(),
+                attempt_ordinal=correction_ordinal,
+                parent_model_call_id=parent,
+            )
+            return InnerDecision(
+                inner_turn_id=opportunity.inner_turn_ref,
+                opportunity_ref=opportunity.opportunity_ref,
+                actor_ref=opportunity.actor_ref,
+                cursor=opportunity.cursor,
+                snapshot_id="inner-life-snapshot:test",
+                snapshot_hash="2" * 64,
+                status="decided",
+                summary=summary,
+                attended_source_refs=opportunity.source_refs,
+                instant_private_self={
+                    "summary": summary,
+                    "attended_source_refs": opportunity.source_refs,
+                },
+                private_self_lineage={
+                    "relation": "single_pass",
+                    "initial_private_self": {
+                        "summary": summary,
+                        "attended_source_refs": opportunity.source_refs,
+                    },
+                    "initial_snapshot_id": "inner-life-snapshot:test",
+                    "initial_snapshot_hash": "2" * 64,
+                    "initial_author_lineage": author_lineage,
+                    "final_private_self": {
+                        "summary": summary,
+                        "attended_source_refs": opportunity.source_refs,
+                    },
+                    "final_snapshot_id": "inner-life-snapshot:test",
+                    "final_snapshot_hash": "2" * 64,
+                    "final_author_lineage": author_lineage,
+                },
+                decision={
+                    "contract": "character-interior-purpose-decision.1",
+                    "purpose": "outcome_selection",
+                    "source_refs": list(opportunity.source_refs),
+                    "capability_ref": opportunity.capability_manifest.capability_ref,
+                    "capability_payload_hash": (opportunity.capability_manifest.payload_hash),
+                    "payload": {
+                        "contract": "character-interior-outcome-selection-decision.1",
+                        "selected_token": selected_ref,
+                        "character_life_direction": self._life_direction,
+                    },
+                },
+                author_lineage=author_lineage,
+            )
+        raise AssertionError("unreachable")
 
 
 class _CapturingLedger:
@@ -1901,9 +1965,7 @@ def _commit_active_long_lived_occurrence(
             content_payload_hash=life_content_payload_hash(text),
             life_arc_effect=effect if index == 0 else None,
         )
-        for index, (candidate_ref, text) in enumerate(
-            zip(candidate_refs, texts, strict=True)
-        )
+        for index, (candidate_ref, text) in enumerate(zip(candidate_refs, texts, strict=True))
     )
     occurrence = WorldOccurrenceProjection(
         occurrence_id=occurrence_id,
@@ -1967,9 +2029,7 @@ def _commit_active_long_lived_occurrence(
         ),
     )
     active = next(
-        item
-        for item in ledger.project().world_occurrences
-        if item.occurrence_id == occurrence_id
+        item for item in ledger.project().world_occurrences if item.occurrence_id == occurrence_id
     )
     return active, texts
 
@@ -1983,12 +2043,8 @@ def _commit_settled_effect_occurrence(
     context_tags: tuple[str, ...],
     duration_days: int,
     dynamic_life_arc_context: DynamicLifeArcContextDescriptor | None = None,
-    provisional_npc_introductions: tuple[
-        ProvisionalNpcIntroductionDescriptor, ...
-    ] = (),
-    provisional_place_introductions: tuple[
-        ProvisionalPlaceIntroductionDescriptor, ...
-    ] = (),
+    provisional_npc_introductions: tuple[ProvisionalNpcIntroductionDescriptor, ...] = (),
+    provisional_place_introductions: tuple[ProvisionalPlaceIntroductionDescriptor, ...] = (),
     include_reviewed_life_arc_effect: bool = True,
     adopt_dynamic_life_direction: bool | None = None,
     objective_biographical_transition: BiographicalCoordinateReplacement | None = None,
@@ -2037,15 +2093,11 @@ def _commit_settled_effect_occurrence(
                 result_payload_ref=result_payload_ref,
                 result_payload_hash=result_payload_hash,
                 privacy_class="personal",
-                life_arc_effect=(
-                    effect if include_reviewed_life_arc_effect else None
-                ),
+                life_arc_effect=(effect if include_reviewed_life_arc_effect else None),
                 dynamic_life_arc_context=dynamic_life_arc_context,
                 provisional_npc_introductions=provisional_npc_introductions,
                 provisional_place_introductions=provisional_place_introductions,
-                objective_biographical_transition=(
-                    objective_biographical_transition
-                ),
+                objective_biographical_transition=(objective_biographical_transition),
             ),
         ),
         visibility="personal",

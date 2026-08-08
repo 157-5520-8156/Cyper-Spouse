@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import hashlib
-import json
 
 import pytest
 
 from companion_daemon.world_v2.activity_lifecycle_draft import (
-    ActivityLifecycleDraftAdapter,
     ActivityLifecycleDraftCapsule,
     ActivityLifecycleOpening,
     materialize_activity_lifecycle_draft,
@@ -70,86 +68,3 @@ def test_materializes_the_exact_no_op_shape_without_an_opening_token() -> None:
 def test_rejects_malformed_unknown_or_authority_bearing_model_output(raw: str) -> None:
     with pytest.raises(ValueError):
         materialize_activity_lifecycle_draft(raw=raw, capsule=_capsule(), model="fake")
-
-
-class _FakeModel:
-    model = "fake-flash"
-
-    def __init__(self, response: str) -> None:
-        self.response = response
-        self.calls: list[tuple[list[dict[str, str]], float]] = []
-
-    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.2) -> str:
-        self.calls.append((messages, temperature))
-        return self.response
-
-
-@pytest.mark.asyncio
-async def test_adapter_exposes_only_safe_summaries_and_the_preoffered_token_set_to_model() -> None:
-    model = _FakeModel('{"decision":"no_op"}')
-    adapter = ActivityLifecycleDraftAdapter(model=model, temperature=0.15)
-
-    draft = await adapter.deliberate(capsule=_capsule())
-
-    assert draft.decision == "no_op"
-    assert len(model.calls) == 1
-    messages, temperature = model.calls[0]
-    assert temperature == 0.15
-    model_input = json.loads(messages[1]["content"])
-    assert model_input == {
-        "situation_summary": "午后，角色有一项尚未开始的日常安排。",
-        "openings": [
-            {
-                "opening_token": "opening:7bf5b65ca5d51fab690613ebc0ea5b1c",
-                "safe_summary": "可以开始一项已安排的日常活动。",
-            },
-            {
-                "opening_token": "opening:23df02c833eaf0b96fafd2c55bd848bd",
-                "safe_summary": "也可以暂时放弃一项已安排的日常活动。",
-            },
-        ],
-    }
-    assert "plan_id" not in model_input
-    assert "revision" not in model_input
-    assert "evidence" not in model_input
-
-
-@pytest.mark.asyncio
-async def test_adapter_does_not_call_a_model_or_offer_a_fallback_when_catalog_is_empty() -> None:
-    model = _FakeModel('{"decision":"select","opening_token":"opening:invented"}')
-    empty = ActivityLifecycleDraftCapsule(situation_summary="没有可推进的安排。", openings=())
-
-    draft = await ActivityLifecycleDraftAdapter(model=model).deliberate(capsule=empty)
-
-    assert draft.decision == "no_op"
-    assert draft.opening_token is None
-    assert model.calls == []
-
-
-def test_worker_mood_summary_renders_only_active_accepted_feelings() -> None:
-    from types import SimpleNamespace
-
-    from companion_daemon.world_v2.activity_lifecycle_worker import _mood_summary
-
-    episodes = (
-        SimpleNamespace(
-            status="active",
-            components=(
-                SimpleNamespace(dimension="sadness", intensity_bp=6_500),
-                SimpleNamespace(dimension="loneliness", intensity_bp=2_500),
-                SimpleNamespace(dimension="joy", intensity_bp=1_000),  # below floor
-            ),
-        ),
-        SimpleNamespace(
-            status="resolved",
-            components=(SimpleNamespace(dimension="anger", intensity_bp=9_000),),
-        ),
-    )
-
-    summary = _mood_summary(episodes)
-
-    assert "低落(强)" in summary
-    assert "孤独(轻)" in summary
-    assert "生气" not in summary  # resolved episodes are not current feelings
-    assert "愉快" not in summary  # sub-threshold intensity stays out
-    assert _mood_summary(()) == ""

@@ -6,6 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from companion_daemon.world_v2.character_interior.snapshot_compiler import (
+    compile_inner_life_snapshot,
+)
 from companion_daemon.world_v2.context_resolver import query_from_projection
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.expression_draft import (
@@ -161,7 +164,10 @@ async def _source_closed_active_occurrence(
             outputs=(json.dumps(draft, ensure_ascii=False),),
         ),
         source_closure_reviewer=source_reviewer,
-        character_model=_SequenceModel(model="test-character-model", outputs=()),
+        character_interior=_SequenceModel(
+            model="test-character-interior",
+            outputs=(),
+        ),
         location_capability=capability,
     )
     if entity_refs:
@@ -298,7 +304,10 @@ async def test_source_closed_active_occurrence_reaches_current_self_without_futu
     assert "变化留下了一些影响" not in encoded
 
     compact = json.loads(compact_chat_model_facing_context(capsule.model_content_json))
-    current_life = compact["current_self_state"]["recent_self_experiences"]["items"][0]
+    assert "inner_life_snapshot" not in compact
+    current_life = compile_inner_life_snapshot(compact).model_view()["materials"][
+        "recent_self_experiences"
+    ]["items"][0]
     assert current_life["source_ref"] == value["occurrence_id"]
     assert current_life["status"] == "active"
     assert current_life["premise"]["text"] == value["premise"]["text"]
@@ -359,6 +368,7 @@ async def test_active_reader_retains_historical_v5_review_identities() -> None:
     "failure",
     ("legacy_without_source_closure", "sidecar_hash_mismatch", "withhold"),
 )
+@pytest.mark.asyncio
 async def test_active_occurrence_authority_or_privacy_failure_is_unavailable_not_fatal(
     failure: str,
 ) -> None:
@@ -443,6 +453,10 @@ async def test_active_occurrence_stays_out_of_long_term_recall_corpus() -> None:
 
 @pytest.mark.asyncio
 async def test_companion_and_npc_lived_experience_enters_context_and_recall() -> None:
+    class MustNotConsider:
+        async def consider(self, _opportunity):  # pragma: no cover - hard assertion
+            raise AssertionError("world contingency must not ask the character to choose")
+
     class RecordingRecall:
         def __init__(self) -> None:
             self.sources = None
@@ -471,7 +485,7 @@ async def test_companion_and_npc_lived_experience_enters_context_and_recall() ->
         ),
         content_store=store,
         owner_actor_ref=OWNER,
-        capsule_compiler=SimpleNamespace(),
+        character_interior=MustNotConsider(),
     )
     settled = await aftermath.advance_once(
         wake_event_ref=settle_wake.event_id,

@@ -78,7 +78,7 @@ class RelationshipAdjustmentPreview(FrozenModel):
 
 
 def relationship_primary_id(*, subject_ref: str) -> str:
-    """Derive the sole World v2 primary relationship identity for a subject."""
+    """Derive the primary World v2 relationship identity for one subject."""
 
     if not subject_ref:
         raise ValueError("relationship subject is required")
@@ -131,12 +131,11 @@ def preview_relationship_slow_variable_adjustment(
         raise ValueError("relationship adjustment requires all signals to be unconsumed")
     _validate_adjustment_deltas(proposed_deltas=proposed_deltas, accepted_deltas=accepted_deltas)
 
-    if len(states) > 1:
-        raise ValueError("world v2.1 permits one primary relationship state")
-    if states:
-        current = states[0]
-        if current.subject_ref != subject_ref:
-            raise ValueError("relationship identity changed subject")
+    subject_matches = tuple(item for item in states if item.subject_ref == subject_ref)
+    if len(subject_matches) > 1:
+        raise ValueError("duplicate relationship state authority for subject")
+    if subject_matches:
+        current = subject_matches[0]
         if (
             current.policy_version != _POLICY["policy_version"]
             or current.policy_digest != RELATIONSHIP_POLICY_DIGEST
@@ -242,17 +241,24 @@ def adjust_relationship_slow_variables(
     _validate_adjustment_deltas(
         proposed_deltas=payload.proposed_deltas, accepted_deltas=payload.accepted_deltas
     )
-    matches = [
+    identity_matches = [
         (index, item)
         for index, item in enumerate(states)
         if item.relationship_id == payload.relationship_id
     ]
-    if len(matches) > 1:
+    subject_matches = [
+        (index, item)
+        for index, item in enumerate(states)
+        if item.subject_ref == payload.subject_ref
+    ]
+    if len(identity_matches) > 1 or len(subject_matches) > 1:
         raise ValueError("duplicate relationship state authority")
-    if not matches and states:
-        raise ValueError("world v2.1 permits one primary relationship state")
-    if matches:
-        index, current = matches[0]
+    if identity_matches and identity_matches[0][1].subject_ref != payload.subject_ref:
+        raise ValueError("relationship identity changed subject")
+    if subject_matches and subject_matches[0][1].relationship_id != payload.relationship_id:
+        raise ValueError("relationship subject changed authority identity")
+    if subject_matches:
+        index, current = subject_matches[0]
         revision = current.entity_revision
         if current.subject_ref != payload.subject_ref:
             raise ValueError("relationship identity changed subject")
@@ -296,7 +302,14 @@ def adjust_relationship_slow_variables(
         )
         if target is None or target.subject_ref != payload.subject_ref:
             raise ValueError("relationship compensation target does not resolve")
-        if not history or history[-1] != target or target.relationship_revision != revision:
+        subject_history = tuple(
+            item for item in history if item.subject_ref == payload.subject_ref
+        )
+        if (
+            not subject_history
+            or subject_history[-1] != target
+            or target.relationship_revision != revision
+        ):
             raise ValueError("relationship compensation target must be the latest adjustment")
         if payload.signal_refs != target.signal_refs:
             raise ValueError("relationship compensation must preserve target signal lineage")

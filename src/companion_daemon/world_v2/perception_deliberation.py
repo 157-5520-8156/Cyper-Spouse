@@ -1,8 +1,14 @@
-"""Opt-in closed proposal grammar for attachment perception decisions."""
+"""Closed attachment-perception grammar composed through CharacterInterior."""
 
 from __future__ import annotations
 
+from .character_interior.core import CharacterInterior
+from .character_interior.qq_attachment_perception import (
+    CharacterInteriorQQAttachmentPerceptionPort,
+)
 from .deliberation import Deliberation
+from .perception_executor import PerceptionTransport
+from .perception_input_source import PerceptionInputSource
 from .production_proposal_grammar import ProductionProposalGrammar, SpecializedProposalCapability
 
 
@@ -17,17 +23,38 @@ _CAPABILITY = SpecializedProposalCapability(
 )
 
 
-def compose_injected_perception_deliberation(*, router: object, model: object) -> Deliberation:
-    """Build the lane only when a deployment injects model, source and provider."""
+def compose_character_interior_perception_deliberation(
+    *,
+    router: object,
+    character_interior: CharacterInterior,
+    input_source: PerceptionInputSource,
+    dispatch_evidence: PerceptionTransport,
+    budget_account_id: str,
+    budget_limit: int,
+    daily_limit: int,
+    local_timezone: str,
+) -> Deliberation:
+    """Build the lane without exposing or constructing another character author."""
+
+    interior_port = CharacterInteriorQQAttachmentPerceptionPort(
+        character_interior=character_interior,
+        input_source=input_source,
+        dispatch_evidence=dispatch_evidence,
+        budget_account_id=budget_account_id,
+        budget_limit=budget_limit,
+        daily_limit=daily_limit,
+        local_timezone=local_timezone,
+    )
 
     return Deliberation(
         router=router,  # type: ignore[arg-type]
-        main_model=model,  # type: ignore[arg-type]
-        quick_recovery=model,  # type: ignore[arg-type]
-        # This decision is background work that never extends a visible
-        # reply, so it may absorb one provider-route failover (primary
-        # failure → fallback through the proxy) instead of spending its one
-        # audited attempt on the tight interactive deadline.
+        main_model=interior_port,
+        quick_recovery=None,
+        # CharacterInterior already owns one bounded same-author structural
+        # correction. Provider failure remains technical and the durable
+        # perception trigger retries later; Deliberation must not re-enter the
+        # role through its historical recovery port.
+        technical_recovery_enabled=False,
         main_timeout_seconds=12.0,
         proposal_grammar=ProductionProposalGrammar(
             lane_id="perception",
@@ -37,4 +64,4 @@ def compose_injected_perception_deliberation(*, router: object, model: object) -
     )
 
 
-__all__ = ["compose_injected_perception_deliberation"]
+__all__ = ["compose_character_interior_perception_deliberation"]

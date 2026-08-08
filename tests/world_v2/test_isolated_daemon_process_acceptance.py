@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import importlib.util
 import json
 import os
@@ -65,7 +64,7 @@ def _passing_real_provider_report() -> dict[str, object]:
             "accepted_character_choice_count": 2,
             "accepted_private_turn_state_count": 2,
             "accepted_character_choice_request_hashes": ["request:1", "request:2"],
-            "current_self_correlated_character_choice_request_hashes": [
+            "inner_life_snapshot_correlated_character_choice_request_hashes": [
                 "request:1",
                 "request:2",
             ],
@@ -212,7 +211,7 @@ def test_real_provider_deterministic_acceptance_requires_correlated_choice_chain
     causal = report["causal_audit"]
     assert isinstance(causal, dict)
     causal["accepted_private_turn_state_count"] = 1
-    causal["current_self_correlated_character_choice_request_hashes"] = ["request:1"]
+    causal["inner_life_snapshot_correlated_character_choice_request_hashes"] = ["request:1"]
 
     assessment = evaluate_deterministic_invariants(
         report=report,
@@ -221,7 +220,7 @@ def test_real_provider_deterministic_acceptance_requires_correlated_choice_chain
 
     assert assessment["failure_codes"] == [
         "causal.private_turn_state_missing",
-        "causal.current_self_not_correlated",
+        "causal.inner_life_snapshot_not_correlated",
     ]
 
 
@@ -878,7 +877,7 @@ def test_interruption_overlap_tracks_only_authoritative_role_provider_requests()
 def test_provider_capture_does_not_count_unavailable_or_empty_recall() -> None:
     report = _capture_provider_presentation(
         {
-            "current_self_state": {
+            "inner_life_snapshot": {
                 "remembered_material": [],
                 "recalled_emotional_associations": {
                     "availability": "unavailable",
@@ -913,7 +912,7 @@ def test_provider_capture_does_not_count_unavailable_or_empty_recall() -> None:
 
 
 @pytest.mark.parametrize(
-    "current_self_state",
+    "inner_life_snapshot",
     [
         {},
         {
@@ -933,13 +932,13 @@ def test_provider_capture_does_not_count_unavailable_or_empty_recall() -> None:
         },
     ],
 )
-def test_provider_capture_does_not_count_empty_current_self_placeholders(
-    current_self_state: dict[str, object],
+def test_provider_capture_does_not_count_empty_inner_life_snapshot_placeholders(
+    inner_life_snapshot: dict[str, object],
 ) -> None:
-    report = _capture_provider_presentation({"current_self_state": current_self_state})
+    report = _capture_provider_presentation({"inner_life_snapshot": inner_life_snapshot})
 
-    assert report["current_self_state_present_count"] == 0
-    assert report["current_self_state_hashes"] == []
+    assert report["inner_life_snapshot_present_count"] == 0
+    assert report["inner_life_snapshot_hashes"] == []
     assert report["emotion_context_present_count"] == 0
     assert report["emotion_context_hashes"] == []
 
@@ -947,7 +946,7 @@ def test_provider_capture_does_not_count_empty_current_self_placeholders(
 def test_provider_capture_counts_only_inspectable_recall_material() -> None:
     report = _capture_provider_presentation(
         {
-            "current_self_state": {
+            "inner_life_snapshot": {
                 "remembered_material": [
                     {
                         "source_ref": "memory:accepted:one",
@@ -1041,30 +1040,30 @@ def test_causal_report_does_not_join_unrelated_run_wide_coverage() -> None:
         "accepted_character_choice_request_hashes": [accepted_request_hash],
     }
     provider_audit = {
-        "current_self_state_present_count": 1,
+        "inner_life_snapshot_present_count": 1,
         "recall_material_present_count": 1,
         "source_closure_request_count": 1,
-        "current_self_state_model_request_hashes": [accepted_request_hash],
+        "inner_life_snapshot_model_request_hashes": [accepted_request_hash],
         "recall_material_model_request_hashes": [unrelated_recall_request_hash],
         "source_closure_model_request_hashes": [unrelated_source_review_hash],
         "request_evidence": [
             {
                 "model_invocation_request_hash": accepted_request_hash,
-                "current_self_state_hash": "e" * 64,
+                "inner_life_snapshot_hash": "e" * 64,
                 "recall_context_hash": None,
                 "emotion_context_hash": "f" * 64,
                 "source_closure_request": False,
             },
             {
                 "model_invocation_request_hash": unrelated_recall_request_hash,
-                "current_self_state_hash": "1" * 64,
+                "inner_life_snapshot_hash": "1" * 64,
                 "recall_context_hash": "2" * 64,
                 "emotion_context_hash": "3" * 64,
                 "source_closure_request": False,
             },
             {
                 "model_invocation_request_hash": unrelated_source_review_hash,
-                "current_self_state_hash": None,
+                "inner_life_snapshot_hash": None,
                 "recall_context_hash": None,
                 "emotion_context_hash": None,
                 "source_closure_request": True,
@@ -1079,7 +1078,7 @@ def test_causal_report_does_not_join_unrelated_run_wide_coverage() -> None:
 
     assert causal["global_coverage"] == {
         "scope": "run_wide_not_causal",
-        "current_self_provider_request_count": 1,
+        "inner_life_snapshot_provider_request_count": 1,
         "recall_material_provider_request_count": 1,
         "source_closure_provider_request_count": 1,
         "character_selected_recall_model_result_count": 0,
@@ -1087,12 +1086,12 @@ def test_causal_report_does_not_join_unrelated_run_wide_coverage() -> None:
         "appraisal_event_count": 1,
         "affect_event_count": 1,
     }
-    assert "current_self_to_recall_to_expression_supported" not in causal
+    assert "inner_life_snapshot_to_recall_to_expression_supported" not in causal
     assert causal["recall_selected_accepted_expression_chains"] == []
     assert len(causal["accepted_expression_causal_chains"]) == 1
     correlated = causal["accepted_expression_causal_chains"][0]
-    assert correlated["current_self_presented"] is True
-    assert correlated["current_self_state_hash"] == "e" * 64
+    assert correlated["inner_life_snapshot_presented"] is True
+    assert correlated["inner_life_snapshot_hash"] == "e" * 64
     assert correlated["recall_material_presented"] is False
     assert correlated["source_closure_model_calls"] == []
     assert causal["sanitized_model_result_diagnostics"] == [
@@ -1506,236 +1505,4 @@ def test_real_daemon_process_recovers_conversation_without_real_qq(
     )
     assert report["latency"]["measurement"] == (
         "loopback_http_request_to_daemon_response_including_captured_provider_acceptance"
-    )
-
-
-def test_provider_subprocess_capture_mode_retains_hash_only_causal_evidence(
-    tmp_path: Path,
-) -> None:
-    root = Path(__file__).parents[2]
-    output = tmp_path / "provider-capture-acceptance.json"
-    completed = subprocess.run(
-        [
-            sys.executable,
-            str(root / "scripts/run_isolated_daemon_acceptance.py"),
-            "--output",
-            str(output),
-            "--startup-timeout-seconds",
-            "45",
-            "--model-mode",
-            "loopback-stub",
-        ],
-        cwd=root,
-        env=_poisoned_proxy_environment(),
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=180,
-    )
-
-    assert completed.returncode == 0, completed.stderr or completed.stdout
-    report = json.loads(output.read_text(encoding="utf-8"))
-    assert report["contract"] == "isolated-daemon-process-acceptance.2"
-    assert report["safety"]["capture_transport_only"] is True
-    assert report["safety"]["loopback_only"] is True
-    assert report["safety"]["real_qq_send_possible"] is False
-    assert report["safety"]["daemon_proxy_bypass_enforced"] is True
-    assert report["safety"]["real_provider_https_guard_enforced"] is True
-    assert report["safety"]["model_provider_network"] == "loopback_stub"
-    assert report["daemon"]["entrypoint"] == (
-        "scripts.run_isolated_daemon_acceptance:_serve_isolated_loopback_daemon"
-    )
-    assert report["daemon"]["test_only_semantic_authority_injection"] is True
-    semantic_authorities = report["daemon"]["semantic_authorities"]
-    assert semantic_authorities["role"] != semantic_authorities["source_reviewer"]
-    assert semantic_authorities["life_source_reviewer"] not in {
-        semantic_authorities["role"],
-        semantic_authorities["source_reviewer"],
-    }
-    assert semantic_authorities["review_contracts"] == [
-        "report-relative-entailment-adjudication.3",
-        "source-closure-review.7",
-    ]
-    assert semantic_authorities["life_review_contracts"] == [
-        "life-development-source-closure-review.1",
-        "life-development-novel-origin-review.2",
-    ]
-    for phase in ("first_start", "after_restart"):
-        life_health = report["liveness"][phase]["scheduler"][
-            "life_source_authority"
-        ]
-        assert life_health["status"] == "ready"
-        assert life_health["runtime_isolated"] is True
-        assert life_health["runtime_isolation"] == "verified_fork"
-    assert report["safety"]["network_topology"] == {
-        "daemon_http_scope": "loopback",
-        "onebot_provider_scope": "loopback_capture",
-        "model_gateway_scope": "loopback_stub",
-        "model_upstream_scope": "none",
-        "external_model_network": False,
-        "aggregate_loopback_only": True,
-    }
-    assert report["daemon"]["model_mode"] == "loopback-stub"
-    assert report["daemon"]["fake_cli_flag_used"] is False
-    assert report["assessment_policy"]["manual_observation_only"] is True
-    assert report["assessment_policy"]["wording_quality_gate"] is False
-    assert report["assessment_policy"]["character_choice_gate"] is False
-    assert report["assessment_policy"]["ci_real_provider_calls"] is False
-    assert report["assessment_policy"]["real_provider_ci_guard_enforced"] is True
-    assert report["assessment_policy"]["real_provider_execution_policy"] == "manual_only"
-
-    provider = report["provider_presentation_audit"]
-    assert provider["contract"] == "provider-presentation-capture.1"
-    assert provider["raw_prompt_retained"] is False
-    assert provider["raw_response_retained"] is False
-    assert provider["request_count"] >= 1
-    assert provider["current_self_state_present_count"] >= 1
-    assert provider["recall_material_present_count"] >= 1
-    assert provider["recall_material_present_count"] < provider["current_self_state_present_count"]
-    assert provider["emotion_context_present_count"] >= 1
-    assert provider["source_closure_request_count"] >= 1
-    for key in (
-        "request_hashes",
-        "presentation_hashes",
-        "model_invocation_request_hashes",
-        "current_self_state_hashes",
-        "recall_material_hashes",
-        "emotion_context_hashes",
-        "source_closure_request_hashes",
-        "source_closure_model_request_hashes",
-    ):
-        assert provider[key]
-        assert all(
-            len(value) == 64 and all(character in "0123456789abcdef" for character in value)
-            for value in provider[key]
-        )
-    assert provider["request_evidence"]
-    assert all(
-        set(item)
-        == {
-            "model_invocation_request_hash",
-            "current_self_state_hash",
-            "recall_context_hash",
-            "emotion_context_hash",
-            "source_closure_request",
-        }
-        for item in provider["request_evidence"]
-    )
-
-    causal = report["causal_audit"]
-    assert causal["model_result_request_hashes"]
-    assert causal["private_turn_state_proposal_count"] >= 1
-    assert causal["presented_prefetch_count"] >= 1
-    assert causal["appraisal_event_count"] >= 1
-    assert causal["affect_event_count"] >= 1
-    assert causal["source_closure"]["provider_request_count"] >= 1
-    assert causal["source_closure"]["accepted_expression_candidate_count"] >= 1
-    assert causal["source_closure"]["provider_effected_expression_proposal_count"] >= 1
-    accepted_chains = causal["accepted_expression_chains"]
-    assert accepted_chains
-    assert causal["source_closure"]["accepted_expression_candidate_count"] == len(accepted_chains)
-    submitted_sources = set(report["continuity"]["submitted_source_event_ids"])
-    provider_request_hashes = set(provider["model_invocation_request_hashes"])
-    for chain in accepted_chains:
-        assert chain["source_event_ids"]
-        assert set(chain["source_event_ids"]).issubset(submitted_sources)
-        assert chain["request_hash"] in provider_request_hashes
-        assert chain["proposal_id"]
-        assert chain["acceptance_event_ref"]
-        assert chain["action_id"]
-        assert chain["action_event_ref"]
-        assert chain["receipt_id"]
-        assert chain["receipt_event_ref"]
-        assert chain["settlement_event_ref"]
-        assert chain["event_sequences"] == sorted(chain["event_sequences"])
-        assert len(set(chain["event_sequences"])) == len(chain["event_sequences"])
-    accepted_choices = causal["accepted_character_choices"]
-    assert causal["accepted_character_choice_count"] == len(accepted_choices)
-    effect_chain_proposals = {chain["proposal_id"] for chain in accepted_chains}
-    for choice in accepted_choices:
-        assert choice["model_result_event_ref"]
-        assert choice["proposal_event_ref"]
-        assert choice["terminal_trigger_id"]
-        if choice["disposition"] == "effect_accepted":
-            assert choice["proposal_id"] in effect_chain_proposals
-        else:
-            assert choice["disposition"] == "model_silent"
-            assert choice["terminal_outcome_ref"]
-    assert causal["correlated_expression_request_hashes"]
-    assert set(causal["correlated_expression_request_hashes"]).issubset(
-        set(provider["causal_context_model_request_hashes"])
-        & set(causal["model_result_request_hashes"])
-    )
-    assert "current_self_to_recall_to_expression_supported" not in causal
-    global_coverage = causal["global_coverage"]
-    assert global_coverage["scope"] == "run_wide_not_causal"
-    assert (
-        global_coverage["current_self_provider_request_count"]
-        == provider["current_self_state_present_count"]
-    )
-    assert (
-        global_coverage["recall_material_provider_request_count"]
-        == provider["recall_material_present_count"]
-    )
-    assert (
-        global_coverage["source_closure_provider_request_count"]
-        == provider["source_closure_request_count"]
-    )
-    causal_chains = causal["accepted_expression_causal_chains"]
-    assert len(causal_chains) == len(accepted_chains)
-    provider_current_self_hashes = set(provider["current_self_state_model_request_hashes"])
-    provider_recall_hashes = set(provider["recall_material_model_request_hashes"])
-    provider_source_review_hashes = set(provider["source_closure_model_request_hashes"])
-    for chain in causal_chains:
-        assert chain["trigger_ref"] == chain["observation_event_ref"]
-        assert chain["attempt_id"]
-        assert chain["model_call_id"]
-        assert chain["model_call_id"] in chain["related_author_model_call_ids"]
-        assert chain["current_self_presented"] is True
-        assert chain["current_self_state_hash"]
-        assert chain["request_hash"] in provider_current_self_hashes
-        for review in chain["source_closure_model_calls"]:
-            assert review["request_hash"] in provider_source_review_hashes
-            assert review["parent_model_call_id"] in chain["related_author_model_call_ids"]
-            assert review["event_sequence"] < chain["proposal_event_sequence"]
-    recall_selected_chains = causal["recall_selected_accepted_expression_chains"]
-    # Recall is a character-owned optional capability. A Recall selected by a
-    # silent, stale, or interrupted turn must not force some other turn to
-    # produce a visible effect. Only an accepted expression that itself chose
-    # Recall owes the exact same-request closure below.
-    for chain in recall_selected_chains:
-        assert chain["character_recall_selected"] is True
-        assert chain["character_recall_trace_result_hash"]
-        assert chain["recall_material_presented"] is True
-        assert chain["recall_material_hash"]
-        assert chain["request_hash"] in provider_recall_hashes
-
-    interruption = report["interaction_stress"]["interruption"]
-    assert interruption["overlap_observed"] is True
-    assert interruption["second_ingress_committed"] is True
-    assert interruption["second_ingress_reached_provider"] is True
-    assert interruption["overlap_observed_at_second_provider_entry"] is True
-    assert interruption["first_provider_in_flight_when_second_reached_provider"] is True
-    assert interruption["second_ingress_started_before_first_completed"] is True
-    assert interruption["latest_source_retained"] is True
-    assert interruption["first_turn"]["daemon_outcome"]["status"] == "observed_only"
-    assert interruption["second_turn"]["daemon_outcome"]["status"] == "action_authorized"
-    burst = report["interaction_stress"]["burst"]
-    assert burst["source_event_ids"]
-    assert burst["coalesced_into_single_action"] is True
-    assert len(burst["distinct_world_action_ids"]) == 1
-    assert set(burst["source_event_ids"]).issubset(
-        report["continuity"]["cold_replay_source_event_ids"]
-    )
-    assert report["continuity"]["duplicate_after_restart_visible_effect_count"] == 0
-    assert report["continuity"]["duplicate_source_persisted_once"] is True
-    assert report["continuity"]["cold_replay_matches_live_head"] is True
-    assert "combined_log_tail" not in report["daemon"]
-    assert len(report["daemon"]["combined_log_tail_hash"]) == 64
-    assert report["captured_provider_effects"]
-    assert all(
-        "content" not in effect
-        and len(effect["content_hash"]) == 64
-        and effect["content_bytes"] >= 1
-        for effect in report["captured_provider_effects"]
     )

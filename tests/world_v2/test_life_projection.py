@@ -13,11 +13,16 @@ from legacy_migration_support import read_head_state_json, strip_v16_state_field
 
 from companion_daemon.world_v2.batch_invariants import appraisal_trigger_identity
 from companion_daemon.world_v2.appraisal_events import appraisal_mutation_hash
+from companion_daemon.world_v2.character_interior import CharacterInterior
+from companion_daemon.world_v2.character_interior.structured_role import (
+    StructuredCharacterRoleFaculty,
+)
 from companion_daemon.world_v2.deliberation import ModelRoute
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.errors import IdempotencyConflict
 from companion_daemon.world_v2.errors import LedgerIntegrityError
 from companion_daemon.world_v2.expression_plan_acceptance import ExpressionPlanBudgetPolicy
+from companion_daemon.world_v2.expression_draft import TEXT_ONLY_EXPRESSION_CAPABILITIES
 from companion_daemon.world_v2.ledger import LedgerPort, WorldLedger
 from companion_daemon.world_v2.ledger_context_resolver import (
     ContextRelevanceScope,
@@ -27,9 +32,7 @@ from companion_daemon.world_v2.life_events import outcome_mutation_hash
 from companion_daemon.world_v2.proactive_action import (
     ProactiveActionRuntime,
     ProactiveDeliberationTurn,
-    ProactiveDraftAdapter,
 )
-from companion_daemon.world_v2.production_proposal_grammar import compose_production_deliberation
 from companion_daemon.world_v2.proposal_envelope import validate_proposal_envelope
 from companion_daemon.world_v2.experience_events import (
     ExperienceCommittedPayload,
@@ -74,6 +77,10 @@ from companion_daemon.world_v2.social_initiative import (
     SocialInitiativePolicy,
 )
 from companion_daemon.world_v2.typed_proposals import AmbiguousTypedProposalAuthority
+from test_proactive_action_production import (
+    _ProactiveInteriorProjection,
+    _ProactiveInteriorWireModel,
+)
 
 
 WORLD_ID = "world-v2-life-test"
@@ -209,6 +216,7 @@ def seed_through_proposal(
     ledger: LedgerPort,
     *,
     event_visibility: str = "private",
+    participant_refs: tuple[str, ...] = ("npc:lin",),
 ) -> str:
     advance_life_clock(ledger)
     commit(
@@ -294,7 +302,7 @@ def seed_through_proposal(
             opens_at=NOW + timedelta(minutes=1),
             closes_at=NOW + timedelta(minutes=30),
         ),
-        participant_refs=("npc:lin",),
+        participant_refs=participant_refs,
         location_ref="room:kitchen",
         owner_actor_ref="actor:companion",
         privacy_class=event_visibility,
@@ -327,7 +335,7 @@ def seed_through_proposal(
         occurrence_id="occurrence-tea",
         entity_revision=1,
         trigger_ref="trigger:tea-time",
-        participant_refs=("npc:lin",),
+        participant_refs=participant_refs,
         location_ref="room:kitchen",
         time_window=DueWindow(
             opens_at=NOW + timedelta(minutes=1),
@@ -448,7 +456,10 @@ def seed_through_proposal(
             )
         ],
     )
-    commit(ledger, [experience_proposal_event()])
+    commit(
+        ledger,
+        [experience_proposal_event(participant_refs=participant_refs)],
+    )
     assert ledger.project().semantic_hash == semantic_hash_before_proposal
     return semantic_hash_before_proposal
 
@@ -530,7 +541,9 @@ def test_acceptance_fails_closed_when_legacy_and_registered_stores_claim_one_id(
         )
 
 
-def settlement_batch() -> list[WorldEvent]:
+def settlement_batch(
+    *, participant_refs: tuple[str, ...] = ("npc:lin",)
+) -> list[WorldEvent]:
     settled_at = NOW + timedelta(minutes=5)
     settled_evidence = evidence("operator:tea-good", "operator_observation", "past_experience")
     accepted_change_hash = outcome_mutation_hash(
@@ -586,7 +599,7 @@ def settlement_batch() -> list[WorldEvent]:
         summary_payload_hash="d" * 64,
         occurred_from=NOW + timedelta(minutes=2),
         occurred_to=settled_at,
-        participant_refs=("npc:lin",),
+        participant_refs=participant_refs,
         source_bindings=(source_binding,),
         privacy_class="private",
     )
@@ -671,8 +684,12 @@ def settlement_batch() -> list[WorldEvent]:
     ]
 
 
-def experience_proposal_event() -> WorldEvent:
-    payload = ExperienceCommittedPayload.model_validate_json(settlement_batch()[3].payload_json)
+def experience_proposal_event(
+    *, participant_refs: tuple[str, ...] = ("npc:lin",)
+) -> WorldEvent:
+    payload = ExperienceCommittedPayload.model_validate_json(
+        settlement_batch(participant_refs=participant_refs)[3].payload_json
+    )
     proposal = ExperienceProposalProjection(
         proposal_id=payload.proposal_id,
         proposal_encoding="typed-authority-v1",
@@ -733,8 +750,8 @@ async def test_settled_world_occurrence_reaches_model_owned_proactive_action() -
             del temperature
             self.calls += 1
             self.proactive_opportunity = json.loads(messages[-1]["content"])[
-                "proactive_opportunity"
-            ]
+                "capability_manifest"
+            ]["payload"]["source_opportunity"]
             return json.dumps(
                 {
                     "timing_choice": "now",
@@ -750,8 +767,15 @@ async def test_settled_world_occurrence_reaches_model_owned_proactive_action() -
 
     issuer = AcceptedLedgerBatchIssuer()
     ledger = WorldLedger.in_memory(world_id=WORLD_ID, accepted_batch_issuer=issuer)
-    seed_through_proposal(ledger, event_visibility="shareable")
-    commit(ledger, settlement_batch())
+    seed_through_proposal(
+        ledger,
+        event_visibility="shareable",
+        participant_refs=("actor:companion", "npc:lin"),
+    )
+    commit(
+        ledger,
+        settlement_batch(participant_refs=("actor:companion", "npc:lin")),
+    )
     account = BudgetAccount(
         account_id="account:proactive:life-test",
         category="proactive",
@@ -769,7 +793,13 @@ async def test_settled_world_occurrence_reaches_model_owned_proactive_action() -
         ],
     )
     model = DraftModel()
-    adapter = ProactiveDraftAdapter(model=model, target="user:primary")
+    interior = CharacterInterior(
+        projection=_ProactiveInteriorProjection(),
+        role=StructuredCharacterRoleFaculty(
+            model=_ProactiveInteriorWireModel(model),
+            model_id=model.model,
+        ),
+    )
     turn = ProactiveDeliberationTurn(
         ledger=ledger,
         capsule_compiler=context_capsule_compiler_from_ledger(
@@ -779,12 +809,10 @@ async def test_settled_world_occurrence_reaches_model_owned_proactive_action() -
                 related_subject_refs=("user:primary",),
             ),
         ),
-        deliberation=compose_production_deliberation(
-            lane_id="proactive",
-            router=Router(),
-            main_model=adapter,
-            quick_recovery=adapter,
-        ),
+        character_interior=interior,
+        router=Router(),
+        target="user:primary",
+        expression_capabilities=TEXT_ONLY_EXPRESSION_CAPABILITIES,
         companion_actor_ref="actor:companion",
     )
     runtime = ProactiveActionRuntime(
@@ -802,6 +830,7 @@ async def test_settled_world_occurrence_reaches_model_owned_proactive_action() -
         owner_id="worker:proactive:life-test",
         social_initiative=SocialInitiativeCompiler(
             ledger=ledger,
+            actor_ref="actor:companion",
             policy=SocialInitiativePolicy(),
         ),
     )
@@ -895,6 +924,7 @@ async def test_settled_world_occurrence_reaches_model_owned_proactive_action() -
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("event_visibility", ["personal", "private", "withhold"])
+@pytest.mark.asyncio
 async def test_non_shareable_settled_occurrence_never_reaches_proactive_model(
     event_visibility: str,
 ) -> None:
@@ -921,7 +951,13 @@ async def test_non_shareable_settled_occurrence_never_reaches_proactive_model(
     settlement_events = settlement_batch()
     commit(ledger, [settlement_events[0], settlement_events[1], settlement_events[4]])
     model = NeverCalledModel()
-    adapter = ProactiveDraftAdapter(model=model, target="user:primary")
+    interior = CharacterInterior(
+        projection=_ProactiveInteriorProjection(),
+        role=StructuredCharacterRoleFaculty(
+            model=_ProactiveInteriorWireModel(model),
+            model_id=model.model,
+        ),
+    )
     runtime = ProactiveActionRuntime(
         ledger=ledger,
         turn=ProactiveDeliberationTurn(
@@ -933,12 +969,10 @@ async def test_non_shareable_settled_occurrence_never_reaches_proactive_model(
                     related_subject_refs=("user:primary",),
                 ),
             ),
-            deliberation=compose_production_deliberation(
-                lane_id="proactive",
-                router=Router(),
-                main_model=adapter,
-                quick_recovery=adapter,
-            ),
+            character_interior=interior,
+            router=Router(),
+            target="user:primary",
+            expression_capabilities=TEXT_ONLY_EXPRESSION_CAPABILITIES,
             companion_actor_ref="actor:companion",
         ),
         batch_issuer=issuer,

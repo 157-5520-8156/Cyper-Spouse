@@ -9,6 +9,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
+from .proposal_audit_schemas import ModelResultRecordedPayload
 from .schema_core import FrozenModel
 
 
@@ -35,6 +36,7 @@ class MediaSelectionAttemptRecordedPayload(FrozenModel):
         default=None, pattern=r"^sha256:[0-9a-f]{64}$"
     )
     failure_code: str | None = Field(default=None, min_length=1, max_length=256)
+    character_interior_model_result: ModelResultRecordedPayload | None = None
 
     @model_validator(mode="after")
     def canonical_candidates(self) -> "MediaSelectionAttemptRecordedPayload":

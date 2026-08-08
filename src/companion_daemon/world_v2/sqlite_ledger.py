@@ -62,12 +62,14 @@ from .reducers import (
     PREVIOUS_REDUCER_BUNDLE_VERSION,
     REDUCER_BUNDLE_VERSION,
     V48_REDUCER_BUNDLE_VERSION,
+    V50_REDUCER_BUNDLE_VERSION,
     ReducerState,
     RevisionClass,
     _expression_beat_semantic_dump,
     _expression_plan_manifest_semantic_dump,
     _expression_plan_semantic_dump,
     event_definition,
+    fold_retired_character_author_state,
     make_projection,
     reduce_event,
     require_reducer_bundle,
@@ -1653,6 +1655,21 @@ class SQLiteWorldLedger:
         explicitly.  Every other shape falls back to ``make_projection``.
         """
 
+        # Reducer .52 retirement is a projection-only cutover: immutable
+        # events and the just-reduced raw state remain untouched.  The
+        # incremental projection copier cannot observe fields changed only by
+        # that deterministic fold, so use the canonical constructor whenever
+        # the fold is material for this head.
+        if fold_retired_character_author_state(state) != state:
+            self._semantic_full_count += 1
+            return make_projection(
+                world_id=self._world_id,
+                world_revision=world_revision,
+                deliberation_revision=deliberation_revision,
+                ledger_sequence=ledger_sequence,
+                state=state,
+            )
+
         if changed_fields is not None:
             semantic_hash_value = self._incremental_semantic_hash(
                 head=head,
@@ -1679,11 +1696,23 @@ class SQLiteWorldLedger:
                 and base is not None
                 and self._head_projection_cache_row_identity == expected_identity
             ):
+                # The .52 retirement fold is projection-only: it never mutates
+                # the raw head state, so ``fold(state) == state`` (checked
+                # above) proves the incremental path is safe for the semantic
+                # payload.  But the *previous* head projection may still carry
+                # fold-derived bookkeeping (e.g. ``completed_trigger_ids``
+                # filled while an earlier commit's fold was material, then
+                # exempted by a later claim).  ``model_copy`` would retain
+                # that stale value, diverging from a cold replay.  Re-derive
+                # the fold-sensitive projection fields from the folded state
+                # so the incremental head always equals ``make_projection``.
+                folded = fold_retired_character_author_state(state)
                 update: dict[str, object] = {
-                    name: getattr(state, name)
+                    name: getattr(folded, name)
                     for name in changed_fields
                     if name in LedgerProjection.model_fields
                 }
+                update["completed_trigger_ids"] = folded.completed_trigger_ids
                 update["world_revision"] = world_revision
                 update["deliberation_revision"] = deliberation_revision
                 update["ledger_sequence"] = ledger_sequence
@@ -3006,6 +3035,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.46",
                 "world-v2-reducers.47",
                 V48_REDUCER_BUNDLE_VERSION,
+                V50_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -3029,6 +3059,7 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.46",
                     "world-v2-reducers.47",
                     V48_REDUCER_BUNDLE_VERSION,
+                    V50_REDUCER_BUNDLE_VERSION,
                     PREVIOUS_REDUCER_BUNDLE_VERSION,
                 }:
                     canonical_legacy_state = json.dumps(
@@ -3357,6 +3388,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.46",
                 "world-v2-reducers.47",
                 V48_REDUCER_BUNDLE_VERSION,
+                V50_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
             }:
                 state = ReducerState.model_validate_json(
@@ -5590,6 +5622,7 @@ class SQLiteWorldLedger:
             continuation_refs=(
                 (str(event.payload()["appraisal_trigger_ref"]),)
                 if event.event_type == "WorldOccurrenceSettled"
+                and event.payload().get("appraisal_trigger_ref") is not None
                 else ()
             ),
         )

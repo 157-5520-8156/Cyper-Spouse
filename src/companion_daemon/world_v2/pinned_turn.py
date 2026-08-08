@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import timedelta
 import hashlib
 import json
 import logging
@@ -19,21 +18,9 @@ from typing import Literal
 
 from companion_daemon.llm import model_request_emission_scope
 
-from .advisory_compiler import (
-    AdvisoryCompilation,
-    AdvisoryCompileRequest,
-    AdvisoryCompiler,
-    ResolverProof as AdvisoryResolverProof,
-    SnapshotMaterial,
-    SourceAuthorityBinding,
-    canonical_snapshot_hash,
-    canonical_trigger_hash,
-    source_authority_bindings_hash,
-)
 from .affect_target_bounds import lower_bounds_from_projection
 from .context_capsule import (
     ContextCapsuleCompiler,
-    InnerAdvisoryCandidate,
     InnerAdvisoryProjection,
 )
 from .context_resolver import query_from_projection
@@ -49,10 +36,7 @@ from .deliberation import (
 )
 from .expression_cadence import CadenceDraw
 from .expression_episode_lifecycle import expression_episode_trigger_id
-from .interactive_turn_budget import (
-    FIRST_PROVIDER_ENTRY_RESERVE_SECONDS,
-    InteractiveTurnBudget,
-)
+from .interactive_turn_budget import InteractiveTurnBudget
 from .errors import ConcurrencyConflict
 from .ledger import LedgerPort
 from .model_facing_context import mechanism_consumption_summary
@@ -111,11 +95,9 @@ class PinnedTurnCompiler:
         capsule_compiler: ContextCapsuleCompiler,
         deliberation: Deliberation,
         companion_actor_ref: str,
-        advisory_compiler: AdvisoryCompiler | None = None,
         relationship_evaluation: bool = False,
         latency_recorder: ProductionLatencyRecorder | None = None,
         pending_expectation_advisory: bool = False,
-        aspiration_advisory: bool = False,
         change_phase_advisory: bool = False,
         npc_relationship_advisory: bool = False,
         shared_private_invitation_advisory: bool = False,
@@ -129,16 +111,17 @@ class PinnedTurnCompiler:
         self._deliberation = deliberation
         self._recorder = ProposalAuditRecorder(ledger=ledger)
         self._companion_actor_ref = companion_actor_ref
-        self._advisories = advisory_compiler
         self._relationship_evaluation = relationship_evaluation
         self._latency = latency_recorder
-        # Only the interaction-appraisal lane opts in: when she was waiting
-        # for a response she invited earlier, the appraisal model should know
-        # what she hoped this message would be.
+        # The unified inbound author opts in: when she was waiting for a
+        # response she invited earlier, the same character turn should know
+        # what she hoped this new message would be.  It remains advisory and
+        # cannot prescribe an appraisal or reply.
         self._pending_expectation_advisory = pending_expectation_advisory
-        # The expression lanes opt in: her active aspirations (ledger-backed
-        # low-stakes wishes) may surface naturally in what she says.
-        self._aspiration_advisory = aspiration_advisory
+        # Active aspirations are ledger-backed subjective state.  Every
+        # canonical turn sees the same source-bound view; callers cannot hide
+        # that faculty behind a composition switch.
+
         # Change Phase (CONTEXT.md): a projection-level reading of whether
         # she is departing from or returning toward baseline.  Advisory only.
         self._change_phase_advisory = change_phase_advisory
@@ -372,7 +355,6 @@ class PinnedTurnCompiler:
         observation: Observation,
         observation_event: WorldEvent,
         cursor: ProjectionCursor,
-        skip_advisories: bool = False,
         turn_budget: InteractiveTurnBudget | None = None,
         recorded_cadence_draws: tuple[CadenceDraw, ...] = (),
         expression_attempt_id: str | None = None,
@@ -517,23 +499,12 @@ class PinnedTurnCompiler:
                 observation_event,
                 source_world_revision=stored[1].world_revision,
             )
-            advisory_already_incorporated = (
-                skip_advisories
-                or self._deliberation.main_has_precomputed_advisory(
-                    trigger_ref=observation_event.event_id,
-                    observation_ref=observation.observation_id,
-                    event_payload_hash=trigger_message.event_payload_hash,
-                )
-            )
-            capsule_operation = self._compile_capsule_with_advisories(
+            capsule_operation = self._compile_capsule_with_source_context(
                 query=query,
                 projection=projection,
-                observation=observation,
                 observation_event=observation_event,
                 latency_trace=latency_trace,
-                turn_budget=turn_budget,
-                skip_advisories=advisory_already_incorporated,
-                expectation_advisories=(
+                source_context_advisories=(
                     *self._expectation_advisories(
                         projection,
                         observation_event=observation_event,
@@ -686,6 +657,28 @@ class PinnedTurnCompiler:
                 )
             await self._raise_if_stale(cursor, exc)
             raise
+        except ValueError:
+            # The completed provider audit failed strict revalidation
+            # (typically metering drift under heavy retry/correction). The
+            # model call already spent; record a content-free technical
+            # result so the turn ends through the durable lifecycle instead
+            # of killing the whole turn with no audit at all.
+            _LOG.warning(
+                "pinned turn audit strict revalidation failed trace=%s attempt=%s",
+                observation.trace_id,
+                attempt_id,
+                exc_info=True,
+            )
+            return await self._record_pre_provider_failure(
+                context=context,
+                cursor=cursor,
+                attempt_id=attempt_id,
+                observation=observation,
+                observation_event=observation_event,
+                observation_world_revision=stored[1].world_revision,
+                expression_attempt_id=expression_attempt_id,
+                failure_code="main_exception",
+            )
 
     async def _record_content_free_result_at_current_head(
         self,
@@ -1269,14 +1262,12 @@ class PinnedTurnCompiler:
     def _aspiration_advisories(
         self, projection: LedgerProjection
     ) -> tuple[InnerAdvisoryProjection, ...]:
-        """Derive the deterministic active-wish advisory, if opted in.
+        """Derive the deterministic active-wish advisory.
 
         Best-effort context like the expectation advisory: a defect here must
         never make an ordinary turn fail, it only omits the wish texture.
         """
 
-        if not self._aspiration_advisory:
-            return ()
         try:
             return active_aspiration_advisories(projection)
         except (TypeError, ValueError):
@@ -1307,7 +1298,10 @@ class PinnedTurnCompiler:
         if not self._npc_relationship_advisory:
             return ()
         try:
-            return npc_relationship_advisories(projection)
+            return npc_relationship_advisories(
+                projection,
+                protagonist_actor_ref=self._companion_actor_ref,
+            )
         except (TypeError, ValueError):
             return ()
 
@@ -1332,259 +1326,26 @@ class PinnedTurnCompiler:
             self._capsules.compile_for_deliberation_with_advisories, query, extra
         )
 
-    async def _compile_capsule_with_advisories(
+    async def _compile_capsule_with_source_context(
         self,
         *,
         query,
         projection: LedgerProjection,
-        observation: Observation,
         observation_event: WorldEvent,
         latency_trace: TurnLatencyTrace | None = None,
-        turn_budget: InteractiveTurnBudget | None = None,
-        skip_advisories: bool = False,
-        expectation_advisories: tuple[InnerAdvisoryProjection, ...] = (),
+        source_context_advisories: tuple[InnerAdvisoryProjection, ...] = (),
     ):
-        advisory_timeout = (
-            None
-            if turn_budget is None
-            else max(
-                0.0,
-                turn_budget.first_provider_entry_remaining()
-                - FIRST_PROVIDER_ENTRY_RESERVE_SECONDS,
-            )
-        )
-        if (
-            self._advisories is None
-            or skip_advisories
-            or advisory_timeout == 0
-        ):
-            if latency_trace is None:
-                return await self._compile_capsule_with_extra(query, expectation_advisories)
-            async with latency_trace.measure("context"):
-                return await self._compile_capsule_with_extra(query, expectation_advisories)
-        try:
-            request = self._advisory_request(
-                query=query,
-                observation=observation,
-                observation_event=observation_event,
-                projection=projection,
-            )
-        except (TypeError, ValueError):
-            # Advisory input is deliberately best-effort.  A bounded-input
-            # failure cannot make a normal user turn fail.
-            if latency_trace is None:
-                return await self._compile_capsule_with_extra(query, expectation_advisories)
-            async with latency_trace.measure("context"):
-                return await self._compile_capsule_with_extra(query, expectation_advisories)
-        # Classifiers are a latency-bounded optional side path.  The Context
-        # compiler and AdvisoryCompiler consume the same pinned cursor but do
-        # not depend on each other's output, so run them concurrently.
-        advisory_provider_call_id = "model-call:advisory:" + _digest(
-            {
-                "trigger_ref": request.trigger_ref,
-                "snapshot_hash": request.snapshot_hash,
-                "world_revision": request.world_revision,
-            }
-        )
-        context_provider_call_id = "model-call:context-provider:" + _digest(
-            {
-                "trigger_ref": request.trigger_ref,
-                "snapshot_hash": request.snapshot_hash,
-                "world_revision": request.world_revision,
-            }
-        )
-
-        async def prepare():
-            if latency_trace is None:
-                return await asyncio.to_thread(
-                    self._capsules.prepare_for_deliberation,
-                    query,
-                    relationship_evaluation=self._relationship_evaluation,
-                )
-            async with latency_trace.measure("context"):
-                with model_request_emission_scope(
-                    provider_call_id=context_provider_call_id,
-                    entry_marker=latency_trace.mark_auxiliary_provider_entry,
-                    completion_marker=latency_trace.mark_auxiliary_provider_completion,
-                ):
-                    return await asyncio.to_thread(
-                        self._capsules.prepare_for_deliberation,
-                        query,
-                        relationship_evaluation=self._relationship_evaluation,
-                    )
-
-        async def classify():
-            operation = self._advisories.compile(
-                self._advisories.issue_authenticated_request(request),
-                timeout_seconds=advisory_timeout,
-            )
-            if latency_trace is None:
-                return await operation
-            async with latency_trace.measure("advisor"):
-                with model_request_emission_scope(
-                    provider_call_id=advisory_provider_call_id,
-                    entry_marker=latency_trace.mark_auxiliary_provider_entry,
-                    completion_marker=latency_trace.mark_auxiliary_provider_completion,
-                ):
-                    return await operation
-
-        base_task = asyncio.create_task(prepare())
-        advisory_task = asyncio.create_task(classify())
-        try:
-            prepared, compilation = await asyncio.gather(base_task, advisory_task)
-        except (TypeError, ValueError, TimeoutError):
-            prepared = await base_task
-            if latency_trace is None:
-                return await self._finalize_prepared_with_extra(
-                    prepared, expectation_advisories, query=query
-                )
-            async with latency_trace.measure("context"):
-                return await self._finalize_prepared_with_extra(
-                    prepared, expectation_advisories, query=query
-                )
-        inner = (*self._inner_advisories(compilation), *expectation_advisories)
-        if not inner:
-            if latency_trace is None:
-                return self._capsules.finalize_prepared(prepared)
-            async with latency_trace.measure("context"):
-                return self._capsules.finalize_prepared(prepared)
-        try:
-            operation = asyncio.to_thread(
-                self._capsules.compile_prepared_with_advisories, prepared, inner
-            )
-            if latency_trace is None:
-                return await operation
-            async with latency_trace.measure("context"):
-                return await operation
-        except (TypeError, ValueError) as exc:
-            # The re-binding pass is defense in depth.  If it rejects a bad
-            # advisory (rather than a stale cursor), retain the already frozen
-            # authoritative capsule and let the main model continue.
-            await self._raise_if_stale(query.cursor, exc)
-            return self._capsules.finalize_prepared(prepared)
-
-    async def _finalize_prepared_with_extra(
-        self, prepared, extra: tuple[InnerAdvisoryProjection, ...], *, query
-    ):
-        if not extra:
-            return self._capsules.finalize_prepared(prepared)
-        try:
-            return await asyncio.to_thread(
-                self._capsules.compile_prepared_with_advisories, prepared, extra
-            )
-        except (TypeError, ValueError) as exc:
-            # Same defense-in-depth stance as the classifier merge below: a
-            # rejected advisory keeps the frozen authoritative capsule.
-            await self._raise_if_stale(query.cursor, exc)
-            return self._capsules.finalize_prepared(prepared)
-
-    @staticmethod
-    def _advisory_request(
-        *,
-        query,
-        projection: LedgerProjection,
-        observation: Observation,
-        observation_event: WorldEvent,
-    ) -> AdvisoryCompileRequest:
-        """Build the classifier input from only the current cursor's authority."""
-
-        logical_time = query.logical_time or observation.logical_time
-        trigger = {
-            "kind": observation.observation_kind,
-            "observation_id": observation.observation_id,
-            "actor": observation.actor,
-            "channel": observation.channel,
-            "payload_ref": observation.payload_ref,
-            "payload_hash": observation.payload_hash,
-            "text": observation.text,
-            "reply_context": observation.reply_context,
-            "attachment_refs": observation.attachment_refs,
-        }
-        source_authorities = (
-            SourceAuthorityBinding(
-                ref=observation_event.event_id,
-                world_revision=query.world_revision,
-                hash_kind="payload",
-                authority_hash=observation_event.payload_hash,
-                content_hash=canonical_trigger_hash(trigger),
-            ),
-        )
-        snapshot_values = PinnedTurnCompiler._advisory_snapshot(projection)
-        snapshot = SnapshotMaterial(
-            world_revision=query.world_revision,
-            values=snapshot_values,
-            canonical_hash=canonical_snapshot_hash(snapshot_values),
-        )
-        return AdvisoryCompileRequest(
-            world_id=query.world_id,
-            snapshot_id=f"advisory-input:{query.snapshot_id}",
-            snapshot_hash=snapshot.canonical_hash,
-            world_revision=query.world_revision,
-            logical_time=logical_time,
-            trigger_ref=observation_event.event_id,
-            expires_at=logical_time + timedelta(seconds=45),
-            source_authorities=source_authorities,
-            resolver_proof=AdvisoryResolverProof(
-                snapshot_id=f"advisory-input:{query.snapshot_id}",
-                snapshot_hash=snapshot.canonical_hash,
-                world_revision=query.world_revision,
-                completeness="full",
-                policy_version="pinned-turn-advisory-input.1",
-                source_bindings_hash=source_authority_bindings_hash(source_authorities),
-                authentication_tag="0" * 64,
-            ),
-            trigger=trigger,
-            recent_context=PinnedTurnCompiler._recent_context(observation),
-            snapshot=snapshot,
-        )
-
-    @staticmethod
-    def _advisory_snapshot(projection: LedgerProjection) -> dict[str, object]:
-        """Small deterministic read model for advisory classifiers only.
-
-        It deliberately exposes no ledger or mutation port.  ContextCapsule
-        remains the richer authority-backed model input; this compact view lets
-        advice run in parallel rather than adding another serial model wait.
-        """
-
-        def values(items, *, limit: int, active=None):
-            selected = [item for item in items if active is None or active(item)]
-            selected.sort(key=lambda item: str(getattr(item, "entity_revision", 0)))
-            return tuple(item.model_dump(mode="json") for item in selected[-limit:])
-
-        return {
-            "cursor": {
-                "world_revision": projection.world_revision,
-                "deliberation_revision": projection.deliberation_revision,
-                "ledger_sequence": projection.ledger_sequence,
-            },
-            "logical_time": projection.logical_time.isoformat()
-            if projection.logical_time is not None
-            else None,
-            "character_core": (
-                projection.character_core.model_dump(mode="json")
-                if projection.character_core is not None
-                else None
-            ),
-            "active_affect_episodes": values(
-                projection.affect_episodes, limit=8, active=lambda item: item.status == "active"
-            ),
-            "relationship_states": values(projection.relationship_states, limit=8),
-            "open_threads": values(
-                projection.threads, limit=8, active=lambda item: item.values.status == "open"
-            ),
-            "recent_message_observations": values(projection.message_observations, limit=8),
-        }
-
-    @staticmethod
-    def _recent_context(observation: Observation) -> tuple[dict[str, object], ...]:
-        reply_context = observation.reply_context
-        if not isinstance(reply_context, dict):
-            return ()
-        recent = reply_context.get("recent_messages")
-        if isinstance(recent, list) and all(isinstance(item, dict) for item in recent):
-            return tuple(recent)
-        return (reply_context,)
+        # These are source-bound projection views (for example an already
+        # accepted aspiration or an unexpired response expectation), not a
+        # second semantic interpretation of the current Observation.  The
+        # canonical CharacterInterior author alone forms current Appraisal,
+        # Affect, relationship stance and private self in its inner turn.
+        del projection, observation_event
+        operation = self._compile_capsule_with_extra(query, source_context_advisories)
+        if latency_trace is None:
+            return await operation
+        async with latency_trace.measure("context"):
+            return await operation
 
     @staticmethod
     def _reply_target(observation: Observation) -> str:
@@ -1659,35 +1420,6 @@ class PinnedTurnCompiler:
         if "file" in tokens:
             return "file"
         return "unknown"
-
-    @staticmethod
-    def _inner_advisories(compilation: AdvisoryCompilation) -> tuple[InnerAdvisoryProjection, ...]:
-        """Reduce classifier distributions to model-readable, non-authoritative hints."""
-
-        return tuple(
-            InnerAdvisoryProjection(
-                advisory_id=item.advisory_id,
-                kind=item.field_id,
-                source_refs=item.source_refs,
-                candidate_refs=tuple(
-                    f"{item.advisory_id}:candidate:{index}"
-                    for index, _ in enumerate(item.candidates, start=1)
-                ),
-                candidates=tuple(
-                    InnerAdvisoryCandidate(
-                        candidate_ref=f"{item.advisory_id}:candidate:{index}",
-                        value=candidate.value,
-                        weight_bp=candidate.weight,
-                        confidence_bp=candidate.confidence,
-                    )
-                    for index, candidate in enumerate(item.candidates, start=1)
-                ),
-                confidence_bp=max(candidate.confidence for candidate in item.candidates),
-                expiry=item.expires_at,
-                producer_version=f"{item.producer}:{item.catalog_version}",
-            )
-            for item in compilation.advisories
-        )
 
     async def _record(
         self, result, context: ProposalAuditContext

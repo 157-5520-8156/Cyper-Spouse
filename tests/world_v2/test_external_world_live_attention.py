@@ -21,9 +21,9 @@ from companion_daemon.world_v2.external_world_perception import (
     LiveCharacterAttentionSelection,
     PerceptionChannelProof,
     RecordedSignalSourceAdapter,
-    SourceBoundAttentionContextItem,
     SourcePolicyRevision,
     SourceProfile,
+    SourceBoundAttentionContextItem,
     SQLiteWorldPerceptionHub,
 )
 from companion_daemon.world_v2.external_world_perception.live_acceptance import (
@@ -126,15 +126,14 @@ class _LedgerContextPort:
             actor_ref=actor_ref,
             pinned_world_cursor=cursor,
             world_logical_time=observed_at,
-            current_self_state=(
+            situation=(
                 SourceBoundAttentionContextItem(
-                    context_ref="context:self:current",
-                    context_kind="current_self_state",
-                    text="刚从外面回来，正在休息。",
+                    context_ref="event:activity:current",
+                    context_kind="current_situation",
+                    text='{"activity":"current"}',
                     source_refs=("event:activity:current",),
                 ),
             ),
-            situation=(),
             relevant_context=(),
             available_channels=(
                 PerceptionChannelProof(
@@ -207,7 +206,7 @@ class _LiveModel:
                             if self.empty_notes_first and len(self.requests) == 1
                             else "目前来源范围已经写在证据窗里。"
                         ),
-                        attended_context_refs=("context:self:current",),
+                        attended_context_refs=("event:activity:current",),
                         privacy_class="public",
                     ),
                 )

@@ -98,14 +98,15 @@ class AffectProposalCompilation(FrozenModel):
 
 
 class AffectProposalCompiler:
-    """Deep compiler for immediate open-or-merge Affect candidates.
+    """Deep compiler for role-authored Affect lifecycle candidates.
 
     ``record`` has one small interface: it resolves the generic proposal from
     the ledger itself, validates all authority at the exact cursor, and either
     records one typed candidate or returns its durable no-change audit.  It
-    deterministically translates a merge-eligible ``open`` hint into an
-    ``update`` of the exact active source-cluster/dimension episode. Explicit
-    model-authored update/resolve/supersede transitions remain unsupported.
+    deterministically translates a merge-eligible ``open`` choice into an
+    ``update`` of the exact active source-cluster/dimension episode.  Explicit
+    ``update``, ``resolve`` and ``supersede`` remain the role's semantic choice;
+    this compiler only verifies exact heads, evidence, bounds and event shape.
     """
 
     def __init__(self, *, ledger: LedgerPort) -> None:
@@ -135,8 +136,6 @@ class AffectProposalCompiler:
         if len(changes) != 1:
             raise AffectProposalCompilerError("affect_change_count_invalid")
         change = changes[0]
-        if change.transition != "open":
-            raise AffectProposalCompilerError("transition_not_implemented")
         projection = self._ledger.project_at(cursor)
         typed = self._compile_transition(authority=authority, change=change, projection=projection)
         source_event = self._event(authority.audit.event_ref)
@@ -207,8 +206,6 @@ class AffectProposalCompiler:
         if len(changes) != 1:
             raise AffectProposalCompilerError("affect_change_count_invalid")
         change = changes[0]
-        if change.transition != "open":
-            raise AffectProposalCompilerError("transition_not_implemented")
         raw = change.payload.value()
         appraisal_refs = raw.get("appraisal_change_refs")
         appraisal_change_ids = {
@@ -330,7 +327,10 @@ class AffectProposalCompiler:
                 identity_world_revision=projection.world_revision,
             )
         except AffectProposalCompilerError as exc:
-            if exc.code != "affect_proposal_compiler.merge_target_ambiguous":
+            if exc.code not in {
+                "affect_proposal_compiler.merge_target_ambiguous",
+                "affect_proposal_compiler.target_revision_stale",
+            }:
                 raise
             return AffectProposalCompilation(
                 status="no_change",
@@ -456,8 +456,11 @@ class AffectProposalCompiler:
     ) -> AffectProposalProjection:
         source = authority.audit
         raw = change.payload.value()
+        transition = change.transition
+        if transition not in {"open", "update", "resolve", "supersede"}:
+            raise AffectProposalCompilerError("transition_unsupported")
         appraisals = self._appraisals(
-            projection=projection, change_refs=raw["appraisal_change_refs"]
+            projection=projection, change_refs=raw.get("appraisal_change_refs")
         )
         cluster = appraisals[0].source_cluster_ref
         if any(item.source_cluster_ref != cluster for item in appraisals):
@@ -478,6 +481,42 @@ class AffectProposalCompiler:
             for appraisal in appraisals
             for hypothesis in appraisal.hypotheses
         )
+        if transition != "open":
+            episode = self._target_episode(
+                projection=projection,
+                change=change,
+                raw=raw,
+            )
+            if transition == "resolve":
+                return self._compile_resolve(
+                    authority=authority,
+                    change=change,
+                    projection=projection,
+                    episode=episode,
+                    evidence=evidence,
+                    meanings=meanings,
+                    identity_world_revision=identity_world_revision,
+                )
+            if transition == "update":
+                return self._compile_explicit_update(
+                    authority=authority,
+                    change=change,
+                    projection=projection,
+                    episode=episode,
+                    evidence=evidence,
+                    meanings=meanings,
+                    identity_world_revision=identity_world_revision,
+                )
+            return self._compile_supersede(
+                authority=authority,
+                change=change,
+                projection=projection,
+                episode=episode,
+                evidence=evidence,
+                meanings=meanings,
+                cluster=cluster,
+                identity_world_revision=identity_world_revision,
+            )
         components, component_semantics = self._components(
             raw=raw,
             cluster=cluster,
@@ -568,6 +607,390 @@ class AffectProposalCompiler:
                 change_id=change.change_id,
                 change_payload_hash=change.payload.payload_hash,
             ),
+        )
+
+    @staticmethod
+    def _target_episode(*, projection, change, raw) -> AffectEpisodeProjection:
+        episode_id = raw.get("episode_id")
+        if episode_id != change.target_id:
+            raise AffectProposalCompilerError("target_episode_mismatch")
+        expected_revision = change.expected_entity_revision
+        if not isinstance(expected_revision, int) or expected_revision < 1:
+            raise AffectProposalCompilerError("target_revision_missing")
+        matches = tuple(
+            item for item in projection.affect_episodes if item.episode_id == episode_id
+        )
+        if len(matches) != 1:
+            raise AffectProposalCompilerError("target_episode_unavailable")
+        episode = matches[0]
+        if episode.status != "active":
+            raise AffectProposalCompilerError("target_episode_not_active")
+        if episode.entity_revision != expected_revision:
+            raise AffectProposalCompilerError("target_revision_stale")
+        return episode
+
+    @staticmethod
+    def _append_meanings(existing, additions):
+        values = list(existing)
+        for item in additions:
+            if item not in values:
+                values.append(item)
+        return tuple(values)
+
+    def _compile_explicit_update(
+        self,
+        *,
+        authority,
+        change,
+        projection,
+        episode,
+        evidence,
+        meanings,
+        identity_world_revision,
+    ) -> AffectProposalProjection:
+        """Compile the role's exact component revisions without a merge timeout."""
+
+        at = projection.logical_time
+        if at is None:
+            raise AffectProposalCompilerError("logical_time_missing")
+        raw = change.payload.value()
+        if raw.get("decay_config") is not None or raw.get("residue_config") is not None:
+            raise AffectProposalCompilerError("update_selector_not_allowed")
+        if raw.get("resolution_summary") is not None or raw.get("component_deltas") is not None:
+            raise AffectProposalCompilerError("update_payload_invalid")
+        targets = raw.get("component_targets")
+        if not isinstance(targets, list) or not targets:
+            raise AffectProposalCompilerError("component_targets_invalid")
+        current_by_id = {item.component_id: item for item in episode.components}
+        selected: dict[str, tuple[object, int]] = {}
+        baseline_by_dimension = {
+            item.dimension: item.baseline_bp for item in projection.affect_baselines
+        }
+        for target in targets:
+            if not isinstance(target, dict):
+                raise AffectProposalCompilerError("component_targets_invalid")
+            component_id = target.get("component_id")
+            dimension = target.get("dimension")
+            intensity = target.get("target_intensity_bp")
+            component = current_by_id.get(component_id)
+            if (
+                component is None
+                or component_id in selected
+                or dimension != component.dimension
+                or isinstance(intensity, bool)
+                or not isinstance(intensity, int)
+                or not 1 <= intensity <= 10_000
+            ):
+                raise AffectProposalCompilerError("component_target_invalid")
+            minimum = max(
+                component.decay_profile.floor_bp,
+                component.residue_bp,
+                baseline_by_dimension.get(component.dimension, 0),
+            )
+            if intensity < minimum:
+                raise AffectProposalCompilerError("component_target_below_lower_bound")
+            selected[str(component_id)] = (component, intensity)
+        updates: list[AffectComponentUpdate] = []
+        for component in episode.components:
+            before = self._materialized_intensity(
+                component=component,
+                at=at,
+                baselines=projection.affect_baselines,
+            )
+            selected_target = selected.get(component.component_id)
+            if selected_target is None:
+                updates.append(
+                    AffectComponentUpdate(
+                        component_id=component.component_id,
+                        operation="materialize",
+                        before_intensity_bp=before,
+                        proposed_delta_bp=0,
+                        accepted_delta_bp=0,
+                        after_intensity_bp=before,
+                        appraisal_refs=(),
+                        updated_component=component.model_copy(
+                            update={"intensity_bp": before, "last_updated_at": at}
+                        ),
+                    )
+                )
+                continue
+            after = selected_target[1]
+            delta = after - before
+            updates.append(
+                AffectComponentUpdate(
+                    component_id=component.component_id,
+                    operation="reinterpret",
+                    before_intensity_bp=before,
+                    proposed_delta_bp=delta,
+                    accepted_delta_bp=delta,
+                    after_intensity_bp=after,
+                    appraisal_refs=meanings,
+                    updated_component=component.model_copy(
+                        update={
+                            "appraisal_refs": self._append_meanings(
+                                component.appraisal_refs, meanings
+                            ),
+                            "intensity_bp": after,
+                            "decay_anchor_intensity_bp": after,
+                            "decay_anchor_at": at,
+                            "last_stimulus_at": at,
+                            "last_updated_at": at,
+                        }
+                    ),
+                )
+            )
+        return self._compiled_update_projection(
+            authority=authority,
+            change=change,
+            projection=projection,
+            episode=episode,
+            evidence=evidence,
+            meanings=meanings,
+            updates=tuple(updates),
+            identity_world_revision=identity_world_revision,
+        )
+
+    def _compiled_update_projection(
+        self,
+        *,
+        authority,
+        change,
+        projection,
+        episode,
+        evidence,
+        meanings,
+        updates,
+        identity_world_revision,
+    ) -> AffectProposalProjection:
+        at = projection.logical_time
+        if at is None:
+            raise AffectProposalCompilerError("logical_time_missing")
+        source = authority.audit
+        identity = self._typed_identity(
+            source_event_ref=source.event_ref,
+            change_id=change.change_id,
+            identity_world_revision=identity_world_revision,
+        )
+        typed_proposal_id = f"proposal:affect-compiled:{identity}"
+        typed_change_id = f"change:affect-compiled:{identity}"
+        transition_id = f"transition:affect-compiled:{identity}"
+        mutation: dict[str, object] = {
+            "change_id": typed_change_id,
+            "transition_id": transition_id,
+            "expected_entity_revision": episode.entity_revision,
+            "evidence_refs": [item.model_dump(mode="json") for item in evidence],
+            "appraisal_refs": [item.model_dump(mode="json") for item in meanings],
+            "policy_refs": list(_POLICY_REFS),
+            "acceptance_id": f"acceptance:affect-compiled:{identity}",
+            "proposal_id": typed_proposal_id,
+            "evaluated_world_revision": projection.world_revision,
+            "accepted_change_hash": "0" * 64,
+            "episode_id": episode.episode_id,
+            "updated_at": to_jsonable_python(at),
+            "component_updates": [item.model_dump(mode="json") for item in updates],
+        }
+        mutation["accepted_change_hash"] = affect_mutation_hash(mutation)
+        return AffectProposalProjection(
+            proposal_id=typed_proposal_id,
+            transition_kind="update",
+            change_id=typed_change_id,
+            transition_id=transition_id,
+            evaluated_world_revision=projection.world_revision,
+            expected_entity_revision=episode.entity_revision,
+            proposed_change_hash=str(mutation["accepted_change_hash"]),
+            evidence_refs=evidence,
+            appraisal_refs=meanings,
+            policy_refs=_POLICY_REFS,
+            proposed_mutation=AffectProposedMutation(
+                event_type="AffectEpisodeUpdated",
+                payload_json=_canonical(mutation),
+            ),
+            authority_contract_ref=_CONTRACT,
+            source_audit=self._source_binding(authority=authority, change=change),
+        )
+
+    def _compile_resolve(
+        self,
+        *,
+        authority,
+        change,
+        projection,
+        episode,
+        evidence,
+        meanings,
+        identity_world_revision,
+    ) -> AffectProposalProjection:
+        at = projection.logical_time
+        if at is None:
+            raise AffectProposalCompilerError("logical_time_missing")
+        raw = change.payload.value()
+        reason = raw.get("resolution_summary")
+        if (
+            not isinstance(reason, str)
+            or not reason.strip()
+            or raw.get("component_targets") is not None
+            or raw.get("component_deltas") is not None
+            or raw.get("decay_config") is not None
+            or raw.get("residue_config") is not None
+        ):
+            raise AffectProposalCompilerError("resolve_payload_invalid")
+        source = authority.audit
+        identity = self._typed_identity(
+            source_event_ref=source.event_ref,
+            change_id=change.change_id,
+            identity_world_revision=identity_world_revision,
+        )
+        typed_proposal_id = f"proposal:affect-compiled:{identity}"
+        typed_change_id = f"change:affect-compiled:{identity}"
+        transition_id = f"transition:affect-compiled:{identity}"
+        mutation: dict[str, object] = {
+            "change_id": typed_change_id,
+            "transition_id": transition_id,
+            "expected_entity_revision": episode.entity_revision,
+            "evidence_refs": [item.model_dump(mode="json") for item in evidence],
+            "appraisal_refs": [item.model_dump(mode="json") for item in meanings],
+            "policy_refs": list(_POLICY_REFS),
+            "acceptance_id": f"acceptance:affect-compiled:{identity}",
+            "proposal_id": typed_proposal_id,
+            "evaluated_world_revision": projection.world_revision,
+            "accepted_change_hash": "0" * 64,
+            "episode_id": episode.episode_id,
+            "resolved_at": to_jsonable_python(at),
+            "resolution_refs": [item.model_dump(mode="json") for item in evidence],
+            # The historical event field is named reason_code, but its value is
+            # deliberately the role's bounded free text, never a local enum.
+            "reason_code": reason.strip(),
+        }
+        mutation["accepted_change_hash"] = affect_mutation_hash(mutation)
+        return AffectProposalProjection(
+            proposal_id=typed_proposal_id,
+            transition_kind="resolve",
+            change_id=typed_change_id,
+            transition_id=transition_id,
+            evaluated_world_revision=projection.world_revision,
+            expected_entity_revision=episode.entity_revision,
+            proposed_change_hash=str(mutation["accepted_change_hash"]),
+            evidence_refs=evidence,
+            appraisal_refs=meanings,
+            policy_refs=_POLICY_REFS,
+            proposed_mutation=AffectProposedMutation(
+                event_type="AffectEpisodeResolved",
+                payload_json=_canonical(mutation),
+            ),
+            authority_contract_ref=_CONTRACT,
+            source_audit=self._source_binding(authority=authority, change=change),
+        )
+
+    def _compile_supersede(
+        self,
+        *,
+        authority,
+        change,
+        projection,
+        episode,
+        evidence,
+        meanings,
+        cluster,
+        identity_world_revision,
+    ) -> AffectProposalProjection:
+        at = projection.logical_time
+        if at is None:
+            raise AffectProposalCompilerError("logical_time_missing")
+        raw = change.payload.value()
+        if raw.get("resolution_summary") is not None or raw.get("component_deltas") is not None:
+            raise AffectProposalCompilerError("supersede_payload_invalid")
+        targets = raw.get("component_targets")
+        if not isinstance(targets, list) or any(
+            not isinstance(item, dict) or item.get("component_id") is not None
+            for item in targets
+        ):
+            raise AffectProposalCompilerError("supersede_component_targets_invalid")
+        components, _component_semantics = self._components(
+            raw=raw,
+            cluster=cluster,
+            meanings=meanings,
+            at=at,
+            baselines=projection.affect_baselines,
+            proposal_id=authority.audit.proposal_id,
+            change_id=change.change_id,
+        )
+        source = authority.audit
+        identity = self._typed_identity(
+            source_event_ref=source.event_ref,
+            change_id=change.change_id,
+            identity_world_revision=identity_world_revision,
+        )
+        typed_proposal_id = f"proposal:affect-compiled:{identity}"
+        typed_change_id = f"change:affect-compiled:{identity}"
+        transition_id = f"transition:affect-compiled:{identity}"
+        mutation_event_id = affect_mutation_event_id(
+            world_id=self._ledger.world_id,
+            proposal_id=typed_proposal_id,
+            transition_id=transition_id,
+            event_type="AffectEpisodeSuperseded",
+        )
+        successor = AffectEpisodeProjection(
+            episode_id=f"affect:compiled:{identity}",
+            entity_revision=1,
+            origin=AffectOrigin(
+                change_id=typed_change_id,
+                transition_id=transition_id,
+                policy_refs=_POLICY_REFS,
+                matrix_catalog_version=_MATRIX_VERSION,
+                accepted_event_ref=mutation_event_id,
+            ),
+            components=components,
+            evidence_refs=evidence,
+            opened_at=at,
+            updated_at=at,
+            status="active",
+            supersedes_episode_id=episode.episode_id,
+        )
+        mutation: dict[str, object] = {
+            "change_id": typed_change_id,
+            "transition_id": transition_id,
+            "expected_entity_revision": episode.entity_revision,
+            "evidence_refs": [item.model_dump(mode="json") for item in evidence],
+            "appraisal_refs": [item.model_dump(mode="json") for item in meanings],
+            "policy_refs": list(_POLICY_REFS),
+            "acceptance_id": f"acceptance:affect-compiled:{identity}",
+            "proposal_id": typed_proposal_id,
+            "evaluated_world_revision": projection.world_revision,
+            "accepted_change_hash": "0" * 64,
+            "episode_id": episode.episode_id,
+            "superseded_at": to_jsonable_python(at),
+            "successor": successor.model_dump(mode="json"),
+        }
+        mutation["accepted_change_hash"] = affect_mutation_hash(mutation)
+        return AffectProposalProjection(
+            proposal_id=typed_proposal_id,
+            transition_kind="supersede",
+            change_id=typed_change_id,
+            transition_id=transition_id,
+            evaluated_world_revision=projection.world_revision,
+            expected_entity_revision=episode.entity_revision,
+            proposed_change_hash=str(mutation["accepted_change_hash"]),
+            evidence_refs=evidence,
+            appraisal_refs=meanings,
+            policy_refs=_POLICY_REFS,
+            proposed_mutation=AffectProposedMutation(
+                event_type="AffectEpisodeSuperseded",
+                payload_json=_canonical(mutation),
+            ),
+            authority_contract_ref=_CONTRACT,
+            source_audit=self._source_binding(authority=authority, change=change),
+        )
+
+    @staticmethod
+    def _source_binding(*, authority, change) -> AffectProposalAuditBinding:
+        source = authority.audit
+        return AffectProposalAuditBinding(
+            proposal_event_ref=source.event_ref,
+            proposal_event_payload_hash=source.event_payload_hash,
+            model_result_ref=source.model_result_ref,
+            capsule_id=source.capsule_id,
+            change_id=change.change_id,
+            change_payload_hash=change.payload.payload_hash,
         )
 
     def _merge_target(self, *, projection, components):

@@ -26,7 +26,6 @@ from .schemas import (
     ReadOnlyToolAuthorizationBinding,
     ReadOnlyToolRequestProjection,
     ToolResultProjection,
-    TriggerProcess,
     WorldEvent,
 )
 from .read_only_tool_authorization import require_read_only_tool_authorization
@@ -220,11 +219,13 @@ def accepted_tool_result_events(
     request: ReadOnlyToolRequestProjection,
     accepted_event_ref: str,
 ) -> tuple[tuple[str, str, dict[str, object]], ...]:
-    """Derive the result projection and its deterministic next-turn trigger.
+    """Derive the accepted immutable result projection.
 
     The helper has no ledger access: settlement supplies the exact accepted
     receipt event and the reducer repeats all source bindings before projecting
-    either effect.
+    the effect.  The former independent ``external_result_deliberation`` author
+    is retired; CharacterInterior may consume the accepted result through its
+    ordinary sourced context instead of opening a worker-less side lane.
     """
 
     if result.status != "delivered" or result.result_ref is None or result.result_hash is None:
@@ -243,17 +244,8 @@ def accepted_tool_result_events(
         accepted_event_ref=accepted_event_ref,
         accepted_at=result.observed_at,
     )
-    trigger_id = external_result_trigger_id(world_id=world_id, result_id=tool_result.result_id)
-    trigger = TriggerProcess(
-        trigger_id=trigger_id,
-        trigger_ref=f"external-result:{tool_result.result_id}",
-        process_kind="external_result_deliberation",
-        source_evidence_ref=accepted_event_ref,
-        state="open",
-    )
     return (
         ("ToolResultAccepted", "tool-result", {"result": tool_result.model_dump(mode="json")}),
-        ("TriggerProcessOpened", "result-trigger", {"process": trigger.model_dump(mode="json")}),
     )
 
 

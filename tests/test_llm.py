@@ -345,6 +345,121 @@ def test_deepseek_json_payload_requests_one_object() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool_calls,error",
+    [
+        (
+            [
+                {
+                    "type": "function",
+                    "function": {"name": "wrong_contract", "arguments": "{}"},
+                }
+            ],
+            "unexpected tool identity",
+        ),
+        (
+            [
+                {
+                    "type": "function",
+                    "function": {"name": "combined_cognition", "arguments": "{}"},
+                },
+                {
+                    "type": "function",
+                    "function": {"name": "combined_cognition", "arguments": "{}"},
+                },
+            ],
+            "exactly one tool call",
+        ),
+    ],
+)
+async def test_forced_tool_completion_rejects_wrong_or_multiple_tool_calls(
+    tool_calls: list[dict[str, object]],
+    error: str,
+) -> None:
+    model = DeepSeekChatModel(
+        "key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={"choices": [{"message": {"tool_calls": tool_calls}}]},
+            )
+        ),
+    )
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "combined_cognition",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+    choice = {"type": "function", "function": {"name": "combined_cognition"}}
+
+    try:
+        with pytest.raises(ValueError, match=error):
+            await model.complete_json_with_usage(
+                [{"role": "user", "content": "choose"}],
+                tools=tools,
+                tool_choice=choice,
+            )
+    finally:
+        await model.aclose()
+
+
+@pytest.mark.asyncio
+async def test_forced_tool_stream_validates_identity_and_exposes_argument_deltas() -> None:
+    body = b"".join(
+        (
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"combined_cognition","arguments":"{\\"a\\":"}}]}}]}\n\n',
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}}]}\n\n',
+            b'data: {"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}\n\n',
+            b"data: [DONE]\n\n",
+        )
+    )
+    model = DeepSeekChatModel(
+        "key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=body,
+            )
+        ),
+    )
+    deltas: list[str] = []
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "combined_cognition",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+    choice = {"type": "function", "function": {"name": "combined_cognition"}}
+
+    try:
+        text, _usage = await model.complete_json_stream_with_usage(
+            [{"role": "user", "content": "choose"}],
+            on_text_delta=deltas.append,
+            tools=tools,
+            tool_choice=choice,
+        )
+    finally:
+        await model.aclose()
+
+    assert text == '{"a":1}'
+    assert deltas == ['{"a":', "1}"]
+
+
+@pytest.mark.asyncio
 async def test_request_emission_marker_runs_after_payload_build_at_transport_boundary() -> None:
     events: list[str] = []
 

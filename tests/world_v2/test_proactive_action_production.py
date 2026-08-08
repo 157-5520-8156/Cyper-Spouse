@@ -1,22 +1,28 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 import asyncio
-from hashlib import sha256
 import json
 import threading
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from types import SimpleNamespace
 
 import pytest
+from world_v2_application import (
+    build_sqlite_world_v2_test_application,
+    compose_fixture_character_interior,
+    compose_fixture_character_purpose,
+)
 
 import companion_daemon.world_v2.proactive_action as proactive_action_module
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
-from companion_daemon.world_v2.biographical_claim_authority import (
-    biographical_coordinate_authorities,
+from companion_daemon.world_v2.character_interior.inbound_wire import (
+    _ExpressionDraftWire,
 )
-from companion_daemon.world_v2.chat_model_deliberation_adapter import (
-    ChatModelDeliberationAdapter,
-    CompanionIdentityFrame,
+from companion_daemon.world_v2.character_interior import CharacterInterior
+from companion_daemon.world_v2.character_interior.contracts import FACET_NAMES
+from companion_daemon.world_v2.character_interior.structured_role import (
+    StructuredCharacterRoleFaculty,
 )
 from companion_daemon.world_v2.deliberation import (
     ModelInput,
@@ -24,12 +30,13 @@ from companion_daemon.world_v2.deliberation import (
     ModelRoute,
     ModelUsageProvenance,
     RouteRequest,
-    TriggerMessage,
-    ValidationTechnicalFailure,
 )
-from companion_daemon.world_v2.event_identity import domain_idempotency_key
-from companion_daemon.world_v2.expression_draft import TEXT_ONLY_EXPRESSION_CAPABILITIES
 from companion_daemon.world_v2.errors import ConcurrencyConflict
+from companion_daemon.world_v2.event_identity import domain_idempotency_key
+from companion_daemon.world_v2.expression_draft import (
+    PRODUCTION_TEXT_ONLY_EXPRESSION_CAPABILITIES,
+    TEXT_ONLY_EXPRESSION_CAPABILITIES,
+)
 from companion_daemon.world_v2.expression_plan_acceptance import ExpressionPlanBudgetPolicy
 from companion_daemon.world_v2.interactive_turn_budget import InteractiveTurnBudgetPolicy
 from companion_daemon.world_v2.ledger import WorldLedger
@@ -37,26 +44,21 @@ from companion_daemon.world_v2.ledger_context_resolver import (
     ContextRelevanceScope,
     context_capsule_compiler_from_ledger,
 )
+from companion_daemon.world_v2.platform_action_executor import PlatformDispatchReceipt
 from companion_daemon.world_v2.proactive_action import (
     ProactiveActionRuntime,
     ProactiveDeliberationTurn,
-    ProactiveDraftAdapter,
     ProactiveOpportunity,
     ProactiveTechnicalRetryState,
     next_proactive_retry_due,
     proactive_technical_retry_states,
 )
-from companion_daemon.world_v2.proposal_envelope import (
-    DecisionProposal,
-    ProposalEvidenceRef,
-    validate_proposal_envelope,
-)
-from companion_daemon.world_v2.production_proposal_grammar import compose_production_deliberation
 from companion_daemon.world_v2.production_turn_application import (
     WorldV2TurnApplicationConfig,
-    build_sqlite_world_v2_turn_application,
 )
-from companion_daemon.world_v2.platform_action_executor import PlatformDispatchReceipt
+from companion_daemon.world_v2.proposal_envelope import (
+    ProposalEvidenceRef,
+)
 from companion_daemon.world_v2.qq_c2c_transport import QQC2CPlatformTransport
 from companion_daemon.world_v2.recall_index import (
     FeatureHashRecallEmbedding,
@@ -66,11 +68,7 @@ from companion_daemon.world_v2.recall_index import (
     RecallEmbedding,
     RecallSourceBinding,
 )
-from companion_daemon.world_v2.recall_runtime import (
-    RecallCoordinator,
-    verify_trusted_recall_trace,
-)
-from companion_daemon.world_v2.social_initiative import SocialInitiativePolicy
+from companion_daemon.world_v2.recall_runtime import RecallCoordinator
 from companion_daemon.world_v2.runtime import WorldRuntime
 from companion_daemon.world_v2.schemas import (
     Action,
@@ -87,12 +85,19 @@ from companion_daemon.world_v2.schemas import (
     WorldEvent,
     thread_semantic_fingerprint,
 )
-from companion_daemon.world_v2.thread_events import ThreadChangedPayload, thread_mutation_hash
+from companion_daemon.world_v2.social_initiative import SocialInitiativePolicy
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
-
+from companion_daemon.world_v2.thread_events import ThreadChangedPayload, thread_mutation_hash
 
 NOW = datetime(2026, 7, 16, 8, 0, tzinfo=UTC)
 WORLD = "world:proactive-production"
+
+
+def _application_config(**kwargs):  # type: ignore[no-untyped-def]
+    return WorldV2TurnApplicationConfig(
+        character_memory_enabled=False,
+        **kwargs,
+    )
 
 
 def _proactive_model_request() -> ModelInput:
@@ -222,631 +227,30 @@ def _supporting_source_reviewer() -> _ProactiveReplySequence:
     return _ProactiveReplySequence([_source_closure_review()])
 
 
-@pytest.mark.asyncio
-async def test_proactive_role_receives_lived_context_without_audit_request_duplication() -> None:
-    model = _ProactiveReplySequence([_proactive_draft("刚看见个诗集名字，莫名有点喜欢。")])
-
-    output = await ProactiveDraftAdapter(
-        model=model,
-        target="user:primary",
-        source_closure_reviewer=_supporting_source_reviewer(),
-    ).propose(_proactive_model_request())
-
-    proposal = validate_proposal_envelope(output.raw_proposal)
-    assert isinstance(proposal, DecisionProposal)
-    assert proposal.proactive_opportunity_decision.disposition == "engage_now"
-
-    system = model.messages[0][0]["content"]
-    assert "not a message outline" in system
-    assert "Always return private_turn_state" not in system
-    assert "Always return" not in system
-    assert "world_claims is an array" in system
-    assert "independent post-authorship process" not in system
-
-    supplied = json.loads(model.messages[0][1]["content"])
-    assert set(supplied) == {
-        "current_self_state",
-        "expression_capabilities",
-        "failure_code",
-        "hard_boundaries",
-        "lived_context",
-        "proactive_opportunity",
-    }
-    assert (
-        supplied["lived_context"]["slices"]["recent_dialogue"]["items"][0]["value"]["text"]
-        == "深圳说实话不是很好玩哈哈哈哈"
-    )
-    assert supplied["current_self_state"]["contract"] == "current-self-state.1"
-    assert supplied["hard_boundaries"]["contract"] == "expression-hard-boundaries.8"
-    assert "request" not in supplied
-    assert "proactive_fact_authority" not in supplied
 
 
-@pytest.mark.asyncio
-async def test_proactive_role_declares_claims_in_same_successful_authorship_call() -> None:
-    source_ref = "event:life-content:experience:visible"
-    request = _proactive_model_request()
-    context = json.loads(request.model_content_json)
-    context["slices"]["recent_experiences"] = {
-        "availability": "available",
-        "items": [
-            {
-                "item_ref": "experience:visible",
-                "source_bindings": [{"ref": source_ref}],
-                "value": {"summary": "在旧书交换活动里翻到一本《小王子》。"},
-            }
-        ],
-    }
-    request = request.model_copy(
-        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
-    )
-    role = _ProactiveReplySequence(
-        [
-            _proactive_draft(
-                "刚翻到一本《小王子》，突然想跟你说句话。",
-                claims=[
-                        {
-                            "claim_text": "沈知栀在旧书交换活动里翻到一本《小王子》",
-                            "scope": "past_world",
-                            "source_refs": ["S1"],
-                        }
-                ],
-            )
-        ]
-    )
-    reviewer = _supporting_source_reviewer()
-
-    output = await ProactiveDraftAdapter(
-        model=role,
-        target="user:primary",
-        source_closure_reviewer=reviewer,
-        proactive_claim_binder_model=None,
-    ).propose(request)
-
-    proposal = validate_proposal_envelope(output.raw_proposal)
-    expression_change = proposal.proposed_changes[0].payload.value()
-    supplied = json.loads(role.messages[0][1]["content"])
-    assert role.calls == 1
-    assert reviewer.calls == 1
-    claim_refs = supplied["hard_boundaries"]["world_claim_source_refs"]["past_world"]
-    source_aliases = supplied["hard_boundaries"]["source_ref_aliases"]
-    assert any(source_aliases.get(ref, ref) == source_ref for ref in claim_refs)
-    assert expression_change["world_claims"] == [
-        {
-            "claim_text": "沈知栀在旧书交换活动里翻到一本《小王子》",
-            "scope": "past_world",
-            "source_refs": [source_ref],
-        }
-    ]
 
 
-@pytest.mark.asyncio
-async def test_proactive_claim_binding_is_post_authorship_and_uses_only_visible_lived_evidence() -> (
-    None
-):
-    visible_binding_ref = "event:life-content:experience:visible"
-    hidden_binding_ref = "event:life-content:experience:hidden"
-    request = _proactive_model_request()
-    context = json.loads(request.model_content_json)
-    context["slices"]["recent_experiences"] = {
-        "availability": "available",
-        "source_refs": [visible_binding_ref, hidden_binding_ref],
-        "items": [
-            {
-                "item_ref": "experience:visible",
-                "source_bindings": [{"ref": visible_binding_ref}],
-                "value": {"summary": "在旧书交换活动里翻到一本《小王子》。"},
-            },
-            *(
-                {
-                    "item_ref": f"experience:filler:{index}",
-                    "source_bindings": [{"ref": f"event:life-content:filler:{index}"}],
-                    "value": {"summary": f"较低排序的经历 {index}"},
-                }
-                for index in range(1, 3)
-            ),
-            {
-                "item_ref": "experience:hidden",
-                "source_bindings": [{"ref": hidden_binding_ref}],
-                "value": {"summary": "不应进入角色工作记忆的隐藏经历。"},
-            },
-        ],
-    }
-    request = request.model_copy(
-        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
-    )
-    role = _ProactiveReplySequence(
-        [_proactive_draft("刚翻到一本《小王子》，突然有点想跟你说句话。")]
-    )
-    binder = _ProactiveReplySequence(
-        [
-            {
-                "contract": "proactive-world-claim-binding.1",
-                "world_claims": [
-                    {
-                        "claim_text": "沈知栀在旧书交换活动里翻到一本《小王子》",
-                        "scope": "past_world",
-                        "source_refs": [visible_binding_ref],
-                    }
-                ],
-            }
-        ]
-    )
-    reviewer = _supporting_source_reviewer()
-
-    output = await ProactiveDraftAdapter(
-        model=role,
-        target="user:primary",
-        proactive_claim_binder_model=binder,
-        source_closure_reviewer=reviewer,
-    ).propose(request)
-
-    proposal = validate_proposal_envelope(output.raw_proposal)
-    assert proposal.action_intents
-    assert role.calls == 1
-    assert binder.calls == 1
-    binder_audit = next(
-        audit
-        for audit in output.provider_subcall_audits
-        if audit.purpose.startswith("proactive_claim_binding")
-    )
-    assert binder_audit.parent_model_call_id == output.winning_model_call_id
-    assert binder_audit.request_hash
-    assert binder_audit.response_hash
-    binder_packet = json.loads(binder.messages[0][1]["content"])
-    assert visible_binding_ref in json.dumps(binder_packet, ensure_ascii=False)
-    assert hidden_binding_ref not in json.dumps(binder_packet, ensure_ascii=False)
-    assert (
-        binder_packet["exact_selected_evidence"]["pinned_time"]["authority_transport_availability"]
-        == "semantic_only_no_world_claim_authority"
-    )
-    review_packet = json.loads(reviewer.messages[0][1]["content"])
-    assert visible_binding_ref in json.dumps(review_packet, ensure_ascii=False)
-    assert hidden_binding_ref not in json.dumps(review_packet, ensure_ascii=False)
-    expression_change = proposal.proposed_changes[0].payload.value()
-    assert expression_change["world_claims"] == [
-        {
-            "claim_text": "沈知栀在旧书交换活动里翻到一本《小王子》",
-            "scope": "past_world",
-            "source_refs": [visible_binding_ref],
-        }
-    ]
 
 
-@pytest.mark.asyncio
-async def test_proactive_claim_binding_retries_invalid_wire_once_without_reauthoring() -> None:
-    role = _ProactiveReplySequence([_proactive_draft("刚刚忽然有点想和你说句话。")])
-    binder = _ProactiveReplySequence(
-        [
-            {"not_the_contract": True},
-            {
-                "contract": "proactive-world-claim-binding.1",
-                "world_claims": [],
-            },
-        ]
-    )
-
-    output = await ProactiveDraftAdapter(
-        model=role,
-        target="user:primary",
-        proactive_claim_binder_model=binder,
-        source_closure_reviewer=_supporting_source_reviewer(),
-    ).propose(_proactive_model_request())
-
-    proposal = validate_proposal_envelope(output.raw_proposal)
-    assert proposal.action_intents
-    assert role.calls == 1
-    assert binder.calls == 2
-    correction = json.loads(binder.messages[1][-1]["content"])
-    assert correction["contract"] == "proactive-world-claim-binding-correction.1"
 
 
-@pytest.mark.asyncio
-async def test_proactive_claim_binding_fails_technically_after_one_invalid_retry() -> None:
-    role = _ProactiveReplySequence([_proactive_draft("刚刚忽然有点想和你说句话。")])
-    binder = _ProactiveReplySequence(["{}", "{}"])
-    reviewer = _supporting_source_reviewer()
-
-    with pytest.raises(
-        ValidationTechnicalFailure,
-        match="proactive_claim_binding_invalid",
-    ):
-        await ProactiveDraftAdapter(
-            model=role,
-            target="user:primary",
-            proactive_claim_binder_model=binder,
-            source_closure_reviewer=reviewer,
-        ).propose(_proactive_model_request())
-
-    assert role.calls == 1
-    assert binder.calls == 2
-    assert reviewer.calls == 0
 
 
-@pytest.mark.asyncio
-async def test_proactive_claim_binding_bogus_ref_is_technical_not_role_reselection() -> None:
-    role = _ProactiveReplySequence([_proactive_draft("刚刚忽然有点想和你说句话。")])
-    invalid_binding = {
-        "contract": "proactive-world-claim-binding.1",
-        "world_claims": [
-            {
-                "claim_text": "沈知栀刚刚去了火星",
-                "scope": "current_world",
-                "source_refs": ["event:not-visible:anywhere"],
-            }
-        ],
-    }
-    binder = _ProactiveReplySequence([invalid_binding, invalid_binding])
-    reviewer = _supporting_source_reviewer()
-
-    with pytest.raises(
-        ValidationTechnicalFailure,
-        match="proactive_claim_binding_invalid",
-    ):
-        await ProactiveDraftAdapter(
-            model=role,
-            target="user:primary",
-            proactive_claim_binder_model=binder,
-            source_closure_reviewer=reviewer,
-        ).propose(_proactive_model_request())
-
-    assert role.calls == 1
-    assert binder.calls == 2
-    assert reviewer.calls == 0
 
 
-@pytest.mark.asyncio
-async def test_claim_only_semantic_rejection_retries_binder_not_character() -> None:
-    source_ref = "event:life-content:experience:visible"
-    request = _proactive_model_request()
-    context = json.loads(request.model_content_json)
-    context["slices"]["recent_experiences"] = {
-        "availability": "available",
-        "items": [
-            {
-                "item_ref": "experience:visible",
-                "source_bindings": [{"ref": source_ref}],
-                "value": {"summary": "在旧书交换活动里翻到一本《小王子》。"},
-            }
-        ],
-    }
-    request = request.model_copy(
-        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
-    )
-    role = _ProactiveReplySequence([_proactive_draft("刚刚忽然有点想和你说句话。")])
-    binder = _ProactiveReplySequence(
-        [
-            {
-                "contract": "proactive-world-claim-binding.1",
-                "world_claims": [
-                    {
-                        "claim_text": "沈知栀刚去了火星",
-                        "scope": "past_world",
-                        "source_refs": [source_ref],
-                    }
-                ],
-            },
-            {
-                "contract": "proactive-world-claim-binding.1",
-                "world_claims": [],
-            },
-        ]
-    )
-    reviewer = _ProactiveReplySequence(
-        [
-            _source_closure_review(claim_indexes=(0,)),
-            _source_closure_review(),
-        ]
-    )
-
-    output = await ProactiveDraftAdapter(
-        model=role,
-        target="user:primary",
-        proactive_claim_binder_model=binder,
-        source_closure_reviewer=reviewer,
-    ).propose(request)
-
-    assert validate_proposal_envelope(output.raw_proposal).action_intents
-    assert role.calls == 1
-    assert binder.calls == 2
-    assert reviewer.calls == 2
-    correction_packet = json.loads(binder.messages[1][1]["content"])
-    assert correction_packet["previous_binding_failure"]
 
 
-@pytest.mark.asyncio
-async def test_persistent_binder_only_rejection_returns_boundary_to_character_once() -> None:
-    source_ref = "event:life-content:experience:visible"
-    request = _proactive_model_request()
-    context = json.loads(request.model_content_json)
-    context["slices"]["recent_experiences"] = {
-        "availability": "available",
-        "items": [
-            {
-                "item_ref": "experience:visible",
-                "source_bindings": [{"ref": source_ref}],
-                "value": {"summary": "在旧书交换活动里翻到一本《小王子》。"},
-            }
-        ],
-    }
-    request = request.model_copy(
-        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
-    )
-    role = _ProactiveReplySequence(
-        [
-            _proactive_draft("刚翻到一本《小王子》，突然想跟你说句话。"),
-            _proactive_draft("刚刚忽然有点想和你说句话。"),
-        ]
-    )
-    rejected_binding = {
-        "contract": "proactive-world-claim-binding.1",
-        "world_claims": [
-            {
-                "claim_text": "沈知栀刚去了火星",
-                "scope": "past_world",
-                "source_refs": [source_ref],
-            }
-        ],
-    }
-    binder = _ProactiveReplySequence(
-        [
-            rejected_binding,
-            rejected_binding,
-            {
-                "contract": "proactive-world-claim-binding.1",
-                "world_claims": [],
-            },
-        ]
-    )
-    reviewer = _ProactiveReplySequence(
-        [
-            _source_closure_review(claim_indexes=(0,)),
-            _source_closure_review(claim_indexes=(0,)),
-            _source_closure_review(),
-        ]
-    )
-
-    output = await ProactiveDraftAdapter(
-        model=role,
-        target="user:primary",
-        proactive_claim_binder_model=binder,
-        source_closure_reviewer=reviewer,
-    ).propose(request)
-
-    proposal = validate_proposal_envelope(output.raw_proposal)
-    assert proposal.action_intents
-    assert role.calls == 2
-    assert binder.calls == 3
-    assert reviewer.calls == 3
-    boundary = json.loads(role.messages[1][-1]["content"])
-    assert boundary["contract"] == "source-closure-reselection.2"
-    assert boundary["rejected_categories"] == {"ci": [0], "v": [], "p": []}
 
 
-@pytest.mark.asyncio
-async def test_undeclared_visible_fact_retries_binder_not_character() -> None:
-    source_ref = "event:life-content:experience:visible"
-    request = _proactive_model_request()
-    context = json.loads(request.model_content_json)
-    context["slices"]["recent_experiences"] = {
-        "availability": "available",
-        "items": [
-            {
-                "item_ref": "experience:visible",
-                "source_bindings": [{"ref": source_ref}],
-                "value": {"summary": "在旧书交换活动里翻到一本《小王子》。"},
-            }
-        ],
-    }
-    request = request.model_copy(
-        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
-    )
-    role = _ProactiveReplySequence([_proactive_draft("刚翻到一本《小王子》，突然想跟你说句话。")])
-    binder = _ProactiveReplySequence(
-        [
-            {
-                "contract": "proactive-world-claim-binding.1",
-                "world_claims": [],
-                "unbound_claim_locators": [],
-            },
-            {
-                "contract": "proactive-world-claim-binding.1",
-                "world_claims": [
-                    {
-                        "claim_text": "沈知栀在旧书交换活动里翻到一本《小王子》",
-                        "scope": "past_world",
-                        "source_refs": [source_ref],
-                    }
-                ],
-                "unbound_claim_locators": [],
-            },
-        ]
-    )
-    reviewer = _ProactiveReplySequence(
-        [
-            _source_closure_review(
-                visible_failures=("undeclared_external_assertion",),
-                visible_findings=(
-                    {
-                        "category": "undeclared_external_assertion",
-                        "visible_span": "刚翻到一本《小王子》",
-                        "claim_index": None,
-                        "source_relation": "unclosed",
-                        "source_refs": [],
-                    },
-                ),
-            ),
-            _source_closure_review(),
-        ]
-    )
-
-    output = await ProactiveDraftAdapter(
-        model=role,
-        target="user:primary",
-        proactive_claim_binder_model=binder,
-        source_closure_reviewer=reviewer,
-    ).propose(request)
-
-    assert validate_proposal_envelope(output.raw_proposal).action_intents
-    assert role.calls == 1
-    assert binder.calls == 2
-    assert reviewer.calls == 2
 
 
-@pytest.mark.asyncio
-async def test_cancelled_proactive_binder_preserves_provider_subcall_audit() -> None:
-    class _BlockingBinder:
-        model = "test-blocking-binder"
-
-        def __init__(self) -> None:
-            self.started = asyncio.Event()
-
-        async def complete(self, _messages, *, temperature=0.0):  # type: ignore[no-untyped-def]
-            del temperature
-            self.started.set()
-            await asyncio.Event().wait()
-            raise AssertionError("unreachable")
-
-    role = _ProactiveReplySequence([_proactive_draft("刚刚忽然有点想和你说句话。")])
-    binder = _BlockingBinder()
-    adapter = ProactiveDraftAdapter(
-        model=role,
-        target="user:primary",
-        proactive_claim_binder_model=binder,
-        source_closure_reviewer=_supporting_source_reviewer(),
-    )
-    task = asyncio.create_task(adapter.propose(_proactive_model_request()))
-    await binder.started.wait()
-    task.cancel()
-
-    with pytest.raises(asyncio.CancelledError) as captured:
-        await task
-
-    failure = captured.value.world_v2_validation_technical_failure
-    assert failure.failure_code == "source_review_timeout"
-    binder_audit = next(
-        audit
-        for audit in failure.provider_subcall_audits
-        if audit.purpose.startswith("proactive_claim_binding")
-    )
-    assert binder_audit.outcome == "timeout"
-    assert binder_audit.parent_model_call_id
-    assert binder_audit.request_hash
 
 
-@pytest.mark.asyncio
-async def test_unbound_claim_locator_offsets_are_derived_from_exact_visible_text() -> None:
-    unsupported = "我刚刚去了一个没有来源的地方。"
-    role = _ProactiveReplySequence([_proactive_draft(unsupported)])
-    binder = _ProactiveReplySequence(
-        [
-            {
-                "contract": "proactive-world-claim-binding.1",
-                "world_claims": [],
-                "unbound_claim_locators": [
-                    {
-                        "beat_index": 0,
-                        "text": unsupported,
-                    }
-                ],
-            },
-        ]
-    )
-    reviewer = _supporting_source_reviewer()
-
-    output = await ProactiveDraftAdapter(
-        model=role,
-        target="user:primary",
-        proactive_claim_binder_model=binder,
-        source_closure_reviewer=reviewer,
-    ).propose(_proactive_model_request())
-
-    assert validate_proposal_envelope(output.raw_proposal).action_intents
-    assert role.calls == 1
-    assert binder.calls == 1
 
 
-@pytest.mark.asyncio
-async def test_unbound_claim_locator_must_match_visible_expression_exactly() -> None:
-    role = _ProactiveReplySequence([_proactive_draft("刚刚忽然有点想和你说句话。")])
-    invalid = {
-        "contract": "proactive-world-claim-binding.1",
-        "world_claims": [],
-        "unbound_claim_locators": [
-            {
-                "beat_index": 0,
-                "char_start": 0,
-                "char_end": 2,
-                "text": "火星",
-            }
-        ],
-    }
-    binder = _ProactiveReplySequence([invalid, invalid])
-
-    with pytest.raises(
-        ValidationTechnicalFailure,
-        match="proactive_claim_binding_invalid",
-    ):
-        await ProactiveDraftAdapter(
-            model=role,
-            target="user:primary",
-            proactive_claim_binder_model=binder,
-            source_closure_reviewer=_supporting_source_reviewer(),
-        ).propose(_proactive_model_request())
-
-    assert role.calls == 1
-    assert binder.calls == 2
 
 
-@pytest.mark.asyncio
-async def test_malformed_role_reselection_is_not_misattributed_to_prior_reviewer() -> None:
-    text = "我刚刚去了一个没有来源的地方。"
-    role = _ProactiveReplySequence([_proactive_draft(text), "{}"])
-    binder = _ProactiveReplySequence(
-        [
-            {
-                "contract": "proactive-world-claim-binding.1",
-                "world_claims": [],
-                "unbound_claim_locators": [
-                    {
-                        "beat_index": 0,
-                        "char_start": 0,
-                        "char_end": len(text),
-                        "text": text,
-                    }
-                ],
-            }
-        ]
-    )
-    reviewer = _ProactiveReplySequence(
-        [
-            _source_closure_review(
-                visible_failures=("undeclared_external_assertion",),
-                visible_findings=(
-                    {
-                        "category": "undeclared_external_assertion",
-                        "visible_span": text,
-                        "claim_index": None,
-                        "source_relation": "unclosed",
-                        "source_refs": [],
-                    },
-                ),
-            )
-        ]
-    )
-
-    with pytest.raises(ValidationTechnicalFailure) as captured:
-        await ProactiveDraftAdapter(
-            model=role,
-            target="user:primary",
-            proactive_claim_binder_model=binder,
-            source_closure_reviewer=reviewer,
-        ).propose(_proactive_model_request())
-
-    assert captured.value.failure_code == "authored_expression_reselection_invalid"
-    assert role.calls == 2
-    assert binder.calls == 1
-    assert reviewer.calls == 1
 
 
 def _candidate_inventory(
@@ -1011,372 +415,22 @@ def _private_proactive_draft(
     return value
 
 
-@pytest.mark.asyncio
-async def test_proactive_expression_uses_shared_multi_beat_draft_and_plan_binding() -> None:
-    model = _ProactiveReplySequence(
-        [
-            {
-                "private_turn_state": {
-                    "contract": "private-turn-state.1",
-                    "inner_state_summary": "想到对方刚好在意的事，想自然地补两句。",
-                    "attended_source_refs": ["event:ambient:1"],
-                },
-                "timing_choice": "now",
-                "cadence": "conversational",
-                "beats": [
-                    {"modality": "text", "text": "刚刚突然想起你。"},
-                    {"modality": "text", "text": "这边的雨声有点像下午那会儿。"},
-                ],
-                "stance": "warm",
-                "brief_rationale": "此刻有自然的分享冲动。",
-                "impulse_summary": "雨声把注意力带回了这段关系。",
-                "confidence": 7000,
-                "world_claims": [],
-            }
-        ]
-    )
-    capabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES.model_copy(
-        update={"private_turn_state_mode": "required"}
-    )
-    output = await ProactiveDraftAdapter(
-        model=model,
-        target="user:primary",
-        expression_capabilities=capabilities,
-    ).propose(_proactive_model_request())
-
-    proposal = validate_proposal_envelope(output.raw_proposal)
-    assert isinstance(proposal, DecisionProposal)
-    assert len(proposal.action_intents) == 2
-    assert proposal.action_intents[1].dependencies == (proposal.action_intents[0].intent_id,)
-    payload = proposal.proposed_changes[0].payload.value()
-    binding = payload["proactive_source_plan_binding_v2"]
-    assert binding["beat_payload_hashes"] == [
-        action.payload_hash for action in proposal.action_intents
-    ]
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("recovery", (False, True))
-async def test_required_private_turn_state_is_independent_of_json_field_order(
-    recovery: bool,
-) -> None:
-    model = _ProactiveReplySequence(
-        [
-            {
-                "timing_choice": "now",
-                "cadence": "conversational",
-                "beats": [{"modality": "text", "text": "刚刚忽然想和你说句话。"}],
-                "stance": "warm",
-                "brief_rationale": "此刻想说。",
-                "impulse_summary": "一个当下的念头。",
-                "confidence": 7000,
-                "world_claims": [],
-                # Deliberately last on the provider wire. JSON object member
-                # order is transport serialization, not causal evidence.
-                "private_turn_state": {
-                    "contract": "private-turn-state.1",
-                    "inner_state_summary": "想到对方，想说句话。",
-                    "attended_source_refs": ["event:ambient:1"],
-                },
-            }
-        ]
-    )
-    capabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES.model_copy(
-        update={"private_turn_state_mode": "required"}
-    )
-    adapter = ProactiveDraftAdapter(
-        model=model,
-        target="user:primary",
-        expression_capabilities=capabilities,
-    )
-
-    output = (
-        await adapter.recover(_proactive_model_request(), "primary_timeout")
-        if recovery
-        else await adapter.propose(_proactive_model_request())
-    )
-
-    proposal = validate_proposal_envelope(output.raw_proposal)
-    assert model.calls == 1
-    assert proposal.private_turn_state is not None
-    assert proposal.private_turn_state.inner_state_summary == "想到对方，想说句话。"
 
 
-@pytest.mark.asyncio
-async def test_missing_required_proactive_private_turn_state_reselects_complete_draft() -> None:
-    model = _ProactiveReplySequence(
-        [
-            {
-                "timing_choice": "now",
-                "cadence": "conversational",
-                "beats": [{"modality": "text", "text": "这份草稿缺少私人状态。"}],
-                "stance": "invalid_without_private_state",
-                "brief_rationale": "Fixture.",
-                "impulse_summary": "一个当下的念头。",
-                "confidence": 7000,
-                "world_claims": [],
-            },
-            _private_proactive_draft(
-                "now",
-                attended_source_ref="event:ambient:1",
-            ),
-        ]
-    )
-    capabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES.model_copy(
-        update={"private_turn_state_mode": "required"}
-    )
-
-    output = await ProactiveDraftAdapter(
-        model=model,
-        target="user:primary",
-        expression_capabilities=capabilities,
-    ).propose(_proactive_model_request())
-
-    proposal = validate_proposal_envelope(output.raw_proposal)
-    assert model.calls == 2
-    assert "private_turn_state.missing" in model.messages[1][-1]["content"]
-    assert "这份草稿缺少私人状态" not in json.dumps(model.messages[1], ensure_ascii=False)
-    assert proposal.private_turn_state is not None
 
 
-@pytest.mark.asyncio
-async def test_malformed_proactive_expression_gets_one_exact_structural_reselection() -> None:
-    model = _ProactiveReplySequence(
-        [
-            {"timing_choice": "now"},
-            _proactive_draft("忽然想跟你说句话。"),
-        ]
-    )
-
-    output = await ProactiveDraftAdapter(
-        model=model,
-        target="user:primary",
-    ).propose(_proactive_model_request())
-
-    proposal = validate_proposal_envelope(output.raw_proposal)
-    assert proposal.timing_choice == "now"
-    assert model.calls == 2
-    repair = json.loads(model.messages[1][-1]["content"])
-    assert repair["contract"] == "proactive-expression-structure-reselection.1"
-    assert "Exact ExpressionDraft JSON field contract" in repair["wire_contract"]
-    assert "impulse_summary is required" in repair["wire_contract"]
-    assert "valid ExpressionDraft" in repair["validation_failure"]
-    assert "brief_rationale" in repair["validation_failure"]
-    assert "忽然想跟你说句话" not in json.dumps(model.messages[0], ensure_ascii=False)
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("wrapper", ["proactive_opportunity", "expression_draft"])
-async def test_proactive_parser_accepts_provider_mirrored_opportunity_wrapper(
-    wrapper: str,
-) -> None:
-    draft = _proactive_draft("刚刚忽然想和你说句话。")
-    model = _ProactiveReplySequence([{wrapper: draft}])
-
-    output = await ProactiveDraftAdapter(
-        model=model,
-        target="user:primary",
-    ).propose(_proactive_model_request())
-
-    proposal = validate_proposal_envelope(output.raw_proposal)
-    assert proposal.timing_choice == "now"
-    assert model.calls == 1
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("choice", "expected_action_kind"),
-    (("now", "proactive_message"), ("later", "followup"), ("silent", None)),
-)
-async def test_unpinned_proactive_private_state_is_reselected_before_source_review(
-    choice: str,
-    expected_action_kind: str | None,
-) -> None:
-    forged_ref = "memory:untrusted:not-in-pinned-context"
-    corrected_ref = "event:user:shenzhen"
-    model = _ProactiveReplySequence(
-        [
-            _private_proactive_draft(choice, attended_source_ref=forged_ref),
-            _private_proactive_draft(choice, attended_source_ref=corrected_ref),
-        ]
-    )
-    inventory = _ProactiveReplySequence(
-        [
-            {
-                "contract": "candidate-external-proposition-inventory.5",
-                "propositions": [],
-            }
-        ]
-        if choice != "silent"
-        else []
-    )
-    authority = _EmptyV5ProactiveCoverageAuthority()
-    capabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES.model_copy(
-        update={"private_turn_state_mode": "required"}
-    )
-
-    output = await ProactiveDraftAdapter(
-        model=model,
-        target="user:primary",
-        expression_capabilities=capabilities,
-        source_closure_reviewer=authority,
-        candidate_external_proposition_inventory_model=inventory,
-    ).propose(_proactive_model_request())
-    proposal = validate_proposal_envelope(output.raw_proposal)
-
-    assert isinstance(proposal, DecisionProposal)
-    assert model.calls == 2
-    assert inventory.calls == (0 if choice == "silent" else 1)
-    assert authority.calls == (0 if choice == "silent" else 1)
-    assert proposal.private_turn_state is not None
-    assert proposal.private_turn_state.attended_source_refs == (corrected_ref,)
-    assert proposal.proactive_grounding_outcome == "corrected"
-    if expected_action_kind is None:
-        assert proposal.action_intents == ()
-    else:
-        assert tuple(intent.kind for intent in proposal.action_intents) == (expected_action_kind,)
-    correction_messages = model.messages[1]
-    rendered_correction = json.dumps(correction_messages, ensure_ascii=False)
-    assert forged_ref not in rendered_correction
-    assert "private_turn_state.unpinned_source" in rendered_correction
-    assert "private_turn_state.attended_source_refs" in rendered_correction
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("choice", ("now", "later", "silent"))
-async def test_second_unpinned_proactive_private_state_fails_closed_without_source_review(
-    choice: str,
-) -> None:
-    model = _ProactiveReplySequence(
-        [
-            _private_proactive_draft(
-                choice,
-                attended_source_ref="memory:untrusted:first",
-            ),
-            _private_proactive_draft(
-                choice,
-                attended_source_ref="memory:untrusted:second",
-            ),
-        ]
-    )
-    inventory = _ProactiveReplySequence([])
-    capabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES.model_copy(
-        update={"private_turn_state_mode": "required"}
-    )
-
-    with pytest.raises(ValidationTechnicalFailure) as failure:
-        await ProactiveDraftAdapter(
-            model=model,
-            target="user:primary",
-            expression_capabilities=capabilities,
-            candidate_external_proposition_inventory_model=inventory,
-        ).propose(_proactive_model_request())
-
-    assert failure.value.failure_code == "authored_expression_reselection_invalid"
-    assert model.calls == 2
-    assert inventory.calls == 0
 
 
-@pytest.mark.asyncio
-async def test_grounding_rejected_proactive_proposal_retains_valid_private_state_audit() -> None:
-    unsupported_claim = {
-        "claim_text": "对方之前说去成都看熊猫",
-        "scope": "counterpart_history",
-        "source_refs": ["event:user:chengdu:not-in-context"],
-    }
-    corrected_summary = "仍然想起对方，但没有可引用的那段经历。"
-    model = _ProactiveReplySequence(
-        [
-            _private_proactive_draft(
-                "now",
-                attended_source_ref="event:ambient:1",
-                claims=[unsupported_claim],
-            ),
-            _private_proactive_draft(
-                "now",
-                attended_source_ref="event:ambient:1",
-                inner_state_summary=corrected_summary,
-                claims=[unsupported_claim],
-            ),
-        ]
-    )
-    capabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES.model_copy(
-        update={"private_turn_state_mode": "required"}
-    )
-
-    output = await ProactiveDraftAdapter(
-        model=model,
-        target="user:primary",
-        expression_capabilities=capabilities,
-    ).propose(_proactive_model_request())
-    proposal = validate_proposal_envelope(output.raw_proposal)
-
-    assert isinstance(proposal, DecisionProposal)
-    assert proposal.proactive_grounding_outcome == "rejected"
-    assert proposal.private_turn_state is not None
-    assert proposal.private_turn_state.inner_state_summary == corrected_summary
-    assert proposal.proposed_changes == ()
-    assert proposal.action_intents == ()
 
 
-@pytest.mark.asyncio
-async def test_proactive_private_state_changes_audit_not_effect_identity() -> None:
-    capabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES.model_copy(
-        update={"private_turn_state_mode": "required"}
-    )
-    request = _proactive_model_request()
-    context = json.loads(request.model_content_json)
-    attention_refs = ("attention:context-only:first", "attention:context-only:second")
-    context["slices"]["recent_dialogue"]["items"][0]["attention_source_refs"] = list(attention_refs)
-    request = request.model_copy(
-        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
-    )
-    first_output = await ProactiveDraftAdapter(
-        model=_ProactiveReplySequence(
-            [
-                _private_proactive_draft(
-                    "now",
-                    attended_source_ref=attention_refs[0],
-                    inner_state_summary="想起这段关系，愿意现在开口。",
-                )
-            ]
-        ),
-        target="user:primary",
-        expression_capabilities=capabilities,
-    ).propose(request)
-    second_output = await ProactiveDraftAdapter(
-        model=_ProactiveReplySequence(
-            [
-                _private_proactive_draft(
-                    "now",
-                    attended_source_ref=attention_refs[1],
-                    inner_state_summary="注意到旧对话，仍然愿意现在开口。",
-                )
-            ]
-        ),
-        target="user:primary",
-        expression_capabilities=capabilities,
-    ).propose(request)
-    first = validate_proposal_envelope(first_output.raw_proposal)
-    second = validate_proposal_envelope(second_output.raw_proposal)
-
-    assert isinstance(first, DecisionProposal)
-    assert isinstance(second, DecisionProposal)
-    assert first.private_turn_state != second.private_turn_state
-    assert first.proposal_hash != second.proposal_hash
-    assert first.proposal_id == second.proposal_id
-    assert first.effect_hash == second.effect_hash
-    assert first.proposed_changes == second.proposed_changes
-    assert first.action_intents == second.action_intents
-    effect_material = json.dumps(
-        {
-            "changes": [item.model_dump(mode="json") for item in first.proposed_changes],
-            "actions": [item.model_dump(mode="json") for item in first.action_intents],
-        },
-        ensure_ascii=False,
-    )
-    assert "private_turn_state" not in effect_material
-    assert all(source_ref not in effect_material for source_ref in attention_refs)
 
 
 @pytest.mark.asyncio
@@ -1442,627 +496,32 @@ def _proactive_biography_request() -> ModelInput:
     )
 
 
-@pytest.mark.asyncio
-async def test_proactive_biography_parent_cannot_authorize_an_occurrence() -> None:
-    unsupported = _proactive_draft(
-        "早上翻旧书的时候突然想起以前在嘉兴老街逛书店的日子。",
-        claims=[
-            {
-                "claim_text": "沈知栀今天早上翻旧书并想起以前逛老街书店",
-                "scope": "current_world",
-                "source_refs": ["biography:summer-home"],
-            }
-        ],
-    )
-    model = _ProactiveReplySequence([unsupported, unsupported])
-
-    output = await ProactiveDraftAdapter(model=model, target="user:primary").propose(
-        _proactive_biography_request()
-    )
-    proposal = validate_proposal_envelope(output.raw_proposal)
-    assert isinstance(proposal, DecisionProposal)
-    assert model.calls == 2
-    assert proposal.proactive_grounding_outcome == "rejected"
-    assert not proposal.action_intents
-    first_request = json.loads(model.messages[0][1]["content"])
-    biography = first_request["lived_context"]["slices"]["world_life"]["items"][0]
-    assert biography["source_ref"] == "biography:summer-home"
-    assert biography["value"]["academic_phase"] == "summer_break"
-    assert "proactive_fact_authority" not in first_request
-    correction_messages = model.messages[1]
-    assert unsupported["beats"][0]["text"] not in json.dumps(
-        correction_messages, ensure_ascii=False
-    )
-    correction = json.loads(correction_messages[-1]["content"])
-    assert correction["contract"] == "proactive-grounding-reselection.1"
-    assert correction["validation_failure"] == {
-        "code": "proactive_world_claim_source_lane_mismatch",
-        "path": "world_claims[].source_refs",
-    }
-    assert "original_draft" not in correction
 
 
-@pytest.mark.asyncio
-async def test_proactive_can_cite_an_exact_current_biographical_coordinate() -> None:
-    request = _proactive_biography_request()
-    context = json.loads(request.model_content_json)
-    residence_ref = next(
-        item.source_ref
-        for item in biographical_coordinate_authorities(context)
-        if item.field_path == "/current_residence_context_tags"
-    )
-    model = _ProactiveReplySequence(
-        [
-            _proactive_draft(
-                "我现在在嘉兴家里，刚才忽然想和你说句话。",
-                claims=[
-                    {
-                        "claim_text": "沈知栀当前住处情境是嘉兴家庭住处",
-                        "scope": "current_world",
-                        "source_refs": [residence_ref],
-                    }
-                ],
-            )
-        ]
-    )
-
-    reviewer = _supporting_source_reviewer()
-    output = await ProactiveDraftAdapter(
-        model=model,
-        target="user:primary",
-        source_closure_reviewer=reviewer,
-    ).propose(request)
-    proposal = validate_proposal_envelope(output.raw_proposal)
-    assert isinstance(proposal, DecisionProposal)
-    assert model.calls == 1
-    assert reviewer.calls == 1
-    assert proposal.proactive_grounding_outcome == "not_required"
-    assert proposal.action_intents
 
 
-@pytest.mark.asyncio
-async def test_proactive_source_review_resolves_the_same_full_pinned_context_seen_by_role() -> None:
-    source_ref = "event:life-content:experience:production-visible"
-    request = _proactive_model_request()
-    context = json.loads(request.model_content_json)
-    context["slices"]["recent_experiences"] = {
-        "availability": "available",
-        "items": [
-            {
-                "item_ref": "experience:production-visible",
-                "source_bindings": [{"ref": source_ref}],
-                "value": {"summary": "在旧书交换活动里翻到一本《小王子》。"},
-            }
-        ],
-    }
-    request = request.model_copy(
-        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
-    )
-    model = _ProactiveReplySequence(
-        [
-            _proactive_draft(
-                "刚才翻到那本《小王子》的时候，忽然有点想和你说句话。",
-                claims=[
-                    {
-                        "claim_text": "沈知栀在旧书交换活动里翻到一本《小王子》",
-                        "scope": "past_world",
-                        "source_refs": [source_ref],
-                    }
-                ],
-            )
-        ]
-    )
-    reviewer = _supporting_source_reviewer()
-
-    output = await ProactiveDraftAdapter(
-        model=model,
-        target="user:primary",
-        source_closure_reviewer=reviewer,
-    ).propose(request)
-
-    proposal = validate_proposal_envelope(output.raw_proposal)
-    assert proposal.proactive_grounding_outcome == "not_required"
-    assert reviewer.calls == 1
-    review = json.loads(reviewer.messages[0][1]["content"])
-    assert any(source_ref in entry["source_refs"] for entry in review["source_evidence"]["entries"])
 
 
-@pytest.mark.asyncio
-async def test_proactive_cannot_use_age_coordinate_to_prove_a_life_occurrence() -> None:
-    request = _proactive_biography_request()
-    context = json.loads(request.model_content_json)
-    age_ref = next(
-        item.source_ref
-        for item in biographical_coordinate_authorities(context)
-        if item.field_path == "/age"
-    )
-    unsupported = _proactive_draft(
-        "今天早上翻书架时看到一本旧书，忽然想起你。",
-        claims=[
-            {
-                "claim_text": "沈知栀今天早上翻书架时看到一本旧书",
-                "scope": "current_world",
-                "source_refs": [age_ref],
-            }
-        ],
-    )
-    model = _ProactiveReplySequence([unsupported, unsupported])
-    reviewer = _ProactiveReplySequence(
-        [
-            _source_closure_review(
-                claim_indexes=(0,),
-                visible_failures=("occurrence_or_status_authority_mismatch",),
-                visible_findings=(
-                    {
-                        "category": "occurrence_or_status_authority_mismatch",
-                        "visible_span": "今天早上翻书架时看到一本旧书",
-                        "claim_index": 0,
-                        "source_relation": "declared_world_claim_source_mismatch",
-                        "source_refs": [age_ref],
-                    },
-                ),
-            ),
-            _source_closure_review(
-                claim_indexes=(0,),
-                visible_failures=("occurrence_or_status_authority_mismatch",),
-                visible_findings=(
-                    {
-                        "category": "occurrence_or_status_authority_mismatch",
-                        "visible_span": "今天早上翻书架时看到一本旧书",
-                        "claim_index": 0,
-                        "source_relation": "declared_world_claim_source_mismatch",
-                        "source_refs": [age_ref],
-                    },
-                ),
-            ),
-        ]
-    )
-
-    output = await ProactiveDraftAdapter(
-        model=model,
-        target="user:primary",
-        source_closure_reviewer=reviewer,
-    ).propose(request)
-    proposal = validate_proposal_envelope(output.raw_proposal)
-
-    assert isinstance(proposal, DecisionProposal)
-    assert model.calls == 2
-    assert reviewer.calls == 2
-    assert proposal.proactive_grounding_outcome == "rejected"
-    assert proposal.proactive_opportunity_decision.disposition == "grounding_rejected"
-    assert not proposal.action_intents
-    first_review = json.loads(reviewer.messages[0][1]["content"])
-    coordinate_entry = next(
-        entry
-        for entry in first_review["source_evidence"]["entries"]
-        if entry["kind"] == "biographical_coordinate"
-    )
-    assert coordinate_entry["material"]["field_path"] == "/age"
-    assert coordinate_entry["material"]["value"] == 21
 
 
-@pytest.mark.asyncio
-async def test_proactive_history_claim_is_corrected_once_against_pinned_sources() -> None:
-    model = _ProactiveReplySequence(
-        [
-            _proactive_draft(
-                "你之前说去成都看熊猫，后来怎么样？",
-                claims=[
-                    {
-                        "claim_text": "你之前说去成都看熊猫",
-                        "scope": "counterpart_history",
-                        "source_refs": ["event:user:chengdu:not-in-context"],
-                    }
-                ],
-            ),
-            _proactive_draft(
-                "你之前说深圳不太好玩，后来回想起来还是这个感觉吗？",
-                claims=[
-                    {
-                        "claim_text": "你之前说深圳不太好玩",
-                        "scope": "counterpart_history",
-                        "source_refs": ["event:user:shenzhen"],
-                    }
-                ],
-            ),
-        ]
-    )
-
-    reviewer = _supporting_source_reviewer()
-    output = await ProactiveDraftAdapter(
-        model=model,
-        target="user:primary",
-        source_closure_reviewer=reviewer,
-    ).propose(_proactive_model_request())
-    proposal = validate_proposal_envelope(output.raw_proposal)
-    assert isinstance(proposal, DecisionProposal)
-
-    assert model.calls == 2
-    assert reviewer.calls == 1
-    assert proposal.proactive_grounding_outcome == "corrected"
-    assert proposal.impulse_summary == "突然想到对方，想顺着这个念头问一句。"
-    assert (
-        "成都" not in proposal.proposed_changes[0].payload.value()["beat_drafts"][0]["inline_text"]
-    )
 
 
-@pytest.mark.asyncio
-async def test_proactive_corrected_candidate_gets_its_own_report_relative_review() -> None:
-    """A correction is a distinct author candidate, even in the proactive lane."""
-
-    current_report = "深圳说实话不是很好玩哈哈哈哈"
-    request = _proactive_model_request().model_copy(
-        update={
-            "trigger_ref": "event:user:current-shenzhen",
-            "trigger_evidence": (
-                ProposalEvidenceRef(
-                    ref_id="event:user:current-shenzhen",
-                    evidence_kind="observed_message",
-                    source_world_revision=8,
-                    immutable_hash="sha256:" + "c" * 64,
-                ),
-            ),
-            "trigger_message": TriggerMessage(
-                event_ref="event:user:current-shenzhen",
-                event_payload_hash="sha256:" + "c" * 64,
-                observation_ref="observation:current-shenzhen",
-                source_world_revision=8,
-                actor="user:primary",
-                channel="qq:c2c",
-                reply_target="user:primary",
-                text=current_report,
-            ),
-        }
-    )
-    model = _ProactiveReplySequence(
-        [
-            _proactive_draft(
-                "你上次去成都看熊猫，后来怎么样？",
-                claims=[
-                    {
-                        "claim_text": "你上次去成都看熊猫",
-                        "scope": "counterpart_history",
-                        "source_refs": ["event:user:chengdu:not-in-context"],
-                    }
-                ],
-            ),
-            _proactive_draft(
-                "你刚才说深圳不好玩，是哪里让你觉得没劲？",
-                claims=[
-                    {
-                        "claim_text": "你刚才说深圳不好玩",
-                        "scope": "counterpart_history",
-                        "source_refs": ["event:user:shenzhen"],
-                    }
-                ],
-            ),
-        ]
-    )
-    primary = _ProactiveReplySequence(
-        [
-            _source_closure_review(
-                visible_failures=("undeclared_external_assertion",),
-                visible_findings=(
-                    {
-                        "category": "undeclared_external_assertion",
-                        "visible_span": "你刚才说深圳不好玩",
-                        "claim_index": None,
-                        "source_relation": "unclosed",
-                        "source_refs": [],
-                    },
-                ),
-            )
-        ]
-    )
-    narrow = _ProactiveReplySequence(
-        [
-            {
-                "contract": "report-relative-entailment-adjudication.2",
-                "findings": [
-                    {
-                        "finding_index": 0,
-                        "decision": "covered_by_exact_current_report",
-                        "failure_dimensions": [],
-                    }
-                ],
-                "r": "The question directly takes up the exact current report.",
-            }
-        ]
-    )
-
-    output = await ProactiveDraftAdapter(
-        model=model,
-        target="user:primary",
-        source_closure_reviewer=primary,
-        report_relative_reviewer=narrow,
-    ).propose(request)
-    proposal = validate_proposal_envelope(output.raw_proposal)
-
-    assert isinstance(proposal, DecisionProposal)
-    assert proposal.proactive_grounding_outcome == "corrected"
-    assert model.calls == 2
-    assert primary.calls == 1
-    assert narrow.calls == 1
 
 
-@pytest.mark.asyncio
-async def test_proactive_history_claim_is_rejected_after_one_bad_correction() -> None:
-    model = _ProactiveReplySequence(
-        [
-            _proactive_draft(
-                "你之前说去成都看熊猫，后来怎么样？",
-                claims=[
-                    {
-                        "claim_text": "你之前说去成都看熊猫",
-                        "scope": "counterpart_history",
-                        "source_refs": ["event:user:chengdu:not-in-context"],
-                    }
-                ],
-            ),
-            _proactive_draft(
-                "你之前说成都熊猫很好玩，对吧？",
-                claims=[
-                    {
-                        "claim_text": "你之前说成都熊猫很好玩",
-                        "scope": "counterpart_history",
-                        "source_refs": ["event:user:chengdu:not-in-context"],
-                    }
-                ],
-            ),
-        ]
-    )
-
-    output = await ProactiveDraftAdapter(model=model, target="user:primary").propose(
-        _proactive_model_request()
-    )
-    proposal = validate_proposal_envelope(output.raw_proposal)
-    assert isinstance(proposal, DecisionProposal)
-
-    assert model.calls == 2
-    assert proposal.proactive_grounding_outcome == "rejected"
-    assert proposal.proactive_opportunity_decision.disposition == "grounding_rejected"
-    assert not proposal.action_intents
 
 
-@pytest.mark.asyncio
-async def test_proactive_legacy_subjective_claim_cannot_launder_a_life_event() -> None:
-    unsupported_life_claim = {
-        "claim_text": "我下午在家泡茶翻书",
-        "scope": "subjective_or_hypothetical",
-        "source_refs": [],
-    }
-    model = _ProactiveReplySequence(
-        [
-            _proactive_draft(
-                "我下午在家泡茶翻书的时候突然想起你。",
-                claims=[unsupported_life_claim],
-            ),
-            _proactive_draft(
-                "我下午在家泡茶翻书的时候突然想起你。",
-                claims=[unsupported_life_claim],
-            ),
-        ]
-    )
-
-    output = await ProactiveDraftAdapter(model=model, target="user:primary").propose(
-        _proactive_model_request()
-    )
-    proposal = validate_proposal_envelope(output.raw_proposal)
-    assert isinstance(proposal, DecisionProposal)
-    assert model.calls == 2
-    assert proposal.proactive_grounding_outcome == "rejected"
-    assert proposal.proactive_opportunity_decision.disposition == "grounding_rejected"
-    assert not proposal.action_intents
 
 
-@pytest.mark.asyncio
-async def test_companion_old_reply_cannot_prove_a_counterpart_experience() -> None:
-    request = _proactive_model_request()
-    context = json.loads(request.model_content_json)
-    context["slices"]["recent_dialogue"] = {
-        "availability": "available",
-        "source_refs": ["event:companion:chengdu"],
-        "items": [
-            {
-                "item_ref": "event:companion:chengdu",
-                "value": {
-                    "speaker": "companion",
-                    "text": "你之前说去成都看熊猫。",
-                },
-            }
-        ],
-    }
-    request = request.model_copy(
-        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
-    )
-    model = _ProactiveReplySequence(
-        [
-            _proactive_draft(
-                "你之前说去成都看熊猫，后来怎么样？",
-                claims=[
-                    {
-                        "claim_text": "你之前说去成都看熊猫",
-                        "scope": "counterpart_history",
-                        "source_refs": ["event:companion:chengdu"],
-                    }
-                ],
-            ),
-            _proactive_draft(
-                "你之前说去成都看熊猫，后来怎么样？",
-                claims=[
-                    {
-                        "claim_text": "你之前说去成都看熊猫",
-                        "scope": "counterpart_history",
-                        "source_refs": ["event:companion:chengdu"],
-                    }
-                ],
-            ),
-        ]
-    )
-
-    output = await ProactiveDraftAdapter(model=model, target="user:primary").propose(request)
-    proposal = validate_proposal_envelope(output.raw_proposal)
-    assert isinstance(proposal, DecisionProposal)
-    assert proposal.proactive_grounding_outcome == "rejected"
 
 
-@pytest.mark.asyncio
-async def test_claim_free_proactive_greeting_passes_candidate_wide_review() -> None:
-    text = "刚刚忽然想和你说句话。"
-    model = _ProactiveReplySequence([_proactive_draft(text)])
-    inventory = _ProactiveReplySequence(
-        [_candidate_inventory(text, semantic_role="outer_private_state")]
-    )
-    reviewer = _ProactiveCoverageAuthority()
-
-    output = await ProactiveDraftAdapter(
-        model=model,
-        target="user:primary",
-        source_closure_reviewer=reviewer,
-        candidate_external_proposition_inventory_model=inventory,
-    ).propose(_proactive_model_request())
-    proposal = validate_proposal_envelope(output.raw_proposal)
-    assert isinstance(proposal, DecisionProposal)
-
-    assert model.calls == 1
-    assert inventory.calls == 1
-    assert reviewer.calls == 1
-    assert proposal.proactive_grounding_outcome == "not_required"
-    assert proposal.action_intents
 
 
-@pytest.mark.asyncio
-async def test_no_external_candidate_inventory_needs_no_source_authority_for_subjective_greeting() -> (
-    None
-):
-    text = "刚刚忽然想和你说句话。"
-    model = _ProactiveReplySequence([_proactive_draft(text)])
-    inventory = _ProactiveReplySequence(
-        [_candidate_inventory(text, semantic_role="outer_private_state")]
-    )
-
-    output = await ProactiveDraftAdapter(
-        model=model,
-        target="user:primary",
-        candidate_external_proposition_inventory_model=inventory,
-    ).propose(_proactive_model_request())
-    proposal = validate_proposal_envelope(output.raw_proposal)
-
-    assert isinstance(proposal, DecisionProposal)
-    assert proposal.action_intents
-    assert inventory.calls == 1
 
 
-@pytest.mark.asyncio
-async def test_nonempty_candidate_inventory_fails_closed_without_source_authority() -> None:
-    invented = "你下午说已经把延迟问题彻底解决了。"
-    model = _ProactiveReplySequence([_proactive_draft(invented)])
-    inventory = _ProactiveReplySequence([_candidate_inventory(invented)])
-
-    with pytest.raises(
-        ValidationTechnicalFailure,
-        match="proactive_source_closure_reviewer_unavailable",
-    ):
-        await ProactiveDraftAdapter(
-            model=model,
-            target="user:primary",
-            candidate_external_proposition_inventory_model=inventory,
-        ).propose(_proactive_model_request())
-
-    assert model.calls == 1
-    assert inventory.calls == 1
 
 
-@pytest.mark.asyncio
-async def test_undeclared_counterpart_fact_is_reselected_with_usage_and_winner_identity() -> None:
-    invented = "你下午说已经把延迟问题彻底解决了。"
-    corrected = "刚刚忽然想和你说句话。"
-    model = _MeteredProactiveReplySequence(
-        [_proactive_draft(invented), _proactive_draft(corrected)]
-    )
-    inventory = _MeteredProactiveReplySequence(
-        [
-            _candidate_inventory(invented),
-            _candidate_inventory(
-                corrected,
-                semantic_role="outer_private_state",
-            ),
-        ]
-    )
-    inventory.model = "test-proactive-inventory"
-    reviewer = _ProactiveCoverageAuthority(
-        unclosed_texts=(invented,),
-        metered=True,
-    )
-    request = _proactive_model_request()
-
-    output = await ProactiveDraftAdapter(
-        model=model,
-        target="user:primary",
-        source_closure_reviewer=reviewer,
-        candidate_external_proposition_inventory_model=inventory,
-    ).propose(request)
-    proposal = validate_proposal_envelope(output.raw_proposal)
-
-    assert isinstance(proposal, DecisionProposal)
-    assert proposal.proactive_grounding_outcome == "corrected"
-    assert corrected in json.dumps(output.raw_proposal, ensure_ascii=False)
-    assert invented not in json.dumps(output.raw_proposal, ensure_ascii=False)
-    assert model.calls == 2
-    assert inventory.calls == 2
-    assert reviewer.calls == 3
-    assert output.usage is not None
-    assert output.usage.input_tokens == 70
-    assert output.usage.output_tokens == 14
-    assert output.winning_model_call_id is not None
-    assert output.winning_model_call_id != request.call_id
-    correction_messages = model.messages[1]
-    expected_request_hash = sha256(
-        json.dumps(
-            {"messages": correction_messages, "temperature": 0.2},
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
-    assert output.winning_request_hash == expected_request_hash
-    rendered_correction = json.dumps(correction_messages, ensure_ascii=False)
-    assert invented not in rendered_correction
-    assert "original_draft" not in rendered_correction
-    correction = json.loads(correction_messages[-1]["content"])
-    assert correction["contract"] == "source-closure-reselection.2"
-    assert correction["rejected_candidate_sha256"]
-    assert correction["rejected_categories"] == {
-        "ci": [],
-        "v": ["undeclared_external_assertion"],
-        "p": [],
-    }
 
 
-@pytest.mark.asyncio
-async def test_undeclared_companion_life_fact_is_grounding_rejected_after_one_reselection() -> None:
-    invented = "我下午去学校旁边的新书店逛了两小时。"
-    model = _ProactiveReplySequence([_proactive_draft(invented), _proactive_draft(invented)])
-    inventory = _ProactiveReplySequence(
-        [_candidate_inventory(invented), _candidate_inventory(invented)]
-    )
-    reviewer = _ProactiveCoverageAuthority(unclosed_texts=(invented,))
-
-    output = await ProactiveDraftAdapter(
-        model=model,
-        target="user:primary",
-        source_closure_reviewer=reviewer,
-        candidate_external_proposition_inventory_model=inventory,
-    ).propose(_proactive_model_request())
-    proposal = validate_proposal_envelope(output.raw_proposal)
-
-    assert isinstance(proposal, DecisionProposal)
-    assert proposal.proactive_grounding_outcome == "rejected"
-    assert proposal.proactive_opportunity_decision.disposition == "grounding_rejected"
-    assert not proposal.action_intents
-    assert model.calls == 2
-    assert inventory.calls == 2
-    assert reviewer.calls == 4
 
 
 def _proactive_recall_fixture(
@@ -2129,195 +588,16 @@ def _proactive_recall_fixture(
     return request, recall
 
 
-@pytest.mark.asyncio
-async def test_unselected_proactive_prefetch_is_not_model_result_provenance() -> None:
-    request, recall = _proactive_recall_fixture()
-    model = _ProactiveReplySequence([_proactive_draft("刚刚忽然想和你说句话。")])
-    adapter = ProactiveDraftAdapter(model=model, target="user:primary")
-    adapter.install_recall_coordinator(recall)
-
-    output = await adapter.propose(request)
-
-    health = recall.semantic_health()
-    assert health["prefetch_first_pass_local_count"] == 0
-    assert health["prefetch_first_pass_semantic_count"] == 0
-    assert output.prefetch_trace is None
-    assert output.recall_trace is None
 
 
-@pytest.mark.asyncio
-async def test_unselected_proactive_prefetch_never_delays_or_claims_first_pass_delivery() -> None:
-    embedding = _BlockingProactivePrefetchEmbedding()
-    request, recall = _proactive_recall_fixture(semantic_embedding=embedding)
-    model = _ProactiveReplySequence([_proactive_draft("刚刚忽然想和你说句话。")])
-    adapter = ProactiveDraftAdapter(model=model, target="user:primary")
-    adapter.install_recall_coordinator(recall)
-
-    started = asyncio.get_running_loop().time()
-    try:
-        output = await adapter.propose(request)
-        elapsed = asyncio.get_running_loop().time() - started
-    finally:
-        embedding.release.set()
-        recall.close()
-
-    assert elapsed < 0.1
-    assert output.prefetch_trace is None
-    health = recall.semantic_health()
-    assert health["prefetch_first_pass_local_count"] == 0
-    assert health["prefetch_first_pass_semantic_count"] == 0
 
 
-@pytest.mark.asyncio
-async def test_proactive_character_chosen_recall_reuses_prefetch_then_forms_final_draft() -> None:
-    request, recall = _proactive_recall_fixture()
-    model = _ProactiveReplySequence(
-        [
-            {"recall_request": {"query_text": "雨夜 听雨", "limit": 4}},
-            _proactive_draft("雨声让我突然想起一件旧事。"),
-        ]
-    )
-    adapter = ProactiveDraftAdapter(model=model, target="user:primary")
-    adapter.install_recall_coordinator(recall)
-
-    output = await adapter.propose(request)
-
-    assert output.prefetch_trace is not None
-    assert verify_trusted_recall_trace(output.prefetch_trace).hits
-    assert output.recall_trace is not None
-    assert verify_trusted_recall_trace(output.recall_trace).hits
-    assert model.calls == 2
-    assert "either JSON member order" in model.messages[0][0]["content"]
-    assert "first followed by recall_request" not in model.messages[0][0]["content"]
-    assert "上次雨夜回宿舍" in model.messages[-1][-1]["content"]
-    request_hash = sha256(
-        json.dumps(
-            {"messages": model.messages[-1], "temperature": 0.8},
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
-    expected_call_id = (
-        "model-call:"
-        + sha256(
-            json.dumps(
-                {
-                    "parent_call_id": request.call_id,
-                    "purpose": "recall_followup",
-                    "request_hash": request_hash,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-        ).hexdigest()
-    )
-    assert output.winning_request_hash == request_hash
-    assert output.winning_model_call_id == expected_call_id
-    assert tuple(item.phase for item in output.presented_prefetch_traces) == ("recall_followup",)
-    assert output.presented_prefetch_traces[0].model_call_id == expected_call_id
 
 
-@pytest.mark.asyncio
-async def test_proactive_recall_is_in_the_post_authorship_binding_closure() -> None:
-    request, recall = _proactive_recall_fixture()
-    role = _ProactiveReplySequence(
-        [
-            {"recall_request": {"query_text": "雨夜 听雨", "limit": 4}},
-            _proactive_draft("上次雨夜回宿舍，我在便利店买了热乌龙。"),
-        ]
-    )
-    binder = _ProactiveReplySequence(
-        [
-            {
-                "contract": "proactive-world-claim-binding.1",
-                "world_claims": [
-                    {
-                        "claim_text": "沈知栀上次雨夜回宿舍时在便利店买了热乌龙",
-                        "scope": "past_world",
-                        "source_refs": ["event:experience:rain"],
-                    }
-                ],
-            }
-        ]
-    )
-    reviewer = _supporting_source_reviewer()
-    adapter = ProactiveDraftAdapter(
-        model=role,
-        target="user:primary",
-        proactive_claim_binder_model=binder,
-        source_closure_reviewer=reviewer,
-    )
-    adapter.install_recall_coordinator(recall)
-
-    output = await adapter.propose(request)
-
-    assert validate_proposal_envelope(output.raw_proposal).action_intents
-    assert role.calls == 2
-    assert binder.calls == 1
-    binder_packet = json.loads(binder.messages[0][1]["content"])
-    rendered_binding = json.dumps(binder_packet, ensure_ascii=False)
-    assert "上次雨夜回宿舍" in rendered_binding
-    assert "event:experience:rain" in rendered_binding
-    review_packet = json.loads(reviewer.messages[0][1]["content"])
-    assert "event:experience:rain" in json.dumps(review_packet, ensure_ascii=False)
 
 
-@pytest.mark.asyncio
-async def test_valid_grounded_proactive_claim_runs_one_source_review() -> None:
-    model = _ProactiveReplySequence(
-        [
-            _proactive_draft(
-                "你之前说深圳不太好玩。",
-                claims=[
-                    {
-                        "claim_text": "你之前说深圳不太好玩",
-                        "scope": "counterpart_history",
-                        "source_refs": ["event:user:shenzhen"],
-                    }
-                ],
-            )
-        ]
-    )
-
-    reviewer = _supporting_source_reviewer()
-    output = await ProactiveDraftAdapter(
-        model=model,
-        target="user:primary",
-        source_closure_reviewer=reviewer,
-    ).propose(_proactive_model_request())
-    proposal = validate_proposal_envelope(output.raw_proposal)
-    assert isinstance(proposal, DecisionProposal)
-    assert model.calls == 1
-    assert reviewer.calls == 1
-    assert proposal.proactive_grounding_outcome == "not_required"
 
 
-@pytest.mark.asyncio
-async def test_malformed_grounding_correction_remains_a_technical_failure() -> None:
-    model = _ProactiveReplySequence(
-        [
-            _proactive_draft(
-                "你之前说去成都看熊猫，后来怎么样？",
-                claims=[
-                    {
-                        "claim_text": "你之前说去成都看熊猫",
-                        "scope": "counterpart_history",
-                        "source_refs": ["event:user:chengdu:not-in-context"],
-                    }
-                ],
-            ),
-            "{not-json",
-        ]
-    )
-
-    with pytest.raises(ValidationTechnicalFailure) as captured:
-        await ProactiveDraftAdapter(model=model, target="user:primary").propose(
-            _proactive_model_request()
-        )
-    assert captured.value.failure_code == "authored_expression_reselection_invalid"
-    assert model.calls == 2
 
 
 def _event(
@@ -2612,7 +892,7 @@ class _DraftModel:
     def captured_capsule(self) -> dict[str, object]:
         assert len(self.messages) == 1
         envelope = json.loads(self.messages[0][1]["content"])
-        return envelope["lived_context"]
+        return envelope["inner_life_snapshot"]
 
 
 class _SequenceDraftModel(_DraftModel):
@@ -2769,6 +1049,11 @@ class _ResponseExpectingChat:
         del temperature
         return json.dumps(
             {
+                "private_turn_state": {
+                    "contract": "private-turn-state.1",
+                    "inner_state_summary": "他要先去忙；我想让他忙完后愿意再回来接着聊。",
+                    "attended_source_refs": [],
+                },
                 "timing_choice": "now",
                 "beats": [{"modality": "text", "text": "你忙完跟我说一声呀。"}],
                 "stance": "answer_without_world_claims",
@@ -2793,6 +1078,11 @@ class _NoExpectationChat:
         del temperature
         return json.dumps(
             {
+                "private_turn_state": {
+                    "contract": "private-turn-state.1",
+                    "inner_state_summary": "他要先忙，我想轻轻接住，不给他继续回应的压力。",
+                    "attended_source_refs": [],
+                },
                 "timing_choice": "now",
                 "beats": [{"modality": "text", "text": "好，你先忙。"}],
                 "stance": "acknowledge_briefly",
@@ -2809,6 +1099,11 @@ class _ExpectationAssessmentChat:
     def __init__(self) -> None:
         self.replies = [
             {
+                "private_turn_state": {
+                    "contract": "private-turn-state.1",
+                    "inner_state_summary": "他刚从深圳回来；我确实好奇这趟体验怎么样。",
+                    "attended_source_refs": [],
+                },
                 "timing_choice": "now",
                 "beats": [{"modality": "text", "text": "深圳怎么样，好玩吗？"}],
                 "stance": "curious",
@@ -2823,6 +1118,11 @@ class _ExpectationAssessmentChat:
                 },
             },
             {
+                "private_turn_state": {
+                    "contract": "private-turn-state.1",
+                    "inner_state_summary": "他已经直接说深圳不好玩；我想接住答案，不重复追问。",
+                    "attended_source_refs": [],
+                },
                 "timing_choice": "now",
                 "beats": [{"modality": "text", "text": "哈哈，听起来确实没戳中你。"}],
                 "stance": "receive_the_answer",
@@ -2840,16 +1140,23 @@ class _ExpectationAssessmentChat:
         return json.dumps(self.replies.pop(0), ensure_ascii=False)
 
 
+def _production_expression_wire(model: object) -> _ExpressionDraftWire:
+    return _ExpressionDraftWire(
+        model=model,  # type: ignore[arg-type]
+        expression_capabilities=PRODUCTION_TEXT_ONLY_EXPRESSION_CAPABILITIES,
+    )
+
+
 @pytest.mark.asyncio
 async def test_inbound_cognition_durably_fulfills_the_exact_prior_expectation(
     tmp_path,
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]
     model = _ExpectationAssessmentChat()
-    chat = ChatModelDeliberationAdapter(model=model)
-    app = build_sqlite_world_v2_turn_application(
+    chat = _production_expression_wire(model)
+    app = build_sqlite_world_v2_test_application(
         path=tmp_path / "expectation-assessment.sqlite3",
-        config=WorldV2TurnApplicationConfig(
+        config=_application_config(
             world_id="world:expectation-assessment",
             companion_actor_ref="actor:companion",
             reply_target="user:primary",
@@ -2857,10 +1164,11 @@ async def test_inbound_cognition_durably_fulfills_the_exact_prior_expectation(
         ),
         identities=_Identities(),
         router=_Router(),
-        main_model=chat,
-        quick_recovery=chat,
+        character_interior=_fixture_character_interior(
+            inbound_author=chat,
+            proactive_provider=_DraftModel("silent"),
+        ),
         transport=_DeliveredTransport(),
-        proactive_model=_DraftModel("silent"),
         now=NOW,
     )
     try:
@@ -2927,6 +1235,98 @@ class _DeliveredExecutor:
         return None
 
 
+class _ProactiveInteriorProjection:
+    async def project(self, *, subject):  # type: ignore[no-untyped-def]
+        source_refs = subject.source_refs
+        return {
+            "world_id": subject.world_id,
+            "actor_ref": subject.actor_ref,
+            "cursor": subject.cursor,
+            "logical_time": subject.logical_time,
+            "situation": {
+                "availability": "available",
+                "content": {"fixture": "proactive opportunity"},
+                "source_refs": source_refs,
+            },
+            "continuity": {
+                "availability": "available",
+                "content": {"fixture": "continuing relationship"},
+                "source_refs": source_refs,
+            },
+            "facets": {
+                name: {
+                    "availability": "available",
+                    "content": {"summary": name},
+                    "source_refs": source_refs,
+                }
+                for name in FACET_NAMES
+            },
+        }
+
+
+class _ProactiveInteriorWireModel:
+    """Test-only translation of historical draft fixtures into the one role wire."""
+
+    def __init__(self, delegate) -> None:  # type: ignore[no-untyped-def]
+        self._delegate = delegate
+        self.model = str(getattr(delegate, "model", "test-proactive-character"))
+
+    async def complete(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        raw = await self._delegate.complete(messages, temperature=temperature)
+        return self._wrap(raw, messages=messages)
+
+    async def complete_json(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        complete_json = getattr(self._delegate, "complete_json", None)
+        raw = await (
+            complete_json(messages, temperature=temperature)
+            if callable(complete_json)
+            else self._delegate.complete(messages, temperature=temperature)
+        )
+        return self._wrap(raw, messages=messages)
+
+    @staticmethod
+    def _wrap(raw: str, *, messages: list[dict[str, str]]) -> str:
+        try:
+            draft = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return raw
+        if not isinstance(draft, dict) or "status" in draft:
+            return raw
+        request = json.loads(messages[-1]["content"])
+        capability = request["capability_manifest"]
+        source_refs = capability["source_refs"]
+        return json.dumps(
+            {
+                "status": "decision",
+                "summary": "The character formed her own proactive choice.",
+                "attended_source_refs": source_refs,
+                "decision": {
+                    "source_refs": source_refs,
+                    "payload": draft,
+                },
+                "recall_query": None,
+                "proposals": [],
+            },
+            ensure_ascii=False,
+        )
+
+
+def _fixture_character_interior(
+    *,
+    inbound_author: object,
+    proactive_provider: object,
+) -> CharacterInterior:
+    return compose_fixture_character_interior(
+        inbound_author=inbound_author,
+        purpose_faculties=(
+            compose_fixture_character_purpose(
+                purpose="proactive_contact",
+                provider=_ProactiveInteriorWireModel(proactive_provider),
+            ),
+        ),
+    )
+
+
 def _make_proactive_runtime(
     *,
     ledger,
@@ -2936,14 +1336,13 @@ def _make_proactive_runtime(
     identity_frame=None,
     social_initiative=None,
     expression_capabilities=TEXT_ONLY_EXPRESSION_CAPABILITIES,
-    proactive_claim_binder_model=None,
 ):  # type: ignore[no-untyped-def]
-    adapter = ProactiveDraftAdapter(
-        model=model,
-        target="user:primary",
-        identity_frame=identity_frame,
-        expression_capabilities=expression_capabilities,
-        proactive_claim_binder_model=proactive_claim_binder_model,
+    interior = CharacterInterior(
+        projection=_ProactiveInteriorProjection(),
+        role=StructuredCharacterRoleFaculty(
+            model=_ProactiveInteriorWireModel(model),
+            model_id=str(getattr(model, "model", "test-proactive-character")),
+        ),
     )
     turn = ProactiveDeliberationTurn(
         ledger=ledger,
@@ -2953,9 +1352,11 @@ def _make_proactive_runtime(
                 actor_ref="actor:companion", related_subject_refs=("user:primary",)
             ),
         ),
-        deliberation=compose_production_deliberation(
-            lane_id="proactive", router=_Router(), main_model=adapter, quick_recovery=adapter
-        ),
+        character_interior=interior,
+        router=_Router(),
+        target="user:primary",
+        expression_capabilities=expression_capabilities,
+        identity_frame=identity_frame,
         companion_actor_ref="actor:companion",
     )
     runtime = ProactiveActionRuntime(
@@ -3025,6 +1426,7 @@ def _runtime(
         ("silent", "silent", None),
     ],
 )
+@pytest.mark.asyncio
 async def test_due_thread_is_a_model_opportunity_not_a_timer_message(
     choice: str, status: str, action_kind: str | None
 ) -> None:
@@ -3074,14 +1476,14 @@ async def test_grounding_rejection_completes_consideration_without_retry_or_visi
 
     assert rejected_result.status == "grounding_rejected"
     assert rejected_result.reason_code == "proactive.grounding_rejected"
-    assert model.calls == 2
+    assert model.calls == 1
     projection = ledger.project()
     assert projection.actions == ()
     process = projection.trigger_processes[-1]
     assert process.state == "terminal"
     assert process.runtime_outcome_ref == "proactive:grounding-rejected"
     assert (await runtime.drain_one()).status == "idle"
-    assert model.calls == 2
+    assert model.calls == 1
 
 
 @pytest.mark.asyncio
@@ -3107,9 +1509,9 @@ async def test_visible_proactive_expression_is_bound_to_its_semantic_opportunity
         "target_ref": "user:primary",
     }
     system = model.messages[0][0]["content"]
-    assert "Exact ExpressionDraft JSON field contract" in system
-    assert 'A text beat uses exactly modality="text" and text=<non-empty string>' in system
-    assert "impulse_summary is required" in system
+    assert "sole semantic author" in system
+    assert "eight source-bound facets" in system
+    assert "capability manifest" in system
     for behavioral_instruction in (
         "curiosity, sharing, missing someone, asking for help or comfort",
         "semantic anchor",
@@ -3121,48 +1523,14 @@ async def test_visible_proactive_expression_is_bound_to_its_semantic_opportunity
     ):
         assert behavioral_instruction not in system
     user = json.loads(model.messages[0][1]["content"])
-    assert user["proactive_opportunity"]["source_kind"] == "thread"
-    assert "verified proactive opportunity" in user["proactive_opportunity"]["guidance"].lower()
-    assert user["proactive_opportunity"]["source_refs"] == [proposal["trigger_ref"]]
+    assert user["inner_turn"]["purpose"] == "proactive_contact"
+    assert user["inner_turn"]["trigger_ref"] == proposal["trigger_ref"]
+    assert user["capability_manifest"]["source_refs"] == [proposal["trigger_ref"]]
+    assert set(user["inner_life_snapshot"]["faculties"]) == set(FACET_NAMES)
 
 
-@pytest.mark.asyncio
-async def test_proactive_recovery_keeps_the_same_character_choice_prompt() -> None:
-    model = _SequenceDraftModel(("silent", "silent"))
-    adapter = ProactiveDraftAdapter(model=model, target="user:primary")
-    request = _proactive_model_request()
-
-    await adapter.propose(request)
-    await adapter.recover(request, "primary_timeout")
-
-    assert model.messages[0][0]["content"] == model.messages[1][0]["content"]
-    assert "smallest valid choice" not in model.messages[1][0]["content"]
 
 
-@pytest.mark.asyncio
-async def test_proactive_voice_receives_the_same_companion_identity_boundary() -> None:
-    ledger, _model, _runtime_value, _turn = _runtime(choice="silent")
-    model = _DraftModel("silent")
-    runtime, _ = _make_proactive_runtime(
-        ledger=ledger,
-        issuer=ledger._accepted_batch_issuer,  # noqa: SLF001 - acceptance seam fixture
-        model=model,
-        identity_frame=CompanionIdentityFrame(
-            companion_name="沈知栀",
-            counterpart_name="Geoff",
-            relationship_frame="刚认识",
-            personality_frame="慢热，有自己的判断。",
-        ),
-    )
-
-    assert (await runtime.drain_one()).status == "opened"
-    assert (await runtime.drain_one()).status == "silent"
-
-    system = model.messages[0][0]["content"]
-    assert "沈知栀" in system
-    assert "Geoff" in system
-    assert "慢热" in system
-    assert "not an assistant" in system
 
 
 @pytest.mark.asyncio
@@ -3301,11 +1669,14 @@ async def test_two_unparseable_choices_are_technical_failure_not_character_silen
     assert result.status == "failed_safe"
     assert malformed.calls == 2
     projection = ledger.project()
-    # The invalid author wire and its one same-role correction remain one
-    # validation attempt, but each physical provider invocation now has its
-    # own child audit beside the terminal orchestration result. They are not a
-    # fabricated main/backup character decision pair.
-    assert len(projection.model_result_audits) == 3
+    # CharacterInterior owns the invalid wire and its one same-role
+    # correction. The outer worker records one terminal orchestration audit;
+    # it does not fabricate a main/backup character decision pair.
+    assert len(projection.model_result_audits) == 1
+    audit = json.loads(projection.model_result_audits[0].audit_json)
+    assert audit["status"] == "main_exception"
+    assert audit["slot"] == "primary"
+    assert audit["failure_code"] == "authored_expression_reselection_invalid"
     assert len(projection.proposal_audits) == 0
     assert projection.actions == ()
     process = projection.trigger_processes[-1]
@@ -3481,6 +1852,77 @@ async def test_settled_occurrence_cannot_bypass_situation_change_schedule(
     monkeypatch.setattr(runtime, "_lookup", lookup)
 
     assert await runtime._next_opportunity(projection) is None  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("participant_refs", "expected_kind"),
+    [
+        (("npc:roommate",), None),
+        (("actor:companion", "npc:roommate"), "settled_world_event"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_legacy_settlement_recovery_requires_protagonist_participation(
+    monkeypatch: pytest.MonkeyPatch,
+    participant_refs: tuple[str, ...],
+    expected_kind: str | None,
+) -> None:
+    _ledger, _model, runtime, _turn = _runtime(choice="silent")
+    settlement = _event(
+        "event:settlement:legacy-recovery-participants",
+        "WorldOccurrenceSettled",
+        {},
+        at=NOW,
+    )
+    source_ref = SimpleNamespace(
+        event_id=settlement.event_id,
+        event_type=settlement.event_type,
+        payload_hash=settlement.payload_hash,
+        world_revision=7,
+        logical_time=settlement.logical_time,
+    )
+    projection = SimpleNamespace(
+        logical_time=NOW + timedelta(seconds=30),
+        world_occurrences=(
+            SimpleNamespace(
+                status="settled",
+                settlement_event_ref=settlement.event_id,
+                visibility="shareable",
+                participant_refs=participant_refs,
+                settled_at=NOW,
+                occurrence_id="occurrence:legacy-recovery-participants",
+            ),
+        ),
+        threads=(),
+        commitments=(),
+        trigger_processes=(
+            SimpleNamespace(
+                process_kind=runtime.PROCESS_KIND,
+                state="open",
+                trigger_ref="proactive-consideration:legacy-settlement-recovery",
+                source_evidence_ref=settlement.event_id,
+                runtime_outcome_ref=None,
+            ),
+        ),
+        message_observations=(),
+        committed_world_event_refs=(source_ref,),
+        model_result_audits=(),
+    )
+
+    class _NoNewSocialOpportunity:
+        async def next_opportunity(self, _projection):  # type: ignore[no-untyped-def]
+            return None
+
+    async def lookup(event_id: str):  # type: ignore[no-untyped-def]
+        assert event_id == settlement.event_id
+        return settlement, SimpleNamespace(world_revision=source_ref.world_revision)
+
+    runtime._social_initiative = _NoNewSocialOpportunity()  # type: ignore[assignment]  # noqa: SLF001
+    monkeypatch.setattr(runtime, "_lookup", lookup)
+
+    opportunity = await runtime._next_opportunity(projection)  # noqa: SLF001
+
+    assert (opportunity.source_kind if opportunity is not None else None) == expected_kind
 
 
 @pytest.mark.asyncio
@@ -3691,9 +2133,9 @@ async def test_sqlite_production_composition_installs_proactive_budget_without_a
 ) -> None:  # type: ignore[no-untyped-def]
     path = tmp_path / "proactive-production.sqlite3"
     proactive = _DraftModel("silent")
-    app = build_sqlite_world_v2_turn_application(
+    app = build_sqlite_world_v2_test_application(
         path=path,
-        config=WorldV2TurnApplicationConfig(
+        config=_application_config(
             world_id="world:proactive-composed",
             companion_actor_ref="actor:companion",
             reply_target="user:primary",
@@ -3701,10 +2143,11 @@ async def test_sqlite_production_composition_installs_proactive_budget_without_a
         ),
         identities=_Identities(),
         router=_Router(),
-        main_model=_InvalidMain(),
-        quick_recovery=_InvalidQuick(),
+        character_interior=_fixture_character_interior(
+            inbound_author=_InvalidMain(),
+            proactive_provider=proactive,
+        ),
         transport=_NoDispatchTransport(),
-        proactive_model=proactive,
         now=NOW,
     )
     try:
@@ -3740,10 +2183,10 @@ async def test_production_proactive_lane_does_not_reauthor_after_timeout(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
     proactive = _SlowPrimaryThenSilentDraftModel(primary_delay_seconds=0.05)
-    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
-    app = build_sqlite_world_v2_turn_application(
+    chat = _production_expression_wire(_NoExpectationChat())
+    app = build_sqlite_world_v2_test_application(
         path=tmp_path / "proactive-timeout-policy.sqlite3",
-        config=WorldV2TurnApplicationConfig(
+        config=_application_config(
             world_id="world:proactive-timeout-policy",
             companion_actor_ref="actor:companion",
             reply_target="user:primary",
@@ -3765,10 +2208,11 @@ async def test_production_proactive_lane_does_not_reauthor_after_timeout(
         ),
         identities=_Identities(),
         router=_Router(),
-        main_model=chat,
-        quick_recovery=chat,
+        character_interior=_fixture_character_interior(
+            inbound_author=chat,
+            proactive_provider=proactive,
+        ),
         transport=_NoDispatchTransport(),
-        proactive_model=proactive,
         now=NOW,
     )
     try:
@@ -3803,104 +2247,16 @@ async def test_production_proactive_lane_does_not_reauthor_after_timeout(
 
 
 @pytest.mark.asyncio
-async def test_production_proactive_source_review_uses_its_validation_window_without_reauthoring(
-    tmp_path,
-) -> None:  # type: ignore[no-untyped-def]
-    proactive = _DraftModel("now")
-    reviewer = _DelayedSupportingSourceReviewer(delay_seconds=0.05)
-    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
-    app = build_sqlite_world_v2_turn_application(
-        path=tmp_path / "proactive-validation-window.sqlite3",
-        config=WorldV2TurnApplicationConfig(
-            world_id="world:proactive-validation-window",
-            companion_actor_ref="actor:companion",
-            reply_target="user:primary",
-            action_pump_owner="worker:actions",
-            interactive_turn_budget_policy=InteractiveTurnBudgetPolicy(
-                total_seconds=0.03,
-                hedge_after_seconds=0.005,
-                acceptance_dispatch_reserve_seconds=0.005,
-                first_provider_entry_seconds=0.001,
-                technical_recovery_seconds=0.2,
-                validation_recovery_seconds=0.2,
-                validation_reselection_seconds=0.2,
-            ),
-            social_initiative_policy=SocialInitiativePolicy(
-                spontaneous_idle_seconds=60,
-                spontaneous_expiry_seconds=3_600,
-                consideration_band_override_seconds=(60, 60),
-            ),
-        ),
-        identities=_Identities(),
-        router=_Router(),
-        main_model=chat,
-        quick_recovery=chat,
-        transport=_NoDispatchTransport(),
-        proactive_model=proactive,
-        proactive_source_closure_model=reviewer,
-        now=NOW,
-    )
-    try:
-        await app.inbound(
-            platform="http",
-            platform_user_id="user.1",
-            platform_message_id="message:proactive-validation-window",
-            text="我先去忙一会儿",
-            observed_at=NOW,
-            trace_id="trace:proactive-validation-window",
-        )
-        due = NOW + timedelta(seconds=61)
-        await app.tick(
-            tick_id="tick:proactive-validation-window",
-            logical_time_from=NOW,
-            logical_time_to=due,
-            observed_at=due,
-            trace_id="trace:proactive-validation-window",
-            causation_id="scheduler:test",
-            correlation_id="conversation:proactive-validation-window",
-            reason="test_idle",
-        )
-
-        assert (await app.drain_background_once()).status == "opened"
-        result = await app.drain_background_once()
-
-        assert result.status == "authorized"
-        assert proactive.calls == 1
-        assert reviewer.calls == 1
-    finally:
-        app.close()
-
-
-@pytest.mark.asyncio
-async def test_proactive_author_prefers_provider_json_mode_when_usage_is_metered() -> None:
-    model = _JsonPreferredProactiveModel()
-
-    output = await ProactiveDraftAdapter(
-        model=model,
-        target="user:primary",
-    ).propose(_proactive_model_request())
-
-    proposal = validate_proposal_envelope(output.raw_proposal)
-    assert isinstance(proposal, DecisionProposal)
-    assert (
-        proposal.proactive_opportunity_decision.disposition
-        == "silent_after_consideration"
-    )
-    assert model.json_calls == 1
-    assert model.general_calls == 0
-
-
-@pytest.mark.asyncio
 async def test_production_application_opens_one_grounded_spontaneous_contact_after_idle(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
     path = tmp_path / "social-initiative.sqlite3"
     proactive = _DraftModel("now")
     transport = _DeliveredTransport()
-    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
-    app = build_sqlite_world_v2_turn_application(
+    chat = _production_expression_wire(_NoExpectationChat())
+    app = build_sqlite_world_v2_test_application(
         path=path,
-        config=WorldV2TurnApplicationConfig(
+        config=_application_config(
             world_id="world:social-initiative",
             companion_actor_ref="actor:companion",
             reply_target="user:primary",
@@ -3913,10 +2269,11 @@ async def test_production_application_opens_one_grounded_spontaneous_contact_aft
         ),
         identities=_Identities(),
         router=_Router(),
-        main_model=chat,
-        quick_recovery=chat,
+        character_interior=_fixture_character_interior(
+            inbound_author=chat,
+            proactive_provider=proactive,
+        ),
         transport=transport,
-        proactive_model=proactive,
         now=NOW,
     )
     try:
@@ -3960,9 +2317,11 @@ async def test_production_application_opens_one_grounded_spontaneous_contact_aft
         capsule = proactive.captured_capsule()
         assert "我先去忙一会儿" in json.dumps(capsule, ensure_ascii=False)
         supplied = json.loads(proactive.messages[0][1]["content"])
-        assert supplied["current_self_state"]["contract"] == "current-self-state.1"
-        assert supplied["current_self_state"]["availability"] == "available"
-        assert supplied["proactive_opportunity"]["source_kind"] == "spontaneous_contact"
+        assert supplied["inner_life_snapshot"]["contract"] == "inner-life-snapshot.1"
+        assert supplied["inner_life_snapshot"]["availability"] == "available"
+        assert supplied["capability_manifest"]["payload"]["source_opportunity"][
+            "source_kind"
+        ] == "spontaneous_contact"
         assert transport.bodies == ["好，你先忙。", "刚才那件事我又想了一下。"]
     finally:
         app.close()
@@ -3972,10 +2331,10 @@ async def test_production_application_opens_one_grounded_spontaneous_contact_aft
 async def test_model_silence_is_reconsidered_in_the_next_cadence_epoch(tmp_path) -> None:
     proactive = _SequenceDraftModel(("silent", "now"))
     transport = _DeliveredTransport()
-    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
-    app = build_sqlite_world_v2_turn_application(
+    chat = _production_expression_wire(_NoExpectationChat())
+    app = build_sqlite_world_v2_test_application(
         path=tmp_path / "social-initiative-reconsider.sqlite3",
-        config=WorldV2TurnApplicationConfig(
+        config=_application_config(
             world_id="world:social-initiative-reconsider",
             companion_actor_ref="actor:companion",
             reply_target="user:primary",
@@ -3988,10 +2347,11 @@ async def test_model_silence_is_reconsidered_in_the_next_cadence_epoch(tmp_path)
         ),
         identities=_Identities(),
         router=_Router(),
-        main_model=chat,
-        quick_recovery=chat,
+        character_interior=_fixture_character_interior(
+            inbound_author=chat,
+            proactive_provider=proactive,
+        ),
         transport=transport,
-        proactive_model=proactive,
         now=NOW,
     )
     try:
@@ -4050,10 +2410,10 @@ async def test_ambient_presence_clock_can_open_model_owned_contact_after_source_
 ) -> None:  # type: ignore[no-untyped-def]
     proactive = _DraftModel("now")
     transport = _DeliveredTransport()
-    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
-    app = build_sqlite_world_v2_turn_application(
+    chat = _production_expression_wire(_NoExpectationChat())
+    app = build_sqlite_world_v2_test_application(
         path=tmp_path / "social-initiative-ambient.sqlite3",
-        config=WorldV2TurnApplicationConfig(
+        config=_application_config(
             world_id="world:social-initiative-ambient",
             companion_actor_ref="actor:companion",
             reply_target="user:primary",
@@ -4066,10 +2426,11 @@ async def test_ambient_presence_clock_can_open_model_owned_contact_after_source_
         ),
         identities=_Identities(),
         router=_Router(),
-        main_model=chat,
-        quick_recovery=chat,
+        character_interior=_fixture_character_interior(
+            inbound_author=chat,
+            proactive_provider=proactive,
+        ),
         transport=transport,
-        proactive_model=proactive,
         now=NOW,
     )
     try:
@@ -4153,74 +2514,8 @@ async def test_technical_failures_retry_at_ten_thirty_then_capped_one_twenty_min
     assert malformed.calls == 10
 
 
-@pytest.mark.asyncio
-async def test_retired_proactive_binder_failure_retries_immediately_after_upgrade(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class _AlwaysInvalidBinder:
-        model = "retired-proactive-binder"
-
-        async def complete(self, _messages, *, temperature=0.0):  # type: ignore[no-untyped-def]
-            del temperature
-            return "{}"
-
-    ledger, _model, _runtime_value, _turn = _runtime(choice="silent")
-    monkeypatch.setattr(ProactiveDraftAdapter, "VERSION", "proactive-draft-adapter.1")
-    runtime, _ = _make_proactive_runtime(
-        ledger=ledger,
-        issuer=ledger._accepted_batch_issuer,  # noqa: SLF001
-        model=_DraftModel("now"),
-        owner="worker:proactive:retired-binder-retry",
-        proactive_claim_binder_model=_AlwaysInvalidBinder(),
-    )
-
-    assert (await runtime.drain_one()).status == "opened"
-    assert (await runtime.drain_one()).status == "failed_safe"
-    monkeypatch.setattr(ProactiveDraftAdapter, "VERSION", "proactive-draft-adapter.3")
-    projection = ledger.project()
-    current = projection.logical_time
-    state = proactive_technical_retry_states(projection)[-1]
-
-    assert current is not None
-    assert state.last_failure_code in {
-        "proactive_claim_binding_invalid",
-        "backup_proactive_claim_binding_invalid",
-    }
-    assert state.next_retry_at == current
-    assert next_proactive_retry_due(projection) == current
-    assert (await runtime.drain_one()).status == "opened"
 
 
-@pytest.mark.asyncio
-async def test_new_proactive_binder_failure_keeps_ordinary_backoff() -> None:
-    class _AlwaysInvalidBinder:
-        model = "compatibility-proactive-binder"
-
-        async def complete(self, _messages, *, temperature=0.0):  # type: ignore[no-untyped-def]
-            del temperature
-            return "{}"
-
-    ledger, _model, _runtime_value, _turn = _runtime(choice="silent")
-    runtime, _ = _make_proactive_runtime(
-        ledger=ledger,
-        issuer=ledger._accepted_batch_issuer,  # noqa: SLF001
-        model=_DraftModel("now"),
-        owner="worker:proactive:new-binder-backoff",
-        proactive_claim_binder_model=_AlwaysInvalidBinder(),
-    )
-
-    assert (await runtime.drain_one()).status == "opened"
-    assert (await runtime.drain_one()).status == "failed_safe"
-    projection = ledger.project()
-    current = projection.logical_time
-    state = proactive_technical_retry_states(projection)[-1]
-
-    assert current is not None
-    assert state.last_failure_code == "proactive_claim_binding_invalid"
-    assert state.next_retry_at == current + timedelta(minutes=10)
-    waiting = await runtime.drain_one()
-    assert waiting.status == "retry_wait"
-    assert waiting.next_retry_at == state.next_retry_at
 
 
 @pytest.mark.parametrize(
@@ -4485,10 +2780,10 @@ async def test_proactive_retry_wait_does_not_starve_ready_background_cognition(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
     malformed = _MalformedProactiveModel()
-    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
-    app = build_sqlite_world_v2_turn_application(
+    chat = _production_expression_wire(_NoExpectationChat())
+    app = build_sqlite_world_v2_test_application(
         path=tmp_path / "proactive-retry-background-fairness.sqlite3",
-        config=WorldV2TurnApplicationConfig(
+        config=_application_config(
             world_id="world:proactive-retry-background-fairness",
             companion_actor_ref="actor:companion",
             reply_target="user:primary",
@@ -4501,10 +2796,11 @@ async def test_proactive_retry_wait_does_not_starve_ready_background_cognition(
         ),
         identities=_Identities(),
         router=_Router(),
-        main_model=chat,
-        quick_recovery=chat,
+        character_interior=_fixture_character_interior(
+            inbound_author=chat,
+            proactive_provider=malformed,
+        ),
         transport=_DeliveredTransport(),
-        proactive_model=malformed,
         fact_model=_RetainedPreferenceFactModel(),
         now=NOW,
     )
@@ -4557,10 +2853,10 @@ async def test_new_cadence_epoch_cannot_bypass_a_social_technical_backoff(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
     malformed = _MalformedProactiveModel()
-    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
-    app = build_sqlite_world_v2_turn_application(
+    chat = _production_expression_wire(_NoExpectationChat())
+    app = build_sqlite_world_v2_test_application(
         path=tmp_path / "social-initiative-backoff-epoch.sqlite3",
-        config=WorldV2TurnApplicationConfig(
+        config=_application_config(
             world_id="world:social-initiative-backoff-epoch",
             companion_actor_ref="actor:companion",
             reply_target="user:primary",
@@ -4573,10 +2869,11 @@ async def test_new_cadence_epoch_cannot_bypass_a_social_technical_backoff(
         ),
         identities=_Identities(),
         router=_Router(),
-        main_model=chat,
-        quick_recovery=chat,
+        character_interior=_fixture_character_interior(
+            inbound_author=chat,
+            proactive_provider=malformed,
+        ),
         transport=_DeliveredTransport(),
-        proactive_model=malformed,
         now=NOW,
     )
     try:
@@ -4701,6 +2998,7 @@ async def test_new_cadence_epoch_cannot_bypass_a_social_technical_backoff(
         ),
     ],
 )
+@pytest.mark.asyncio
 async def test_newer_semantic_consideration_resets_older_technical_retry(
     tmp_path,
     semantic_draft: dict[str, object],
@@ -4716,10 +3014,10 @@ async def test_newer_semantic_consideration_resets_older_technical_retry(
             semantic_draft,
         ]
     )
-    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
-    app = build_sqlite_world_v2_turn_application(
+    chat = _production_expression_wire(_NoExpectationChat())
+    app = build_sqlite_world_v2_test_application(
         path=tmp_path / "health-multiple-proactive-considerations.sqlite3",
-        config=WorldV2TurnApplicationConfig(
+        config=_application_config(
             world_id=WORLD,
             companion_actor_ref="actor:companion",
             reply_target="user:primary",
@@ -4727,18 +3025,18 @@ async def test_newer_semantic_consideration_resets_older_technical_retry(
         ),
         identities=_Identities(),
         router=_Router(),
-        main_model=chat,
-        quick_recovery=chat,
+        character_interior=_fixture_character_interior(
+            inbound_author=chat,
+            proactive_provider=proactive,
+        ),
         transport=_DeliveredTransport(),
-        proactive_model=proactive,
         now=NOW,
     )
     try:
         _seed_due_thread(app._ledger)  # noqa: SLF001 - real persisted authority fixture
-        runtime = app._turns._runtime._proactive_action_runtime  # noqa: SLF001
-        assert runtime is not None
-        assert (await runtime.drain_one()).status == "opened"
-        assert (await runtime.drain_one()).status == "failed_safe"
+        interior = app._turns._runtime._character_interior  # noqa: SLF001
+        assert (await interior._drain_proactive_once()).status == "opened"  # noqa: SLF001
+        assert (await interior._drain_proactive_once()).status == "failed_safe"  # noqa: SLF001
         failed_at = app._ledger.project().logical_time  # noqa: SLF001
         assert failed_at is not None
         retry_due = failed_at + timedelta(minutes=10)
@@ -4749,8 +3047,8 @@ async def test_newer_semantic_consideration_resets_older_technical_retry(
             advance_clock=False,
             event_at=failed_at,
         )
-        assert (await runtime.drain_one()).status == "opened"
-        assert (await runtime.drain_one()).status == expected_status
+        assert (await interior._drain_proactive_once()).status == "opened"  # noqa: SLF001
+        assert (await interior._drain_proactive_once()).status == expected_status  # noqa: SLF001
         projection = app._ledger.project()  # noqa: SLF001
         proactive_processes = tuple(
             item
@@ -4791,7 +3089,7 @@ async def test_newer_semantic_consideration_resets_older_technical_retry(
         assert health["initiative_retry_ordinal"] == 0
         assert health["initiative_last_failure_code"] is None
         assert health["initiative_last_model_decision"] == expected_decision
-        assert (await runtime.drain_one()).status != "completed_existing"
+        assert await interior._drain_proactive_once() is None  # noqa: SLF001
     finally:
         app.close()
 
@@ -4808,10 +3106,10 @@ async def test_proactive_health_keeps_a_24_hour_failure_visible_after_a_newer_su
             _proactive_draft("忽然想跟你说句话。"),
         ]
     )
-    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
-    app = build_sqlite_world_v2_turn_application(
+    chat = _production_expression_wire(_NoExpectationChat())
+    app = build_sqlite_world_v2_test_application(
         path=tmp_path / "proactive-health-window.sqlite3",
-        config=WorldV2TurnApplicationConfig(
+        config=_application_config(
             world_id=WORLD,
             companion_actor_ref="actor:companion",
             reply_target="user:primary",
@@ -4819,18 +3117,18 @@ async def test_proactive_health_keeps_a_24_hour_failure_visible_after_a_newer_su
         ),
         identities=_Identities(),
         router=_Router(),
-        main_model=chat,
-        quick_recovery=chat,
+        character_interior=_fixture_character_interior(
+            inbound_author=chat,
+            proactive_provider=proactive,
+        ),
         transport=_DeliveredTransport(),
-        proactive_model=proactive,
         now=NOW,
     )
     try:
         _seed_due_thread(app._ledger)  # noqa: SLF001 - real persisted authority fixture
-        runtime = app._turns._runtime._proactive_action_runtime  # noqa: SLF001
-        assert runtime is not None
-        assert (await runtime.drain_one()).status == "opened"
-        assert (await runtime.drain_one()).status == "failed_safe"
+        interior = app._turns._runtime._character_interior  # noqa: SLF001
+        assert (await interior._drain_proactive_once()).status == "opened"  # noqa: SLF001
+        assert (await interior._drain_proactive_once()).status == "failed_safe"  # noqa: SLF001
         current_time = app._ledger.project().logical_time  # noqa: SLF001
         assert current_time is not None
 
@@ -4840,8 +3138,8 @@ async def test_proactive_health_keeps_a_24_hour_failure_visible_after_a_newer_su
             advance_clock=False,
             event_at=current_time,
         )
-        assert (await runtime.drain_one()).status == "opened"
-        assert (await runtime.drain_one()).status == "authorized"
+        assert (await interior._drain_proactive_once()).status == "opened"  # noqa: SLF001
+        assert (await interior._drain_proactive_once()).status == "authorized"  # noqa: SLF001
         assert (await app.drain_actions_once()).status == "settled"
 
         health = await app.world_health_diagnostics()
@@ -4891,10 +3189,10 @@ async def test_same_consideration_does_not_open_a_second_role_author(
             _proactive_draft("刚才想说的话现在说出来。"),
         ]
     )
-    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
-    app = build_sqlite_world_v2_turn_application(
+    chat = _production_expression_wire(_NoExpectationChat())
+    app = build_sqlite_world_v2_test_application(
         path=tmp_path / "proactive-health-recovered-retry.sqlite3",
-        config=WorldV2TurnApplicationConfig(
+        config=_application_config(
             world_id=WORLD,
             companion_actor_ref="actor:companion",
             reply_target="user:primary",
@@ -4902,18 +3200,18 @@ async def test_same_consideration_does_not_open_a_second_role_author(
         ),
         identities=_Identities(),
         router=_Router(),
-        main_model=chat,
-        quick_recovery=chat,
+        character_interior=_fixture_character_interior(
+            inbound_author=chat,
+            proactive_provider=proactive,
+        ),
         transport=_DeliveredTransport(),
-        proactive_model=proactive,
         now=NOW,
     )
     try:
         _seed_due_thread(app._ledger)  # noqa: SLF001 - durable retry fixture
-        runtime = app._turns._runtime._proactive_action_runtime  # noqa: SLF001
-        assert runtime is not None
-        assert (await runtime.drain_one()).status == "opened"
-        assert (await runtime.drain_one()).status == "failed_safe"
+        interior = app._turns._runtime._character_interior  # noqa: SLF001
+        assert (await interior._drain_proactive_once()).status == "opened"  # noqa: SLF001
+        assert (await interior._drain_proactive_once()).status == "failed_safe"  # noqa: SLF001
         assert proactive.calls == 2
 
         health = await app.world_health_diagnostics()
@@ -4940,10 +3238,10 @@ async def test_delivered_response_expectation_does_not_open_a_proactive_lane(
 ) -> None:  # type: ignore[no-untyped-def]
     proactive = _LooseProactiveModel({"choice": "now", "text": "刚才说晚点聊，我还记着。"})
     transport = _DeliveredTransport()
-    chat = ChatModelDeliberationAdapter(model=_ResponseExpectingChat())
-    app = build_sqlite_world_v2_turn_application(
+    chat = _production_expression_wire(_ResponseExpectingChat())
+    app = build_sqlite_world_v2_test_application(
         path=tmp_path / "response-gap.sqlite3",
-        config=WorldV2TurnApplicationConfig(
+        config=_application_config(
             world_id="world:response-gap",
             companion_actor_ref="actor:companion",
             reply_target="user:primary",
@@ -4955,10 +3253,11 @@ async def test_delivered_response_expectation_does_not_open_a_proactive_lane(
         ),
         identities=_Identities(),
         router=_Router(),
-        main_model=chat,
-        quick_recovery=chat,
+        character_interior=_fixture_character_interior(
+            inbound_author=chat,
+            proactive_provider=proactive,
+        ),
         transport=transport,
-        proactive_model=proactive,
         now=NOW,
     )
     try:
@@ -5000,10 +3299,10 @@ async def test_real_qq_provider_expectation_remains_advisory_only(
         recipients_by_target={"user:primary": "qq-user-1"},
         now=lambda: NOW,
     )
-    chat = ChatModelDeliberationAdapter(model=_ResponseExpectingChat())
-    app = build_sqlite_world_v2_turn_application(
+    chat = _production_expression_wire(_ResponseExpectingChat())
+    app = build_sqlite_world_v2_test_application(
         path=tmp_path / "response-gap-qq-provider-accepted.sqlite3",
-        config=WorldV2TurnApplicationConfig(
+        config=_application_config(
             world_id="world:response-gap-qq-provider-accepted",
             companion_actor_ref="actor:companion",
             reply_target="user:primary",
@@ -5015,10 +3314,11 @@ async def test_real_qq_provider_expectation_remains_advisory_only(
         ),
         identities=_Identities(),
         router=_Router(),
-        main_model=chat,
-        quick_recovery=chat,
+        character_interior=_fixture_character_interior(
+            inbound_author=chat,
+            proactive_provider=proactive,
+        ),
         transport=transport,
-        proactive_model=proactive,
         now=NOW,
     )
     try:
@@ -5057,10 +3357,10 @@ async def test_failed_qq_send_never_opens_a_response_gap(tmp_path) -> None:  # t
         recipients_by_target={"user:primary": "qq-user-1"},
         now=lambda: NOW,
     )
-    chat = ChatModelDeliberationAdapter(model=_ResponseExpectingChat())
-    app = build_sqlite_world_v2_turn_application(
+    chat = _production_expression_wire(_ResponseExpectingChat())
+    app = build_sqlite_world_v2_test_application(
         path=tmp_path / "response-gap-qq-failed.sqlite3",
-        config=WorldV2TurnApplicationConfig(
+        config=_application_config(
             world_id="world:response-gap-qq-failed",
             companion_actor_ref="actor:companion",
             reply_target="user:primary",
@@ -5072,10 +3372,11 @@ async def test_failed_qq_send_never_opens_a_response_gap(tmp_path) -> None:  # t
         ),
         identities=_Identities(),
         router=_Router(),
-        main_model=chat,
-        quick_recovery=chat,
+        character_interior=_fixture_character_interior(
+            inbound_author=chat,
+            proactive_provider=proactive,
+        ),
         transport=transport,
-        proactive_model=proactive,
         now=NOW,
     )
     try:
@@ -5113,10 +3414,10 @@ async def test_unknown_qq_send_never_opens_a_response_gap(tmp_path) -> None:  # 
         recipients_by_target={"user:primary": "qq-user-1"},
         now=lambda: NOW,
     )
-    chat = ChatModelDeliberationAdapter(model=_ResponseExpectingChat())
-    app = build_sqlite_world_v2_turn_application(
+    chat = _production_expression_wire(_ResponseExpectingChat())
+    app = build_sqlite_world_v2_test_application(
         path=tmp_path / "response-gap-qq-unknown.sqlite3",
-        config=WorldV2TurnApplicationConfig(
+        config=_application_config(
             world_id="world:response-gap-qq-unknown",
             companion_actor_ref="actor:companion",
             reply_target="user:primary",
@@ -5128,10 +3429,11 @@ async def test_unknown_qq_send_never_opens_a_response_gap(tmp_path) -> None:  # 
         ),
         identities=_Identities(),
         router=_Router(),
-        main_model=chat,
-        quick_recovery=chat,
+        character_interior=_fixture_character_interior(
+            inbound_author=chat,
+            proactive_provider=proactive,
+        ),
         transport=transport,
-        proactive_model=proactive,
         now=NOW,
     )
     try:
@@ -5166,7 +3468,7 @@ async def test_persisted_qq_provider_expectation_does_not_reopen_after_restart(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
     path = tmp_path / "response-gap-qq-restart.sqlite3"
-    config = WorldV2TurnApplicationConfig(
+    config = _application_config(
         world_id="world:response-gap-qq-restart",
         companion_actor_ref="actor:companion",
         reply_target="user:primary",
@@ -5176,20 +3478,21 @@ async def test_persisted_qq_provider_expectation_does_not_reopen_after_restart(
             spontaneous_expiry_seconds=7_200,
         ),
     )
-    chat = ChatModelDeliberationAdapter(model=_ResponseExpectingChat())
-    first = build_sqlite_world_v2_turn_application(
+    chat = _production_expression_wire(_ResponseExpectingChat())
+    first = build_sqlite_world_v2_test_application(
         path=path,
         config=config,
         identities=_Identities(),
         router=_Router(),
-        main_model=chat,
-        quick_recovery=chat,
+        character_interior=_fixture_character_interior(
+            inbound_author=chat,
+            proactive_provider=_DraftModel("silent"),
+        ),
         transport=QQC2CPlatformTransport(
             delivery=_QQDelivery(),  # type: ignore[arg-type]
             recipients_by_target={"user:primary": "qq-user-1"},
             now=lambda: NOW,
         ),
-        proactive_model=_DraftModel("silent"),
         now=NOW,
     )
     try:
@@ -5206,19 +3509,20 @@ async def test_persisted_qq_provider_expectation_does_not_reopen_after_restart(
         first.close()
 
     restarted_proactive = _DraftModel("silent")
-    restarted = build_sqlite_world_v2_turn_application(
+    restarted = build_sqlite_world_v2_test_application(
         path=path,
         config=config,
         identities=_Identities(),
         router=_Router(),
-        main_model=chat,
-        quick_recovery=chat,
+        character_interior=_fixture_character_interior(
+            inbound_author=chat,
+            proactive_provider=restarted_proactive,
+        ),
         transport=QQC2CPlatformTransport(
             delivery=_QQDelivery(),  # type: ignore[arg-type]
             recipients_by_target={"user:primary": "qq-user-1"},
             now=lambda: NOW,
         ),
-        proactive_model=restarted_proactive,
         now=NOW,
     )
     try:
@@ -5245,10 +3549,10 @@ async def test_production_application_does_not_infer_response_gap_from_message_t
 ) -> None:  # type: ignore[no-untyped-def]
     proactive = _DraftModel("now")
     transport = _DeliveredTransport()
-    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
-    app = build_sqlite_world_v2_turn_application(
+    chat = _production_expression_wire(_NoExpectationChat())
+    app = build_sqlite_world_v2_test_application(
         path=tmp_path / "no-response-gap.sqlite3",
-        config=WorldV2TurnApplicationConfig(
+        config=_application_config(
             world_id="world:no-response-gap",
             companion_actor_ref="actor:companion",
             reply_target="user:primary",
@@ -5260,10 +3564,11 @@ async def test_production_application_does_not_infer_response_gap_from_message_t
         ),
         identities=_Identities(),
         router=_Router(),
-        main_model=chat,
-        quick_recovery=chat,
+        character_interior=_fixture_character_interior(
+            inbound_author=chat,
+            proactive_provider=proactive,
+        ),
         transport=transport,
-        proactive_model=proactive,
         now=NOW,
     )
     try:
@@ -5299,10 +3604,10 @@ async def test_failed_spontaneous_delivery_is_settled_once_and_not_resent(
     path = tmp_path / "social-initiative-failed.sqlite3"
     proactive = _DraftModel("now")
     transport = _FailedTransport()
-    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
-    app = build_sqlite_world_v2_turn_application(
+    chat = _production_expression_wire(_NoExpectationChat())
+    app = build_sqlite_world_v2_test_application(
         path=path,
-        config=WorldV2TurnApplicationConfig(
+        config=_application_config(
             world_id="world:social-initiative-failed",
             companion_actor_ref="actor:companion",
             reply_target="user:primary",
@@ -5315,10 +3620,11 @@ async def test_failed_spontaneous_delivery_is_settled_once_and_not_resent(
         ),
         identities=_Identities(),
         router=_Router(),
-        main_model=chat,
-        quick_recovery=chat,
+        character_interior=_fixture_character_interior(
+            inbound_author=chat,
+            proactive_provider=proactive,
+        ),
         transport=transport,
-        proactive_model=proactive,
         now=NOW,
     )
     try:

@@ -28,9 +28,10 @@ class RoleBoundLifeDevelopmentModelAdapter:
         role: Literal[
             "world_author",
             "world_author_source_reviewer",
-            "character_model",
         ],
     ) -> None:
+        if role not in {"world_author", "world_author_source_reviewer"}:
+            raise ValueError("life development adapter accepts only a world-author role")
         model_id = str(getattr(model, "model", "")).strip() or type(model).__name__
         self.model = f"{model_id}/life-development/{role}"
         self._model = model

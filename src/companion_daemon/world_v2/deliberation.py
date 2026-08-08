@@ -35,11 +35,13 @@ from .expression_episode import (
 )
 from .expression_cadence import CadenceDraw
 from .proposal_envelope import (
+    CanonicalTypedPayload,
     MinimalProposal,
     ProposalEvidenceRef,
     ProposalInput,
     validate_proposal_envelope,
 )
+from .proposal_audit_schemas import RecordedCharacterInteriorTurnLineage
 from .recall_audit import PrefetchPresentationAudit, RecallAuditTrace
 from .recall_index import RecallCursor
 from .recall_runtime import (
@@ -81,12 +83,12 @@ _INTERACTIVE_TURN_BUDGET: ContextVar[InteractiveTurnBudget | None] = ContextVar(
 _FIRST_ROLE_PROVIDER_MARKER: ContextVar[Callable[[str], None] | None] = ContextVar(
     "world_v2_first_role_provider_marker", default=None
 )
-_FIRST_ROLE_PROVIDER_COMPLETION_MARKER: ContextVar[
-    Callable[[str], None] | None
-] = ContextVar("world_v2_first_role_provider_completion_marker", default=None)
-_FIRST_ROLE_PROVIDER_TOKEN_MARKER: ContextVar[
-    Callable[[str], None] | None
-] = ContextVar("world_v2_first_role_provider_token_marker", default=None)
+_FIRST_ROLE_PROVIDER_COMPLETION_MARKER: ContextVar[Callable[[str], None] | None] = ContextVar(
+    "world_v2_first_role_provider_completion_marker", default=None
+)
+_FIRST_ROLE_PROVIDER_TOKEN_MARKER: ContextVar[Callable[[str], None] | None] = ContextVar(
+    "world_v2_first_role_provider_token_marker", default=None
+)
 _PROVIDER_SLOT_COORDINATOR: ContextVar["_ProviderSlotCoordinator | None"] = ContextVar(
     "world_v2_provider_slot_coordinator", default=None
 )
@@ -143,11 +145,10 @@ class _ProviderSlotCoordinator:
     def claim_validation_corrective(self, *, allow_after_backup: bool) -> bool:
         """Allow one repair for each independently authored candidate.
 
-        A configured recovery author is a new role candidate, not a retry of
-        the rejected primary bytes.  It therefore receives its own single
-        bounded source/shape re-selection.  This is the rare fourth role call
-        only when the primary already spent its correction; a second recovery
-        correction remains impossible.
+        Production CharacterInterior composition never installs a backup
+        author.  The backup branch remains only for historical/non-production
+        Deliberation fixtures; when used there, it is a separate candidate
+        with one bounded source/shape re-selection.
         """
 
         if self.episode_reserved:
@@ -196,12 +197,11 @@ def claim_validation_corrective_provider_slot(
 ) -> bool:
     """Claim the one structural correction allowed for a model-owned result.
 
-    Usually this is the second provider call.  A bounded Recall result and each
-    configured recovery-author candidate may each receive one correction.
-    When both the primary and recovery authors needed correction this is the
-    rare fourth role call, still scoped to reselecting that recovery
-    candidate. It cannot open another Recall, backup, hedge, provisional
-    episode, or a second correction for either author.
+    Usually this is the second provider call. A bounded Recall result may also
+    receive one correction. Production CharacterInterior has no backup role
+    author. Generic historical/non-production Deliberation fixtures can still
+    exercise one separately configured backup candidate; it cannot open
+    another Recall, backup, hedge, provisional episode, or second correction.
     """
 
     coordinator = _PROVIDER_SLOT_COORDINATOR.get()
@@ -295,10 +295,7 @@ def fit_pre_provider_wait_timeout(
     turn_budget = _INTERACTIVE_TURN_BUDGET.get()
     if turn_budget is None:
         return default_seconds
-    available = (
-        turn_budget.first_provider_entry_remaining()
-        - provider_entry_reserve_seconds
-    )
+    available = turn_budget.first_provider_entry_remaining() - provider_entry_reserve_seconds
     return max(0.0, min(default_seconds, available))
 
 
@@ -387,10 +384,10 @@ class ValidationTechnicalFailure(RuntimeError):
     A truth reviewer may have exhausted its retry, or the role may have spent
     its one schema-correction choice and returned another invalid candidate.
     The failed candidate must not receive another candidate-local correction.
-    Deliberation may still use the one configured, independently audited role
-    recovery author defined by the Expression Reliability Lifecycle; that
-    recovery owns its own single correction budget and cannot erase this
-    candidate's terminal audit.
+    Production CharacterInterior records this as a technical failure and lets
+    the owning scheduler retry the same semantic author. Generic
+    historical/non-production Deliberation fixtures may install a separately
+    audited recovery candidate, which cannot erase this terminal audit.
     """
 
     def __init__(
@@ -441,12 +438,8 @@ def _validation_failure_with_preserved_attempt(
     attempted_model_id = getattr(exc, "attempted_model_id", None)
     attempted_model_version = getattr(exc, "attempted_model_version", None)
     usage = getattr(exc, "usage", None)
-    provider_subcall_audits = tuple(
-        getattr(exc, "provider_subcall_audits", ())
-    )
-    authored_candidate_audits = tuple(
-        getattr(exc, "authored_candidate_audits", ())
-    )
+    provider_subcall_audits = tuple(getattr(exc, "provider_subcall_audits", ()))
+    authored_candidate_audits = tuple(getattr(exc, "authored_candidate_audits", ()))
     if model_call_id is None:
         return ValidationTechnicalFailure(
             failure_code,
@@ -466,14 +459,12 @@ def _validation_failure_with_preserved_attempt(
 
 
 class RecoveryCandidateFailure(RuntimeError):
-    """Preserve the configured recovery author's terminal failure class.
+    """Preserve a non-production recovery candidate's terminal failure class.
 
-    Recovery adapters may need to clean up attempt-local state or try an
-    explicitly configured independent recovery model before returning to
-    Deliberation.  They must not collapse a bounded timeout or invalid model
-    result into a generic exception while doing so: the durable lifecycle uses
-    this class to retain the real terminal category without persisting raw
-    provider errors.
+    Production CharacterInterior does not install this candidate. Generic
+    adapters and historical fixtures may still need to clean up attempt-local
+    state; they must not collapse a bounded timeout or invalid result into a
+    generic exception while doing so.
     """
 
     def __init__(self, failure_kind: Literal["timeout", "invalid", "exception"]):
@@ -786,9 +777,7 @@ def _checked_output(value: object) -> ModelOutput:
                 for item in getattr(value, "physical_provider_audits", ())
             ),
             "provider_subcall_audits": tuple(
-                item.model_dump(mode="python")
-                if isinstance(item, ProviderSubcallAudit)
-                else item
+                item.model_dump(mode="python") if isinstance(item, ProviderSubcallAudit) else item
                 for item in getattr(value, "provider_subcall_audits", ())
             ),
             "authored_candidate_audits": tuple(
@@ -831,6 +820,61 @@ def _checked_output(value: object) -> ModelOutput:
         raw = value.get("raw_proposal") if isinstance(value, dict) else None
     _bounded_raw(material, label="model output")
     return ModelOutput.model_validate(material)
+
+
+def _strip_unbound_expression_evidence(
+    proposal: ProposalInput,
+    unbound_refs: set[str],
+) -> ProposalInput:
+    """Drop expression-plan claims that cite evidence the Capsule does not bind.
+
+    Returns the same object when nothing was strippable (non-expression
+    proposals keep failing closed).
+    """
+
+    if not isinstance(proposal, MinimalProposal) and not hasattr(
+        proposal, "proposed_changes"
+    ):
+        return proposal
+    modified = False
+    stripped_changes: list[object] = []
+    for change in proposal.proposed_changes:  # type: ignore[attr-defined]
+        if change.kind != "expression_plan_transition":
+            # Non-expression changes keep their evidence untouched: their
+            # refs are functional bindings, not strippable claims.
+            stripped_changes.append(change)
+            continue
+        payload = change.payload.value()
+        claims = payload.get("world_claims", [])
+        remaining = [
+            claim
+            for claim in claims
+            if not set(claim.get("source_refs", [])).intersection(unbound_refs)
+        ]
+        if len(remaining) == len(claims):
+            stripped_changes.append(change)
+            continue
+        modified = True
+        stripped_changes.append(
+            change.model_copy(
+                update={
+                    "payload": CanonicalTypedPayload.from_value(
+                        payload_schema=change.payload.payload_schema,
+                        value={**payload, "world_claims": remaining},
+                    ),
+                }
+            )
+        )
+    if not modified:
+        return proposal
+    return proposal.model_copy(  # type: ignore[attr-defined]
+        update={
+            "proposed_changes": tuple(stripped_changes),
+            "evidence_refs": tuple(
+                ref for ref in proposal.evidence_refs if ref.ref_id not in unbound_refs
+            ),
+        }
+    )
 
 
 def _checked_route(value: object) -> ModelRoute:
@@ -1127,6 +1171,10 @@ class ModelOutput(_FrozenModel):
     model_id: str = Field(min_length=1, max_length=256)
     model_version: str = Field(min_length=1, max_length=256)
     raw_proposal: dict[str, Any]
+    character_interior_lineage: RecordedCharacterInteriorTurnLineage | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     input_tokens: int | None = Field(default=None, ge=0, le=MAX_REPORTED_TOKENS)
     output_tokens: int | None = Field(default=None, ge=0, le=MAX_REPORTED_TOKENS)
     usage: ModelUsageProvenance | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -1196,14 +1244,26 @@ class ModelOutput(_FrozenModel):
             raise ValueError("model output usage tokens do not match token fields")
         if (self.winning_model_call_id is None) != (self.winning_request_hash is None):
             raise ValueError("winning provider invocation identity must be complete")
+        lineage = self.character_interior_lineage
+        if lineage is not None:
+            if (lineage.author_model_id, lineage.author_model_version) != (
+                self.model_id,
+                self.model_version,
+            ):
+                raise ValueError("CharacterInterior lineage changed the winning model identity")
+            if self.winning_model_call_id is not None and (
+                lineage.author_model_call_id != self.winning_model_call_id
+                or lineage.author_request_hash != f"sha256:{self.winning_request_hash}"
+            ):
+                raise ValueError(
+                    "CharacterInterior lineage changed the winning invocation identity"
+                )
         if (
             self.provider_parent_model_call_id is not None
             and self.provider_parent_model_call_id == self.winning_model_call_id
         ):
             raise ValueError("stream unit identity must differ from its provider parent")
-        if (self.provider_parent_model_call_id is None) != (
-            self.semantic_stream_part is None
-        ):
+        if (self.provider_parent_model_call_id is None) != (self.semantic_stream_part is None):
             raise ValueError("stream semantic part requires a physical provider parent")
         if self.physical_provider_audits:
             parent = self.physical_provider_audits[0]
@@ -1223,9 +1283,7 @@ class ModelOutput(_FrozenModel):
         subcall_ids = tuple(item.model_call_id for item in self.provider_subcall_audits)
         if len(subcall_ids) != len(set(subcall_ids)):
             raise ValueError("provider subcalls require distinct invocation identities")
-        candidate_ids = tuple(
-            item.model_call_id for item in self.authored_candidate_audits
-        )
+        candidate_ids = tuple(item.model_call_id for item in self.authored_candidate_audits)
         if len(candidate_ids) != len(set(candidate_ids)):
             raise ValueError("authored candidates require distinct invocation identities")
         all_call_ids = (
@@ -1243,9 +1301,7 @@ class ModelOutput(_FrozenModel):
             or item.parent_model_call_id == item.model_call_id
             for item in self.provider_subcall_audits
         ):
-            raise ValueError(
-                "provider subcall parent is not a captured authored candidate"
-            )
+            raise ValueError("provider subcall parent is not a captured authored candidate")
         return self
 
 
@@ -1260,9 +1316,7 @@ class DeliberationModelAdapter(Protocol):
 class QuickRecoveryAdapter(Protocol):
     async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput: ...
 
-    async def recover_stream_head(
-        self, request: ModelInput, failure_code: str
-    ) -> ModelOutput: ...
+    async def recover_stream_head(self, request: ModelInput, failure_code: str) -> ModelOutput: ...
 
 
 class ProposalGrammar(Protocol):
@@ -1303,8 +1357,7 @@ def _map_terminal_validation_failure(
     return _TerminalValidationAudit(
         status=(
             "main_timeout"
-            if failure_code
-            in {"source_review_timeout", "authored_subcall_timeout"}
+            if failure_code in {"source_review_timeout", "authored_subcall_timeout"}
             else "main_exception"
         ),
         failure_code=failure_code,
@@ -1351,6 +1404,10 @@ class ModelResultAudit(_FrozenModel):
     )
     request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     response_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    character_interior_lineage: RecordedCharacterInteriorTurnLineage | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     status: AuditStatus
     failure_code: str | None = Field(default=None, max_length=64)
     slot: Literal["primary", "backup", "corrective"] | None = Field(
@@ -1530,8 +1587,8 @@ class ModelResultAudit(_FrozenModel):
             },
         }.get(self.status)
         provider_failure_type, separator, provider_failure_detail = (
-            (self.failure_code or "").partition(":")
-        )
+            self.failure_code or ""
+        ).partition(":")
         typed_provider_subcall_failure = (
             self.route.router_version == "provider-subcall-audit.1"
             and self.outcome in {"timeout", "exception"}
@@ -1549,9 +1606,7 @@ class ModelResultAudit(_FrozenModel):
                             separator == ":"
                             and provider_failure_detail.startswith("http_")
                             and provider_failure_detail.removeprefix("http_").isdigit()
-                            and 100
-                            <= int(provider_failure_detail.removeprefix("http_"))
-                            <= 599
+                            and 100 <= int(provider_failure_detail.removeprefix("http_")) <= 599
                         )
                     )
                 )
@@ -1561,11 +1616,7 @@ class ModelResultAudit(_FrozenModel):
             if not has_output or self.failure_code is not None:
                 raise ValueError("validated proposal audit requires output and no failure")
         elif self.status == "candidate_returned":
-            if (
-                not has_output
-                or self.failure_code is not None
-                or self.outcome != "returned"
-            ):
+            if not has_output or self.failure_code is not None or self.outcome != "returned":
                 raise ValueError(
                     "returned candidate audit requires output without semantic acceptance"
                 )
@@ -1747,7 +1798,7 @@ class Deliberation:
         *,
         router: ModelRouterAdapter,
         main_model: DeliberationModelAdapter,
-        quick_recovery: QuickRecoveryAdapter,
+        quick_recovery: QuickRecoveryAdapter | None = None,
         # Interactive expression is deliberately latency-bounded.  A slow
         # provider must not hold a human conversation open while the host
         # still retains the full audit/recovery path.  Six seconds leaves
@@ -1758,7 +1809,7 @@ class Deliberation:
         technical_recovery_enabled: bool = True,
         proposal_grammar: ProposalGrammar | None = None,
         recovery_mode: Literal["minimal_only", "proposal_grammar"] = "minimal_only",
-        expression_episode_mode: Literal["off", "shadow", "on", "stream"] = "off",
+        expression_episode_mode: Literal["off", "shadow", "stream"] = "off",
         expression_episode_diagnostics: ExpressionEpisodeDiagnostics | None = None,
         expression_episode_grammar: ProposalGrammar | None = None,
     ) -> None:
@@ -1766,6 +1817,8 @@ class Deliberation:
             raise ValueError("main model timeout is out of bounds")
         if not 0 < quick_timeout_seconds <= 30:
             raise ValueError("quick recovery timeout is out of bounds")
+        if expression_episode_mode not in {"off", "shadow", "stream"}:
+            raise ValueError("expression episode mode must be off, shadow, or stream")
         self._router = router
         self._main = main_model
         self._quick = quick_recovery
@@ -1787,9 +1840,7 @@ class Deliberation:
         self._shadow_observer_provider_tasks: set[asyncio.Task[object]] = set()
         self._episode_tail_tasks: dict[str, asyncio.Task[EpisodeTailResult | None]] = {}
         self._episode_tail_superseded: dict[str, asyncio.Event] = {}
-        self._episode_tail_fallbacks: dict[
-            str, Callable[[bool, str], EpisodeTailResult]
-        ] = {}
+        self._episode_tail_fallbacks: dict[str, Callable[[bool, str], EpisodeTailResult]] = {}
         self._detached_episode_tail_tasks: set[asyncio.Task[object]] = set()
         # An inbound attention change can happen while an older author head is
         # still validating, before its continuation has entered the registry.
@@ -1851,9 +1902,7 @@ class Deliberation:
         self._stream_attention_epoch += 1
         cancelled: list[asyncio.Task[EpisodeTailResult | None]] = []
         trigger_by_task: dict[asyncio.Task[object], str] = {}
-        fallback_by_task: dict[
-            asyncio.Task[object], Callable[[bool, str], EpisodeTailResult]
-        ] = {}
+        fallback_by_task: dict[asyncio.Task[object], Callable[[bool, str], EpisodeTailResult]] = {}
         for trigger_ref, task in tuple(self._episode_tail_tasks.items()):
             if trigger_ref == current_trigger_ref:
                 continue
@@ -1934,7 +1983,7 @@ class Deliberation:
         return trigger_ref in self._episode_tail_tasks
 
     @property
-    def expression_episode_mode(self) -> Literal["off", "shadow", "on", "stream"]:
+    def expression_episode_mode(self) -> Literal["off", "shadow", "stream"]:
         return self._expression_episode_mode
 
     async def deliberate(
@@ -2001,9 +2050,7 @@ class Deliberation:
             and type(affect_target_bounds) is not AffectTargetLowerBounds
         ):
             raise TypeError("affect target bounds must use the exact pinned contract")
-        if first_role_provider_marker is not None and not callable(
-            first_role_provider_marker
-        ):
+        if first_role_provider_marker is not None and not callable(first_role_provider_marker):
             raise TypeError("first role-provider marker must be callable")
         if first_role_provider_completion_marker is not None and not callable(
             first_role_provider_completion_marker
@@ -2058,9 +2105,7 @@ class Deliberation:
                 trigger_evidence=trigger_evidence,
                 budget=budget,
                 first_role_provider_marker=first_role_provider_marker,
-                first_role_provider_completion_marker=(
-                    first_role_provider_completion_marker
-                ),
+                first_role_provider_completion_marker=(first_role_provider_completion_marker),
                 first_role_provider_token_marker=first_role_provider_token_marker,
                 stream_attention_epoch=stream_attention_epoch,
             )
@@ -2072,9 +2117,7 @@ class Deliberation:
         try:
             deadline_token = _ATTEMPT_DEADLINE.set(time.monotonic() + self._main_timeout)
             slot_token = _PROVIDER_SLOT_COORDINATOR.set(slot_coordinator)
-            marker_token = _FIRST_ROLE_PROVIDER_MARKER.set(
-                first_role_provider_marker
-            )
+            marker_token = _FIRST_ROLE_PROVIDER_MARKER.set(first_role_provider_marker)
             completion_marker_token = _FIRST_ROLE_PROVIDER_COMPLETION_MARKER.set(
                 first_role_provider_completion_marker
             )
@@ -2093,13 +2136,13 @@ class Deliberation:
                         )
                     )
             finally:
-                _FIRST_ROLE_PROVIDER_COMPLETION_MARKER.reset(
-                    completion_marker_token
-                )
+                _FIRST_ROLE_PROVIDER_COMPLETION_MARKER.reset(completion_marker_token)
                 _FIRST_ROLE_PROVIDER_MARKER.reset(marker_token)
                 _PROVIDER_SLOT_COORDINATOR.reset(slot_token)
                 _ATTEMPT_DEADLINE.reset(deadline_token)
-            proposal = self._validated_proposal(output, trusted, trigger_evidence=trigger_evidence)
+            proposal = self._validated_proposal(
+                output, trusted, trigger_evidence=trigger_evidence, trigger_message=model_input.trigger_message
+            )
             proposal = self._bind_minimal_model_result(proposal, call_id, output)
             status: AuditStatus = "proposal_validated"
         except ValidationTechnicalFailure as exc:
@@ -2137,9 +2180,7 @@ class Deliberation:
             recovered_status = "main_timeout_recovered"
         except (ValueError, TypeError) as exc:
             failure_code = "main_invalid_output"
-            recovery_failure_reason = (
-                f"{failure_code}:{type(exc).__name__}:{str(exc)[:384]}"
-            )
+            recovery_failure_reason = f"{failure_code}:{type(exc).__name__}:{str(exc)[:384]}"
             recovered_status = "main_invalid_recovered"
             _LOG.warning(
                 "deliberation main attempt invalid call=%s trigger=%s error=%s: %s",
@@ -2174,8 +2215,18 @@ class Deliberation:
                 output=output,
                 status=main_status,
                 failure_code=failure_code,
+                slot=("primary" if not self._technical_recovery_enabled else None),
+                outcome=(
+                    {
+                        "main_timeout": "timeout",
+                        "main_invalid_output": "invalid",
+                        "main_exception": "exception",
+                    }[failure_code or "main_exception"]
+                    if not self._technical_recovery_enabled
+                    else None
+                ),
             )
-            if not self._technical_recovery_enabled:
+            if not self._technical_recovery_enabled or self._quick is None:
                 return self._result(
                     trusted,
                     proposal=None,
@@ -2188,9 +2239,7 @@ class Deliberation:
             quick_output: ModelOutput | None = None
             try:
                 quick_deadline_token = _ATTEMPT_DEADLINE.set(time.monotonic() + self._quick_timeout)
-                marker_token = _FIRST_ROLE_PROVIDER_MARKER.set(
-                    first_role_provider_marker
-                )
+                marker_token = _FIRST_ROLE_PROVIDER_MARKER.set(first_role_provider_marker)
                 completion_marker_token = _FIRST_ROLE_PROVIDER_COMPLETION_MARKER.set(
                     first_role_provider_completion_marker
                 )
@@ -2204,9 +2253,7 @@ class Deliberation:
                             await self._with_deadline(
                                 self._quick.recover(
                                     quick_input,
-                                    recovery_failure_reason
-                                    or failure_code
-                                    or "main_failure",
+                                    recovery_failure_reason or failure_code or "main_failure",
                                 ),
                                 timeout=self._quick_timeout,
                                 label=quick_call_id,
@@ -2214,9 +2261,7 @@ class Deliberation:
                             )
                         )
                 finally:
-                    _FIRST_ROLE_PROVIDER_COMPLETION_MARKER.reset(
-                        completion_marker_token
-                    )
+                    _FIRST_ROLE_PROVIDER_COMPLETION_MARKER.reset(completion_marker_token)
                     _FIRST_ROLE_PROVIDER_MARKER.reset(marker_token)
                     _ATTEMPT_DEADLINE.reset(quick_deadline_token)
                 proposal = self._validated_proposal(
@@ -2224,6 +2269,7 @@ class Deliberation:
                     trusted,
                     minimal_only=self._recovery_mode == "minimal_only",
                     trigger_evidence=trigger_evidence,
+                    trigger_message=model_input.trigger_message,
                 )
                 proposal = self._bind_minimal_model_result(proposal, quick_call_id, quick_output)
                 status = recovered_status
@@ -2337,9 +2383,7 @@ class Deliberation:
             output: ModelOutput | None = None
             token = _ATTEMPT_DEADLINE.set(candidate_deadline)
             turn_budget_token = _INTERACTIVE_TURN_BUDGET.set(budget)
-            marker_token = _FIRST_ROLE_PROVIDER_MARKER.set(
-                first_role_provider_marker
-            )
+            marker_token = _FIRST_ROLE_PROVIDER_MARKER.set(first_role_provider_marker)
             completion_marker_token = _FIRST_ROLE_PROVIDER_COMPLETION_MARKER.set(
                 first_role_provider_completion_marker
             )
@@ -2375,6 +2419,7 @@ class Deliberation:
                     minimal_only=minimal_only,
                     trigger_evidence=trigger_evidence,
                     proposal_grammar_override=proposal_grammar_override,
+                    trigger_message=model_input.trigger_message,
                 )
                 proposal = self._bind_minimal_model_result(proposal, call_id, output)
                 return proposal, output, None
@@ -2415,20 +2460,24 @@ class Deliberation:
                 # cancellation of the inbound request itself.
                 return None, output, "cancelled"
             except Exception as exc:
+                cause = exc
+                chain: list[str] = []
+                while cause is not None and len(chain) < 5:
+                    chain.append(f"{type(cause).__name__}: {str(cause)[:200]}")
+                    cause = cause.__cause__
                 _LOG.warning(
                     "deliberation candidate raised call=%s trigger=%s error=%s: %s",
                     call_id,
                     trusted.trigger_ref,
                     type(exc).__name__,
-                    str(exc)[:500],
+                    " -> ".join(chain)[:800],
+                    exc_info=True,
                 )
                 return None, output, "exception"
             finally:
                 if validation_token is not None:
                     _VALIDATION_ATTEMPT.reset(validation_token)
-                _FIRST_ROLE_PROVIDER_COMPLETION_MARKER.reset(
-                    completion_marker_token
-                )
+                _FIRST_ROLE_PROVIDER_COMPLETION_MARKER.reset(completion_marker_token)
                 _FIRST_ROLE_PROVIDER_TOKEN_MARKER.reset(first_token_marker_token)
                 _FIRST_ROLE_PROVIDER_MARKER.reset(marker_token)
                 _INTERACTIVE_TURN_BUDGET.reset(turn_budget_token)
@@ -2438,29 +2487,21 @@ class Deliberation:
         slot_coordinator = _ProviderSlotCoordinator()
         isolated_shadow_episode = self._expression_episode_mode == "shadow"
         unit_stream_episode = self._expression_episode_mode == "stream"
-        provisional_operation = getattr(
-            self._main,
-            (
-                "propose_shadow_observer"
-                if isolated_shadow_episode
-                else "propose_stream_tail"
-                if unit_stream_episode
-                else "propose_provisional"
-            ),
-            None,
+        provisional_operation = (
+            getattr(self._main, "propose_shadow_observer", None)
+            if isolated_shadow_episode
+            else getattr(self._main, "propose_stream_tail", None)
+            if unit_stream_episode
+            else None
         )
         already_evaluated = getattr(self._main, "episode_provisional_already_evaluated", None)
         source_closure_enabled = getattr(self._main, "source_closure_review_enabled", None)
-        provisional_provider_available = getattr(
-            self._main,
-            (
-                "shadow_observer_provider_available"
-                if isolated_shadow_episode
-                else "stream_provider_available"
-                if unit_stream_episode
-                else "provisional_provider_available"
-            ),
-            None,
+        provisional_provider_available = (
+            getattr(self._main, "shadow_observer_provider_available", None)
+            if isolated_shadow_episode
+            else getattr(self._main, "stream_provider_available", None)
+            if unit_stream_episode
+            else None
         )
         source_closure_review_active = bool(
             callable(source_closure_enabled) and source_closure_enabled()
@@ -2484,19 +2525,21 @@ class Deliberation:
             self._expression_episode_mode != "off"
             and callable(provisional_operation)
             and (
-                unit_stream_episode
-                or not callable(provisional_provider_available)
-                or provisional_provider_available(model_input)
+                (
+                    callable(provisional_provider_available)
+                    and provisional_provider_available(model_input)
+                )
+                if unit_stream_episode
+                else (
+                    not callable(provisional_provider_available)
+                    or provisional_provider_available(model_input)
+                )
             )
             # An authoritative provisional cannot bypass source closure.  A
             # shadow candidate is observational only, however, so always run
             # it with an isolated slot coordinator that cannot consume or
             # suppress Recall, factual review, or correction on the full lane.
-            and (
-                not source_closure_review_active
-                or isolated_shadow_episode
-                or unit_stream_episode
-            )
+            and (not source_closure_review_active or isolated_shadow_episode or unit_stream_episode)
             and not (callable(already_evaluated) and already_evaluated(model_input))
         )
         episode_started_at = budget.clock()
@@ -2568,6 +2611,15 @@ class Deliberation:
             _PROVIDER_SLOT_COORDINATOR.reset(slot_token)
         backup_task: (
             asyncio.Task[tuple[ProposalInput | None, ModelOutput | None, str | None]] | None
+        ) = None
+        backup_role: (
+            Literal[
+                "stream_tail",
+                "provisional",
+                "hedge",
+                "technical_recovery",
+            ]
+            | None
         ) = None
         primary_result: tuple[ProposalInput | None, ModelOutput | None, str | None] | None = None
         primary_timing_recorded = False
@@ -2659,6 +2711,9 @@ class Deliberation:
         ) -> bool:
             nonlocal backup_task, backup_call_id, backup_input, backup_request_hash
             nonlocal backup_validation, corrective_claimed_before_backup, deadline_timer
+            nonlocal backup_role
+            if self._quick is None:
+                return False
             if backup_task is not None:
                 return False
             recovery_operation = (
@@ -2736,16 +2791,48 @@ class Deliberation:
                         validation_state=backup_validation,
                     )
                 )
+                backup_role = "technical_recovery" if after_actual_failure else "hedge"
             finally:
                 _PROVIDER_SLOT_COORDINATOR.reset(token)
             return True
 
-        if episode_enabled and not isolated_shadow_episode and (
-            unit_stream_episode or slot_coordinator.claim_second("backup")
-        ):
-            slot_coordinator.episode_reserved = not unit_stream_episode
-            budget.mark("provisional")
-            backup_call_id = f"model-call:{_digest({**call_identity, 'lane': 'provisional'})}"
+        async def retire_initial_stream_tail() -> None:
+            """Cancel the original continuation before opening head recovery.
+
+            The unit-stream continuation shares ``backup_task`` storage with a
+            technical recovery candidate, but it is not a recovery candidate:
+            without an accepted head it can never win or append.  Clear its
+            result and invocation identity only after cancellation has been
+            observed so the recovery task cannot inherit or splice that tail.
+            """
+
+            nonlocal backup_task, backup_result, backup_call_id, backup_input
+            nonlocal backup_request_hash, backup_validation, backup_role
+            if backup_role != "stream_tail":
+                return
+            stream_tail = backup_task
+            stream_tail_input = backup_input
+            if stream_tail is not None:
+                if stream_tail.done():
+                    await asyncio.gather(stream_tail, return_exceptions=True)
+                else:
+                    await self._cancel_and_observe_expression_tail_tasks(
+                        (stream_tail,),
+                        reason="stream head failed before acceptance",
+                    )
+            discard_candidate = getattr(self._main, "discard_candidate", None)
+            if callable(discard_candidate) and stream_tail_input is not None:
+                discard_candidate(stream_tail_input)
+            backup_task = None
+            backup_result = None
+            backup_call_id = None
+            backup_input = None
+            backup_request_hash = None
+            backup_validation = None
+            backup_role = None
+
+        if episode_enabled and unit_stream_episode:
+            backup_call_id = f"model-call:{_digest({**call_identity, 'lane': 'stream_tail'})}"
             backup_input = model_input.model_copy(update={"call_id": backup_call_id})
             backup_request_hash = _digest(backup_input.model_dump(mode="json"))
             token = _PROVIDER_SLOT_COORDINATOR.set(slot_coordinator)
@@ -2757,13 +2844,10 @@ class Deliberation:
                         minimal_only=False,
                         lane="quick",
                         candidate_deadline=primary_author_deadline,
-                        proposal_grammar_override=(
-                            None
-                            if unit_stream_episode
-                            else self._expression_episode_grammar
-                        ),
+                        proposal_grammar_override=None,
                     )
                 )
+                backup_role = "stream_tail"
             finally:
                 _PROVIDER_SLOT_COORDINATOR.reset(token)
 
@@ -2813,9 +2897,7 @@ class Deliberation:
                                     reason="attention changed before head acceptance",
                                 )
                                 backup_task = None
-                            discard_candidate = getattr(
-                                self._main, "discard_candidate", None
-                            )
+                            discard_candidate = getattr(self._main, "discard_candidate", None)
                             if callable(discard_candidate):
                                 discard_candidate(model_input)
                             stale_audit = self._audit(
@@ -2841,7 +2923,7 @@ class Deliberation:
                             accept_candidate(model_input)
                         start_isolated_shadow()
                         loser_audit: ModelResultAudit | None = None
-                        if backup_task is not None and unit_stream_episode:
+                        if backup_task is not None and backup_role == "stream_tail":
                             continuing_tail = backup_task
                             tail_call_id = backup_call_id
                             tail_request_hash = backup_request_hash
@@ -2849,14 +2931,11 @@ class Deliberation:
                             assert head_output is not None
                             parent_call_id = head_output.provider_parent_model_call_id
                             parent_request_hash = head_output.winning_request_hash
-                            tail_semantic_call_id = (
-                                "model-call:"
-                                + _digest(
-                                    {
-                                        "provider_call_id": parent_call_id,
-                                        "unit": "tail",
-                                    }
-                                )
+                            tail_semantic_call_id = "model-call:" + _digest(
+                                {
+                                    "provider_call_id": parent_call_id,
+                                    "unit": "tail",
+                                }
                             )
 
                             def incomplete_stream_result(
@@ -2872,9 +2951,7 @@ class Deliberation:
                                     model_version=head_output.model_version,
                                     outcome="cancelled" if cancelled else "unresolved",
                                     failure_code=failure_code,
-                                    usage_status=(
-                                        "cancelled" if cancelled else "unresolved"
-                                    ),
+                                    usage_status=("cancelled" if cancelled else "unresolved"),
                                     semantic_model_call_ids=(
                                         head_output.winning_model_call_id,
                                         tail_semantic_call_id,
@@ -2884,9 +2961,7 @@ class Deliberation:
                                     model_call_id=tail_semantic_call_id,
                                     parent_model_call_id=parent_call_id,
                                     semantic_stream_part="tail",
-                                    model_result_ref=_model_result_ref(
-                                        tail_semantic_call_id, None
-                                    ),
+                                    model_result_ref=_model_result_ref(tail_semantic_call_id, None),
                                     attempt_id=attempt_id,
                                     route=route,
                                     attempted_model_id=head_output.model_id,
@@ -2940,22 +3015,18 @@ class Deliberation:
                                     else "main_exception"
                                 )
                                 invalid_outcome: Literal["invalid", "exception"] = (
-                                    "invalid"
-                                    if invalid_status == "main_invalid"
-                                    else "exception"
+                                    "invalid" if invalid_status == "main_invalid" else "exception"
                                 )
                                 physical = tail_output.physical_provider_audits
                                 if (
                                     tail_output.semantic_stream_part == "tail"
-                                    and tail_output.provider_parent_model_call_id
-                                    == parent_call_id
+                                    and tail_output.provider_parent_model_call_id == parent_call_id
                                 ):
                                     invalid_audit = self._audit(
                                         model_call_id=tail_call_id or tail_semantic_call_id,
                                         attempt_id=attempt_id,
                                         route=route,
-                                        request_hash=tail_request_hash
-                                        or parent_request_hash,
+                                        request_hash=tail_request_hash or parent_request_hash,
                                         output=tail_output,
                                         status=invalid_status,
                                         failure_code=normalized_failure,
@@ -3006,9 +3077,7 @@ class Deliberation:
                                     )
 
                                 try:
-                                    tail_proposal, tail_output, tail_failure = (
-                                        await continuing_tail
-                                    )
+                                    tail_proposal, tail_output, tail_failure = await continuing_tail
                                 except asyncio.CancelledError:
                                     return incomplete_stream_result(
                                         True,
@@ -3052,12 +3121,10 @@ class Deliberation:
                                             update={"physical_provider_audits": ()}
                                         )
                                         corrected_audit = self._audit(
-                                            model_call_id=tail_call_id
-                                            or tail_semantic_call_id,
+                                            model_call_id=tail_call_id or tail_semantic_call_id,
                                             attempt_id=attempt_id,
                                             route=route,
-                                            request_hash=tail_request_hash
-                                            or parent_request_hash,
+                                            request_hash=tail_request_hash or parent_request_hash,
                                             output=corrected_output,
                                             status="main_invalid_recovered",
                                             failure_code="main_invalid_output",
@@ -3101,8 +3168,7 @@ class Deliberation:
                                         "stream_author_identity_changed",
                                     )
                                 disposition = (
-                                    tail_output.episode_disposition
-                                    or "complete_without_more"
+                                    tail_output.episode_disposition or "complete_without_more"
                                 )
                                 assert tail_call_id is not None
                                 assert tail_request_hash is not None
@@ -3114,16 +3180,14 @@ class Deliberation:
                                     output=tail_output,
                                     status=(
                                         "proposal_validated"
-                                        if disposition == "append"
-                                        and tail_proposal is not None
+                                        if disposition == "append" and tail_proposal is not None
                                         else "candidate_returned"
                                     ),
                                     failure_code=None,
                                     slot="backup",
                                     outcome=(
                                         "winner"
-                                        if disposition == "append"
-                                        and tail_proposal is not None
+                                        if disposition == "append" and tail_proposal is not None
                                         else "returned"
                                     ),
                                 )
@@ -3132,9 +3196,7 @@ class Deliberation:
                                     deliberation=self._result(
                                         trusted,
                                         proposal=(
-                                            tail_proposal
-                                            if disposition == "append"
-                                            else None
+                                            tail_proposal if disposition == "append" else None
                                         ),
                                         audit=tail_audit,
                                         attempt_audits=(tail_audit,),
@@ -3152,13 +3214,12 @@ class Deliberation:
                                     self._episode_tail_fallbacks[trusted.trigger_ref] = (
                                         incomplete_stream_result
                                     )
-                                self._episode_tail_tasks[trusted.trigger_ref] = (
-                                    asyncio.create_task(
-                                        finish_stream_tail(),
-                                        name=f"expression-stream-tail:{trusted.trigger_ref}",
-                                    )
+                                self._episode_tail_tasks[trusted.trigger_ref] = asyncio.create_task(
+                                    finish_stream_tail(),
+                                    name=f"expression-stream-tail:{trusted.trigger_ref}",
                                 )
                             backup_task = None
+                            backup_role = None
                         elif backup_task is not None and self._expression_episode_mode == "shadow":
                             if backup_task.done():
                                 record_episode(backup_task.result(), winner="provisional")
@@ -3252,13 +3313,23 @@ class Deliberation:
                     discard_candidate = getattr(self._main, "discard_candidate", None)
                     if callable(discard_candidate):
                         discard_candidate(model_input)
-                    start_backup(
+                    await retire_initial_stream_tail()
+                    recovery_started = start_backup(
                         primary_failure_for_recovery,
                         after_actual_failure=True,
-                        recovery_failure_detail=candidate_failure_details.get(
-                            primary_call_id
+                        recovery_failure_detail=(
+                            None
+                            if primary_failure_for_recovery == "corrective_invalid"
+                            else candidate_failure_details.get(primary_call_id)
                         ),
                     )
+                    if not recovery_started and backup_task is None:
+                        # Production CharacterInterior installs no recovery
+                        # author. Once its sole candidate has a terminal
+                        # technical failure, return that audit immediately;
+                        # waiting for the overall turn deadline would only
+                        # turn a fast, retryable failure into a long hang.
+                        break
                     if (
                         self._expression_episode_mode == "shadow"
                         and backup_result is not None
@@ -3272,7 +3343,7 @@ class Deliberation:
                 if backup_task is not None and backup_task in done and backup_result is None:
                     backup_result = backup_task.result()
                     proposal, output, failure = backup_result
-                    if unit_stream_episode:
+                    if backup_role == "stream_tail":
                         # Tail units are never an independent winner.  They can
                         # only append after the validated head from the same
                         # provider stream has become authoritative.
@@ -3288,74 +3359,6 @@ class Deliberation:
                         accept_candidate = getattr(self._quick, "accept_candidate", None)
                         if callable(accept_candidate) and backup_input is not None:
                             accept_candidate(backup_input)
-                        if (
-                            self._expression_episode_mode == "on"
-                            and primary_result is None
-                            and not primary_task.done()
-                        ):
-                            continuing_primary = primary_task
-
-                            async def finish_full_tail() -> EpisodeTailResult | None:
-                                full_proposal, full_output, full_failure = await continuing_primary
-                                if self._episode_diagnostics is not None:
-                                    self._episode_diagnostics.record_full(
-                                        (budget.clock() - budget.started_at) * 1_000
-                                    )
-                                if full_failure is not None or full_output is None:
-                                    return EpisodeTailResult(
-                                        disposition="complete_without_more",
-                                        failure_code=full_failure or "missing_output",
-                                    )
-                                disposition = (
-                                    full_output.episode_disposition or "complete_without_more"
-                                )
-                                if disposition != "append" or full_proposal is None:
-                                    return EpisodeTailResult(disposition=disposition)
-                                full_audit = self._audit(
-                                    model_call_id=primary_call_id,
-                                    attempt_id=attempt_id,
-                                    route=route,
-                                    request_hash=request_hash,
-                                    output=full_output,
-                                    status="proposal_validated",
-                                    failure_code=None,
-                                    slot="primary",
-                                    outcome="winner",
-                                )
-                                return EpisodeTailResult(
-                                    disposition="append",
-                                    deliberation=self._result(
-                                        trusted,
-                                        proposal=full_proposal,
-                                        audit=full_audit,
-                                        attempt_audits=(full_audit,),
-                                    ),
-                                )
-                            self._episode_tail_superseded[trusted.trigger_ref] = asyncio.Event()
-                            self._episode_tail_tasks[trusted.trigger_ref] = asyncio.create_task(
-                                finish_full_tail(),
-                                name=f"expression-tail:{trusted.trigger_ref}",
-                            )
-                            primary_task = None
-                            assert backup_call_id is not None and backup_request_hash is not None
-                            provisional_audit = self._audit(
-                                model_call_id=backup_call_id,
-                                attempt_id=attempt_id,
-                                route=route,
-                                request_hash=backup_request_hash,
-                                output=output,
-                                status="proposal_validated",
-                                failure_code=None,
-                                slot="backup",
-                                outcome="winner",
-                            )
-                            budget.mark("winner")
-                            return self._result(
-                                trusted,
-                                proposal=proposal,
-                                audit=provisional_audit,
-                                attempt_audits=(provisional_audit,),
-                            )
                         discard_candidate = getattr(self._main, "discard_candidate", None)
                         if callable(discard_candidate):
                             discard_candidate(model_input)
@@ -3368,9 +3371,7 @@ class Deliberation:
                             primary_result = (None, None, "timeout")
                         main_output = primary_result[1]
                         main_failure = primary_result[2]
-                        technical_failure = terminal_validation_failures.get(
-                            primary_call_id
-                        )
+                        technical_failure = terminal_validation_failures.get(primary_call_id)
                         if technical_failure is None:
                             main_status: AuditStatus = {
                                 "invalid": "main_invalid",
@@ -3391,9 +3392,7 @@ class Deliberation:
                                 ),
                             }.get(main_failure or "", "primary_timeout")
                             main_slot: Literal["primary", "corrective"] = (
-                                "corrective"
-                                if corrective_claimed_before_backup
-                                else "primary"
+                                "corrective" if corrective_claimed_before_backup else "primary"
                             )
                             main_outcome = (
                                 "hedge_cancelled"
@@ -3430,21 +3429,11 @@ class Deliberation:
                             "source_review_timeout": "main_timeout_recovered",
                             "authored_subcall_timeout": "main_timeout_recovered",
                             "source_review_exception": "main_exception_recovered",
-                            "authored_subcall_exception": (
-                                "main_exception_recovered"
-                            ),
-                            "recall_choice_reselection_invalid": (
-                                "main_exception_recovered"
-                            ),
-                            "authored_expression_reselection_invalid": (
-                                "main_exception_recovered"
-                            ),
-                            "proactive_claim_binding_invalid": (
-                                "main_exception_recovered"
-                            ),
-                            "affect_target_reselection_invalid": (
-                                "main_exception_recovered"
-                            ),
+                            "authored_subcall_exception": ("main_exception_recovered"),
+                            "recall_choice_reselection_invalid": ("main_exception_recovered"),
+                            "authored_expression_reselection_invalid": ("main_exception_recovered"),
+                            "proactive_claim_binding_invalid": ("main_exception_recovered"),
+                            "affect_target_reselection_invalid": ("main_exception_recovered"),
                             "inventory_invalid": "main_exception_recovered",
                             "coverage_invalid": "main_exception_recovered",
                         }[main_failure_code]
@@ -3524,6 +3513,7 @@ class Deliberation:
                         discard_candidate = getattr(self._main, "discard_candidate", None)
                         if callable(discard_candidate):
                             discard_candidate(model_input)
+                        await retire_initial_stream_tail()
                         if start_backup(
                             primary_failure_for_recovery,
                             after_actual_failure=True,
@@ -3626,31 +3616,6 @@ class Deliberation:
             for task in (primary_task, hedge_timer, deadline_timer, backup_task):
                 if task is not None and not task.done():
                     task.cancel()
-
-    def main_has_precomputed_advisory(
-        self,
-        *,
-        trigger_ref: str,
-        observation_ref: str,
-        event_payload_hash: str,
-    ) -> bool:
-        """Report whether main already incorporated this trigger's advice.
-
-        This is a read-only performance hint, never proposal or acceptance
-        authority.  Adapters without a paired prepass simply return False.
-        """
-
-        checker = getattr(self._main, "has_precomputed_semantic_advisory", None)
-        if not callable(checker):
-            checker = getattr(self._main, "has_precomputed_advisory", None)
-        return bool(
-            callable(checker)
-            and checker(
-                trigger_ref=trigger_ref,
-                observation_ref=observation_ref,
-                event_payload_hash=event_payload_hash,
-            )
-        )
 
     async def _route(self, request: RouteRequest) -> ModelRoute:
         try:
@@ -3884,6 +3849,7 @@ class Deliberation:
         minimal_only: bool = False,
         trigger_evidence: tuple[ProposalEvidenceRef, ...] = (),
         proposal_grammar_override: ProposalGrammar | None = None,
+        trigger_message: TriggerMessage | None = None,
     ) -> ProposalInput:
         checked = _checked_output(output)
         proposal = validate_proposal_envelope(checked.raw_proposal)
@@ -3894,6 +3860,19 @@ class Deliberation:
         if minimal_only and not isinstance(proposal, MinimalProposal):
             raise ValueError("quick recovery may only return MinimalProposal")
         bindings_by_ref: dict[str, set[tuple[str, str, int, str]]] = {}
+        if trigger_message is not None and trigger_message.event_ref:
+            # The ingress observation event is a committed ledger event with
+            # the same authority as the observation ref passed separately in
+            # trigger_evidence. Decision proposals authored from the trigger
+            # cite the event-level ref; bind it so those references validate.
+            bindings_by_ref.setdefault(trigger_message.event_ref, set()).add(
+                (
+                    "committed_event",
+                    "observation_trigger",
+                    trigger_message.source_world_revision,
+                    trigger_message.event_payload_hash.removeprefix("sha256:"),
+                )
+            )
         for binding in (
             binding
             for name in (
@@ -4016,6 +3995,7 @@ class Deliberation:
                             binding.immutable_hash,
                         )
                     )
+        unbound_refs: set[str] = set()
         for evidence in proposal.evidence_refs:
             if evidence in trigger_evidence:
                 continue
@@ -4026,21 +4006,65 @@ class Deliberation:
                 for source_kind, authority_type, revision, immutable_hash in matches
                 if revision == evidence.source_world_revision and immutable_hash == evidence_hash
             }
-            if not exact:
-                raise ValueError("proposal evidence authority is absent from the frozen Capsule")
-            allowed_kinds = {
-                (
-                    "settled_external_result"
-                    if source_kind == "execution_receipt"
-                    else _EVENT_EVIDENCE_KIND.get(authority_type, "committed_world_event")
-                    if source_kind == "committed_event"
-                    and not authority_type.startswith("situation_source:")
-                    else None
+            allowed_kinds = (
+                {
+                    (
+                        "settled_external_result"
+                        if source_kind == "execution_receipt"
+                        else _EVENT_EVIDENCE_KIND.get(authority_type, "committed_world_event")
+                        if source_kind == "committed_event"
+                        and not authority_type.startswith("situation_source:")
+                        else None
+                    )
+                    for source_kind, authority_type in exact
+                }
+                if exact
+                else set()
+            )
+            if not exact or evidence.evidence_kind not in allowed_kinds:
+                unbound_refs.add(evidence.ref_id)
+        if unbound_refs:
+            # The author model can cite a well-formed ref that the frozen
+            # Capsule does not bind (e.g. the observation trigger event
+            # instead of the clock-tick trigger event). The lane-closure
+            # strip at materialization cannot see this, so degrade here:
+            # drop the claims that cite the unbound evidence and keep the
+            # reply. A fabricated fact never reaches the World ledger.
+            stripped = _strip_unbound_expression_evidence(proposal, unbound_refs)
+            if stripped is not proposal:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "stripped %d unbound evidence claim(s) to keep the reply refs=%s",
+                    len(proposal.evidence_refs) - len(stripped.evidence_refs),
+                    sorted(unbound_refs)[:5],
                 )
-                for source_kind, authority_type in exact
-            }
-            if evidence.evidence_kind not in allowed_kinds:
-                raise ValueError("proposal evidence kind does not match Capsule source authority")
+                return self._validated_proposal(
+                    output.model_copy(
+                        update={
+                            "raw_proposal": stripped.model_dump(mode="json"),
+                        }
+                    ),
+                    capsule,
+                    minimal_only=minimal_only,
+                    trigger_evidence=trigger_evidence,
+                    proposal_grammar_override=proposal_grammar_override,
+                    trigger_message=trigger_message,
+                )
+            import logging as _lg2
+
+            _lg2.getLogger("evprobe").warning(
+                "strip noop kind=%s unbound=%s claim_refs=%s",
+                proposal.proposal_kind,
+                sorted(unbound_refs)[:5],
+                [
+                    set(claim.get("source_refs", []))
+                    for change in getattr(proposal, "proposed_changes", ())
+                    if change.kind == "expression_plan_transition"
+                    for claim in change.payload.value().get("world_claims", [])
+                ][:5],
+            )
+            raise ValueError("proposal evidence authority is absent from the frozen Capsule")
         grammar = proposal_grammar_override or self._proposal_grammar
         if grammar is not None:
             grammar.validate(proposal)
@@ -4106,13 +4130,9 @@ class Deliberation:
         return ModelResultAudit(
             model_call_id=model_call_id,
             parent_model_call_id=(
-                output.provider_parent_model_call_id
-                if output is not None
-                else None
+                output.provider_parent_model_call_id if output is not None else None
             ),
-            semantic_stream_part=(
-                output.semantic_stream_part if output is not None else None
-            ),
+            semantic_stream_part=(output.semantic_stream_part if output is not None else None),
             model_result_ref=_model_result_ref(model_call_id, response_hash),
             attempt_id=attempt_id,
             route=route,
@@ -4122,6 +4142,9 @@ class Deliberation:
             attempted_model_version=attempted_model_version,
             request_hash=request_hash,
             response_hash=response_hash,
+            character_interior_lineage=(
+                output.character_interior_lineage if output is not None else None
+            ),
             status=status,
             failure_code=failure_code,
             slot=slot,

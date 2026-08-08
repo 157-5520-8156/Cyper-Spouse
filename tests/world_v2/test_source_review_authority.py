@@ -490,6 +490,7 @@ async def test_primary_circuit_open_is_suppressed_and_concurrent_reviews_keep_ba
         (TimeoutError("async transport timed out"), "TimeoutError"),
     ),
 )
+@pytest.mark.asyncio
 async def test_direct_transport_timeout_categories_enter_route_cooldown(
     error: BaseException,
     reason: str,
@@ -895,6 +896,7 @@ async def test_shared_deadline_cancels_both_lanes_as_provider_timeouts() -> None
         ("complete_json_with_usage", ("primary", {"tokens": 7})),
     ],
 )
+@pytest.mark.asyncio
 async def test_all_chat_model_interfaces_preserve_the_winner_result(
     method_name: str,
     expected: object,

@@ -15,6 +15,7 @@ from pydantic import Field, model_validator
 
 from .media_selection import MediaSelection, media_selection_hash
 from .media_v2 import PhotoCandidate, media_digest
+from .proposal_audit_schemas import ModelResultRecordedPayload
 from .schema_core import FrozenModel
 from .schemas import LedgerProjection
 
@@ -161,6 +162,7 @@ class MediaSelectionProposalRecordedPayload(FrozenModel):
     model: str = Field(min_length=1, max_length=256)
     raw_output_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     normalized_output_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    character_interior_model_result: ModelResultRecordedPayload | None = None
 
     @model_validator(mode="after")
     def proposal_is_closed(self) -> "MediaSelectionProposalRecordedPayload":
@@ -218,6 +220,7 @@ class MediaSelectionProposalCompiler:
         model: str,
         raw_output_hash: str,
         normalized_output_hash: str,
+        character_interior_model_result: ModelResultRecordedPayload | None = None,
     ) -> MediaSelectionProposalRecordedPayload:
         candidate = next(
             (item for item in projection.photo_candidates if item.candidate_id == selection.candidate_id),
@@ -304,6 +307,7 @@ class MediaSelectionProposalCompiler:
             model=model,
             raw_output_hash=raw_output_hash,
             normalized_output_hash=normalized_output_hash,
+            character_interior_model_result=character_interior_model_result,
         )
 
 

@@ -71,12 +71,55 @@ class _JourneyReplyModel:
         del temperature
         system = messages[0]["content"]
         envelope = json.loads(messages[1]["content"])
+        inner_turn = envelope.get("inner_turn")
+        if isinstance(inner_turn, dict):
+            purpose = inner_turn.get("purpose")
+            capability = envelope.get("capability_manifest")
+            if purpose == "fact_memory_retention" and isinstance(capability, dict):
+                source_refs = capability.get("source_refs")
+                assert isinstance(source_refs, list) and source_refs
+                return json.dumps(
+                    {
+                        "status": "decision",
+                        "summary": "这条明确的个人信息以后可能真的会用到，我想记住。",
+                        "attended_source_refs": [],
+                        "decision": {
+                            "source_refs": source_refs,
+                            "payload": {
+                                "retain": True,
+                                "cue_kind": "future_utility",
+                                "retention_rationales": [
+                                    "future_utility",
+                                    "identity_relevance",
+                                ],
+                                "salience": {
+                                    "autobiographical_relevance_bp": 7000,
+                                    "relationship_relevance_bp": 5000,
+                                    "emotional_residue_bp": 1000,
+                                    "unfinished_business_bp": 1000,
+                                    "recurrence_bp": 3000,
+                                    "novelty_bp": 3000,
+                                    "future_utility_bp": 8000,
+                                    "world_continuity_bp": 4000,
+                                },
+                            },
+                        },
+                        "recall_query": None,
+                        "proposals": [],
+                    },
+                    ensure_ascii=False,
+                )
         request = envelope["request"]
         trigger = request.get("trigger_message") or {}
         text = trigger.get("text")
         turn = self._by_text[str(text)]
         turn_id = str(turn["id"])
-        model_context = str(request.get("model_content_json", ""))
+        model_context = json.dumps(
+            envelope.get("inner_life_snapshot", {}),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        model_context += "\n" + str(request.get("model_content_json", ""))
         if len(messages) > 2:
             model_context += "\n" + str(messages[-1].get("content", ""))
         private_turn_state = {
@@ -339,13 +382,13 @@ async def test_fact_memory_recall_survives_two_source_facts_before_later_probe(t
         settings=Settings(
             database_path=tmp_path / "fact-memory-recall.sqlite",
             PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
             WORLD_V2_EXPRESSION_EPISODE_MODE="off",
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
         model=_JourneyReplyModel(turns),
-        advisory_model=_JourneyBackgroundModel(),
+        world_support_model=_JourneyBackgroundModel(),
         source_closure_model=_JourneySourceReviewer(),
         delivery=delivery,
         semantic_recall_embedding=_JourneyRecallEmbedding(),
@@ -369,10 +412,10 @@ async def test_fact_memory_recall_survives_two_source_facts_before_later_probe(t
 
 
 @pytest.mark.asyncio
-async def test_emotional_journey_replies_do_not_wait_for_durable_affect(
+async def test_emotional_journey_settles_expression_and_affect_in_one_inbound_cycle(
     tmp_path: Path,
 ) -> None:
-    """T09/T21/T22/T24 reply from private state while durable Affect trails."""
+    """T09/T21/T22/T24 share one authored turn and settle before ingress returns."""
 
     fixture = _load()
     all_turns = fixture["turns"]
@@ -384,13 +427,13 @@ async def test_emotional_journey_replies_do_not_wait_for_durable_affect(
         settings=Settings(
             database_path=tmp_path / "same-turn-affect.sqlite",
             PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
             WORLD_V2_EXPRESSION_EPISODE_MODE="off",
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
         model=_JourneyReplyModel(turns),
-        advisory_model=_JourneyBackgroundModel(),
+        world_support_model=_JourneyBackgroundModel(),
         source_closure_model=_JourneySourceReviewer(),
         delivery=delivery,
     )
@@ -413,7 +456,16 @@ async def test_emotional_journey_replies_do_not_wait_for_durable_affect(
             ]
             assert "ExpressionPlanAccepted" in before_event_types, turn["id"]
             assert "ActionAuthorized" in before_event_types, turn["id"]
-            assert "AppraisalAccepted" not in before_event_types, turn["id"]
+            assert "AppraisalAccepted" in before_event_types, turn["id"]
+            affect_index = next(
+                index
+                for index, event_type in enumerate(before_event_types)
+                if event_type in {"AffectEpisodeOpened", "AffectEpisodeUpdated"}
+            )
+            assert before_event_types.index("ExpressionPlanAccepted") < (
+                before_event_types.index("AppraisalAccepted")
+            ), turn["id"]
+            assert before_event_types.index("ActionAuthorized") < affect_index, turn["id"]
             await host.drain(max_action_units=0, max_background_units=32)
         evidence = host._host._application.export_replay_evidence()  # noqa: SLF001
     finally:
@@ -450,13 +502,13 @@ async def test_new_acquaintance_journey_exposes_grounded_memory_life_and_initiat
         settings=Settings(
             database_path=tmp_path / "new-acquaintance.sqlite",
             PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
             WORLD_V2_EXPRESSION_EPISODE_MODE="off",
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
         model=_JourneyReplyModel(turns),
-        advisory_model=_JourneyBackgroundModel(),
+        world_support_model=_JourneyBackgroundModel(),
         source_closure_model=_JourneySourceReviewer(),
         delivery=delivery,
         semantic_recall_embedding=_JourneyRecallEmbedding(),
@@ -529,13 +581,13 @@ async def test_scheduler_does_not_promote_response_expectation_into_proactive_co
         settings=Settings(
             database_path=tmp_path / "response-gap-preflight.sqlite",
             PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
             WORLD_V2_EXPRESSION_EPISODE_MODE="off",
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
         model=_JourneyReplyModel(turns),
-        advisory_model=_JourneyBackgroundModel(),
+        world_support_model=_JourneyBackgroundModel(),
         source_closure_model=_JourneySourceReviewer(),
         delivery=delivery,
     )

@@ -288,7 +288,7 @@ async function loadLifeState(){
     }
     fillList('userRelationship','userRelationshipEmpty',userRows,'和你的关系还没有落进账本的状态。');
     fillList('npcRelationships','npcRelationshipsEmpty',(relationship2.npc_states||[]).map(npc=>
-      `${NPC_NAMES[npc.npc_id]||npc.npc_id}：亲近 ${pct(npc.closeness_bp)} · 熟悉 ${pct(npc.familiarity_bp)} · 摩擦 ${pct(npc.friction_bp)} · 一起经历 ${npc.settled_shared_count} 件事${npc.last_shared_at?` · 上次 ${fmtDay(npc.last_shared_at)}`:''}`
+      `${NPC_NAMES[npc.npc_id]||npc.npc_id}：亲近 ${pct(npc.closeness_bp)} · 熟悉 ${pct(npc.familiarity_bp)} · 一起经历 ${npc.settled_shared_count} 件事${npc.last_shared_at?` · 上次 ${fmtDay(npc.last_shared_at)}`:''}`
     ),'她身边还没有留下相处痕迹的人。');
     const rows=[];
     const eco=mech.life_ecology||{};

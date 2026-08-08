@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -44,44 +44,105 @@ class Settings(BaseSettings):
     deepseek_api_key: str | None = Field(default=None, alias="DEEPSEEK_API_KEY")
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-v4-flash"
-    deepseek_reply_model: str | None = Field(default=None, alias="DEEPSEEK_REPLY_MODEL")
-    deepseek_expressive_model: str | None = Field(
-        default=None, alias="DEEPSEEK_EXPRESSIVE_MODEL"
+    # Historical reply/expression/thinking selectors described separate role
+    # authors but have no production consumer after the CharacterInterior
+    # cutover. Keep them only as rejected inputs so a stale deployment cannot
+    # appear configured while silently running a different topology.
+    removed_deepseek_reply_model: str | None = Field(
+        default=None, alias="DEEPSEEK_REPLY_MODEL", exclude=True, repr=False
     )
-    deepseek_expressive_thinking_enabled: bool = Field(
-        default=False, alias="DEEPSEEK_EXPRESSIVE_THINKING_ENABLED"
+    removed_deepseek_expressive_model: str | None = Field(
+        default=None, alias="DEEPSEEK_EXPRESSIVE_MODEL", exclude=True, repr=False
     )
-    deepseek_expressive_reasoning_effort: str = Field(
-        default="high", alias="DEEPSEEK_EXPRESSIVE_REASONING_EFFORT"
+    removed_deepseek_expressive_thinking_enabled: bool | None = Field(
+        default=None,
+        alias="DEEPSEEK_EXPRESSIVE_THINKING_ENABLED",
+        exclude=True,
+        repr=False,
     )
-    deepseek_thinking_enabled: bool = Field(default=False, alias="DEEPSEEK_THINKING_ENABLED")
-    deepseek_reasoning_effort: str = Field(default="high", alias="DEEPSEEK_REASONING_EFFORT")
-    deepseek_deep_appraisal_model: str = Field(
-        default="deepseek-v4-flash", alias="DEEPSEEK_DEEP_APPRAISAL_MODEL"
+    removed_deepseek_expressive_reasoning_effort: str | None = Field(
+        default=None,
+        alias="DEEPSEEK_EXPRESSIVE_REASONING_EFFORT",
+        exclude=True,
+        repr=False,
     )
-    deepseek_deep_appraisal_thinking_enabled: bool = Field(
-        # Opt-in after live World-v2 audits showed the high-effort route
-        # repeatedly exceeded the interactive deadline. The routed adapter
-        # remains installed for deployments with a measured low-latency
-        # thinking provider; Flash plus same-turn appraisal is the safe default.
-        default=False, alias="DEEPSEEK_DEEP_APPRAISAL_THINKING_ENABLED"
+    removed_deepseek_thinking_enabled: bool | None = Field(
+        default=None, alias="DEEPSEEK_THINKING_ENABLED", exclude=True, repr=False
     )
-    deepseek_deep_appraisal_reasoning_effort: str = Field(
-        default="high", alias="DEEPSEEK_DEEP_APPRAISAL_REASONING_EFFORT"
+    removed_deepseek_reasoning_effort: str | None = Field(
+        default=None, alias="DEEPSEEK_REASONING_EFFORT", exclude=True, repr=False
     )
-    local_appraisal_enabled: bool = Field(default=False, alias="LOCAL_APPRAISAL_ENABLED")
-    local_appraisal_base_url: str = Field(
-        default="http://127.0.0.1:8188/v1", alias="LOCAL_APPRAISAL_BASE_URL"
+    deepseek_character_thinking_model: str = Field(
+        default="deepseek-v4-flash", alias="DEEPSEEK_CHARACTER_THINKING_MODEL"
     )
-    local_appraisal_model: str = Field(
-        default="mlx-community/Qwen3-1.7B-4bit", alias="LOCAL_APPRAISAL_MODEL"
+    deepseek_character_thinking_enabled: bool = Field(
+        # This is a second compute route for the same CharacterInterior author,
+        # never an independent Appraisal/Affect role.
+        default=False, alias="DEEPSEEK_CHARACTER_THINKING_ENABLED"
     )
-    local_appraisal_api_key: str = Field(default="local", alias="LOCAL_APPRAISAL_API_KEY")
-    world_v2_advisory_timeout_seconds: float = Field(
-        default=1.25,
-        ge=0.05,
-        le=5.0,
+    deepseek_character_thinking_reasoning_effort: str = Field(
+        default="high", alias="DEEPSEEK_CHARACTER_THINKING_REASONING_EFFORT"
+    )
+    world_v2_text_endpoint_base_url: str = Field(
+        default="http://127.0.0.1:8188/v1", alias="WORLD_V2_TEXT_ENDPOINT_BASE_URL"
+    )
+    world_v2_text_endpoint_model: str = Field(
+        default="mlx-community/Qwen3-1.7B-4bit", alias="WORLD_V2_TEXT_ENDPOINT_MODEL"
+    )
+    world_v2_text_endpoint_api_key: str = Field(
+        default="local", alias="WORLD_V2_TEXT_ENDPOINT_API_KEY"
+    )
+    # Removed settings remain declared only so an old environment fails with a
+    # precise migration error. They are not aliases and never enter runtime
+    # composition, which prevents an old deployment from silently re-enabling
+    # the retired semantic-appraisal side path.
+    removed_deepseek_deep_appraisal_model: str | None = Field(
+        default=None,
+        alias="DEEPSEEK_DEEP_APPRAISAL_MODEL",
+        exclude=True,
+        repr=False,
+    )
+    removed_deepseek_deep_appraisal_thinking_enabled: bool | None = Field(
+        default=None,
+        alias="DEEPSEEK_DEEP_APPRAISAL_THINKING_ENABLED",
+        exclude=True,
+        repr=False,
+    )
+    removed_deepseek_deep_appraisal_reasoning_effort: str | None = Field(
+        default=None,
+        alias="DEEPSEEK_DEEP_APPRAISAL_REASONING_EFFORT",
+        exclude=True,
+        repr=False,
+    )
+    removed_local_appraisal_enabled: bool | None = Field(
+        default=None,
+        alias="LOCAL_APPRAISAL_ENABLED",
+        exclude=True,
+        repr=False,
+    )
+    removed_local_appraisal_base_url: str | None = Field(
+        default=None,
+        alias="LOCAL_APPRAISAL_BASE_URL",
+        exclude=True,
+        repr=False,
+    )
+    removed_local_appraisal_model: str | None = Field(
+        default=None,
+        alias="LOCAL_APPRAISAL_MODEL",
+        exclude=True,
+        repr=False,
+    )
+    removed_local_appraisal_api_key: str | None = Field(
+        default=None,
+        alias="LOCAL_APPRAISAL_API_KEY",
+        exclude=True,
+        repr=False,
+    )
+    removed_world_v2_advisory_timeout_seconds: float | None = Field(
+        default=None,
         alias="WORLD_V2_ADVISORY_TIMEOUT_SECONDS",
+        exclude=True,
+        repr=False,
     )
     enable_reply_rewrite: bool = Field(default=False, alias="ENABLE_REPLY_REWRITE")
     enable_reply_decision: bool = Field(default=True, alias="ENABLE_REPLY_DECISION")
@@ -157,6 +218,87 @@ class Settings(BaseSettings):
         ge=0.01,
         le=1.0,
     )
+
+    @model_validator(mode="after")
+    def reject_removed_semantic_model_configuration(self) -> "Settings":
+        removed = (
+            (
+                "DEEPSEEK_REPLY_MODEL",
+                self.removed_deepseek_reply_model,
+                "DEEPSEEK_MODEL",
+            ),
+            (
+                "DEEPSEEK_EXPRESSIVE_MODEL",
+                self.removed_deepseek_expressive_model,
+                "DEEPSEEK_MODEL",
+            ),
+            (
+                "DEEPSEEK_EXPRESSIVE_THINKING_ENABLED",
+                self.removed_deepseek_expressive_thinking_enabled,
+                "DEEPSEEK_CHARACTER_THINKING_ENABLED",
+            ),
+            (
+                "DEEPSEEK_EXPRESSIVE_REASONING_EFFORT",
+                self.removed_deepseek_expressive_reasoning_effort,
+                "DEEPSEEK_CHARACTER_THINKING_REASONING_EFFORT",
+            ),
+            (
+                "DEEPSEEK_THINKING_ENABLED",
+                self.removed_deepseek_thinking_enabled,
+                "DEEPSEEK_CHARACTER_THINKING_ENABLED",
+            ),
+            (
+                "DEEPSEEK_REASONING_EFFORT",
+                self.removed_deepseek_reasoning_effort,
+                "DEEPSEEK_CHARACTER_THINKING_REASONING_EFFORT",
+            ),
+            (
+                "DEEPSEEK_DEEP_APPRAISAL_MODEL",
+                self.removed_deepseek_deep_appraisal_model,
+                "DEEPSEEK_CHARACTER_THINKING_MODEL",
+            ),
+            (
+                "DEEPSEEK_DEEP_APPRAISAL_THINKING_ENABLED",
+                self.removed_deepseek_deep_appraisal_thinking_enabled,
+                "DEEPSEEK_CHARACTER_THINKING_ENABLED",
+            ),
+            (
+                "DEEPSEEK_DEEP_APPRAISAL_REASONING_EFFORT",
+                self.removed_deepseek_deep_appraisal_reasoning_effort,
+                "DEEPSEEK_CHARACTER_THINKING_REASONING_EFFORT",
+            ),
+            (
+                "LOCAL_APPRAISAL_ENABLED",
+                self.removed_local_appraisal_enabled,
+                "WORLD_V2_TEXT_ENDPOINT_ENABLED",
+            ),
+            (
+                "LOCAL_APPRAISAL_BASE_URL",
+                self.removed_local_appraisal_base_url,
+                "WORLD_V2_TEXT_ENDPOINT_BASE_URL",
+            ),
+            (
+                "LOCAL_APPRAISAL_MODEL",
+                self.removed_local_appraisal_model,
+                "WORLD_V2_TEXT_ENDPOINT_MODEL",
+            ),
+            (
+                "LOCAL_APPRAISAL_API_KEY",
+                self.removed_local_appraisal_api_key,
+                "WORLD_V2_TEXT_ENDPOINT_API_KEY",
+            ),
+            (
+                "WORLD_V2_ADVISORY_TIMEOUT_SECONDS",
+                self.removed_world_v2_advisory_timeout_seconds,
+                "WORLD_V2_TEXT_ENDPOINT_TIMEOUT_SECONDS",
+            ),
+        )
+        for old_name, value, replacement in removed:
+            if value is not None:
+                raise ValueError(
+                    f"removed configuration {old_name}; use {replacement} for its exact role"
+                )
+        return self
 
     # Where the daemon's dashboard reads the QQ world's read-only life state.
     # The adapter process owns that world's ledger; the daemon only relays.
@@ -250,6 +392,15 @@ class Settings(BaseSettings):
         default=False,
         alias="WORLD_V2_RECALL_SEMANTIC_ENABLED",
     )
+    world_v2_recall_embedding_base_url: str | None = Field(
+        default=None,
+        alias="WORLD_V2_RECALL_EMBEDDING_BASE_URL",
+        description=(
+            "Optional OpenAI-compatible endpoint for semantic recall only. "
+            "When unset, falls back to OPENAI_BASE_URL. Lets recall run on a "
+            "local embedding service without moving other OpenAI lanes."
+        ),
+    )
     world_v2_recall_embedding_model: str = Field(
         default="text-embedding-3-small",
         alias="WORLD_V2_RECALL_EMBEDDING_MODEL",
@@ -301,6 +452,10 @@ class Settings(BaseSettings):
         default_factory=lambda: _macos_launchctl_env("OPENROUTER_API_KEY"),
         alias="OPENROUTER_API_KEY",
     )
+    qwen_api_key: str | None = Field(
+        default_factory=lambda: _macos_launchctl_env("QWEN_API_KEY"),
+        alias="QWEN_API_KEY",
+    )
     openrouter_base_url: str = Field(
         default="https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL"
     )
@@ -313,6 +468,42 @@ class Settings(BaseSettings):
     world_v2_source_review_redundancy_enabled: bool = Field(
         default=False,
         alias="WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED",
+    )
+    # Life Ecology source closure is a hard dependency of life_development
+    # (fail-closed when the reviewer is absent), independent of the retired
+    # interactive chat review lane. Default on so the event machine keeps
+    # producing while chat runs pure deterministic.
+    world_v2_life_source_review_enabled: bool = Field(
+        default=True,
+        alias="WORLD_V2_LIFE_SOURCE_REVIEW_ENABLED",
+    )
+    world_v2_source_review_base_url: str | None = Field(
+        default=None,
+        alias="WORLD_V2_SOURCE_REVIEW_BASE_URL",
+        description=(
+            "Optional OpenAI-compatible endpoint for source-closure review "
+            "only. When set, ordinary and recovery reviewers are pinned to "
+            "this local endpoint (no proxy); otherwise OpenRouter/OpenAI are "
+            "used. Still independent of the DeepSeek character author."
+        ),
+    )
+    world_v2_source_review_local_model: str | None = Field(
+        default=None,
+        alias="WORLD_V2_SOURCE_REVIEW_LOCAL_MODEL",
+        description="Model id used when WORLD_V2_SOURCE_REVIEW_BASE_URL is set.",
+    )
+    world_v2_source_inventory_base_url: str | None = Field(
+        default=None,
+        alias="WORLD_V2_SOURCE_INVENTORY_BASE_URL",
+        description=(
+            "Optional OpenAI-compatible endpoint for candidate external "
+            "proposition inventory. Falls back to WORLD_V2_SOURCE_REVIEW_BASE_URL."
+        ),
+    )
+    world_v2_source_inventory_local_model: str | None = Field(
+        default=None,
+        alias="WORLD_V2_SOURCE_INVENTORY_LOCAL_MODEL",
+        description="Model id used when a local inventory endpoint is set.",
     )
     world_v2_source_review_secondary_model: str = Field(
         default="qwen/qwen-plus",
@@ -380,8 +571,9 @@ class Settings(BaseSettings):
     # ``off`` retains the complete-response interface for a future explicit
     # delayed-attention capability (for example, the character was occupied
     # and did not answer immediately). It is not selected by production now.
-    # The historical two-author ``on`` mode remains test-only because its
-    # provisional author can disagree with the full one.
+    # The historical two-author ``on`` vocabulary remains only in immutable
+    # event replay/codecs. It has no Settings or production-composition entry
+    # because its provisional author can disagree with the full one.
     world_v2_expression_episode_mode: Literal["off", "shadow", "stream"] = Field(
         default="stream", alias="WORLD_V2_EXPRESSION_EPISODE_MODE"
     )

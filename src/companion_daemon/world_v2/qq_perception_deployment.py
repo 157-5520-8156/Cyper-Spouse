@@ -1,19 +1,17 @@
 """Production factory for the QQ World v2 perception (vision) deployment.
 
-This is the one place that turns deployment ``Settings`` into the complete,
-explicit perception injection set for ``build_qq_c2c_host``:
+This is the one place that turns deployment ``Settings`` into the objective,
+explicit perception capability set for ``build_qq_c2c_host``:
 
-- the decision model uses the same sole DeepSeek character-author provider
-  wrapped in :class:`QQPerceptionDecisionModel`, which owns the restrained
-  trigger semantics (archived-image gate, exact-bytes dedupe, durable daily
-  cap, one bounded look/skip confirmation);
+- the already-composed ``CharacterInterior`` owns the character's later
+  look/silence choice; this factory creates no role model or provider client;
 - the durable input source is the URL-free :class:`QQAttachmentArchive`
   under ``ATTACHMENT_CACHE_PATH``, fed at the adapter boundary by
   :class:`QQOneBotAttachmentArchiver`;
 - the transport is :class:`SQLiteDurableVisionPerceptionTransport` against
   the world database file, so restart recovery replays exact stored text.
 
-Missing prerequisites (budget limit 0, absent OpenAI/DeepSeek credentials, or
+Missing prerequisites (budget limit 0, absent vision credentials, or
 an unprovisioned perception enforcement chain) disable the whole lane with
 exactly one log line; ingress and replies are never affected.
 """
@@ -32,7 +30,6 @@ from .perception_authority_provisioning import (
     PERCEPTION_PRIVACY_POLICY_ID,
     PERCEPTION_VISION_CAPABILITY_ID,
 )
-from .perception_decision_adapter import QQPerceptionDecisionModel
 from .perception_vision_transport import SQLiteDurableVisionPerceptionTransport
 from .qq_attachment_archive import QQAttachmentArchive, QQOneBotAttachmentArchiver
 
@@ -54,7 +51,6 @@ _REQUIRED_AUTHORITY = (
 class QQPerceptionDeploymentBundle:
     """Everything ``create_qq_c2c_onebot_app`` needs to install perception."""
 
-    model: QQPerceptionDecisionModel
     input_source: QQAttachmentArchive
     transport: SQLiteDurableVisionPerceptionTransport
     budget_limit: int
@@ -108,8 +104,6 @@ def build_qq_perception_deployment(
         missing.append("PERCEPTION_BUDGET_LIMIT (0 disables the lane)")
     if not settings.openai_api_key:
         missing.append("OPENAI_API_KEY")
-    if not settings.deepseek_api_key:
-        missing.append("DEEPSEEK_API_KEY")
     database_path = Path(settings.database_path)
     if not missing and not _provisioned_authority_present(
         database_path=database_path, world_id=world_id
@@ -126,14 +120,6 @@ def build_qq_perception_deployment(
         )
         return None
 
-    from companion_daemon.llm import DeepSeekChatModel
-
-    decision_model = DeepSeekChatModel(
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        model=settings.deepseek_model,
-        thinking_enabled=False,
-    )
     archive = QQAttachmentArchive(Path(settings.attachment_cache_path) / "qq-c2c-v2")
     transport = SQLiteDurableVisionPerceptionTransport(
         database_path,
@@ -141,15 +127,6 @@ def build_qq_perception_deployment(
         base_url=settings.openai_base_url,
         model=settings.vision_model,
         proxy_url=settings.openai_proxy_url,
-    )
-    model = QQPerceptionDecisionModel(
-        model=decision_model,
-        input_source=archive,
-        dispatch_evidence=transport,
-        budget_account_id=PERCEPTION_ACCOUNT_ID,
-        budget_limit=settings.world_v2_perception_budget_limit,
-        daily_limit=settings.world_v2_perception_budget_limit,
-        local_timezone=settings.local_timezone,
     )
     archiver = QQOneBotAttachmentArchiver(
         archive=archive, api_url=api_url, access_token=access_token
@@ -161,7 +138,6 @@ def build_qq_perception_deployment(
         settings.world_v2_perception_budget_limit,
     )
     return QQPerceptionDeploymentBundle(
-        model=model,
         input_source=archive,
         transport=transport,
         budget_limit=settings.world_v2_perception_budget_limit,

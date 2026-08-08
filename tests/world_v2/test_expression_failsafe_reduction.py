@@ -1,43 +1,34 @@
 """Regression tests for the 2026-07-20 fallback-rate reduction work.
 
-Covers four seams measured in production as the dominant failsafe causes:
+Covers the remaining same-author reliability seams measured in production:
 attempt-deadline awareness for corrective retries, corrective coverage for
-non-claim structural rejects, the pre-failsafe violation-quoting retry, and
-the timestamped failover-usage check that stops cross-lane flag contamination
-from skipping a legitimate backup attempt.
+non-claim structural rejects, and the pre-failure violation-quoting retry.
 """
 
 from __future__ import annotations
 
 import json
 import time
-from time import monotonic
 
-import httpx
 import pytest
 
-from companion_daemon.llm import (
-    DeepSeekChatModel,
-    FailoverChatModel,
-    OpenAICompatibleChatModel,
-)
 from companion_daemon.world_v2 import production_reliability_metrics as metrics
-from companion_daemon.world_v2.chat_model_deliberation_adapter import (
-    ChatModelDeliberationAdapter,
+from companion_daemon.world_v2.character_interior.inbound_wire import (
+    _ExpressionDraftWire,
 )
 from companion_daemon.world_v2.deliberation import (
     Deliberation,
     ModelInput,
     ModelOutput,
+    ValidationTechnicalFailure,
     fit_secondary_call_timeout,
     remaining_attempt_seconds,
 )
-from companion_daemon.world_v2.single_call_inbound_cognition import (
-    SingleCallInboundCognition,
-    _provider_already_used_fallback,
+from companion_daemon.world_v2.character_interior.inbound_author import (
+    _InboundCharacterAuthor as InboundCharacterAuthor,
 )
 from test_deliberation import _Quick, _Router, _capsule, _decision_raw
-from test_single_call_inbound_cognition import _request
+from test_character_interior_inbound_author import _request
 
 
 @pytest.fixture(autouse=True)
@@ -235,23 +226,17 @@ class _ShapeRepairedCombinedProvider:
 
 @pytest.mark.asyncio
 async def test_paired_shape_reject_is_repaired_with_violation_feedback() -> None:
-    provider = _ShapeRepairedCombinedProvider(
-        corrected_on_call=2,
-        direct_expression_on_call=3,
-    )
-    cognition = SingleCallInboundCognition(flash_model=provider)
+    provider = _ShapeRepairedCombinedProvider(corrected_on_call=2)
+    cognition = InboundCharacterAuthor(flash_model=provider)
     request = _request(revision=3, call="call:paired-shape-repair")
 
-    await cognition.appraisal.propose(request)
-    expression = await cognition.expression.propose(
-        request.model_copy(update={"call_id": "call:paired-shape-repair-expression"})
-    )
+    await cognition._appraisal_materializer.propose(request)
+    expression = await cognition._expression_materializer.propose(request)
 
-    # The combined pass and its correction produce valid appraisal evidence.
-    # Acceptance changes the final pinned request identity, so the expression
-    # is chosen once more from that updated same-turn Context rather than
-    # relabelling cached pre-appraisal bytes as a later provider result.
-    assert len(provider.calls) == 3
+    # The combined pass and its one correction author both Appraisal and
+    # Expression for one pinned turn.  Expression consumes that exact authored
+    # result; it must not open the retired second author call.
+    assert len(provider.calls) == 2
     corrective = provider.calls[1][-1]["content"]
     assert "structural validation" in corrective
     assert "note" in corrective  # quotes the concrete violation
@@ -271,22 +256,22 @@ async def test_deadline_deferred_repair_is_spent_before_the_failsafe() -> None:
     from companion_daemon.world_v2 import deliberation as deliberation_module
 
     provider = _ShapeRepairedCombinedProvider(corrected_on_call=2)
-    cognition = SingleCallInboundCognition(flash_model=provider)
+    cognition = InboundCharacterAuthor(flash_model=provider)
     request = _request(revision=3, call="call:pre-failsafe-retry")
 
     token = deliberation_module._ATTEMPT_DEADLINE.set(time.monotonic() + 1.0)
     try:
-        await cognition.appraisal.propose(request)
+        await cognition._appraisal_materializer.propose(request)
     finally:
         deliberation_module._ATTEMPT_DEADLINE.reset(token)
     assert len(provider.calls) == 1  # repair deferred, not spent
 
-    expression = await cognition.expression.propose(request)
+    expression = await cognition._expression_materializer.propose(request)
 
     assert len(provider.calls) == 2
     assert "structural validation" in provider.calls[1][-1]["content"]
     assert expression.model_id == "combined-flash"
-    assert expression.model_version == SingleCallInboundCognition.VERSION
+    assert expression.model_version == InboundCharacterAuthor.VERSION
     assert "接住" in json.dumps(expression.raw_proposal, ensure_ascii=False)
     assert metrics.reliability_snapshot()["failsafe_24h"] == 0
 
@@ -297,15 +282,16 @@ async def test_spent_corrective_is_not_repeated_or_replaced_with_local_prose() -
     # pass for the same pinned request must not repeat the identical repair
     # before its bounded model-owned recovery.
     provider = _ShapeRepairedCombinedProvider(corrected_on_call=99)
-    cognition = SingleCallInboundCognition(flash_model=provider)
+    cognition = InboundCharacterAuthor(flash_model=provider)
     request = _request(revision=3, call="call:pre-failsafe-exhausted")
 
-    await cognition.appraisal.propose(request)
+    await cognition._appraisal_materializer.propose(request)
     assert len(provider.calls) == 2  # paired pass plus one failed corrective
 
-    with pytest.raises(ValueError, match="requires_model_recovery"):
-        await cognition.expression.propose(request)
+    with pytest.raises(ValidationTechnicalFailure) as caught:
+        await cognition._expression_materializer.propose(request)
 
+    assert caught.value.failure_code == "paired_expression_reselection_invalid"
     assert len(provider.calls) == 2  # no third identical repair
     assert metrics.reliability_snapshot()["failsafe_24h"] == 0
 
@@ -331,70 +317,10 @@ async def test_direct_adapter_repairs_non_claim_shape_rejects_too() -> None:
             return json.dumps(expression, ensure_ascii=False)
 
     direct = _DirectShapeProvider()
-    adapter = ChatModelDeliberationAdapter(model=direct)
+    adapter = _ExpressionDraftWire(model=direct)
     output = await adapter.propose(_request(revision=3, call="call:direct-shape-repair"))
 
     assert len(direct.calls) == 2
     assert "structural validation" in direct.calls[1][-1]["content"]
     assert "接住" in json.dumps(output.raw_proposal, ensure_ascii=False)
     del provider
-
-
-# --- timestamped failover-usage check ------------------------------------------
-
-
-class _TimestampedProvider:
-    def __init__(self, used_at: float | None) -> None:
-        self.last_fallback_used_at = used_at
-        self.last_attempt_used_fallback = True  # stale boolean must not win
-
-
-def test_recent_fallback_use_skips_and_stale_use_does_not() -> None:
-    assert _provider_already_used_fallback(_TimestampedProvider(monotonic() - 5.0))
-    assert not _provider_already_used_fallback(_TimestampedProvider(monotonic() - 300.0))
-    assert not _provider_already_used_fallback(_TimestampedProvider(None))
-
-
-def test_providers_without_the_timestamp_keep_boolean_semantics() -> None:
-    class _LegacyProvider:
-        last_attempt_used_fallback = True
-
-    class _CleanProvider:
-        pass
-
-    assert _provider_already_used_fallback(_LegacyProvider())
-    assert not _provider_already_used_fallback(_CleanProvider())
-
-
-@pytest.mark.asyncio
-async def test_failover_chat_model_records_the_fallback_use_timestamp() -> None:
-    primary = DeepSeekChatModel(
-        "deepseek-key",
-        "https://api.deepseek.com",
-        "deepseek-v4-flash",
-        transport=httpx.MockTransport(
-            lambda _request: httpx.Response(402, json={"error": "insufficient balance"})
-        ),
-    )
-    fallback = OpenAICompatibleChatModel(
-        "openai-key",
-        "https://api.openai.com/v1",
-        "gpt-5.6-luna",
-        transport=httpx.MockTransport(
-            lambda _request: httpx.Response(
-                200,
-                json={"choices": [{"message": {"content": "备用回复"}}]},
-            )
-        ),
-    )
-    model = FailoverChatModel(primary=primary, fallback=fallback)
-    assert model.last_fallback_used_at is None
-
-    before = monotonic()
-    assert await model.complete([{"role": "user", "content": "你好"}]) == "备用回复"
-
-    assert model.last_attempt_used_fallback is True
-    assert model.last_fallback_used_at is not None
-    assert model.last_fallback_used_at >= before
-    assert _provider_already_used_fallback(model)
-    await model.aclose()

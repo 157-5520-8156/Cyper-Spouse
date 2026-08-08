@@ -124,28 +124,23 @@ class _Media:
 
 
 class _Activity:
-    def __init__(self, *, status: str = "no_op", raises: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        status: str = "no_op",
+        raises: bool = False,
+        reason_code: str | None = None,
+    ) -> None:
         self.status = status
         self.raises = raises
+        self.reason_code = reason_code
         self.calls = []
 
     async def advance_once(self, **kwargs):  # type: ignore[no-untyped-def]
         self.calls.append(kwargs)
         if self.raises:
             raise RuntimeError("activity failed")
-        return SimpleNamespace(status=self.status)
-
-
-class _LifeAuthor:
-    def __init__(self, *, raises: Exception | None = None) -> None:
-        self.raises = raises
-        self.calls = []
-
-    async def advance_once(self, **kwargs):  # type: ignore[no-untyped-def]
-        self.calls.append(kwargs)
-        if self.raises is not None:
-            raise self.raises
-        return SimpleNamespace(status="idle")
+        return SimpleNamespace(status=self.status, reason_code=self.reason_code)
 
 
 class _OpenWorld:
@@ -195,17 +190,6 @@ class _Aftermath:
         if self.raises is not None:
             raise self.raises
         return SimpleNamespace(status=self.status)
-
-
-class _Aspiration:
-    def __init__(self, *, status: str, reason_code: str) -> None:
-        self.status = status
-        self.reason_code = reason_code
-        self.calls = []
-
-    async def advance_once(self, **kwargs):  # type: ignore[no-untyped-def]
-        self.calls.append(kwargs)
-        return SimpleNamespace(status=self.status, reason_code=self.reason_code)
 
 
 @pytest.mark.asyncio
@@ -413,6 +397,7 @@ async def test_open_life_cadence_does_not_block_a_biographical_boundary() -> Non
         "blocked_by_missing_capability",
     ],
 )
+@pytest.mark.asyncio
 async def test_life_ecology_makes_non_active_installation_explicitly_unavailable(state: str) -> None:
     event = _event("clock")
     trigger_store, media = _TriggerStore(), _Media()
@@ -513,6 +498,38 @@ async def test_life_ecology_fails_safe_without_media_when_activity_followup_fail
 
 
 @pytest.mark.asyncio
+async def test_activity_character_failure_uses_the_shared_technical_retry_lane() -> None:
+    event = _event("clock-activity-character-failure")
+    trigger_store, media = _TriggerStore(), _Media()
+    activity = _Activity(
+        status="technical_failure",
+        reason_code="activity_lifecycle.role_result_not_json",
+    )
+    runtime = LifeEcologyRuntime(
+        ledger=_Ledger(event),
+        trigger_store=trigger_store,
+        media_followup=media,
+        activity_followup=activity,
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=event.event_id,
+        trace_id="trace:activity-character-failure",
+        correlation_id="correlation:activity-character-failure",
+    )
+
+    assert result.status == "deferred"
+    assert result.reason_code == "life_ecology.activity_lifecycle_technical_failure"
+    assert result.activity_followup_status == "technical_failure"
+    assert result.technical_failure_code == "activity_lifecycle.role_result_not_json"
+    assert trigger_store.completed[0][2] == (
+        "technical_failure.activity_lifecycle.role_result_not_json"
+    )
+    assert media.calls == []
+
+
+@pytest.mark.asyncio
 async def test_life_ecology_persists_a_retryable_media_failure_code() -> None:
     event = _event("clock-media-failure")
     trigger_store = _TriggerStore()
@@ -534,34 +551,6 @@ async def test_life_ecology_persists_a_retryable_media_failure_code() -> None:
     assert result.technical_failure_code == "media.type_error"
     assert result.reason_code == "life_ecology.media_followup_failed.media.type_error"
     assert trigger_store.completed[0][2] == "technical_failure.media.type_error"
-
-
-@pytest.mark.asyncio
-async def test_contextual_inspiration_model_failure_does_not_mutate_global_backoff() -> None:
-    event = _event("clock-contextual-inspiration-failure")
-    trigger_store = _TriggerStore()
-    aspiration = _Aspiration(
-        status="deferred",
-        reason_code="contextual_life_inspiration.model_unavailable",
-    )
-    runtime = LifeEcologyRuntime(
-        ledger=_Ledger(event),
-        trigger_store=trigger_store,
-        media_followup=_Media(),
-        aspiration_followup=aspiration,
-        availability=LifeEcologyAvailability(state="installed_and_active"),
-    )
-
-    result = await runtime.advance_once(
-        wake_event_ref=event.event_id,
-        trace_id="trace:contextual-inspiration-failure",
-        correlation_id="correlation:contextual-inspiration-failure",
-    )
-
-    assert result.status == "idle"
-    assert result.aspiration_followup_status == "deferred"
-    assert result.technical_failure_code is None
-    assert not trigger_store.completed[0][2].startswith("technical_failure.")
 
 
 @pytest.mark.asyncio
@@ -613,24 +602,16 @@ async def test_life_ecology_keeps_model_deferred_wake_recoverable_instead_of_ter
 
 
 @pytest.mark.asyncio
-async def test_life_ecology_uses_one_open_development_followup_instead_of_legacy_story_lanes() -> None:
+async def test_life_ecology_uses_the_open_development_followup() -> None:
     event = _event("clock-open-life-development")
     trigger_store, media = _TriggerStore(), _Media()
     development = _LifeDevelopment("occurrence_committed")
-    present_author = _LifeAuthor()
-    future_author = _LifeAuthor()
-    npc_initiative = _LifeAuthor()
-    aspiration = _Aspiration(status="no_op", reason_code="legacy")
     open_world = _OpenWorld("committed")
     runtime = LifeEcologyRuntime(
         ledger=_Ledger(event),
         trigger_store=trigger_store,
         media_followup=media,
         life_development_followup=development,
-        life_author_followup=present_author,
-        future_life_author_followup=future_author,
-        npc_initiative_followup=npc_initiative,
-        aspiration_followup=aspiration,
         open_world_followup=open_world,
         availability=LifeEcologyAvailability(state="installed_and_active"),
     )
@@ -648,10 +629,6 @@ async def test_life_ecology_uses_one_open_development_followup_instead_of_legacy
         "trace_id": "trace:open-life-development",
         "correlation_id": "correlation:open-life-development",
     }]
-    assert present_author.calls == []
-    assert future_author.calls == []
-    assert npc_initiative.calls == []
-    assert aspiration.calls == []
     assert open_world.calls == []
     assert len(media.calls) == 1
     assert trigger_store.completed[0][2] == "life_development_occurrence_committed"
@@ -844,33 +821,6 @@ async def test_aftermath_retry_wait_defers_other_life_lanes_without_calling_mode
 
 
 @pytest.mark.asyncio
-async def test_life_ecology_does_not_hide_life_author_programming_errors() -> None:
-    event = _event("clock-author-bug")
-    trigger_store, media = _TriggerStore(), _Media()
-    author = _LifeAuthor(raises=RuntimeError("programming bug"))
-    runtime = LifeEcologyRuntime(
-        ledger=_Ledger(event),
-        trigger_store=trigger_store,
-        media_followup=media,
-        life_author_followup=author,
-        availability=LifeEcologyAvailability(state="installed_and_active"),
-    )
-
-    with pytest.raises(RuntimeError, match="programming bug"):
-        await runtime.advance_once(
-            wake_event_ref=event.event_id,
-            trace_id="trace:author-bug",
-            correlation_id="correlation:author-bug",
-        )
-
-    assert len(author.calls) == 1
-    assert media.calls == []
-    # Do not terminalise an owned wake after an unexpected code defect: the
-    # exception must remain observable and the durable run recoverable.
-    assert trigger_store.completed == []
-
-
-@pytest.mark.asyncio
 async def test_life_ecology_retries_an_exact_older_wake_at_the_current_logical_time() -> None:
     event = _event("older-clock")
     ledger = _Ledger(event)
@@ -933,3 +883,138 @@ async def test_life_ecology_joins_an_in_progress_durable_run_without_second_medi
     assert result.reason_code == "life_ecology.run_in_progress"
     assert media.calls == []
     assert trigger_store.completed == []
+
+
+@pytest.mark.asyncio
+async def test_life_ecology_activates_a_due_planned_occurrence() -> None:
+    """A later-mode committed occurrence whose window has opened must be
+    activated by the ecology pass; otherwise it would never reach settlement."""
+
+    from datetime import timedelta
+
+    from companion_daemon.world_v2.event_identity import domain_idempotency_key
+    from companion_daemon.world_v2.ledger import WorldLedger
+    from companion_daemon.world_v2.life_events import (
+        WorldOccurrenceCommittedPayload,
+    )
+    from companion_daemon.world_v2.schemas import ClockObservation
+    from companion_daemon.world_v2.schemas import (
+        DueWindow,
+        EvidenceRef,
+        WorldOccurrenceProjection,
+    )
+
+    ledger = WorldLedger.in_memory(world_id="world:life-ecology")
+    occurrence = WorldOccurrenceProjection(
+        occurrence_id="occurrence:life-development:due-plan",
+        entity_revision=1,
+        trigger_ref="event:life-development:proposal:due-plan",
+        participant_refs=("agent:companion",),
+        time_window=DueWindow(
+            opens_at=NOW - timedelta(minutes=5),
+            closes_at=NOW + timedelta(hours=2),
+        ),
+        candidate_outcome_refs=("candidate:due-plan",),
+        visibility="shareable",
+        status="committed",
+    )
+    wake = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event:clock:due-plan",
+        event_type="ClockAdvanced",
+        world_id="world:life-ecology",
+        logical_time=NOW,
+        created_at=NOW,
+        actor="worker:clock",
+        source="test",
+        trace_id="trace:due-plan-clock",
+        causation_id="scheduler:due-plan",
+        correlation_id="correlation:due-plan-clock",
+        idempotency_key="due-plan-clock",
+        payload=ClockObservation(
+            schema_version="world-v2.1",
+            tick_id="due-plan",
+            world_id="world:life-ecology",
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:due-plan-clock",
+            causation_id="scheduler:due-plan",
+            correlation_id="correlation:due-plan-clock",
+            logical_time_from=NOW - timedelta(minutes=10),
+            logical_time_to=NOW,
+            reason="test",
+        ).model_dump(mode="json"),
+    )
+    committed_payload = WorldOccurrenceCommittedPayload(
+        change_id="change:due-plan",
+        transition_id="transition:due-plan",
+        expected_entity_revision=0,
+        evidence_refs=(
+            EvidenceRef(
+                ref_id=wake.event_id,
+                evidence_type="committed_world_event",
+                claim_purpose="future_plan",
+                source_world_revision=1,
+                immutable_hash=wake.payload_hash,
+            ),
+        ),
+        policy_refs=("policy:life-ecology.1",),
+        occurrence=occurrence,
+    ).model_dump(mode="json")
+    committed = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event:life-development:occurrence:due-plan",
+        event_type="WorldOccurrenceCommitted",
+        world_id="world:life-ecology",
+        logical_time=NOW,
+        created_at=NOW,
+        actor="worker:world-v2:life-development",
+        source="world-v2:life-development",
+        trace_id="trace:due-plan",
+        causation_id="event:life-development:proposal:due-plan",
+        correlation_id="correlation:due-plan",
+        idempotency_key=(
+            domain_idempotency_key(
+                event_type="WorldOccurrenceCommitted",
+                world_id="world:life-ecology",
+                payload=committed_payload,
+            )
+            or "due-plan-committed"
+        ),
+        payload=committed_payload,
+    )
+    ledger.commit(
+        (wake,),
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    fresh = ledger.project()
+    ledger.commit(
+        (committed,),
+        expected_world_revision=fresh.world_revision,
+        expected_deliberation_revision=fresh.deliberation_revision,
+    )
+
+    runtime = LifeEcologyRuntime(
+        ledger=ledger,
+        trigger_store=_TriggerStore(),
+        media_followup=_Media(),
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+    result = await runtime.advance_once(
+        wake_event_ref=wake.event_id,
+        trace_id="trace:due-plan-activation",
+        correlation_id="correlation:due-plan-activation",
+    )
+
+    assert result.status == "idle"
+    activated = next(
+        item
+        for item in ledger.project().world_occurrences
+        if item.occurrence_id == "occurrence:life-development:due-plan"
+    )
+    assert activated.status == "active"
+    assert activated.activated_at == NOW
+    assert ledger.lookup_event_commit(
+        "event:life-ecology:activate:life-development:due-plan"
+    ) is not None

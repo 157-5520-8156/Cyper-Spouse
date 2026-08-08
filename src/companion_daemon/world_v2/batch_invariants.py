@@ -180,7 +180,11 @@ def _reject_new_private_impression_without_role_reflection(
         transition_kind = payload.get("transition_kind", "open")
         expected_decision = "retain" if transition_kind == "open" else transition_kind
         if (
-            contract != "private-impression-draft.4"
+            contract
+            not in {
+                "private-impression-draft.4",
+                "character-interior-private-impression-transition.1",
+            }
             or payload.get("reflection_decision") != expected_decision
             or not payload.get("reflection_source_refs")
             or not payload.get("source_model_result")
@@ -465,7 +469,11 @@ def validate_commit_batch(
             raise ValueError(
                 "accepted decision requires its one domain mutation immediately after it"
             )
-    settlement_trigger_refs = [item.appraisal_trigger_ref for item in settlements]
+    settlement_trigger_refs = [
+        item.appraisal_trigger_ref
+        for item in settlements
+        if item.appraisal_trigger_ref is not None
+    ]
     if len(set(settlement_trigger_refs)) != len(settlement_trigger_refs):
         raise ValueError("settlements in one commit require unique appraisal triggers")
     for event in events:
@@ -510,15 +518,26 @@ def validate_commit_batch(
         expected_trigger_id = appraisal_trigger_identity(
             settlement.occurrence_id, settlement.result_id
         )
-        if settlement.appraisal_trigger_ref != expected_trigger_id:
-            raise ValueError("settlement appraisal trigger identity is not deterministic")
-        if appraisal_triggers.get(settlement.appraisal_trigger_ref) != [
-            (expected_trigger_id, expected_trigger_id, settlement_event.event_id)
-        ]:
-            raise ValueError(
-                "WorldOccurrenceSettled requires exactly one matching "
-                "npc_world_appraisal trigger in the same commit"
-            )
+        if settlement.appraisal_trigger_ref is None:
+            if any(
+                source_ref == settlement_event.event_id
+                for bindings in appraisal_triggers.values()
+                for _trigger_id, _trigger_ref, source_ref in bindings
+            ):
+                raise ValueError(
+                    "WorldOccurrenceSettled without appraisal authority cannot open "
+                    "a protagonist appraisal trigger"
+                )
+        else:
+            if settlement.appraisal_trigger_ref != expected_trigger_id:
+                raise ValueError("settlement appraisal trigger identity is not deterministic")
+            if appraisal_triggers.get(settlement.appraisal_trigger_ref) != [
+                (expected_trigger_id, expected_trigger_id, settlement_event.event_id)
+            ]:
+                raise ValueError(
+                    "WorldOccurrenceSettled requires exactly one matching "
+                    "npc_world_appraisal trigger in the same commit"
+                )
         matching_experiences = [
             item
             for item in experiences
@@ -805,7 +824,11 @@ def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> No
         acceptance = acceptance_event.payload()
         if (
             outcome.context_identity_version
-            not in {"life-aftermath-context.2", "life-aftermath-context.3"}
+            not in {
+                "life-aftermath-context.2",
+                "life-aftermath-context.3",
+                "life-aftermath-context.4",
+            }
             or outcome.decision_authority != "character_model"
             or outcome.decision_model_result_ref != final.model_result_ref
             or outcome.decision_model_result_event_ref != events[first.attempt_count - 1].event_id

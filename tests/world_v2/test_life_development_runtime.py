@@ -25,7 +25,12 @@ from companion_daemon.world_v2.life_development_draft import (
     LifeDevelopmentDraftError,
     LifeDevelopmentLocationCapability,
     LifeDevelopmentPossibilityDraft,
+    parse_character_choice,
     parse_world_author_draft,
+)
+from companion_daemon.world_v2.character_interior import InnerDecision
+from companion_daemon.world_v2.character_interior.contracts import (
+    _InteriorAuthorLineage,
 )
 from companion_daemon.world_v2.life_development_model_adapter import (
     RoleBoundLifeDevelopmentModelAdapter,
@@ -44,19 +49,7 @@ from companion_daemon.world_v2.life_development_source_closure import (
 )
 from companion_daemon.world_v2.life_events import WorldOccurrenceCommittedPayload
 from companion_daemon.world_v2.ledger import WorldLedger
-from companion_daemon.world_v2.proposal_audit_schemas import (
-    LifeDevelopmentRecallResultRecordedPayload,
-    RecordedModelResultAudit,
-)
-from companion_daemon.world_v2.recall_audit import CharacterRecallRequest
-from companion_daemon.world_v2.recall_index import (
-    FeatureHashRecallEmbedding,
-    InMemoryRecallIndex,
-    RecallCursor,
-    RecallDocument,
-    RecallSourceBinding,
-)
-from companion_daemon.world_v2.recall_runtime import RecallCoordinator
+from companion_daemon.world_v2.proposal_audit_schemas import RecordedModelResultAudit
 from companion_daemon.world_v2.schemas import (
     AspirationProjection,
     ClockObservation,
@@ -83,6 +76,7 @@ class _SequenceModel:
         self.semantic_authority_id = f"semantic-authority:test:{model.casefold()}"
         self._outputs = list(outputs)
         self.calls = 0
+        self.consider_calls = 0
         self.messages: list[list[dict[str, str]]] = []
 
     async def complete(
@@ -99,6 +93,117 @@ class _SequenceModel:
             raise output
         assert isinstance(output, str)
         return output
+
+    async def consider(self, opportunity):
+        self.consider_calls += 1
+        manifest = opportunity.capability_manifest
+        assert manifest is not None
+        capability = dict(manifest.payload)
+        offered = LifeDevelopmentPossibilityDraft.model_validate_json(
+            json.dumps(capability["external_opportunity"], ensure_ascii=False)
+        )
+        envelope = capability["executable_envelope"]
+        offered_window = DueWindow.model_validate_json(
+            json.dumps(
+                {
+                    "opens_at": envelope["opens_at"],
+                    "closes_at": envelope["closes_at"],
+                }
+            )
+        )
+        messages = [
+            {"role": "system", "content": "fixture CharacterInterior"},
+            {
+                "role": "user",
+                "content": json.dumps(capability, ensure_ascii=False, sort_keys=True),
+            },
+        ]
+        first_call_id: str | None = None
+        last_error: LifeDevelopmentDraftError | None = None
+        for ordinal in range(2):
+            raw = await self.complete(messages)
+            call_id = (
+                "model-call:fixture-character-interior:"
+                + hashlib.sha256(
+                    (json.dumps(messages, sort_keys=True) + f":{ordinal}").encode()
+                ).hexdigest()
+            )
+            if ordinal == 0:
+                first_call_id = call_id
+            try:
+                parsed = parse_character_choice(
+                    raw=raw,
+                    offered=offered,
+                    offered_window=offered_window,
+                    active_aspiration_source_refs=tuple(
+                        capability.get("active_aspiration_source_refs", ())
+                    ),
+                )
+            except LifeDevelopmentDraftError as exc:
+                last_error = exc
+                continue
+            completion = parsed.model_dump(mode="json")
+            summary = "Fixture character made one life decision."
+            author_lineage = _InteriorAuthorLineage(
+                model_id=self.model,
+                model_version=self.model,
+                model_call_id=call_id,
+                request_hash="sha256:"
+                + hashlib.sha256(json.dumps(messages, sort_keys=True).encode()).hexdigest(),
+                response_hash="sha256:" + hashlib.sha256(raw.encode()).hexdigest(),
+                attempt_ordinal=ordinal,
+                parent_model_call_id=first_call_id if ordinal else None,
+            )
+            return InnerDecision(
+                inner_turn_id=(
+                    "character-inner-turn:fixture:"
+                    + hashlib.sha256(opportunity.inner_turn_ref.encode()).hexdigest()[:32]
+                ),
+                opportunity_ref=opportunity.opportunity_ref,
+                actor_ref=opportunity.actor_ref,
+                cursor=opportunity.cursor,
+                snapshot_id="snapshot:fixture-life-development",
+                snapshot_hash="f" * 64,
+                status="decided",
+                summary=summary,
+                attended_source_refs=(),
+                instant_private_self={"summary": summary},
+                private_self_lineage={
+                    "relation": "single_pass",
+                    "initial_private_self": {"summary": summary},
+                    "initial_snapshot_id": "snapshot:fixture-life-development",
+                    "initial_snapshot_hash": "f" * 64,
+                    "initial_author_lineage": author_lineage,
+                    "final_private_self": {"summary": summary},
+                    "final_snapshot_id": "snapshot:fixture-life-development",
+                    "final_snapshot_hash": "f" * 64,
+                    "final_author_lineage": author_lineage,
+                },
+                decision={
+                    "contract": "character-interior-purpose-decision.1",
+                    "purpose": "life_development_choice",
+                    "source_refs": list(manifest.source_refs),
+                    "capability_ref": manifest.capability_ref,
+                    "capability_payload_hash": manifest.payload_hash,
+                    "payload": {
+                        "contract": "character-interior-life-development-choice.1",
+                        "completion": completion,
+                    },
+                },
+                author_lineage=author_lineage,
+            )
+        assert last_error is not None
+        return InnerDecision(
+            inner_turn_id=(
+                "character-inner-turn:fixture:"
+                + hashlib.sha256(opportunity.inner_turn_ref.encode()).hexdigest()[:32]
+            ),
+            opportunity_ref=opportunity.opportunity_ref,
+            actor_ref=opportunity.actor_ref,
+            cursor=opportunity.cursor,
+            status="technical_failure",
+            failure_code="invalid_role_result_after_correction",
+        )
 
 
 class _WireReselectionSequenceModel(_SequenceModel):
@@ -134,7 +239,7 @@ class _PinnedCapsuleCompiler:
     def compile_for_deliberation(self, _query):  # type: ignore[no-untyped-def]
         projection = self._ledger.project()
         context = self._context or {
-            "current_self_state": {
+            "inner_life_snapshot": {
                 "character_core": {"values": ["autonomy"]},
                 "personality_state": {"availability": "present"},
             },
@@ -158,7 +263,7 @@ async def test_world_author_receives_recent_life_texture_as_non_directive_histor
     ledger = WorldLedger.in_memory(world_id=WORLD_ID)
     wake = _seed_clock(ledger)
     context = {
-        "current_self_state": {
+        "inner_life_snapshot": {
             "character_core": {"values": ["autonomy"]},
             "personality_state": {"availability": "present"},
         },
@@ -185,7 +290,7 @@ async def test_world_author_receives_recent_life_texture_as_non_directive_histor
         ledger=ledger,
         content_store=InMemoryImmutableLifeContentStore(),
         world_author=world_author,
-        character_model=character,
+        character_interior=character,
         capsule_compiler=_PinnedCapsuleCompiler(ledger=ledger, context=context),
         capability_manifest_compiler=_StaticManifestCompiler(wake=wake),
         owner_actor_ref=OWNER,
@@ -497,7 +602,7 @@ async def test_world_author_can_attach_an_open_objective_transition_to_one_outco
         ledger=ledger,
         wake=wake,
         world_author=_SequenceModel(model="world-author", outputs=(raw,)),
-        character_model=_SequenceModel(model="character", outputs=()),
+        character_interior=_SequenceModel(model="character", outputs=()),
         location_capability=capability,
     )
 
@@ -510,9 +615,7 @@ async def test_world_author_can_attach_an_open_objective_transition_to_one_outco
     assert result.status == "occurrence_committed"
     candidate = ledger.project().world_occurrences[0].candidate_outcomes[0]
     assert candidate.objective_biographical_transition is not None
-    assert candidate.objective_biographical_transition.coordinate_ref == (
-        "biography:education"
-    )
+    assert candidate.objective_biographical_transition.coordinate_ref == ("biography:education")
 
 
 def test_world_author_objective_transition_cannot_claim_character_direction_coordinate() -> None:
@@ -637,7 +740,7 @@ async def test_pre_v7_possibility_cannot_carry_objective_transition() -> None:
         ledger=ledger,
         wake=wake,
         world_author=_SequenceModel(model="world-author", outputs=(raw,)),
-        character_model=_SequenceModel(model="character", outputs=()),
+        character_interior=_SequenceModel(model="character", outputs=()),
         location_capability=capability,
     )
 
@@ -654,9 +757,7 @@ async def test_pre_v7_possibility_cannot_carry_objective_transition() -> None:
     )
     for strip_proposal_descriptors in (False, True):
         downgraded_payload = proposal_event.payload()
-        downgraded_payload["possibility_authority_version"] = (
-            "life-development-possibility.6"
-        )
+        downgraded_payload["possibility_authority_version"] = "life-development-possibility.6"
         if strip_proposal_descriptors:
             possibility = downgraded_payload["possibility_authority"]
             for outcome in possibility["outcomes"]:
@@ -682,9 +783,7 @@ async def test_pre_v7_possibility_cannot_carry_objective_transition() -> None:
     rejected_review["unsupported_objective_transitions"] = [
         {"prose_path": "outcomes.0.objective_biographical_transition.summary"}
     ]
-    rejected_payload["world_author_novel_origin_review_hash"] = _hash_json(
-        rejected_review
-    )
+    rejected_payload["world_author_novel_origin_review_hash"] = _hash_json(rejected_review)
     rejected_proposal = _replace_event_payload(
         proposal_event,
         payload=rejected_payload,
@@ -727,7 +826,7 @@ async def test_world_author_optional_visual_evidence_is_claim_closed_and_persist
         ledger=ledger,
         wake=wake,
         world_author=_SequenceModel(model="world-author", outputs=(raw,)),
-        character_model=_SequenceModel(model="character", outputs=()),
+        character_interior=_SequenceModel(model="character", outputs=()),
     )
 
     result = await runtime.advance_once(
@@ -768,7 +867,7 @@ async def test_world_author_can_introduce_a_place_without_a_destination_catalogu
         ledger=ledger,
         wake=wake,
         world_author=_SequenceModel(model="world-author", outputs=(raw,)),
-        character_model=_SequenceModel(model="character", outputs=()),
+        character_interior=_SequenceModel(model="character", outputs=()),
         location_capability=capability,
     )
 
@@ -876,9 +975,7 @@ def test_visual_location_mismatch_reports_exact_machine_paths() -> None:
         )
 
     assert raised.value.code == "invalid_shape"
-    assert {
-        item["path"] for item in raised.value.violations
-    } >= {
+    assert {item["path"] for item in raised.value.violations} >= {
         "location_ref",
         "outcomes.0.visual_evidence.location.location_ref",
     }
@@ -896,7 +993,7 @@ async def test_world_author_receives_machine_visible_visual_location_pairing() -
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="character-role",
             outputs=(AssertionError("no-op does not call the character"),),
         ),
@@ -910,9 +1007,7 @@ async def test_world_author_receives_machine_visible_visual_location_pairing() -
 
     assert result.status == "no_op"
     request = json.loads(world_author.messages[0][-1]["content"])
-    assert request["cross_field_authority"]["visual_evidence"][
-        "location_binding"
-    ] == {
+    assert request["cross_field_authority"]["visual_evidence"]["location_binding"] == {
         "when_proposal_location_ref_is_null": (
             "every_outcome.visual_evidence.location_must_be_null"
         ),
@@ -921,8 +1016,7 @@ async def test_world_author_receives_machine_visible_visual_location_pairing() -
             "must_equal_proposal.location_ref"
         ),
         "semantic_kind_and_place": (
-            "must_describe_the_same_execution_coordinate_not_an_origin_or_"
-            "background_place"
+            "must_describe_the_same_execution_coordinate_not_an_origin_or_background_place"
         ),
     }
 
@@ -940,7 +1034,7 @@ async def test_world_author_receives_copyable_pinned_time_and_location_window() 
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="character-role",
             outputs=(AssertionError("no-op does not call the character"),),
         ),
@@ -1555,27 +1649,22 @@ def _runtime(
     wake: WorldEvent,
     world_author: _SequenceModel,
     world_author_source_rewriter: _SequenceModel | None = None,
-    character_model: _SequenceModel,
+    character_interior: _SequenceModel,
     source_closure_reviewer: _SequenceModel | None = None,
     novel_origin_critic: _SequenceModel | None = None,
     store: InMemoryImmutableLifeContentStore | None = None,
     location_capability: LifeDevelopmentLocationCapability | None = None,
-    recall_coordinator: RecallCoordinator | None = None,
 ) -> tuple[LifeDevelopmentRuntime, InMemoryImmutableLifeContentStore]:
     content_store = store or InMemoryImmutableLifeContentStore()
     if source_closure_reviewer is None:
         source_closure_reviewer = _SequenceModel(
             model="fixture:independent-life-source-reviewer",
-            outputs=tuple(
-                _source_closure_review(decision="supported") for _ in range(32)
-            ),
+            outputs=tuple(_source_closure_review(decision="supported") for _ in range(32)),
         )
     if novel_origin_critic is None and source_closure_reviewer is not None:
         novel_origin_critic = _SequenceModel(
             model=source_closure_reviewer.model,
-            outputs=tuple(
-                _novel_origin_review(decision="supported") for _ in range(8)
-            ),
+            outputs=tuple(_novel_origin_review(decision="supported") for _ in range(8)),
         )
     runtime_kwargs: dict[str, object] = {}
     if world_author_source_rewriter is not None:
@@ -1585,7 +1674,7 @@ def _runtime(
             ledger=ledger,
             content_store=content_store,
             world_author=world_author,
-            character_model=character_model,
+            character_interior=character_interior,
             source_closure_reviewer=source_closure_reviewer,
             novel_origin_critic=novel_origin_critic,
             capsule_compiler=_PinnedCapsuleCompiler(ledger=ledger),
@@ -1594,7 +1683,6 @@ def _runtime(
                 location_capability=location_capability,
             ),
             owner_actor_ref=OWNER,
-            recall_coordinator=recall_coordinator,
             **runtime_kwargs,
         ),
         content_store,
@@ -1639,7 +1727,7 @@ async def test_factful_world_author_draft_fails_closed_without_source_reviewer()
         ledger=ledger,
         content_store=InMemoryImmutableLifeContentStore(),
         world_author=world_author,
-        character_model=character,
+        character_interior=character,
         capsule_compiler=_PinnedCapsuleCompiler(ledger=ledger),
         capability_manifest_compiler=_StaticManifestCompiler(wake=wake),
         owner_actor_ref=OWNER,
@@ -1672,7 +1760,7 @@ async def test_world_author_no_op_remains_valid_without_source_reviewer() -> Non
             model="world-author-no-op-without-reviewer",
             outputs=('{"decision":"no_op"}',),
         ),
-        character_model=character,
+        character_interior=character,
         capsule_compiler=_PinnedCapsuleCompiler(ledger=ledger),
         capability_manifest_compiler=_StaticManifestCompiler(wake=wake),
         owner_actor_ref=OWNER,
@@ -1711,7 +1799,7 @@ async def test_role_labels_cannot_disguise_world_author_self_review() -> None:
             model=shared_provider,
             role="world_author",
         ),
-        character_model=character,
+        character_interior=character,
         source_closure_reviewer=RoleBoundLifeDevelopmentModelAdapter(
             model=shared_provider,
             role="world_author_source_reviewer",
@@ -1728,9 +1816,7 @@ async def test_role_labels_cannot_disguise_world_author_self_review() -> None:
     )
 
     assert result.status == "technical_failure"
-    assert result.reason_code == (
-        "life_development.source_closure_reviewer_not_independent"
-    )
+    assert result.reason_code == ("life_development.source_closure_reviewer_not_independent")
     assert shared_provider.calls == 1
     assert character.calls == 0
 
@@ -1751,15 +1837,9 @@ def _novel_origin_review(
             "decision": decision,
             "unsupported_claims": list(unsupported_claims),
             "unsupported_provisional_npcs": list(unsupported_provisional_npcs),
-            "unsupported_provisional_places": list(
-                unsupported_provisional_places
-            ),
-            "unsupported_outcome_prerequisites": list(
-                unsupported_outcome_prerequisites
-            ),
-            "unsupported_objective_transitions": list(
-                unsupported_objective_transitions
-            ),
+            "unsupported_provisional_places": list(unsupported_provisional_places),
+            "unsupported_outcome_prerequisites": list(unsupported_outcome_prerequisites),
+            "unsupported_objective_transitions": list(unsupported_objective_transitions),
             "undeclared_premise_fragments": list(undeclared_premise_fragments),
             "reason": reason,
         },
@@ -1794,9 +1874,7 @@ def test_focused_critic_closes_objective_transition_prior_history() -> None:
             decision="unsupported",
             unsupported_objective_transitions=(
                 {
-                    "prose_path": (
-                        "outcomes.0.objective_biographical_transition.summary"
-                    ),
+                    "prose_path": ("outcomes.0.objective_biographical_transition.summary"),
                     "violation_kinds": ["imported_current_or_prior_prerequisite"],
                     "exact_fragments": ["上个月已经秘密退学"],
                 },
@@ -1805,9 +1883,7 @@ def test_focused_critic_closes_objective_transition_prior_history() -> None:
         draft=draft,
     )
 
-    assert review.unsupported_objective_transitions[0].exact_fragments == (
-        "上个月已经秘密退学",
-    )
+    assert review.unsupported_objective_transitions[0].exact_fragments == ("上个月已经秘密退学",)
 
 
 def _clock_only_old_friend_draft(*, wake: WorldEvent) -> dict[str, object]:
@@ -1825,8 +1901,7 @@ def _clock_only_old_friend_draft(*, wake: WorldEvent) -> dict[str, object]:
         "outcome_resolution_authority": "character_choice",
         "premise_scope": "external_opportunity",
         "premise": (
-            "她在家收到老同学陈伟的消息；陈伟回到嘉兴，约她今晚去老方"
-            "面馆吃饭，顺便讲云南旅行。"
+            "她在家收到老同学陈伟的消息；陈伟回到嘉兴，约她今晚去老方面馆吃饭，顺便讲云南旅行。"
         ),
         "premise_claim_refs": list(claims),
         "claim_declarations": [
@@ -1962,9 +2037,7 @@ def test_world_author_accepts_schema_conforming_provisional_npc_ref() -> None:
     )
 
     assert parsed.decision == "propose"
-    assert parsed.outcomes[0].provisional_npcs[0].local_ref == (
-        "local:npc:book-stall-volunteer"
-    )
+    assert parsed.outcomes[0].provisional_npcs[0].local_ref == ("local:npc:book-stall-volunteer")
 
 
 def test_world_author_cannot_author_a_biographical_coordinate_replacement() -> None:
@@ -2124,9 +2197,7 @@ def test_source_closure_retains_valid_rejection_when_an_extra_fragment_is_not_ve
         raw=_source_closure_review(
             decision="unsupported",
             unsupported_claim_ids=("local:claim:old-friend-message",),
-            undeclared_fact_fragments=(
-                "她在家收到陈伟讲云南旅行的消息",
-            ),
+            undeclared_fact_fragments=("她在家收到陈伟讲云南旅行的消息",),
             reason=(
                 "The claim id is an exact rejection coordinate; the prose fragment "
                 "is only a non-verbatim explanation of the same issue."
@@ -2223,8 +2294,7 @@ def test_general_source_closure_cannot_use_outcome_text_as_a_rejection_coordinat
             decision="unsupported",
             undeclared_fact_paths=("premise",),
             reason=(
-                "Each path is copied from the supplied machine-visible prose "
-                "coordinate catalogue."
+                "Each path is copied from the supplied machine-visible prose coordinate catalogue."
             ),
         ),
         draft=draft,
@@ -2241,9 +2311,7 @@ def test_general_source_closure_cannot_use_outcome_text_as_a_rejection_coordinat
             raw=_source_closure_review(
                 decision="unsupported",
                 undeclared_fact_fragments=(outcome_only_fragment,),
-                reason=(
-                    "Outcome prose is delegated to the focused prerequisite critic."
-                ),
+                reason=("Outcome prose is delegated to the focused prerequisite critic."),
             ),
             draft=draft,
         )
@@ -2298,9 +2366,7 @@ def test_focused_critic_accepts_only_exact_imported_outcome_prerequisite_coordin
     wake = _seed_clock(ledger)
     manifest = _manifest(wake, pinned_cursor=_projection_cursor(ledger))
     value = _novel_book_exchange_draft(wake=wake)
-    value["outcomes"][0]["text"] = (
-        "摊主认出她，提起两人上个月已经约好今天继续聊那本诗集。"
-    )
+    value["outcomes"][0]["text"] = "摊主认出她，提起两人上个月已经约好今天继续聊那本诗集。"
     draft = parse_world_author_draft(
         raw=json.dumps(value, ensure_ascii=False),
         manifest=manifest,
@@ -2329,9 +2395,7 @@ def test_focused_critic_accepts_only_exact_imported_outcome_prerequisite_coordin
         draft=draft,
     )
 
-    assert review.unsupported_outcome_prerequisites[0].prose_path == (
-        "outcomes.0.text"
-    )
+    assert review.unsupported_outcome_prerequisites[0].prose_path == ("outcomes.0.text")
     assert review.unsupported_outcome_prerequisites[0].exact_fragments == (
         "上个月已经约好",
         "摊主认出她",
@@ -2347,9 +2411,7 @@ def test_focused_critic_accepts_only_exact_imported_outcome_prerequisite_coordin
                 unsupported_outcome_prerequisites=(
                     {
                         "prose_path": "outcomes.0.text",
-                        "violation_kinds": [
-                            "imported_current_or_prior_prerequisite"
-                        ],
+                        "violation_kinds": ["imported_current_or_prior_prerequisite"],
                         "exact_fragments": ["模型自行补写的解释"],
                     },
                 ),
@@ -2410,9 +2472,7 @@ def test_focused_critic_closes_provisional_place_prior_history() -> None:
             unsupported_provisional_places=(
                 {
                     "local_ref": "local:place:old-stall",
-                    "violation_kinds": [
-                        "retroactive_relationship_or_shared_history"
-                    ],
+                    "violation_kinds": ["retroactive_relationship_or_shared_history"],
                     "exact_fragments": ["和用户上个月常去"],
                 },
             ),
@@ -2420,9 +2480,7 @@ def test_focused_critic_closes_provisional_place_prior_history() -> None:
         draft=draft,
     )
 
-    assert review.unsupported_provisional_places[0].local_ref == (
-        "local:place:old-stall"
-    )
+    assert review.unsupported_provisional_places[0].local_ref == ("local:place:old-stall")
 
 
 @pytest.mark.asyncio
@@ -2460,7 +2518,7 @@ async def test_branch_internal_candidate_false_veto_never_reaches_world_author_r
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=character,
+        character_interior=character,
         source_closure_reviewer=general,
         novel_origin_critic=focused,
     )
@@ -2478,9 +2536,7 @@ async def test_branch_internal_candidate_false_veto_never_reaches_world_author_r
     assert focused.calls == 1
     assert character.calls == 1
     correction = json.loads(general.messages[1][-1]["content"])
-    assert correction["validation_failure"]["code"] == (
-        "unknown_source_closure_path"
-    )
+    assert correction["validation_failure"]["code"] == ("unknown_source_closure_path")
 
 
 @pytest.mark.asyncio
@@ -2523,7 +2579,7 @@ async def test_branch_internal_completed_outcome_is_not_prior_history() -> None:
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=character,
+        character_interior=character,
         source_closure_reviewer=_SequenceModel(
             model="general-source-reviewer",
             outputs=(_source_closure_review(decision="supported"),),
@@ -2578,7 +2634,7 @@ async def test_source_reviewer_repairs_annotated_fragment_with_catalog_path() ->
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="character-role",
             outputs=(AssertionError("rewritten no-op does not call the character"),),
         ),
@@ -2595,17 +2651,11 @@ async def test_source_reviewer_repairs_annotated_fragment_with_catalog_path() ->
     assert reviewer.calls == 2
     assert world_author.calls == 2
     correction = json.loads(reviewer.messages[1][-1]["content"])
-    assert correction["validation_failure"]["code"] == (
-        "unknown_source_closure_fragment"
-    )
-    assert "premise" in correction["parser_coordinate_catalog"][
-        "undeclared_fact_paths"
-    ]
+    assert correction["validation_failure"]["code"] == ("unknown_source_closure_fragment")
+    assert "premise" in correction["parser_coordinate_catalog"]["undeclared_fact_paths"]
     assert "Prefer an exact undeclared_fact_path" in correction["instruction"]
     rewrite = json.loads(world_author.messages[1][-1]["content"])
-    assert rewrite["source_closure_failure"]["undeclared_fact_paths"] == [
-        "premise"
-    ]
+    assert rewrite["source_closure_failure"]["undeclared_fact_paths"] == ["premise"]
 
 
 @pytest.mark.asyncio
@@ -2670,7 +2720,7 @@ async def test_source_closure_rejects_clock_backstory_then_preserves_free_novel_
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=character,
+        character_interior=character,
         source_closure_reviewer=reviewer,
     )
 
@@ -2727,8 +2777,7 @@ async def test_source_closure_rejects_clock_backstory_then_preserves_free_novel_
         "user",
     ]
     assert all(
-        private_invalid_marker not in message["content"]
-        for message in world_author.messages[1]
+        private_invalid_marker not in message["content"] for message in world_author.messages[1]
     )
     assert all(message["content"] != first_raw for message in world_author.messages[1])
     rewrite_request = json.loads(world_author.messages[1][-1]["content"])
@@ -2737,9 +2786,7 @@ async def test_source_closure_rejects_clock_backstory_then_preserves_free_novel_
         "local:claim:noodle-invitation",
         "local:claim:old-friend-message",
     ]
-    assert rewrite_request["source_closure_failure"]["undeclared_fact_fragments"] == [
-        "云南旅行"
-    ]
+    assert rewrite_request["source_closure_failure"]["undeclared_fact_fragments"] == ["云南旅行"]
     assert "reason" not in rewrite_request["source_closure_failure"]
     assert rewrite_request["source_closure_failure"]["typed_location_conflicts"] == [
         {
@@ -2766,16 +2813,14 @@ async def test_source_closure_rejects_clock_backstory_then_preserves_free_novel_
         "maximum_optional_visual_objects": 2,
         "optional_annexes": "include_only_when_the_authored_possibility_needs_them",
     }
-    assert rewrite_request["timing_coordinates"] == json.loads(
-        world_author.messages[1][1]["content"]
-    )["timing_coordinates"]
-    assert rewrite_request["timing_coordinates"]["pinned_logical_time"]["utc"] == (
-        NOW.isoformat()
+    assert (
+        rewrite_request["timing_coordinates"]
+        == json.loads(world_author.messages[1][1]["content"])["timing_coordinates"]
     )
-    assert rewrite_request["claim_classification_contract"] == (
-        json.loads(world_author.messages[1][1]["content"])[
-            "claim_classification_contract"
-        ]
+    assert rewrite_request["timing_coordinates"]["pinned_logical_time"]["utc"] == (NOW.isoformat())
+    assert (
+        rewrite_request["claim_classification_contract"]
+        == (json.loads(world_author.messages[1][1]["content"])["claim_classification_contract"])
     )
     assert rewrite_request["correction_obligations"] == {
         "unsupported_existing_claim": (
@@ -2787,8 +2832,7 @@ async def test_source_closure_rejects_clock_backstory_then_preserves_free_novel_
             "and_reference_it_from_every_relying_field"
         ),
         "unsettled_outcome": (
-            "keep_branch_events_conditional_and_do_not_present_them_as_"
-            "already_completed"
+            "keep_branch_events_conditional_and_do_not_present_them_as_already_completed"
         ),
     }
     proposal = ledger.lookup_event_commit(result.proposal_event_ref or "")[0].payload()
@@ -2826,9 +2870,7 @@ async def test_character_can_crystallize_active_aspiration_into_open_plan_atomic
     aspiration_event = _seed_contextual_aspiration(ledger, wake=wake)
     world_author = _SequenceModel(
         model="world-author-role",
-        outputs=(
-            json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),
-        ),
+        outputs=(json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),),
     )
     character = _SequenceModel(
         model="character-role",
@@ -2849,7 +2891,7 @@ async def test_character_can_crystallize_active_aspiration_into_open_plan_atomic
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=character,
+        character_interior=character,
     )
 
     result = await runtime.advance_once(
@@ -2866,20 +2908,14 @@ async def test_character_can_crystallize_active_aspiration_into_open_plan_atomic
     located = ledger.lookup_event_commit(result.proposal_event_ref or "")
     assert located is not None
     committed_types = {
-        ledger.lookup_event_commit(event_id)[0].event_type
-        for event_id in located[1].event_ids
+        ledger.lookup_event_commit(event_id)[0].event_type for event_id in located[1].event_ids
     }
-    assert {"ProposalRecorded", "ActivityPlanned", "AspirationCrystallized"} <= (
-        committed_types
-    )
+    assert {"ProposalRecorded", "ActivityPlanned", "AspirationCrystallized"} <= (committed_types)
     committed_events = tuple(
-        ledger.lookup_event_commit(event_id)[0]
-        for event_id in located[1].event_ids
+        ledger.lookup_event_commit(event_id)[0] for event_id in located[1].event_ids
     )
     without_aspiration = tuple(
-        event
-        for event in committed_events
-        if event.event_type != "AspirationCrystallized"
+        event for event in committed_events if event.event_type != "AspirationCrystallized"
     )
     with pytest.raises(ValueError, match="one adjacent effect"):
         validate_commit_batch(
@@ -2932,7 +2968,7 @@ async def test_source_closure_rewrite_can_use_a_stronger_world_author_route() ->
         wake=wake,
         world_author=world_author,
         world_author_source_rewriter=source_rewriter,
-        character_model=character,
+        character_interior=character,
         source_closure_reviewer=reviewer,
     )
 
@@ -3019,6 +3055,7 @@ async def test_source_closure_rewrite_can_use_a_stronger_world_author_route() ->
         ),
     ),
 )
+@pytest.mark.asyncio
 async def test_source_rewriter_gets_one_complete_structural_reselection(
     invalid_kind: str,
     expected_code: str,
@@ -3088,7 +3125,7 @@ async def test_source_rewriter_gets_one_complete_structural_reselection(
         wake=wake,
         world_author=world_author,
         world_author_source_rewriter=source_rewriter,
-        character_model=character,
+        character_interior=character,
         source_closure_reviewer=reviewer,
     )
 
@@ -3113,9 +3150,7 @@ async def test_source_rewriter_gets_one_complete_structural_reselection(
         "local:claim:old-friend-message"
     ]
     assert correction["output_contract"]["contract"] == expected_contract
-    assert correction["replacement_contract"]["allowed_decisions"] == (
-        expected_decisions
-    )
+    assert correction["replacement_contract"]["allowed_decisions"] == (expected_decisions)
     if expected_decisions == ["propose"]:
         assert "no_op" not in correction["output_contract"]
         assert correction["replacement_contract"]["semantic_decision"] == (
@@ -3155,6 +3190,7 @@ async def test_source_rewriter_gets_one_complete_structural_reselection(
         ),
     ),
 )
+@pytest.mark.asyncio
 async def test_invalid_rewrite_proposal_is_repaired_as_the_same_propose_before_character(
     invalid_kind: str,
     expected_code: str,
@@ -3215,7 +3251,7 @@ async def test_invalid_rewrite_proposal_is_repaired_as_the_same_propose_before_c
             ),
         ),
         world_author_source_rewriter=source_rewriter,
-        character_model=character,
+        character_interior=character,
         source_closure_reviewer=reviewer,
     )
 
@@ -3235,28 +3271,20 @@ async def test_invalid_rewrite_proposal_is_repaired_as_the_same_propose_before_c
         "world-author-source-rewrite-propose-repair.1"
     )
     assert correction["replacement_contract"]["allowed_decisions"] == ["propose"]
-    assert correction["replacement_contract"]["semantic_decision"] == (
-        "preserve_initial_propose"
-    )
-    assert correction["same_pinned_authority"]["capability_manifest"][
-        "owner_actor_ref"
-    ] == OWNER
-    assert correction["same_pinned_authority"]["cross_field_authority"][
-        "entity_binding"
-    ] == {
+    assert correction["replacement_contract"]["semantic_decision"] == ("preserve_initial_propose")
+    assert correction["same_pinned_authority"]["capability_manifest"]["owner_actor_ref"] == OWNER
+    assert correction["same_pinned_authority"]["cross_field_authority"]["entity_binding"] == {
         "allowed_existing_entity_refs": [],
         "owner_actor_ref": OWNER,
         "owner_is_implicit_not_entity_ref": True,
         "new_people": "outcomes.*.provisional_npcs_only",
     }
     assert any(
-        coordinate["rule"] == expected_rule
-        for coordinate in correction["repair_coordinates"]
+        coordinate["rule"] == expected_rule for coordinate in correction["repair_coordinates"]
     )
     if invalid_kind == "missing_visual_description":
         assert any(
-            coordinate["field_path"]
-            == "outcomes.0.visual_evidence.objects.0.description"
+            coordinate["field_path"] == "outcomes.0.visual_evidence.objects.0.description"
             for coordinate in correction["repair_coordinates"]
         )
 
@@ -3287,7 +3315,7 @@ async def test_propose_repair_cannot_change_the_selected_decision_to_no_op() -> 
             ),
         ),
         world_author_source_rewriter=source_rewriter,
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="character-role",
             outputs=(AssertionError("invalid repair must not reach Character Model"),),
         ),
@@ -3309,9 +3337,7 @@ async def test_propose_repair_cannot_change_the_selected_decision_to_no_op() -> 
     )
 
     assert result.status == "technical_failure"
-    assert result.reason_code == (
-        "life_development.world_author_source_rewrite_unavailable"
-    )
+    assert result.reason_code == ("life_development.world_author_source_rewrite_unavailable")
     correction = json.loads(source_rewriter.messages[1][-1]["content"])
     assert correction["output_contract"]["contract"] == (
         "world-author-source-rewrite-propose-repair.1"
@@ -3343,7 +3369,7 @@ async def test_initial_source_rewrite_no_op_remains_a_world_author_decision() ->
             ),
         ),
         world_author_source_rewriter=source_rewriter,
-        character_model=character,
+        character_interior=character,
         source_closure_reviewer=_SequenceModel(
             model="independent-source-reviewer",
             outputs=(
@@ -3411,7 +3437,7 @@ async def test_source_rewrite_envelope_is_unwrapped_without_changing_audit_bytes
             ),
         ),
         world_author_source_rewriter=source_rewriter,
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="character-role",
             outputs=(
                 json.dumps(
@@ -3508,33 +3534,25 @@ async def test_focused_novel_origin_critic_rejects_d10_history_then_accepts_firs
                 unsupported_claims=(
                     {
                         "claim_id": "local:claim:chen-wei-return",
-                        "violation_kinds": [
-                            "retroactive_relationship_or_shared_history"
-                        ],
+                        "violation_kinds": ["retroactive_relationship_or_shared_history"],
                         "exact_fragments": ["高中老同学", "几个月没联系"],
                     },
                 ),
                 unsupported_provisional_npcs=(
                     {
                         "local_ref": "local:npc:chen-wei",
-                        "violation_kinds": [
-                            "retroactive_relationship_or_shared_history"
-                        ],
+                        "violation_kinds": ["retroactive_relationship_or_shared_history"],
                         "exact_fragments": ["高中老同学", "几个月没联系"],
                     },
                 ),
                 unsupported_outcome_prerequisites=(
                     {
                         "prose_path": "outcomes.0.text",
-                        "violation_kinds": [
-                            "retroactive_relationship_or_shared_history"
-                        ],
+                        "violation_kinds": ["retroactive_relationship_or_shared_history"],
                         "exact_fragments": ["高中时的旧回忆"],
                     },
                 ),
-                reason=(
-                    "The draft relabels prior relationship and shared history as novel."
-                ),
+                reason=("The draft relabels prior relationship and shared history as novel."),
             ),
             _novel_origin_review(decision="supported"),
         ),
@@ -3557,7 +3575,7 @@ async def test_focused_novel_origin_critic_rejects_d10_history_then_accepts_firs
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=character,
+        character_interior=character,
         source_closure_reviewer=general,
         novel_origin_critic=focused,
     )
@@ -3579,15 +3597,11 @@ async def test_focused_novel_origin_critic_rejects_d10_history_then_accepts_firs
         "exact_fragments": ["几个月没联系", "高中老同学"],
         "violation_kinds": ["retroactive_relationship_or_shared_history"],
     }
-    assert correction["source_closure_failure"][
-        "unsupported_outcome_prerequisites"
-    ] == [
+    assert correction["source_closure_failure"]["unsupported_outcome_prerequisites"] == [
         {
             "exact_fragments": ["高中时的旧回忆"],
             "prose_path": "outcomes.0.text",
-            "violation_kinds": [
-                "retroactive_relationship_or_shared_history"
-            ],
+            "violation_kinds": ["retroactive_relationship_or_shared_history"],
         }
     ]
     proposal = ledger.lookup_event_commit(result.proposal_event_ref or "")[0].payload()
@@ -3598,9 +3612,16 @@ async def test_focused_novel_origin_critic_rejects_d10_history_then_accepts_firs
         == "world_author_novel_origin_critic"
     )
     model_roles = [
-        json.loads(json.loads(item.proposal_json)["response_text"])["model_role"]
+        (
+            metadata.get("model_role")
+            or (
+                "character_interior"
+                if metadata.get("contract") == "character-interior-decision-audit.1"
+                else None
+            )
+        )
         for item in ledger.project().proposal_audits
-        if json.loads(item.proposal_json).get("response_text") is not None
+        if (metadata := json.loads(json.loads(item.proposal_json)["response_text"])) is not None
     ]
     assert model_roles == [
         "world_author",
@@ -3609,7 +3630,7 @@ async def test_focused_novel_origin_critic_rejects_d10_history_then_accepts_firs
         "world_author",
         "world_author_source_reviewer",
         "world_author_novel_origin_critic",
-        "character_model",
+        "character_interior",
     ]
 
 
@@ -3619,9 +3640,7 @@ async def test_terminal_novel_origin_failure_is_fail_closed_and_replays_without_
     wake = _seed_clock(ledger)
     world_author = _SequenceModel(
         model="world-author-role",
-        outputs=(
-            json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),
-        ),
+        outputs=(json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),),
     )
     general = _SequenceModel(
         model="independent-source-reviewer",
@@ -3635,7 +3654,7 @@ async def test_terminal_novel_origin_failure_is_fail_closed_and_replays_without_
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="character-role",
             outputs=(AssertionError("failed critic must not reach Character"),),
         ),
@@ -3665,7 +3684,7 @@ async def test_terminal_novel_origin_failure_is_fail_closed_and_replays_without_
         ledger=ledger,
         wake=wake,
         world_author=restarted_world,
-        character_model=_SequenceModel(model="character-role", outputs=()),
+        character_interior=_SequenceModel(model="character-role", outputs=()),
         source_closure_reviewer=restarted_general,
         novel_origin_critic=restarted_focused,
         store=store,
@@ -3677,8 +3696,10 @@ async def test_terminal_novel_origin_failure_is_fail_closed_and_replays_without_
     )
 
     assert first.status == recovered.status == "technical_failure"
-    assert first.reason_code == recovered.reason_code == (
-        "life_development.novel_origin_critic_unavailable"
+    assert (
+        first.reason_code
+        == recovered.reason_code
+        == ("life_development.novel_origin_critic_unavailable")
     )
     assert world_author.calls == general.calls == focused.calls == 1
     assert restarted_world.calls == restarted_general.calls == restarted_focused.calls == 0
@@ -3700,9 +3721,7 @@ async def test_terminal_invalid_novel_origin_contract_is_distinct_from_unavailab
         unsupported_claims=(
             {
                 "claim_id": "local:claim:book-exchange",
-                "violation_kinds": [
-                    "existing_entity_or_fact_masquerading_as_novel"
-                ],
+                "violation_kinds": ["existing_entity_or_fact_masquerading_as_novel"],
                 "exact_fragments": ["今晚街角"],
             },
         ),
@@ -3720,7 +3739,7 @@ async def test_terminal_invalid_novel_origin_contract_is_distinct_from_unavailab
             model="world-author-role",
             outputs=(json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),),
         ),
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="character-role",
             outputs=(AssertionError("invalid review must not reach Character"),),
         ),
@@ -3738,9 +3757,7 @@ async def test_terminal_invalid_novel_origin_contract_is_distinct_from_unavailab
     )
 
     assert result.status == "technical_failure"
-    assert result.reason_code == (
-        "life_development.novel_origin_critic_invalid_contract"
-    )
+    assert result.reason_code == ("life_development.novel_origin_critic_invalid_contract")
     assert critic.calls == critic.reselection.calls == 1
     last_audit = RecordedModelResultAudit.model_validate_json(
         ledger.project().model_result_audits[-1].audit_json
@@ -3783,7 +3800,7 @@ async def test_source_closure_rewrite_still_unsupported_is_audited_technical_fai
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=character,
+        character_interior=character,
         source_closure_reviewer=reviewer,
     )
 
@@ -3794,10 +3811,7 @@ async def test_source_closure_rewrite_still_unsupported_is_audited_technical_fai
     )
 
     assert result.status == "technical_failure"
-    assert (
-        result.reason_code
-        == "life_development.world_author_source_closure_rejected"
-    )
+    assert result.reason_code == "life_development.world_author_source_closure_rejected"
     assert world_author.calls == reviewer.calls == 2
     assert character.calls == 0
     assert ledger.project().plans == ()
@@ -3821,7 +3835,7 @@ async def test_source_closure_provider_failure_is_not_role_silence_or_world_succ
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=_SequenceModel(model="character-role", outputs=()),
+        character_interior=_SequenceModel(model="character-role", outputs=()),
         source_closure_reviewer=reviewer,
     )
 
@@ -3863,7 +3877,7 @@ async def test_terminal_invalid_source_review_contract_is_distinct_and_replays_w
             model="world-author-role",
             outputs=(json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),),
         ),
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="character-role",
             outputs=(AssertionError("invalid review must not reach Character"),),
         ),
@@ -3888,7 +3902,7 @@ async def test_terminal_invalid_source_review_contract_is_distinct_and_replays_w
         ledger=ledger,
         wake=wake,
         world_author=restarted_world,
-        character_model=_SequenceModel(model="character-role", outputs=()),
+        character_interior=_SequenceModel(model="character-role", outputs=()),
         source_closure_reviewer=restarted_reviewer,
         store=store,
     )
@@ -3899,8 +3913,10 @@ async def test_terminal_invalid_source_review_contract_is_distinct_and_replays_w
     )
 
     assert first.status == recovered.status == "technical_failure"
-    assert first.reason_code == recovered.reason_code == (
-        "life_development.source_closure_reviewer_invalid_contract"
+    assert (
+        first.reason_code
+        == recovered.reason_code
+        == ("life_development.source_closure_reviewer_invalid_contract")
     )
     assert reviewer.calls == reviewer.reselection.calls == 1
     assert restarted_world.calls == restarted_reviewer.calls == 0
@@ -3926,7 +3942,7 @@ async def test_terminal_source_review_failure_replays_without_provider_io() -> N
                 ),
             ),
         ),
-        character_model=_SequenceModel(model="character-role", outputs=()),
+        character_interior=_SequenceModel(model="character-role", outputs=()),
         source_closure_reviewer=_SequenceModel(
             model="independent-source-reviewer",
             outputs=(TimeoutError("reviewer unavailable"),),
@@ -3949,7 +3965,7 @@ async def test_terminal_source_review_failure_replays_without_provider_io() -> N
         ledger=ledger,
         wake=wake,
         world_author=restarted_world,
-        character_model=_SequenceModel(model="character-role", outputs=()),
+        character_interior=_SequenceModel(model="character-role", outputs=()),
         source_closure_reviewer=restarted_reviewer,
         store=store,
     )
@@ -3961,8 +3977,10 @@ async def test_terminal_source_review_failure_replays_without_provider_io() -> N
     )
 
     assert first.status == recovered.status == "technical_failure"
-    assert first.reason_code == recovered.reason_code == (
-        "life_development.source_closure_reviewer_unavailable"
+    assert (
+        first.reason_code
+        == recovered.reason_code
+        == ("life_development.source_closure_reviewer_unavailable")
     )
     assert restarted_world.calls == 0
     assert restarted_reviewer.calls == 0
@@ -3985,11 +4003,9 @@ async def test_changed_review_request_does_not_recover_old_terminal_failure(
         wake=wake,
         world_author=_SequenceModel(
             model="world-author-role",
-            outputs=(
-                json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),
-            ),
+            outputs=(json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),),
         ),
-        character_model=_SequenceModel(model="character-role", outputs=()),
+        character_interior=_SequenceModel(model="character-role", outputs=()),
         source_closure_reviewer=_SequenceModel(
             model="independent-source-reviewer",
             outputs=(TimeoutError("first packet unavailable"),),
@@ -4033,7 +4049,7 @@ async def test_changed_review_request_does_not_recover_old_terminal_failure(
         ledger=ledger,
         wake=wake,
         world_author=restarted_world,
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="character-role",
             outputs=(
                 json.dumps(
@@ -4089,7 +4105,7 @@ async def test_general_review_correction_compiler_change_opens_a_new_lineage(
             model="world-author-role",
             outputs=(json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),),
         ),
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="character-role",
             outputs=(json.dumps({"decision": "no_op"}),),
         ),
@@ -4103,6 +4119,7 @@ async def test_general_review_correction_compiler_change_opens_a_new_lineage(
         )
         assert first.status == "technical_failure"
     else:
+
         async def stop_after_general_review(**_kwargs: object) -> None:
             raise RuntimeError("stop after durable general review")
 
@@ -4118,9 +4135,7 @@ async def test_general_review_correction_compiler_change_opens_a_new_lineage(
                 correlation_id="correlation:life-development",
             )
 
-    original_correction = (
-        life_runtime_module.life_development_source_closure_correction_message
-    )
+    original_correction = life_runtime_module.life_development_source_closure_correction_message
 
     def changed_correction(**kwargs):  # type: ignore[no-untyped-def]
         message = original_correction(**kwargs)
@@ -4146,7 +4161,7 @@ async def test_general_review_correction_compiler_change_opens_a_new_lineage(
             model="world-author-role",
             outputs=(AssertionError("World Author result must recover"),),
         ),
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="character-role",
             outputs=(json.dumps({"decision": "no_op"}),),
         ),
@@ -4200,7 +4215,7 @@ async def test_focused_review_correction_compiler_change_opens_a_new_lineage(
             model="world-author-role",
             outputs=(json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),),
         ),
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="character-role",
             outputs=(character_choice,),
         ),
@@ -4218,6 +4233,7 @@ async def test_focused_review_correction_compiler_change_opens_a_new_lineage(
         )
         assert first.status == "technical_failure"
     else:
+
         def stop_after_focused_review(**_kwargs: object) -> None:
             raise RuntimeError("stop after durable focused review")
 
@@ -4233,9 +4249,7 @@ async def test_focused_review_correction_compiler_change_opens_a_new_lineage(
                 correlation_id="correlation:life-development",
             )
 
-    original_correction = (
-        life_runtime_module.life_development_novel_origin_correction_message
-    )
+    original_correction = life_runtime_module.life_development_novel_origin_correction_message
 
     def changed_correction(**kwargs):  # type: ignore[no-untyped-def]
         message = original_correction(**kwargs)
@@ -4261,7 +4275,7 @@ async def test_focused_review_correction_compiler_change_opens_a_new_lineage(
             model="world-author-role",
             outputs=(AssertionError("World Author result must recover"),),
         ),
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="character-role",
             outputs=(character_choice,),
         ),
@@ -4295,7 +4309,7 @@ async def test_current_reader_and_batch_bind_every_review_request_hash() -> None
             model="world-author-role",
             outputs=(json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),),
         ),
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="character-role",
             outputs=(
                 json.dumps(
@@ -4335,17 +4349,18 @@ async def test_current_reader_and_batch_bind_every_review_request_hash() -> None
     novel_deliberation = proposal["world_author_novel_origin_deliberation"]
     assert len(source_deliberation["request_hashes"]) == 2
     assert len(novel_deliberation["request_hashes"]) == 2
-    assert LifeDevelopmentProposalReader(
-        ledger=ledger,
-        content_store=store,
-    ).read_for_plan(plan_id=result.plan_id) is not None
+    assert (
+        LifeDevelopmentProposalReader(
+            ledger=ledger,
+            content_store=store,
+        ).read_for_plan(plan_id=result.plan_id)
+        is not None
+    )
 
     reader_tamper = json.loads(json.dumps(proposal))
     reader_source = reader_tamper["world_author_source_closure_deliberation"]
     reader_source["request_hashes"][1] = "e" * 64
-    reader_tamper["world_author_source_closure_deliberation_hash"] = _hash_json(
-        reader_source
-    )
+    reader_tamper["world_author_source_closure_deliberation_hash"] = _hash_json(reader_source)
     with pytest.raises(
         ValueError,
         match="source closure changed subject",
@@ -4359,9 +4374,7 @@ async def test_current_reader_and_batch_bind_every_review_request_hash() -> None
     batch_tamper = json.loads(json.dumps(proposal))
     batch_novel = batch_tamper["world_author_novel_origin_deliberation"]
     batch_novel["request_hashes"][1] = "f" * 64
-    batch_tamper["world_author_novel_origin_deliberation_hash"] = _hash_json(
-        batch_novel
-    )
+    batch_tamper["world_author_novel_origin_deliberation_hash"] = _hash_json(batch_novel)
     tampered_proposal = WorldEvent.from_payload(
         payload=batch_tamper,
         **proposal_event.model_dump(
@@ -4410,7 +4423,7 @@ async def test_source_closure_rewriter_retries_once_then_audits_invalid_bytes() 
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=_SequenceModel(model="character-role", outputs=()),
+        character_interior=_SequenceModel(model="character-role", outputs=()),
         source_closure_reviewer=reviewer,
     )
 
@@ -4421,10 +4434,7 @@ async def test_source_closure_rewriter_retries_once_then_audits_invalid_bytes() 
     )
 
     assert result.status == "technical_failure"
-    assert (
-        result.reason_code
-        == "life_development.world_author_source_rewrite_unavailable"
-    )
+    assert result.reason_code == "life_development.world_author_source_rewrite_unavailable"
     assert world_author.calls == 3
     assert reviewer.calls == 1
     rewrite_audits = [
@@ -4471,7 +4481,7 @@ async def test_source_rewrite_authority_exhaustion_is_a_durable_technical_failur
             ),
         ),
         world_author_source_rewriter=source_rewriter,
-        character_model=_SequenceModel(model="character-role", outputs=()),
+        character_interior=_SequenceModel(model="character-role", outputs=()),
         source_closure_reviewer=_SequenceModel(
             model="independent-source-reviewer",
             outputs=(
@@ -4490,16 +4500,12 @@ async def test_source_rewrite_authority_exhaustion_is_a_durable_technical_failur
     )
 
     assert result.status == "technical_failure"
-    assert result.reason_code == (
-        "life_development.world_author_source_rewrite_unavailable"
-    )
+    assert result.reason_code == ("life_development.world_author_source_rewrite_unavailable")
     assert source_rewriter.calls == 1
     audits = [
         RecordedModelResultAudit.model_validate_json(item.audit_json)
         for item in ledger.project().model_result_audits
-        if RecordedModelResultAudit.model_validate_json(
-            item.audit_json
-        ).attempted_model_id
+        if RecordedModelResultAudit.model_validate_json(item.audit_json).attempted_model_id
         == "world-author-source-rewriter"
     ]
     assert len(audits) == 1
@@ -4518,16 +4524,16 @@ async def test_terminal_source_rewrite_failure_replays_without_provider_io() -> 
         wake=wake,
         world_author=_SequenceModel(
             model="world-author-role",
-                outputs=(
-                    json.dumps(
-                        _clock_only_old_friend_draft(wake=wake),
-                        ensure_ascii=False,
-                    ),
-                    "{}",
-                    "{}",
+            outputs=(
+                json.dumps(
+                    _clock_only_old_friend_draft(wake=wake),
+                    ensure_ascii=False,
+                ),
+                "{}",
+                "{}",
             ),
         ),
-        character_model=_SequenceModel(model="character-role", outputs=()),
+        character_interior=_SequenceModel(model="character-role", outputs=()),
         source_closure_reviewer=_SequenceModel(
             model="independent-source-reviewer",
             outputs=(
@@ -4555,7 +4561,7 @@ async def test_terminal_source_rewrite_failure_replays_without_provider_io() -> 
         ledger=ledger,
         wake=wake,
         world_author=restarted_world,
-        character_model=_SequenceModel(model="character-role", outputs=()),
+        character_interior=_SequenceModel(model="character-role", outputs=()),
         source_closure_reviewer=restarted_reviewer,
         store=store,
     )
@@ -4567,8 +4573,10 @@ async def test_terminal_source_rewrite_failure_replays_without_provider_io() -> 
     )
 
     assert first.status == recovered.status == "technical_failure"
-    assert first.reason_code == recovered.reason_code == (
-        "life_development.world_author_source_rewrite_unavailable"
+    assert (
+        first.reason_code
+        == recovered.reason_code
+        == ("life_development.world_author_source_rewrite_unavailable")
     )
     assert restarted_world.calls == 0
     assert restarted_reviewer.calls == 0
@@ -4624,7 +4632,7 @@ async def test_source_review_authority_provider_attempts_are_immutable_without_p
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=character,
+        character_interior=character,
         source_closure_reviewer=authority,  # type: ignore[arg-type]
         novel_origin_critic=focused,
     )
@@ -4652,9 +4660,7 @@ async def test_source_review_authority_provider_attempts_are_immutable_without_p
         for item in projection.model_result_audits
     )
     provider_audits = tuple(
-        item
-        for item in recorded
-        if item.route.router_version == "provider-subcall-audit.1"
+        item for item in recorded if item.route.router_version == "provider-subcall-audit.1"
     )
     assert len(provider_audits) == 2
     assert provider_audits[0].attempted_model_id == primary.model
@@ -4671,24 +4677,22 @@ async def test_source_review_authority_provider_attempts_are_immutable_without_p
     assert provider_audits[1].model_id == secondary.model
     assert provider_audits[1].model_version == type(secondary).__name__
     assert provider_audits[1].request_hash == expected_provider_request_hash
-    assert provider_audits[1].response_hash == hashlib.sha256(
-        secondary_review.encode("utf-8")
-    ).hexdigest()
+    assert (
+        provider_audits[1].response_hash
+        == hashlib.sha256(secondary_review.encode("utf-8")).hexdigest()
+    )
     assert provider_audits[1].outcome == "winner"
     assert provider_audits[1].slot == "backup"
     assert len({item.model_call_id for item in provider_audits}) == 2
     assert all(
-        not item.attempt_id.startswith(
-            "attempt:life-development:world_author_source_reviewer:"
-        )
+        not item.attempt_id.startswith("attempt:life-development:world_author_source_reviewer:")
         for item in provider_audits
     )
 
     reviewer_audits = tuple(
         item
         for item in recorded
-        if item.route.reason_code
-        == "life_development.world_author_source_reviewer"
+        if item.route.reason_code == "life_development.world_author_source_reviewer"
     )
     assert len(reviewer_audits) == 1
     assert reviewer_audits[0].model_id == authority.model
@@ -4706,8 +4710,7 @@ async def test_source_review_authority_provider_attempts_are_immutable_without_p
     focused_audits = tuple(
         item
         for item in recorded
-        if item.route.reason_code
-        == "life_development.world_author_novel_origin_critic"
+        if item.route.reason_code == "life_development.world_author_novel_origin_critic"
     )
     assert len(focused_audits) == 1
     assert focused_audits[0].model_id == focused.model
@@ -4743,7 +4746,7 @@ async def test_source_review_authority_provider_attempts_are_immutable_without_p
         ledger=ledger,
         wake=wake,
         world_author=restarted_world,
-        character_model=restarted_character,
+        character_interior=restarted_character,
         source_closure_reviewer=restarted_authority,  # type: ignore[arg-type]
         novel_origin_critic=restarted_focused,
         store=store,
@@ -4767,9 +4770,7 @@ async def test_source_review_authority_provider_attempts_are_immutable_without_p
         == 0
     )
     proposal = ledger.lookup_event_commit(result.proposal_event_ref or "")[0].payload()
-    source_review_lineage = proposal[
-        "world_author_source_closure_deliberation"
-    ]
+    source_review_lineage = proposal["world_author_source_closure_deliberation"]
     assert len(source_review_lineage["model_result_event_refs"]) == 1
     source_review_event = ledger.lookup_event_commit(
         source_review_lineage["model_result_event_refs"][0]
@@ -4780,16 +4781,19 @@ async def test_source_review_authority_provider_attempts_are_immutable_without_p
     assert source_review_audit.route.reason_code == (
         "life_development.world_author_source_reviewer"
     )
-    assert len(
-        [
-            item
-            for item in ledger.project().model_result_audits
-            if RecordedModelResultAudit.model_validate_json(
-                item.audit_json
-            ).route.router_version
-            == "provider-subcall-audit.1"
-        ]
-    ) == 2
+    assert (
+        len(
+            [
+                item
+                for item in ledger.project().model_result_audits
+                if RecordedModelResultAudit.model_validate_json(
+                    item.audit_json
+                ).route.router_version
+                == "provider-subcall-audit.1"
+            ]
+        )
+        == 2
+    )
 
 
 @pytest.mark.asyncio
@@ -4824,7 +4828,7 @@ async def test_terminal_source_review_authority_failure_records_each_lane_once_a
                 ),
             ),
         ),
-        character_model=_SequenceModel(model="character-role", outputs=()),
+        character_interior=_SequenceModel(model="character-role", outputs=()),
         source_closure_reviewer=authority,  # type: ignore[arg-type]
         novel_origin_critic=_SequenceModel(
             model="direct-novel-origin-reviewer",
@@ -4839,16 +4843,12 @@ async def test_terminal_source_review_authority_failure_records_each_lane_once_a
     )
 
     assert first.status == "technical_failure"
-    assert first.reason_code == (
-        "life_development.source_closure_reviewer_unavailable"
-    )
+    assert first.reason_code == ("life_development.source_closure_reviewer_unavailable")
     projection = ledger.project()
     provider_audits = tuple(
         RecordedModelResultAudit.model_validate_json(item.audit_json)
         for item in projection.model_result_audits
-        if RecordedModelResultAudit.model_validate_json(
-            item.audit_json
-        ).route.router_version
+        if RecordedModelResultAudit.model_validate_json(item.audit_json).route.router_version
         == "provider-subcall-audit.1"
     )
     assert len(provider_audits) == 2
@@ -4878,7 +4878,7 @@ async def test_terminal_source_review_authority_failure_records_each_lane_once_a
             model="world-author-role",
             outputs=(AssertionError("terminal replay must recover World Author"),),
         ),
-        character_model=_SequenceModel(model="character-role", outputs=()),
+        character_interior=_SequenceModel(model="character-role", outputs=()),
         source_closure_reviewer=SourceReviewAuthority(
             primary=restarted_primary,
             secondary=restarted_secondary,
@@ -4935,7 +4935,7 @@ async def test_source_closed_world_author_restarts_without_reauthoring_or_rerevi
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=character,
+        character_interior=character,
         source_closure_reviewer=reviewer,
     )
     original = runtime._commit_character_plan  # noqa: SLF001
@@ -5220,7 +5220,7 @@ async def test_no_op_is_pinned_audited_and_effect_once() -> None:
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=character_model,
+        character_interior=character_model,
     )
     first = await runtime.advance_once(
         wake_event_ref=wake.event_id,
@@ -5276,7 +5276,7 @@ async def test_stale_model_result_cas_does_not_poison_a_different_retry(
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="test-character",
             outputs=(),
         ),
@@ -5383,7 +5383,7 @@ async def test_world_author_can_commit_a_free_adverse_world_contingency() -> Non
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=character_model,
+        character_interior=character_model,
     )
 
     first = await runtime.advance_once(
@@ -5479,22 +5479,16 @@ async def test_world_author_can_commit_a_free_adverse_world_contingency() -> Non
             accepted_manifest_v3_authorized=True,
         )
     legacy_subject_payload = json.loads(json.dumps(proposal_payload))
-    legacy_deliberation = legacy_subject_payload[
-        "world_author_source_closure_deliberation"
-    ]
+    legacy_deliberation = legacy_subject_payload["world_author_source_closure_deliberation"]
     legacy_deliberation["decision_subject_hash"] = _hash_json(
         {
-            "capability_manifest_hash": legacy_subject_payload[
-                "capability_manifest_hash"
-            ],
-            "world_author_raw_output_hash": legacy_subject_payload[
-                "world_author_raw_output_hash"
-            ],
+            "capability_manifest_hash": legacy_subject_payload["capability_manifest_hash"],
+            "world_author_raw_output_hash": legacy_subject_payload["world_author_raw_output_hash"],
         }
     )
-    legacy_subject_payload[
-        "world_author_source_closure_deliberation_hash"
-    ] = _hash_json(legacy_deliberation)
+    legacy_subject_payload["world_author_source_closure_deliberation_hash"] = _hash_json(
+        legacy_deliberation
+    )
     legacy_subject_proposal = WorldEvent.from_payload(
         payload=legacy_subject_payload,
         **proposal_event.model_dump(
@@ -5561,7 +5555,7 @@ async def test_ledger_rejects_a_self_authorized_manifest_not_bound_to_model_audi
                 ),
             ),
         ),
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="test-character-model",
             outputs=(),
         ),
@@ -5652,7 +5646,7 @@ async def test_location_capability_authority_is_carried_into_the_world_effect() 
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="test-character-model",
             outputs=(
                 AssertionError("world contingency occurrence must not call the Character Model"),
@@ -5782,7 +5776,7 @@ async def test_character_model_freely_accepts_an_external_opportunity_into_a_pla
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=character_model,
+        character_interior=character_model,
     )
     commit_character_plan = runtime._commit_character_plan  # noqa: SLF001
     commit_attempts = 0
@@ -5810,6 +5804,15 @@ async def test_character_model_freely_accepts_an_external_opportunity_into_a_pla
     assert world_author.calls == 1
     assert character_model.calls == 1
     assert len(ledger.project().model_result_audits) == 4
+    assert {
+        RecordedModelResultAudit.model_validate_json(item.audit_json).route.reason_code
+        for item in ledger.project().model_result_audits
+    } >= {"life_development.character_interior"}
+    assert all(
+        RecordedModelResultAudit.model_validate_json(item.audit_json).route.reason_code
+        != "life_development.character_model"
+        for item in ledger.project().model_result_audits
+    )
 
     result = await runtime.advance_once(
         wake_event_ref=wake.event_id,
@@ -5832,8 +5835,15 @@ async def test_character_model_freely_accepts_an_external_opportunity_into_a_pla
     proposal = proposal_event.payload()
     assert proposal["causal_authority"] == "character_choice"
     assert proposal["world_author_model"] == "shared-provider/world-author"
-    assert proposal["character_model_role"] == "character_model"
-    assert proposal["character_model"] == "shared-provider/character-model"
+    assert "character_model_role" not in proposal
+    assert "character_model" not in proposal
+    character_binding = proposal["character_interior_decision"]
+    assert character_binding["contract"] == ("life-development-character-inner-decision.1")
+    assert character_binding["inner_turn_id"]
+    assert character_binding["snapshot_id"]
+    assert len(character_binding["snapshot_hash"]) == 64
+    assert character_binding["author_lineage"]["model_id"] == ("shared-provider/character-model")
+    assert character_binding["decision_hash"] == _hash_json(character_binding["decision"])
     assert len(proposal["possibility_authority_hash"]) == 64
     assert len(proposal["character_choice_hash"]) == 64
     intention_binding = next(
@@ -5856,10 +5866,7 @@ async def test_character_model_freely_accepts_an_external_opportunity_into_a_pla
     assert material.outcomes[0].visual_evidence.activity_description == "在校外院子里看临时露天电影"
     assert material.outcomes[1].visual_evidence is None
     assert {item.descriptor.causal_authority for item in material.outcomes} == {"character_choice"}
-    assert all(
-        item.descriptor.dynamic_life_arc_context is None
-        for item in material.outcomes
-    )
+    assert all(item.descriptor.dynamic_life_arc_context is None for item in material.outcomes)
 
     plan_event, plan_commit = next(
         ledger.lookup_event_commit(item.event_id)
@@ -5946,636 +5953,148 @@ async def test_character_model_freely_accepts_an_external_opportunity_into_a_pla
     )
 
 
-def _life_character_recall_fixture(
-    *,
-    ledger: WorldLedger,
-    wake: WorldEvent,
-) -> tuple[RecallCoordinator, str]:
-    projection = ledger.project()
-    # World Author, source-closure review and novel-origin review each commit
-    # one ModelResult + Proposal audit pair before the Character phase.  The
-    # production capsule compiler refreshes recall at that exact later cursor;
-    # this unit fixture pins the same deterministic prefix directly.
-    cursor = RecallCursor(
-        world_revision=projection.world_revision,
-        deliberation_revision=projection.deliberation_revision + 6,
-        ledger_sequence=projection.ledger_sequence + 6,
-    )
-    memory_ref = "event:experience:rainy-book-stall"
-    index = InMemoryRecallIndex(embedding=FeatureHashRecallEmbedding())
-    index.rebuild(
-        cursor=cursor,
-        documents=(
-            RecallDocument(
-                document_id="recall:experience:rainy-book-stall",
-                memory_kind="episodic",
-                source_item_ref="experience:rainy-book-stall",
-                source_slice="recent_experiences",
-                source_refs=(memory_ref,),
-                source_bindings=(
-                    RecallSourceBinding(
-                        source_kind="committed_event",
-                        authority_type="ExperienceCommitted",
-                        ref=memory_ref,
-                        source_world_revision=projection.world_revision,
-                        immutable_hash="b" * 64,
-                    ),
-                ),
-                source_world_revision=projection.world_revision,
-                text="上次下雨时，她在旧书摊躲雨，意外翻到一本有铅笔批注的诗集。",
-                actor_ref=OWNER,
-                subject_refs=(OWNER,),
-                occurred_from=NOW - timedelta(days=18),
-                privacy_class="personal",
-            ),
-        ),
-    )
-    recall = RecallCoordinator.from_built_index(
-        index=index,
-        cursor=cursor,
-        actor_ref=OWNER,
-        subject_refs=(OWNER,),
-        logical_time=NOW,
-        trigger_ref=wake.event_id,
-    )
-    return recall, memory_ref
-
-
 @pytest.mark.asyncio
-async def test_character_may_pull_one_source_bound_memory_before_life_choice_and_replay(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
-    wake = _seed_clock(ledger)
-    recall, memory_ref = _life_character_recall_fixture(ledger=ledger, wake=wake)
-    opportunity = _novel_book_exchange_draft(wake=wake)
-    world_author = _SequenceModel(
-        model="world-author-role",
-        outputs=(json.dumps(opportunity, ensure_ascii=False),),
-    )
-    character = _SequenceModel(
-        model="character-role",
-        outputs=(
-            json.dumps(
-                {
-                    "recall_request": {
-                        "query_text": "以前逛旧书摊时自己的感受",
-                        "memory_kinds": ["episodic"],
-                        "limit": 3,
-                    }
-                },
-                ensure_ascii=False,
-            ),
-            json.dumps(
-                {
-                    "decision": "accept",
-                    "intention_summary": "想起那次躲雨翻书的感觉，我愿意再去看看。",
-                    "importance_bp": 4400,
-                    "participant_refs": [],
-                },
-                ensure_ascii=False,
-            ),
-        ),
-    )
-    runtime, _store = _runtime(
-        ledger=ledger,
+async def test_historical_character_model_deliberation_still_cold_replays() -> None:
+    source = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(source)
+    capability = _location_capability()
+    offered_opens = NOW + timedelta(hours=2)
+    offered_closes = NOW + timedelta(hours=3)
+    world_raw = _location_bound_world_draft(
         wake=wake,
-        world_author=world_author,
-        character_model=character,
-        recall_coordinator=recall,
+        capability=capability,
+        timing={
+            "mode": "later",
+            "opens_at": offered_opens.isoformat(),
+            "closes_at": offered_closes.isoformat(),
+        },
+        privacy_class="shareable",
+        causal_authority="character_choice",
+        outcome_resolution_authority="character_choice",
     )
-    commit_character_plan = runtime._commit_character_plan  # noqa: SLF001
-    commit_attempts = 0
-
-    def crash_once_after_character_audit(**kwargs):  # type: ignore[no-untyped-def]
-        nonlocal commit_attempts
-        commit_attempts += 1
-        if commit_attempts == 1:
-            raise RuntimeError("simulated crash after recalled character choice")
-        return commit_character_plan(**kwargs)
-
-    monkeypatch.setattr(runtime, "_commit_character_plan", crash_once_after_character_audit)
-    try:
-        with pytest.raises(RuntimeError, match="after recalled character choice"):
-            await runtime.advance_once(
-                wake_event_ref=wake.event_id,
-                trace_id="trace:character-recall-crash",
-                correlation_id="correlation:life-development",
-            )
-
-        assert character.calls == 2
-        assert "上次下雨时" in character.messages[1][-1]["content"]
-        character_audits = tuple(
-            RecordedModelResultAudit.model_validate_json(item.audit_json)
-            for item in ledger.project().model_result_audits
-            if RecordedModelResultAudit.model_validate_json(
-                item.audit_json
-            ).route.reason_code
-            == "life_development.character_model"
-        )
-        request_audits = tuple(
-            RecordedModelResultAudit.model_validate_json(item.audit_json)
-            for item in ledger.project().model_result_audits
-            if RecordedModelResultAudit.model_validate_json(
-                item.audit_json
-            ).route.reason_code
-            == "life_development.character_recall_request"
-        )
-        assert len(request_audits) == len(character_audits) == 1
-        assert request_audits[0].status == "proposal_validated"
-        assert request_audits[0].recall_trace is None
-        recalled = character_audits[0].recall_trace
-        assert recalled is not None
-        assert recalled.request.query_text == "以前逛旧书摊时自己的感受"
-        assert recalled.hits[0].document.source_refs == (memory_ref,)
-
-        result = await runtime.advance_once(
-            wake_event_ref=wake.event_id,
-            trace_id="trace:character-recall-replay",
-            correlation_id="correlation:life-development",
-        )
-    finally:
-        recall.close()
-
-    assert result.status == "plan_committed"
-    assert world_author.calls == 1
-    assert character.calls == 2
-    assert ledger.rebuild().semantic_hash == ledger.project().semantic_hash
-
-
-@pytest.mark.asyncio
-async def test_character_recall_followup_has_one_reselection_without_second_recall(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
-    wake = _seed_clock(ledger)
-    recall, _memory_ref = _life_character_recall_fixture(ledger=ledger, wake=wake)
-    recall_choice = json.dumps(
+    character_raw = json.dumps(
         {
-            "recall_request": {
-                "query_text": "以前逛旧书摊时自己的感受",
-                "memory_kinds": ["episodic"],
-                "limit": 3,
-            }
+            "decision": "accept",
+            "intention_summary": "我想去看看，但只待一会儿。",
+            "importance_bp": 4200,
+            "opens_at": offered_opens.isoformat(),
+            "closes_at": offered_closes.isoformat(),
+            "participant_refs": [],
         },
         ensure_ascii=False,
-    )
-    character = _SequenceModel(
-        model="character-role",
-        outputs=(recall_choice, recall_choice, '{"decision":"no_op"}'),
-    )
-    runtime, _store = _runtime(
-        ledger=ledger,
-        wake=wake,
-        world_author=_SequenceModel(
-            model="world-author-role",
-            outputs=(json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),),
-        ),
-        character_model=character,
-        recall_coordinator=recall,
-    )
-    real_recall = life_runtime_module.perform_character_recall
-    recall_calls = 0
-
-    async def counted_recall(*args, **kwargs):  # type: ignore[no-untyped-def]
-        nonlocal recall_calls
-        recall_calls += 1
-        return await real_recall(*args, **kwargs)
-
-    monkeypatch.setattr(life_runtime_module, "perform_character_recall", counted_recall)
-    try:
-        result = await runtime.advance_once(
-            wake_event_ref=wake.event_id,
-            trace_id="trace:character-recall-budget",
-            correlation_id="correlation:life-development",
-        )
-    finally:
-        recall.close()
-
-    assert result.status == "no_op"
-    assert character.calls == 3
-    assert recall_calls == 1
-    character_audits = tuple(
-        RecordedModelResultAudit.model_validate_json(item.audit_json)
-        for item in ledger.project().model_result_audits
-        if RecordedModelResultAudit.model_validate_json(
-            item.audit_json
-        ).route.reason_code
-        == "life_development.character_model"
-    )
-    assert tuple(item.status for item in character_audits) == (
-        "main_invalid",
-        "main_invalid_recovered",
-    )
-    assert character_audits[0].recall_trace is None
-    assert character_audits[1].recall_trace is not None
-    assert character_audits[1].failure_code == "main_invalid_output"
-
-
-@pytest.mark.asyncio
-async def test_invalid_initial_choice_can_reselect_recall_then_make_final_life_choice() -> None:
-    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
-    wake = _seed_clock(ledger)
-    recall, _memory_ref = _life_character_recall_fixture(ledger=ledger, wake=wake)
-    character = _SequenceModel(
-        model="character-role",
-        outputs=(
-            '{"recall_request":{"query_text":""}}',
-            json.dumps(
-                {
-                    "recall_request": {
-                        "query_text": "以前逛旧书摊时自己的感受",
-                        "memory_kinds": ["episodic"],
-                        "limit": 3,
-                    }
-                },
-                ensure_ascii=False,
-            ),
-            json.dumps(
-                {
-                    "decision": "accept",
-                    "intention_summary": "想起那次躲雨翻书的感觉，我愿意再去看看。",
-                    "importance_bp": 4400,
-                    "participant_refs": [],
-                },
-                ensure_ascii=False,
-            ),
-        ),
-    )
-    runtime, _store = _runtime(
-        ledger=ledger,
-        wake=wake,
-        world_author=_SequenceModel(
-            model="world-author-role",
-            outputs=(json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),),
-        ),
-        character_model=character,
-        recall_coordinator=recall,
-    )
-    try:
-        result = await runtime.advance_once(
-            wake_event_ref=wake.event_id,
-            trace_id="trace:character-recall-after-reselection",
-            correlation_id="correlation:life-development",
-        )
-    finally:
-        recall.close()
-
-    assert result.status == "plan_committed"
-    assert character.calls == 3
-    correction = json.loads(character.messages[1][-1]["content"])
-    assert correction["replacement_contract"]["allowed_decisions"] == [
-        "no_op",
-        "accept",
-        "recall_request",
-    ]
-    assert "上次下雨时" in character.messages[2][-1]["content"]
-
-
-@pytest.mark.asyncio
-async def test_restart_after_recall_result_does_not_repeat_initial_choice_or_retrieval(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
-    wake = _seed_clock(ledger)
-    recall, _memory_ref = _life_character_recall_fixture(ledger=ledger, wake=wake)
-    store = InMemoryImmutableLifeContentStore()
-    recall_choice = json.dumps(
-        {
-            "recall_request": {
-                "query_text": "以前逛旧书摊时自己的感受",
-                "memory_kinds": ["episodic"],
-                "limit": 3,
-            }
-        },
-        ensure_ascii=False,
-    )
-    first_character = _SequenceModel(
-        model="character-role",
-        outputs=(
-            recall_choice,
-            RuntimeError("simulated process crash before final choice"),
-        ),
-    )
-    world_author = _SequenceModel(
-        model="world-author-role",
-        outputs=(json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),),
     )
     runtime, _ = _runtime(
-        ledger=ledger,
+        ledger=source,
         wake=wake,
-        world_author=world_author,
-        character_model=first_character,
-        recall_coordinator=recall,
-        store=store,
+        world_author=_SequenceModel(model="world-author", outputs=(world_raw,)),
+        character_interior=_SequenceModel(model="character", outputs=(character_raw,)),
+        location_capability=capability,
     )
-    real_recall = life_runtime_module.perform_character_recall
-    recall_calls = 0
-
-    async def counted_recall(*args, **kwargs):  # type: ignore[no-untyped-def]
-        nonlocal recall_calls
-        recall_calls += 1
-        return await real_recall(*args, **kwargs)
-
-    monkeypatch.setattr(life_runtime_module, "perform_character_recall", counted_recall)
-    with pytest.raises(RuntimeError, match="before final choice"):
-        await runtime.advance_once(
-            wake_event_ref=wake.event_id,
-            trace_id="trace:recall-result-crash",
-            correlation_id="correlation:life-development",
-        )
-
-    restarted_character = _SequenceModel(
-        model="character-role",
-        outputs=(
-            json.dumps(
-                {
-                    "decision": "accept",
-                    "intention_summary": "想起那次躲雨翻书的感觉，我愿意再去看看。",
-                    "importance_bp": 4400,
-                    "participant_refs": [],
-                },
-                ensure_ascii=False,
-            ),
-        ),
-    )
-    restarted, _ = _runtime(
-        ledger=ledger,
+    pinned = runtime._compile_pinned(  # noqa: SLF001
+        projection=source.project(),
         wake=wake,
-        world_author=_SequenceModel(
-            model="world-author-role",
-            outputs=(AssertionError("World Author result must recover"),),
-        ),
-        character_model=restarted_character,
-        recall_coordinator=recall,
-        store=store,
     )
-    try:
-        result = await restarted.advance_once(
-            wake_event_ref=wake.event_id,
-            trace_id="trace:recall-result-restart",
-            correlation_id="correlation:life-development",
-        )
-    finally:
-        recall.close()
+    assert not isinstance(pinned, life_runtime_module.LifeDevelopmentResult)
+    capsule, context_cursor, _context, manifest = pinned
 
+    result = await runtime.advance_once(
+        wake_event_ref=wake.event_id,
+        trace_id="trace:historical-character-source",
+        correlation_id="correlation:life-development",
+    )
     assert result.status == "plan_committed"
-    assert world_author.calls == 1
-    assert first_character.calls == 2
-    assert restarted_character.calls == 1
-    assert recall_calls == 1
-    assert ledger.rebuild().semantic_hash == ledger.project().semantic_hash
+    proposal_event, domain_commit = source.lookup_event_commit(result.proposal_event_ref or "")
 
-
-@pytest.mark.asyncio
-async def test_recall_result_cannot_rebind_request_stage_proposal_or_validated_request(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
-    wake = _seed_clock(ledger)
-    recall, _memory_ref = _life_character_recall_fixture(ledger=ledger, wake=wake)
-    recall_request = CharacterRecallRequest(
-        query_text="以前逛旧书摊时自己的感受",
-        memory_kinds=("episodic",),
-        limit=3,
+    offered = parse_world_author_draft(
+        raw=world_raw,
+        manifest=manifest,
+        logical_time=NOW,
     )
-    runtime, _store = _runtime(
-        ledger=ledger,
+    assert isinstance(offered, LifeDevelopmentPossibilityDraft)
+    historical_choice = parse_character_choice(
+        raw=character_raw,
+        offered=offered,
+        offered_window=DueWindow(opens_at=offered_opens, closes_at=offered_closes),
+        active_aspiration_source_refs=(),
+    )
+    historical_run = life_runtime_module._LifeDevelopmentModelRun(  # noqa: SLF001
+        model_id="historical-character-model",
+        parsed=historical_choice,
+        attempts=(
+            life_runtime_module._LifeDevelopmentAttempt(  # noqa: SLF001
+                request_hash="a" * 64,
+                raw_output=character_raw,
+                status="proposal_validated",
+            ),
+        ),
+    )
+    historical_audit = runtime._record_model_run(  # type: ignore[arg-type]  # noqa: SLF001
+        proposal_id=proposal_event.payload()["proposal_id"],
+        role="character_model",
+        run=historical_run,
         wake=wake,
-        world_author=_SequenceModel(
-            model="world-author-role",
-            outputs=(json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),),
-        ),
-        character_model=_SequenceModel(
-            model="character-role",
-            outputs=(
-                json.dumps(
-                    {"recall_request": recall_request.model_dump(mode="json")},
-                    ensure_ascii=False,
-                ),
-            ),
-        ),
-        recall_coordinator=recall,
+        capsule=capsule,
+        manifest=manifest,
+        decision_subject_hash="b" * 64,
+        expected_cursor=context_cursor,
+        commit_cursor=_projection_cursor(source),
+        trace_id="trace:historical-character-audit",
+        correlation_id="correlation:life-development",
     )
 
-    def stop_before_result_record(**_kwargs: object) -> None:
-        raise RuntimeError("stop before durable recall result")
+    historical_payload = proposal_event.payload()
+    historical_payload.pop("character_interior_decision")
+    historical_payload.pop("character_interior_decision_hash")
+    historical_payload.update(
+        {
+            "character_model_role": "character_model",
+            "character_model": "historical-character-model",
+            "character_raw_output_hash": life_runtime_module._digest(character_raw),  # noqa: SLF001
+            "character_repair_ordinal": 0,
+            "character_deliberation": historical_audit.authority_payload(),
+            "character_deliberation_hash": _hash_json(historical_audit.authority_payload()),
+        }
+    )
+    historical_proposal = _replace_event_payload(
+        proposal_event,
+        payload=historical_payload,
+    )
+    domain_events = tuple(
+        source.lookup_event_commit(event_id)[0] for event_id in domain_commit.event_ids
+    )
 
-    monkeypatch.setattr(
-        runtime,
-        "_record_character_recall_result",
-        stop_before_result_record,
-    )
-    try:
-        with pytest.raises(RuntimeError, match="before durable recall result"):
-            await runtime.advance_once(
-                wake_event_ref=wake.event_id,
-                trace_id="trace:recall-result-proposal-binding",
-                correlation_id="correlation:life-development",
-            )
-    finally:
-        recall.close()
-
-    request_projection = next(
-        item
-        for item in ledger.project().model_result_audits
-        if RecordedModelResultAudit.model_validate_json(
-            item.audit_json
-        ).route.reason_code
-        == "life_development.character_recall_request"
-    )
-    request_audit = RecordedModelResultAudit.model_validate_json(
-        request_projection.audit_json
-    )
-    assert request_audit.decision_context is not None
-    assert request_audit.response_hash is not None
-    context_cursor = RecallCursor(
-        world_revision=request_audit.decision_context.world_revision,
-        deliberation_revision=request_audit.decision_context.deliberation_revision,
-        ledger_sequence=request_audit.decision_context.ledger_sequence,
-    )
-    def forged_recall_result(
-        *,
-        proposal_id: str,
-        recorded_request: CharacterRecallRequest,
-        event_id: str,
-    ) -> WorldEvent:
-        recall_request_hash = _hash_json(recorded_request.model_dump(mode="json"))
-        result_id = "life-recall-result:" + _hash_json(
-            {
-                "proposal_id": proposal_id,
-                "request_model_result_ref": request_projection.model_result_ref,
-                "recall_request_hash": recall_request_hash,
-                "trigger_ref": wake.event_id,
-            }
+    replay = WorldLedger.in_memory(world_id=WORLD_ID)
+    _seed_clock(replay)
+    replayed_commits: set[tuple[str, ...]] = set()
+    for stored in source._events:  # noqa: SLF001
+        event = stored.event
+        if event.event_type not in {"ModelResultRecorded", "ProposalRecorded"}:
+            continue
+        if event.event_type == "ProposalRecorded" and "audit_contract" not in event.payload():
+            continue
+        _member, commit = source.lookup_event_commit(event.event_id)
+        if commit.event_ids in replayed_commits:
+            continue
+        replayed_commits.add(commit.event_ids)
+        audit_events = tuple(
+            source.lookup_event_commit(event_id)[0] for event_id in commit.event_ids
         )
-        payload = LifeDevelopmentRecallResultRecordedPayload(
-            result_id=result_id,
-            proposal_id=proposal_id,
-            trigger_ref=wake.event_id,
-            evaluated_world_revision=context_cursor.world_revision,
-            decision_subject_hash=(
-                request_audit.decision_context.decision_subject_hash
-            ),
-            context_cursor=context_cursor,
-            request_model_result_event_ref=request_projection.event_ref,
-            request_model_result_event_hash=request_projection.event_payload_hash,
-            request_model_result_ref=request_projection.model_result_ref,
-            request_deliberation_result_id=(
-                request_projection.deliberation_result_id
-            ),
-            request_response_hash=request_audit.response_hash,
-            recall_request=recorded_request,
-            recall_request_hash=recall_request_hash,
-            status="technical_failure",
-            failure_code="recall_context_unavailable",
-        ).model_dump(mode="json")
-        return WorldEvent.from_payload(
-            schema_version="world-v2.1",
-            event_id=event_id,
-            world_id=ledger.world_id,
-            event_type="LifeDevelopmentRecallResultRecorded",
-            logical_time=wake.logical_time,
-            created_at=wake.created_at,
-            actor=OWNER,
-            source="world-v2:life-development",
-            trace_id="trace:recall-result-proposal-binding",
-            causation_id=request_projection.event_ref,
-            correlation_id="correlation:life-development",
-            idempotency_key=(
-                domain_idempotency_key(
-                    event_type="LifeDevelopmentRecallResultRecorded",
-                    world_id=ledger.world_id,
-                    payload=payload,
-                )
-                or f"life-development-recall-result:{event_id}"
-            ),
-            payload=payload,
+        replay.commit_at_cursor(
+            audit_events,
+            expected_cursor=_projection_cursor(replay),
+            commit_id=f"commit:test:historical-audit:{len(replayed_commits)}",
         )
 
-    event = forged_recall_result(
-        proposal_id="proposal:life-development:another-opportunity",
-        recorded_request=recall_request,
-        event_id="event:life-development:recall-result:proposal-rebinding",
+    replay.commit_at_cursor(
+        (historical_proposal, *domain_events[1:]),
+        expected_cursor=_projection_cursor(replay),
+        commit_id="commit:test:historical-life-development-domain",
     )
 
-    with pytest.raises(
-        ValueError,
-        match="not bound to its Character request",
-    ):
-        _commit_at_head(ledger, event)
-
-    actual_proposal_id = "proposal:life-development:" + _hash_json(
-        {"world_id": ledger.world_id, "wake_event_ref": wake.event_id}
-    )
-    event = forged_recall_result(
-        proposal_id=actual_proposal_id,
-        recorded_request=CharacterRecallRequest(
-            query_text="一段模型从未提出过的不同回忆",
-            memory_kinds=("episodic",),
-            limit=3,
-        ),
-        event_id="event:life-development:recall-result:request-rebinding",
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="not bound to its Character request",
-    ):
-        _commit_at_head(ledger, event)
-
-
-@pytest.mark.parametrize(
-    ("recall_error", "expected_failure_code"),
-    (
-        (TimeoutError("semantic recall timed out"), "recall_timeout"),
-        (httpx.ConnectError("semantic recall provider disconnected"), "recall_exception"),
-    ),
-)
-@pytest.mark.asyncio
-async def test_recall_technical_failure_preserves_request_and_returns_degraded_evidence(
-    monkeypatch: pytest.MonkeyPatch,
-    recall_error: Exception,
-    expected_failure_code: str,
-) -> None:
-    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
-    wake = _seed_clock(ledger)
-    recall, _memory_ref = _life_character_recall_fixture(ledger=ledger, wake=wake)
-    character = _SequenceModel(
-        model="character-role",
-        outputs=(
-            json.dumps(
-                {
-                    "recall_request": {
-                        "query_text": "以前逛旧书摊时自己的感受",
-                        "memory_kinds": ["episodic"],
-                        "limit": 3,
-                    }
-                },
-                ensure_ascii=False,
-            ),
-            '{"decision":"no_op"}',
-        ),
-    )
-    runtime, _store = _runtime(
-        ledger=ledger,
-        wake=wake,
-        world_author=_SequenceModel(
-            model="world-author-role",
-            outputs=(json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),),
-        ),
-        character_model=character,
-        recall_coordinator=recall,
-    )
-
-    async def timed_out_recall(*args, **kwargs):  # type: ignore[no-untyped-def]
-        del args, kwargs
-        raise recall_error
-
-    monkeypatch.setattr(
-        life_runtime_module,
-        "perform_character_recall",
-        timed_out_recall,
-    )
-    try:
-        result = await runtime.advance_once(
-            wake_event_ref=wake.event_id,
-            trace_id="trace:recall-degraded",
-            correlation_id="correlation:life-development",
-        )
-    finally:
-        recall.close()
-
-    assert result.status == "no_op"
-    assert character.calls == 2
-    degraded = json.loads(character.messages[1][-1]["content"])[
-        "character_selected_recall"
-    ]
-    assert degraded == {
-        "status": "technical_failure",
-        "request": {
-            "query_text": "以前逛旧书摊时自己的感受",
-            "occurred_from": None,
-            "occurred_to": None,
-            "link_refs": [],
-            "memory_kinds": ["episodic"],
-            "include_historical": False,
-            "limit": 3,
-        },
-        "failure_code": expected_failure_code,
-        "available_evidence": [],
-    }
-    request_audits = tuple(
-        RecordedModelResultAudit.model_validate_json(item.audit_json)
-        for item in ledger.project().model_result_audits
-        if RecordedModelResultAudit.model_validate_json(
-            item.audit_json
-        ).route.reason_code
-        == "life_development.character_recall_request"
-    )
-    assert len(request_audits) == 1
-    assert request_audits[0].status == "proposal_validated"
-    assert request_audits[0].response_hash is not None
+    assert replay.project().plans == source.project().plans
+    replayed_proposal = replay.lookup_event_commit(historical_proposal.event_id)[0].payload()
+    assert replayed_proposal["character_model_role"] == "character_model"
+    assert "character_interior_decision" not in replayed_proposal
 
 
 @pytest.mark.asyncio
@@ -6643,7 +6162,7 @@ async def test_character_choice_reselection_receives_exact_phase_and_shape_contr
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=character_model,
+        character_interior=character_model,
     )
 
     result = await runtime.advance_once(
@@ -6653,6 +6172,7 @@ async def test_character_choice_reselection_receives_exact_phase_and_shape_contr
     )
 
     assert result.status == "plan_committed"
+    assert character_model.consider_calls == 1
     assert character_model.calls == 2
     initial = json.loads(character_model.messages[0][-1]["content"])
     assert initial["output_contract"]["no_op"] == {"decision": "no_op"}
@@ -6683,19 +6203,9 @@ async def test_character_choice_reselection_receives_exact_phase_and_shape_contr
         },
     }
     repair = json.loads(character_model.messages[1][-1]["content"])
-    assert repair["validation_failure"]["code"] == "invalid_character_output"
-    violation_paths = {item["path"] for item in repair["validation_failure"]["violations"]}
-    assert {"decision", "intention_summary", "importance_bp", "decisions"} <= violation_paths
-    assert repair["output_contract"] == initial["output_contract"]
-    assert repair["cross_field_authority"] == initial["cross_field_authority"]
-    assert repair["replacement_contract"] == {
-        "allowed_decisions": ["no_op", "accept"],
-        "output": "one_complete_replacement_object",
-        "repair_obligation": {
-            "first": "resolve_validation_failure.code_and_detail",
-            "then": "revalidate_complete_replacement_against_output_and_authority_contracts",
-        },
-    }
+    assert repair == initial
+    assert "completion_validation_failure" not in repair
+    assert "replacement_contract" not in repair
 
 
 @pytest.mark.asyncio
@@ -6730,7 +6240,7 @@ async def test_world_author_reselection_does_not_anchor_invalid_dynamic_draft() 
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="test-character-model",
             outputs=(AssertionError("corrected World Author no-op ends the turn"),),
         ),
@@ -6751,10 +6261,7 @@ async def test_world_author_reselection_does_not_anchor_invalid_dynamic_draft() 
         "user",
         "user",
     ]
-    assert all(
-        private_invalid_marker not in message["content"]
-        for message in correction_messages
-    )
+    assert all(private_invalid_marker not in message["content"] for message in correction_messages)
     assert all(message["content"] != invalid_raw for message in correction_messages)
     correction = json.loads(correction_messages[-1]["content"])
     assert correction["rejected_draft_hash"] == _hash_json(invalid_raw)
@@ -6764,9 +6271,7 @@ async def test_world_author_reselection_does_not_anchor_invalid_dynamic_draft() 
         "event_and_outcomes": "world_author",
         "provisional_npcs": "world_author",
         "provisional_places": "world_author",
-        "objective_biographical_transition": (
-            "world_author_objective_candidate_consequence"
-        ),
+        "objective_biographical_transition": ("world_author_objective_candidate_consequence"),
         "dynamic_life_direction": "retired_character_model_at_settlement",
         "system_supplied_story_content": "none",
     }
@@ -6839,7 +6344,7 @@ async def test_invalid_world_draft_gets_one_source_bound_reselection() -> None:
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=character_model,
+        character_interior=character_model,
     )
 
     result = await runtime.advance_once(
@@ -6848,6 +6353,8 @@ async def test_invalid_world_draft_gets_one_source_bound_reselection() -> None:
         correlation_id="correlation:life-development",
     )
 
+    # The host must not rewrite the role-authored location choice. The exact
+    # capability failure is returned to the same model for one bounded choice.
     assert result.status == "no_op"
     assert world_author.calls == 2
     primary_request = json.loads(world_author.messages[0][-1]["content"])
@@ -6902,17 +6409,13 @@ async def test_invalid_world_draft_gets_one_source_bound_reselection() -> None:
         "unsettled_outcome": {
             "status": "candidate_not_completed_fact",
             "claim_use": (
-                "declare_and_reference_every_current_or_prior_external_fact_"
-                "the_branch_relies_on"
+                "declare_and_reference_every_current_or_prior_external_fact_the_branch_relies_on"
             ),
-            "branch_generated_events": (
-                "remain_conditional_and_need_no_existing_world_source"
-            ),
+            "branch_generated_events": ("remain_conditional_and_need_no_existing_world_source"),
         },
     }
     assert (
-        "A novel declaration creates candidate material only inside this unsettled "
-        "proposal"
+        "A novel declaration creates candidate material only inside this unsettled proposal"
     ) in world_author.messages[0][0]["content"]
     assert primary_request["output_contract"]["no_op"] == {"decision": "no_op"}
     assert (
@@ -6920,7 +6423,7 @@ async def test_invalid_world_draft_gets_one_source_bound_reselection() -> None:
         == "propose"
     )
     assert primary_request["cross_field_authority"] == {
-            "contract_version": "life-development-world-author-authority.4",
+        "contract_version": "life-development-world-author-authority.4",
         "canonical_reference_arrays": {
             "duplicates": "discarded_as_set_equivalent",
             "normal_form": "lexicographic_ascending",
@@ -6960,27 +6463,25 @@ async def test_invalid_world_draft_gets_one_source_bound_reselection() -> None:
                 ),
             },
         },
-            "decision_shapes": {
-                "no_op": {
-                    "canonical_fields": ["decision"],
+        "decision_shapes": {
+            "no_op": {
+                "canonical_fields": ["decision"],
             },
             "propose": {
                 "authored_subject_ref": OWNER,
-                    "outcomes_experienced_by_ref": OWNER,
-                },
+                "outcomes_experienced_by_ref": OWNER,
             },
-            "entity_binding": {
-                "allowed_existing_entity_refs": [],
-                "owner_actor_ref": OWNER,
-                "owner_is_implicit_not_entity_ref": True,
-                "new_people": "outcomes.*.provisional_npcs_only",
-            },
-            "location_binding": {
+        },
+        "entity_binding": {
+            "allowed_existing_entity_refs": [],
+            "owner_actor_ref": OWNER,
+            "owner_is_implicit_not_entity_ref": True,
+            "new_people": "outcomes.*.provisional_npcs_only",
+        },
+        "location_binding": {
             "status": "optional",
             "pairing": "both_or_neither",
-            "available_capabilities": [
-                _location_capability().model_dump(mode="json")
-            ],
+            "available_capabilities": [_location_capability().model_dump(mode="json")],
             "when_present": (
                 "copy_one_exact_available_location_ref_and_capability_ref_pair_and_use_"
                 "a_window_it_authorizes"
@@ -7043,9 +6544,7 @@ async def test_invalid_world_draft_gets_one_source_bound_reselection() -> None:
                         "private",
                         "withhold",
                     ],
-                    "allowed_recipient_unbound_visual_proposal_privacy": [
-                        "shareable"
-                    ],
+                    "allowed_recipient_unbound_visual_proposal_privacy": ["shareable"],
                 },
             ],
             "recipient_unbound_visual_compatibility": {
@@ -7054,60 +6553,59 @@ async def test_invalid_world_draft_gets_one_source_bound_reselection() -> None:
                 "when_incompatible": "omit_visual_evidence",
             },
         },
-                "dynamic_life_direction": {
-                    "status": "retired_must_be_null",
-                    "authority": "character_model_at_outcome_settlement",
-                },
-                "objective_biographical_transition": {
-                    "status": "optional_per_outcome",
-                    "authority": "world_author_objective_candidate_consequence",
-                    "applied_when": "that_exact_candidate_is_accepted_and_settled",
-                    "must_be": "present_objective_state_entailed_by_candidate_branch",
-                    "must_not_be": [
-                        "character_motive",
-                        "desire",
-                        "plan",
-                        "hoped_future",
-                        "predetermined_plot_type",
-                    ],
-                    "direction_namespace": "reserved_for_character_model",
-                },
-            "provisional_places": {
-                "status": "optional_per_outcome",
-                "identity_before_settlement": "proposal_scoped_only",
-                "identity_after_selected_outcome_settlement": "stable_world_place",
-                "future_authority": "attempt_only",
-                "does_not_prove": [
-                    "opening_hours",
-                    "presence",
-                    "entry",
-                    "visit_success",
-                ],
-                "story_candidate_catalog": "none",
-            },
+        "dynamic_life_direction": {
+            "status": "retired_must_be_null",
+            "authority": "character_model_at_outcome_settlement",
+        },
+        "objective_biographical_transition": {
+            "status": "optional_per_outcome",
+            "authority": "world_author_objective_candidate_consequence",
+            "applied_when": "that_exact_candidate_is_accepted_and_settled",
+            "must_be": "present_objective_state_entailed_by_candidate_branch",
+            "must_not_be": [
+                "character_motive",
+                "desire",
+                "plan",
+                "hoped_future",
+                "predetermined_plot_type",
+            ],
+            "direction_namespace": "reserved_for_character_model",
+        },
+        "provisional_places": {
+            "status": "optional_per_outcome",
+            "identity_before_settlement": "proposal_scoped_only",
+            "identity_after_selected_outcome_settlement": "stable_world_place",
+            "future_authority": "attempt_only",
+            "does_not_prove": [
+                "opening_hours",
+                "presence",
+                "entry",
+                "visit_success",
+            ],
+            "story_candidate_catalog": "none",
+        },
         "outcome_text": {
             "authority_status": "unsettled_alternative",
             "does_not_establish_completed_experience": True,
             "must_not_author_user_choice_or_action": True,
         },
-            "visual_evidence": {
-                "status": "optional",
-                "claim_refs": "subset_of_outcome.claim_refs",
-                "permitted_outcome_privacy": ["public", "shareable"],
-                "location_binding": {
-                    "when_proposal_location_ref_is_null": (
-                        "every_outcome.visual_evidence.location_must_be_null"
-                    ),
-                    "when_proposal_location_ref_is_present": (
-                        "every_present_outcome.visual_evidence.location.location_ref_"
-                        "must_equal_proposal.location_ref"
-                    ),
-                    "semantic_kind_and_place": (
-                        "must_describe_the_same_execution_coordinate_not_an_origin_or_"
-                        "background_place"
-                    ),
-                },
-                "when_absent": None,
+        "visual_evidence": {
+            "status": "optional",
+            "claim_refs": "subset_of_outcome.claim_refs",
+            "permitted_outcome_privacy": ["public", "shareable"],
+            "location_binding": {
+                "when_proposal_location_ref_is_null": (
+                    "every_outcome.visual_evidence.location_must_be_null"
+                ),
+                "when_proposal_location_ref_is_present": (
+                    "every_present_outcome.visual_evidence.location.location_ref_"
+                    "must_equal_proposal.location_ref"
+                ),
+                "semantic_kind_and_place": (
+                    "must_describe_the_same_execution_coordinate_not_an_origin_or_background_place"
+                ),
+            },
+            "when_absent": None,
             "when_present": {
                 "concrete_fields": {
                     "at_least_one_of": [
@@ -7121,27 +6619,6 @@ async def test_invalid_world_draft_gets_one_source_bound_reselection() -> None:
             },
         },
     }
-    repair_request = json.loads(world_author.messages[1][-1]["content"])
-    assert repair_request["validation_failure"]["code"] == "unsupported_location_window"
-    assert {
-        item["path"] for item in repair_request["validation_failure"]["violations"]
-    } == {"location_ref", "location_capability_ref"}
-    assert repair_request["replacement_contract"] == {
-        "allowed_decisions": ["no_op", "propose"],
-        "authority_inputs": [
-            "capability_manifest",
-            "cross_field_authority",
-            "output_contract",
-            "timing_coordinates",
-        ],
-        "repair_obligation": {
-            "first": "resolve_validation_failure.code_and_detail",
-            "must_not_leave_failed_field_combination_unchanged": True,
-            "then": "revalidate_complete_replacement_against_all_authority_inputs",
-        },
-        "output": "one_complete_replacement_object",
-    }
-    assert "same pinned Context and capability manifest" in repair_request["instruction"]
     assert "never author the user's choices" in world_author.messages[0][0]["content"]
     proposal = ledger.lookup_event_commit(result.proposal_event_ref or "")[0].payload()
     assert proposal["repair_ordinal"] == 1
@@ -7149,31 +6626,13 @@ async def test_invalid_world_draft_gets_one_source_bound_reselection() -> None:
         RecordedModelResultAudit.model_validate_json(item.audit_json)
         for item in ledger.project().model_result_audits
     ]
+    # The invalid location remains part of the rejected attempt; the host does
+    # not mutate it into a different proposal.
+    assert len(audits) == 2
     assert [item.status for item in audits] == [
         "main_invalid",
         "main_invalid_recovered",
     ]
-    assert [item.request_hash for item in audits] == [
-        hashlib.sha256(
-            json.dumps(
-                messages,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
-        for messages in world_author.messages
-    ]
-    for audit, expected_raw in zip(
-        audits,
-        (json.dumps(invalid, ensure_ascii=False), '{"decision":"no_op"}'),
-        strict=True,
-    ):
-        assert audit.response_hash == life_content_payload_hash(expected_raw)
-        assert any(
-            record.text == expected_raw and record.content_payload_hash == audit.response_hash
-            for record in store._records.values()  # noqa: SLF001
-        )
 
 
 @pytest.mark.asyncio
@@ -7282,7 +6741,7 @@ async def test_world_author_location_reselection_exposes_empty_capability_space(
         ledger=ledger,
         content_store=content_store,
         world_author=world_author,
-        character_model=character_model,
+        character_interior=character_model,
         source_closure_reviewer=_SequenceModel(
             model="fixture:no-location-independent-source-reviewer",
             outputs=(_source_closure_review(decision="supported"),),
@@ -7305,35 +6764,15 @@ async def test_world_author_location_reselection_exposes_empty_capability_space(
     assert result.status == "plan_committed"
     assert world_author.calls == 2
     initial = json.loads(world_author.messages[0][-1]["content"])
-    repair = json.loads(world_author.messages[1][-1]["content"])
     assert initial["capability_manifest"]["location_capabilities"] == []
     propose_schema = initial["output_contract"]["propose"]
     assert propose_schema["properties"]["location_ref"]["default"] is None
     assert propose_schema["properties"]["location_capability_ref"]["default"] is None
     assert (
-        propose_schema["$defs"]["ProvisionalNpcDraft"]["properties"]["local_ref"][
-            "pattern"
-        ]
+        propose_schema["$defs"]["ProvisionalNpcDraft"]["properties"]["local_ref"]["pattern"]
         == r"^local:npc:[a-z0-9][a-z0-9._-]{0,63}$"
     )
-    assert repair["capability_manifest"] == initial["capability_manifest"]
-    assert repair["output_contract"] == initial["output_contract"]
-    assert repair["validation_failure"]["code"] == "unsupported_location_window"
-    assert repair["validation_failure"]["failure_context"] == {
-        "available_location_capability_count": 0,
-        "matching_location_capability_count": 0,
-        "resolved_window": {
-            "opens_at": NOW.isoformat(),
-            "closes_at": (NOW + timedelta(minutes=90)).isoformat(),
-        },
-        "selected_location_capability_ref": fabricated_capability.capability_ref,
-        "selected_location_ref": fabricated_capability.location_ref,
-        "timing_mode": "now",
-    }
-    assert {
-        item["path"] for item in repair["validation_failure"]["violations"]
-    } == {"location_ref", "location_capability_ref"}
-    location_space = repair["hard_boundary_contract"]["location_binding"]
+    location_space = initial["cross_field_authority"]["location_binding"]
     assert location_space == {
         "status": "optional",
         "pairing": "both_or_neither",
@@ -7348,17 +6787,7 @@ async def test_world_author_location_reselection_exposes_empty_capability_space(
             "no_op": "allowed",
         },
     }
-    assert repair["content_authority"] == {
-        "event_and_outcomes": "world_author",
-        "provisional_npcs": "world_author",
-        "provisional_places": "world_author",
-        "objective_biographical_transition": (
-            "world_author_objective_candidate_consequence"
-        ),
-        "dynamic_life_direction": "retired_character_model_at_settlement",
-        "system_supplied_story_content": "none",
-    }
-    assert "location-independent possibility" in repair["instruction"]
+
     proposal = ledger.lookup_event_commit(result.proposal_event_ref or "")[0].payload()
     assert proposal["possibility_authority"]["location_ref"] is None
     corrected_draft = parse_world_author_draft(
@@ -7412,7 +6841,7 @@ async def test_world_author_reselection_receives_exact_optional_annex_capabiliti
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="test-character-model",
             outputs=(AssertionError("corrected World Author no-op ends the turn"),),
         ),
@@ -7505,8 +6934,7 @@ async def test_world_author_reselection_receives_exact_optional_annex_capabiliti
                 "must_equal_proposal.location_ref"
             ),
             "semantic_kind_and_place": (
-                "must_describe_the_same_execution_coordinate_not_an_origin_or_"
-                "background_place"
+                "must_describe_the_same_execution_coordinate_not_an_origin_or_background_place"
             ),
         },
         "when_absent": None,
@@ -7523,9 +6951,7 @@ async def test_world_author_reselection_receives_exact_optional_annex_capabiliti
         },
     }
     repair = json.loads(world_author.messages[1][-1]["content"])
-    violation_paths = {
-        item["path"] for item in repair["validation_failure"]["violations"]
-    }
+    violation_paths = {item["path"] for item in repair["validation_failure"]["violations"]}
     assert "outcomes.0.dynamic_life_direction" in violation_paths
     assert "outcomes.0.visual_evidence" in violation_paths
     assert "outcomes" not in violation_paths
@@ -7576,7 +7002,7 @@ async def test_world_author_privacy_reselection_receives_the_coupled_lattice() -
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="test-character-model",
             outputs=(AssertionError("corrected World Author no-op ends the turn"),),
         ),
@@ -7597,15 +7023,18 @@ async def test_world_author_privacy_reselection_receives_the_coupled_lattice() -
         and "recipient-unbound life-development visual evidence" in item["message"]
         for item in repair["validation_failure"]["violations"]
     )
-    assert repair["hard_boundary_contract"]["privacy_lattice"] == (
-        initial["cross_field_authority"]["privacy_lattice"]
+    assert (
+        repair["hard_boundary_contract"]["privacy_lattice"]
+        == (initial["cross_field_authority"]["privacy_lattice"])
     )
     assert "do not repair one privacy field in isolation" in repair["instruction"]
     assert "Privacy is one coupled hard boundary" in world_author.messages[0][0]["content"]
 
 
 @pytest.mark.asyncio
-async def test_world_author_visual_privacy_reselection_preserves_privacy_and_accepts_model_replacement() -> None:
+async def test_world_author_visual_privacy_reselection_preserves_privacy_and_accepts_model_replacement() -> (
+    None
+):
     """The host exposes a narrow repair coordinate; the author owns the replacement."""
 
     ledger = WorldLedger.in_memory(world_id=WORLD_ID)
@@ -7651,7 +7080,7 @@ async def test_world_author_visual_privacy_reselection_preserves_privacy_and_acc
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=character,
+        character_interior=character,
         location_capability=capability,
     )
 
@@ -7704,7 +7133,7 @@ async def test_world_author_authority_pair_reselection_exposes_only_legal_pairs(
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=_SequenceModel(model="character", outputs=()),
+        character_interior=_SequenceModel(model="character", outputs=()),
         location_capability=capability,
     )
 
@@ -7743,14 +7172,18 @@ def test_source_closure_contract_delegates_outcome_semantics_to_focused_critic()
     )
     draft = parse_world_author_draft(
         raw=raw,
-        manifest=_manifest(wake, pinned_cursor=_projection_cursor(ledger), location_capability=capability),
+        manifest=_manifest(
+            wake, pinned_cursor=_projection_cursor(ledger), location_capability=capability
+        ),
         logical_time=NOW,
     )
     assert isinstance(draft, LifeDevelopmentPossibilityDraft)
 
     messages = life_development_source_closure_messages(
         context={},
-        manifest=_manifest(wake, pinned_cursor=_projection_cursor(ledger), location_capability=capability),
+        manifest=_manifest(
+            wake, pinned_cursor=_projection_cursor(ledger), location_capability=capability
+        ),
         draft=draft,
         cited_events=(),
     )
@@ -7799,13 +7232,12 @@ def test_source_closure_contract_delegates_outcome_semantics_to_focused_critic()
         "supported": "all_rejection_coordinate_arrays_empty",
         "unsupported": "at_least_one_rejection_coordinate_array_non_empty",
     }
-    assert focused_request["parser_coordinate_catalog"][
-        "outcome_prerequisite_paths"
-    ] == ["outcomes.0.text", "outcomes.1.text"]
+    assert focused_request["parser_coordinate_catalog"]["outcome_prerequisite_paths"] == [
+        "outcomes.0.text",
+        "outcomes.1.text",
+    ]
     assert focused_request["review_dimensions"]["outcome_prerequisites"] == {
-        "reject": (
-            "imported_current_or_prior_fact_or_retroactive_history_outside_branch"
-        ),
+        "reject": ("imported_current_or_prior_fact_or_retroactive_history_outside_branch"),
         "allow": "branch_internal_candidate_action_dialogue_feeling_or_response",
     }
 
@@ -7880,9 +7312,7 @@ def test_general_source_review_packet_excludes_unrelated_capsule_bulk() -> None:
         cited_events=(),
     )
     changed_irrelevant = json.loads(json.dumps(context))
-    changed_irrelevant["slices"]["action_budget"]["items"][0][
-        "irrelevant_bulk"
-    ] = "z" * 80_000
+    changed_irrelevant["slices"]["action_budget"]["items"][0]["irrelevant_bulk"] = "z" * 80_000
     second = life_development_source_closure_messages(
         context=changed_irrelevant,
         manifest=manifest,
@@ -7894,20 +7324,14 @@ def test_general_source_review_packet_excludes_unrelated_capsule_bulk() -> None:
     request = json.loads(first[-1]["content"])
     assert "pinned_world_context" not in request["pinned_source_evidence"]
     manifest_binding = request["pinned_source_evidence"]["manifest_binding"]
-    assert manifest_binding["contract"] == (
-        "life-development-review-manifest-binding.2"
-    )
+    assert manifest_binding["contract"] == ("life-development-review-manifest-binding.2")
     assert manifest_binding["manifest_hash"] == manifest.manifest_hash
     assert manifest_binding["owner_actor_ref"] == OWNER
-    assert manifest_binding["pinned_cursor"] == manifest.pinned_cursor.model_dump(
-        mode="json"
-    )
+    assert manifest_binding["pinned_cursor"] == manifest.pinned_cursor.model_dump(mode="json")
     assert manifest_binding["selected_location_capabilities"] == [
         capability.model_dump(mode="json")
     ]
-    assert manifest_binding["selected_location_descriptor"]["scope"] == (
-        "ref_level_only"
-    )
+    assert manifest_binding["selected_location_descriptor"]["scope"] == ("ref_level_only")
     assert manifest_binding["known_entity_index_scope"] == (
         "non_exhaustive_exact_ref_join_inline; opaque_without_source_bound_match; "
         "absence_is_not_evidence_of_novelty"
@@ -8009,13 +7433,11 @@ def test_location_descriptor_requires_exact_source_bound_capsule_item() -> None:
         draft=draft,
         cited_events=(),
     )
-    baseline_descriptor = json.loads(baseline_messages[-1]["content"])[
-        "pinned_source_evidence"
-    ]["manifest_binding"]["selected_location_descriptor"]
+    baseline_descriptor = json.loads(baseline_messages[-1]["content"])["pinned_source_evidence"][
+        "manifest_binding"
+    ]["selected_location_descriptor"]
     assert baseline_descriptor["scope"] == "ref_level_only"
-    assert baseline_descriptor["descriptor"] == {
-        "location_ref": capability.location_ref
-    }
+    assert baseline_descriptor["descriptor"] == {"location_ref": capability.location_ref}
     assert baseline_descriptor["source_bindings"] == []
 
     binding = {
@@ -8036,17 +7458,15 @@ def test_location_descriptor_requires_exact_source_bound_capsule_item() -> None:
         draft=draft,
         cited_events=(),
     )
-    exact_descriptor = json.loads(exact_messages[-1]["content"])[
-        "pinned_source_evidence"
-    ]["manifest_binding"]["selected_location_descriptor"]
+    exact_descriptor = json.loads(exact_messages[-1]["content"])["pinned_source_evidence"][
+        "manifest_binding"
+    ]["selected_location_descriptor"]
     assert exact_descriptor["scope"] == "canonical_descriptor"
     assert exact_descriptor["descriptor"]["canonical_name"] == "校园院子"
     assert exact_descriptor["descriptor"]["city"] == "深圳"
 
     invalid_context = json.loads(json.dumps(exact_context))
-    invalid_context["slices"]["current_situation"]["items"][0][
-        "value_hash"
-    ] = "0" * 64
+    invalid_context["slices"]["current_situation"]["items"][0]["value_hash"] = "0" * 64
     with pytest.raises(ValueError, match="value_hash does not bind its value"):
         life_development_source_closure_messages(
             context=invalid_context,
@@ -8091,9 +7511,7 @@ def test_manifest_entity_descriptors_use_only_exact_source_bound_ref_joins() -> 
         "canonical_name": "林遥",
         "stage": "friend",
     }
-    substring_value = {
-        "note": f"prose mentions {opaque_ref} but is not a ref value"
-    }
+    substring_value = {"note": f"prose mentions {opaque_ref} but is not a ref value"}
     binding_only_source = {
         **source_binding,
         "ref": binding_ref,
@@ -8146,9 +7564,7 @@ def test_manifest_entity_descriptors_use_only_exact_source_bound_ref_joins() -> 
     request = json.loads(messages[-1]["content"])
     index = {
         item["entity_ref"]: item
-        for item in request["pinned_source_evidence"]["manifest_binding"][
-            "known_entity_index"
-        ]
+        for item in request["pinned_source_evidence"]["manifest_binding"]["known_entity_index"]
     }
     assert index[exact_ref]["descriptor_status"] == "source_bound_exact_ref_join"
     assert index[exact_ref]["descriptor_evidence"][0]["item"]["value"] == {
@@ -8157,9 +7573,7 @@ def test_manifest_entity_descriptors_use_only_exact_source_bound_ref_joins() -> 
         "stage": "friend",
     }
     assert index[binding_ref]["descriptor_status"] == "source_bound_exact_ref_join"
-    assert index[binding_ref]["descriptor_evidence"][0]["item"]["value"] == {
-        "status": "known"
-    }
+    assert index[binding_ref]["descriptor_evidence"][0]["item"]["value"] == {"status": "known"}
     assert index[opaque_ref] == {
         "entity_ref": opaque_ref,
         "descriptor_status": "opaque_ref_only",
@@ -8180,10 +7594,7 @@ def test_manifest_entity_descriptors_use_only_exact_source_bound_ref_joins() -> 
         "non_exhaustive_exact_ref_pointer_into_existing_evidence; "
         "opaque_without_source_bound_match; absence_is_not_evidence_of_novelty"
     )
-    focused_index = {
-        item["entity_ref"]: item
-        for item in focused_manifest["known_entity_index"]
-    }
+    focused_index = {item["entity_ref"]: item for item in focused_manifest["known_entity_index"]}
     exact_pointer = focused_index[exact_ref]["descriptor_evidence"][0]
     assert exact_pointer == {
         "slice": "relationship_slice",
@@ -8262,22 +7673,18 @@ def test_novel_origin_packet_keeps_source_bound_truth_but_ignores_budget_noise()
         draft=draft,
     )
     changed_noise = json.loads(json.dumps(context))
-    changed_noise["slices"]["action_budget"]["items"][0][
-        "irrelevant_bulk"
-    ] = "z" * 80_000
+    changed_noise["slices"]["action_budget"]["items"][0]["irrelevant_bulk"] = "z" * 80_000
     same_evidence = life_development_novel_origin_messages(
         context=changed_noise,
         manifest=manifest,
         draft=draft,
     )
     changed_fact = json.loads(json.dumps(context))
-    changed_fact["slices"]["relevant_facts"]["items"][0]["value"][
-        "source_excerpt"
-    ] = "她明确不喜欢安静的地方。"
-    changed_fact["slices"]["relevant_facts"]["items"][0]["value_hash"] = (
-        _hash_json(
-            changed_fact["slices"]["relevant_facts"]["items"][0]["value"]
-        )
+    changed_fact["slices"]["relevant_facts"]["items"][0]["value"]["source_excerpt"] = (
+        "她明确不喜欢安静的地方。"
+    )
+    changed_fact["slices"]["relevant_facts"]["items"][0]["value_hash"] = _hash_json(
+        changed_fact["slices"]["relevant_facts"]["items"][0]["value"]
     )
     different_evidence = life_development_novel_origin_messages(
         context=changed_fact,
@@ -8294,14 +7701,10 @@ def test_novel_origin_packet_keeps_source_bound_truth_but_ignores_budget_noise()
         "relevant_facts": [
             {
                 "item_ref": "fact:existing",
-                "value_hash": _hash_json(
-                    context["slices"]["relevant_facts"]["items"][0]["value"]
-                ),
+                "value_hash": _hash_json(context["slices"]["relevant_facts"]["items"][0]["value"]),
                 "source_hash": _hash_json([source_binding]),
                 "source_bindings": [source_binding],
-                "value": context["slices"]["relevant_facts"]["items"][0][
-                    "value"
-                ],
+                "value": context["slices"]["relevant_facts"]["items"][0]["value"],
                 "authority_scope": "exact_source_bound_existing_truth",
             }
         ]
@@ -8310,10 +7713,7 @@ def test_novel_origin_packet_keeps_source_bound_truth_but_ignores_budget_noise()
         "life-development-novel-origin-review-evidence-packet.4"
     )
     assert "Inspect each exact outcome Opaque" not in first[0]["content"]
-    assert (
-        "Opaque entity/location refs prove identity coordinates only"
-        in first[0]["content"]
-    )
+    assert "Opaque entity/location refs prove identity coordinates only" in first[0]["content"]
     assert (
         "an existing_world claim or, by itself, justify an unsupported verdict"
         in first[0]["content"]
@@ -8348,13 +7748,11 @@ def test_novel_origin_packet_keeps_source_bound_truth_but_ignores_budget_noise()
         draft=draft,
     )
     changed_last = json.loads(json.dumps(many_facts))
-    changed_last["slices"]["relevant_facts"]["items"][8]["value"][
-        "source_excerpt"
-    ] = "changed final source-bound fact"
-    changed_last["slices"]["relevant_facts"]["items"][8]["value_hash"] = (
-        _hash_json(
-            changed_last["slices"]["relevant_facts"]["items"][8]["value"]
-        )
+    changed_last["slices"]["relevant_facts"]["items"][8]["value"]["source_excerpt"] = (
+        "changed final source-bound fact"
+    )
+    changed_last["slices"]["relevant_facts"]["items"][8]["value_hash"] = _hash_json(
+        changed_last["slices"]["relevant_facts"]["items"][8]["value"]
     )
     assert all_items != life_development_novel_origin_messages(
         context=changed_last,
@@ -8363,9 +7761,7 @@ def test_novel_origin_packet_keeps_source_bound_truth_but_ignores_budget_noise()
     )
 
     mismatched_source_item = json.loads(json.dumps(context))
-    mismatched_source_item["slices"]["relevant_facts"]["items"][0][
-        "value_hash"
-    ] = "0" * 64
+    mismatched_source_item["slices"]["relevant_facts"]["items"][0]["value_hash"] = "0" * 64
     with pytest.raises(ValueError, match="value_hash does not bind its value"):
         life_development_novel_origin_messages(
             context=mismatched_source_item,
@@ -8373,9 +7769,7 @@ def test_novel_origin_packet_keeps_source_bound_truth_but_ignores_budget_noise()
             draft=draft,
         )
     missing_value_hash = json.loads(json.dumps(context))
-    del missing_value_hash["slices"]["relevant_facts"]["items"][0][
-        "value_hash"
-    ]
+    del missing_value_hash["slices"]["relevant_facts"]["items"][0]["value_hash"]
     with pytest.raises(ValueError, match="value_hash does not bind its value"):
         life_development_novel_origin_messages(
             context=missing_value_hash,
@@ -8383,9 +7777,7 @@ def test_novel_origin_packet_keeps_source_bound_truth_but_ignores_budget_noise()
             draft=draft,
         )
     mismatched_source_hash = json.loads(json.dumps(context))
-    mismatched_source_hash["slices"]["relevant_facts"]["items"][0][
-        "source_hash"
-    ] = "0" * 64
+    mismatched_source_hash["slices"]["relevant_facts"]["items"][0]["source_hash"] = "0" * 64
     with pytest.raises(ValueError, match="source_hash does not bind its sources"):
         life_development_novel_origin_messages(
             context=mismatched_source_hash,
@@ -8393,9 +7785,9 @@ def test_novel_origin_packet_keeps_source_bound_truth_but_ignores_budget_noise()
             draft=draft,
         )
     invalid_binding = json.loads(json.dumps(context))
-    invalid_binding["slices"]["relevant_facts"]["items"][0]["source_bindings"][
-        0
-    ]["source_kind"] = "FactAccepted"
+    invalid_binding["slices"]["relevant_facts"]["items"][0]["source_bindings"][0]["source_kind"] = (
+        "FactAccepted"
+    )
     with pytest.raises(ValueError, match="invalid source bindings"):
         life_development_novel_origin_messages(
             context=invalid_binding,
@@ -8423,19 +7815,15 @@ def test_novel_origin_packet_keeps_source_bound_truth_but_ignores_budget_noise()
         manifest=manifest,
         draft=draft,
     )
-    baseline_item = json.loads(baseline_messages[-1]["content"])[
-        "pinned_authority"
-    ]["existing_world_evidence"]["slices"]["recent_dialogue"][0]
+    baseline_item = json.loads(baseline_messages[-1]["content"])["pinned_authority"][
+        "existing_world_evidence"
+    ]["slices"]["recent_dialogue"][0]
     assert baseline_item["capsule_item_value_hash"] == "1" * 64
     assert baseline_item["capsule_item_source_hash"] == "2" * 64
-    assert baseline_item["review_value_hash"] == _hash_json(
-        {"text": "只展示压缩后的对话内容"}
-    )
+    assert baseline_item["review_value_hash"] == _hash_json({"text": "只展示压缩后的对话内容"})
     assert "value_hash" not in baseline_item
     assert "source_hash" not in baseline_item
-    assert baseline_item["authority_scope"] == (
-        "capsule_bound_reviewer_baseline_only"
-    )
+    assert baseline_item["authority_scope"] == ("capsule_bound_reviewer_baseline_only")
 
 
 @pytest.mark.asyncio
@@ -8446,6 +7834,7 @@ def test_novel_origin_packet_keeps_source_bound_truth_but_ignores_budget_noise()
         (TimeoutError("corrective timeout"), "corrective_timeout", False),
     ),
 )
+@pytest.mark.asyncio
 async def test_failed_correction_retains_both_exact_attempts_without_world_effect(
     corrective: object,
     expected_code: str,
@@ -8461,7 +7850,7 @@ async def test_failed_correction_retains_both_exact_attempts_without_world_effec
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="test-character-model",
             outputs=(AssertionError("failed World Author must not reach Character"),),
         ),
@@ -8508,7 +7897,7 @@ async def test_oversized_invalid_diagnostics_are_audited_without_interrupting_th
             model="test-world-author",
             outputs=raw_outputs,
         ),
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="test-character-model",
             outputs=(AssertionError("failed World Author must not reach Character"),),
         ),
@@ -8540,9 +7929,7 @@ async def test_oversized_invalid_diagnostics_are_audited_without_interrupting_th
         assert audit.response_storage.disposition == "stored_exact"
         assert audit.response_storage.original_utf8_bytes == len(raw.encode("utf-8"))
         assert audit.response_storage.truncated is False
-        stored = store.read_exact(
-            content_ref=audit.response_storage.content_ref or ""
-        )
+        stored = store.read_exact(content_ref=audit.response_storage.content_ref or "")
         assert stored is not None
         assert stored.content_kind == "raw_model_result"
         assert stored.content_payload_hash == audit.response_hash
@@ -8570,7 +7957,7 @@ async def test_model_diagnostics_above_the_absolute_cap_keep_hash_and_size_only(
             model="test-world-author",
             outputs=raw_outputs,
         ),
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="test-character-model",
             outputs=(AssertionError("failed World Author must not reach Character"),),
         ),
@@ -8625,7 +8012,7 @@ async def test_diagnostic_sidecar_failure_is_audited_without_interrupting_the_ru
             model="test-world-author",
             outputs=("{}", "{}"),
         ),
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="test-character-model",
             outputs=(AssertionError("failed World Author must not reach Character"),),
         ),
@@ -8671,7 +8058,7 @@ async def test_terminal_world_author_failure_replays_without_recalling_the_model
         ledger=ledger,
         wake=wake,
         world_author=first_model,
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="test-character-model",
             outputs=(AssertionError("failed World Author must not reach Character"),),
         ),
@@ -8691,7 +8078,7 @@ async def test_terminal_world_author_failure_replays_without_recalling_the_model
         ledger=ledger,
         wake=wake,
         world_author=restarted_model,
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="test-character-model",
             outputs=(AssertionError("failed World Author must not reach Character"),),
         ),
@@ -8705,19 +8092,19 @@ async def test_terminal_world_author_failure_replays_without_recalling_the_model
     )
 
     assert first.status == recovered.status == "technical_failure"
-    assert first.reason_code == recovered.reason_code == (
-        "life_development.world_author_unavailable"
+    assert (
+        first.reason_code == recovered.reason_code == ("life_development.world_author_unavailable")
     )
     assert restarted_model.calls == 0
-    assert tuple(item.event_ref for item in ledger.project().model_result_audits) == (
-        audit_refs
-    )
+    assert tuple(item.event_ref for item in ledger.project().model_result_audits) == (audit_refs)
     assert ledger.project().plans == ()
     assert ledger.project().world_occurrences == ()
 
 
 @pytest.mark.asyncio
-async def test_terminal_character_failure_replays_without_recalling_either_model() -> None:
+async def test_character_interior_technical_failure_retries_without_recalling_world_author() -> (
+    None
+):
     ledger = WorldLedger.in_memory(world_id=WORLD_ID)
     wake = _seed_clock(ledger)
     capability = _location_capability()
@@ -8737,7 +8124,7 @@ async def test_terminal_character_failure_replays_without_recalling_either_model
                 ),
             ),
         ),
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="test-character-model",
             outputs=("{}", "{}"),
         ),
@@ -8755,13 +8142,13 @@ async def test_terminal_character_failure_replays_without_recalling_either_model
     )
     restarted_character = _SequenceModel(
         model="test-character-model",
-        outputs=(AssertionError("terminal Character failure must recover"),),
+        outputs=("{}", "{}"),
     )
     restarted, _ = _runtime(
         ledger=ledger,
         wake=wake,
         world_author=restarted_world,
-        character_model=restarted_character,
+        character_interior=restarted_character,
         store=store,
         location_capability=capability,
     )
@@ -8773,12 +8160,15 @@ async def test_terminal_character_failure_replays_without_recalling_either_model
     )
 
     assert first.status == recovered.status == "technical_failure"
-    assert first.reason_code == recovered.reason_code == (
-        "life_development.character_model_unavailable"
+    assert (
+        first.reason_code
+        == recovered.reason_code
+        == ("life_development.character_interior_unavailable")
     )
     assert restarted_world.calls == 0
-    assert restarted_character.calls == 0
-    assert len(ledger.project().model_result_audits) == 5
+    assert restarted_character.consider_calls == 1
+    assert restarted_character.calls == 2
+    assert len(ledger.project().model_result_audits) == 3
     assert ledger.project().plans == ()
     assert ledger.project().world_occurrences == ()
 
@@ -8794,7 +8184,7 @@ async def test_new_clock_after_terminal_failure_starts_a_new_model_attempt_chain
             model="test-world-author",
             outputs=("{}", "{}"),
         ),
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="test-character-model",
             outputs=(AssertionError("failed World Author must not reach Character"),),
         ),
@@ -8818,7 +8208,7 @@ async def test_new_clock_after_terminal_failure_starts_a_new_model_attempt_chain
         ledger=ledger,
         wake=retry_wake,
         world_author=retry_model,
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="test-character-model",
             outputs=(AssertionError("failed World Author must not reach Character"),),
         ),
@@ -8834,9 +8224,10 @@ async def test_new_clock_after_terminal_failure_starts_a_new_model_attempt_chain
     assert first.status == retry.status == "technical_failure"
     assert retry_model.calls == 2
     assert len(ledger.project().model_result_audits) == 4
-    assert {
-        item.trigger_ref for item in ledger.project().model_result_audits
-    } == {first_wake.event_id, retry_wake.event_id}
+    assert {item.trigger_ref for item in ledger.project().model_result_audits} == {
+        first_wake.event_id,
+        retry_wake.event_id,
+    }
     assert ledger.project().plans == ()
     assert ledger.project().world_occurrences == ()
 
@@ -8850,6 +8241,7 @@ async def test_new_clock_after_terminal_failure_starts_a_new_model_attempt_chain
         ValueError("malformed provider response"),
     ),
 )
+@pytest.mark.asyncio
 async def test_provider_failure_is_technical_and_writes_no_world_effect(
     failure: BaseException,
 ) -> None:
@@ -8867,7 +8259,7 @@ async def test_provider_failure_is_technical_and_writes_no_world_effect(
         ledger=ledger,
         wake=wake,
         world_author=world_author,
-        character_model=character_model,
+        character_interior=character_model,
     )
 
     result = await runtime.advance_once(
@@ -8920,7 +8312,7 @@ async def test_programming_error_is_not_disguised_as_provider_failure() -> None:
             model="test-world-author",
             outputs=(RuntimeError("adapter invariant broke"),),
         ),
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="test-character-model",
             outputs=(),
         ),
@@ -8963,7 +8355,7 @@ async def test_character_programming_error_also_propagates() -> None:
                 ),
             ),
         ),
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="test-character-model",
             outputs=(RuntimeError("character adapter invariant broke"),),
         ),
@@ -9016,7 +8408,7 @@ async def test_invalid_source_review_wire_reselects_one_independent_lane() -> No
                 ),
             ),
         ),
-        character_model=character,
+        character_interior=character,
         source_closure_reviewer=reviewer,
     )
 
@@ -9070,7 +8462,7 @@ async def test_two_source_review_attempts_keep_author_lineage_before_provider_au
                 ),
             ),
         ),
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="character-role",
             outputs=(
                 json.dumps(
@@ -9097,13 +8489,8 @@ async def test_two_source_review_attempts_keep_author_lineage_before_provider_au
     source_author_audits: list[RecordedModelResultAudit] = []
     provider_audits: list[RecordedModelResultAudit] = []
     for projected in ledger.project().model_result_audits:
-        audit = RecordedModelResultAudit.model_validate_json(
-            projected.audit_json
-        )
-        if (
-            audit.route.reason_code
-            == "life_development.world_author_source_reviewer"
-        ):
+        audit = RecordedModelResultAudit.model_validate_json(projected.audit_json)
+        if audit.route.reason_code == "life_development.world_author_source_reviewer":
             source_author_audits.append(audit)
         elif audit.route.router_version == "provider-subcall-audit.1":
             provider_audits.append(audit)
@@ -9139,7 +8526,7 @@ async def test_invalid_novel_origin_wire_reselects_one_independent_lane() -> Non
                 ),
             ),
         ),
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="character-role",
             outputs=(
                 json.dumps(
@@ -9214,7 +8601,7 @@ async def test_invalid_world_author_source_rewrite_wire_reselects_one_provider_l
             ),
         ),
         world_author_source_rewriter=source_rewriter,
-        character_model=_SequenceModel(
+        character_interior=_SequenceModel(
             model="character-role",
             outputs=(
                 json.dumps(

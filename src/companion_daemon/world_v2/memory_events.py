@@ -18,6 +18,7 @@ from .schemas import (
     MemoryRetentionRationale,
     MemorySourceBinding,
 )
+from .proposal_audit_schemas import ModelResultRecordedPayload
 
 
 MemoryOperation = Literal[
@@ -178,6 +179,10 @@ class MemoryCandidateChangedPayload(MemoryCandidateAuthorizedMutationPayload):
     reinforcement_count_after: int | None = Field(default=None, ge=0)
     policy_version: str | None = None
     policy_digest: str | None = Field(default=None, min_length=64, max_length=64)
+    character_interior_model_result: ModelResultRecordedPayload | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def mutation_is_complete(self) -> MemoryCandidateChangedPayload:

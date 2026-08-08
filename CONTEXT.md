@@ -174,6 +174,41 @@ A referencable experience derived from a settled activity or confirmed shared ev
 
 A traceable attempt to produce an observable online or external effect. An Action has one terminal outcome: delivered, failed, cancelled, expired, or unknown.
 
+## Dedicated Companion
+
+A character and World exclusively assigned to one user, with no memories, relationships, budgets, or private evidence shared with another user's companion. The current deployment has one Dedicated Companion; future multi-user service creates one isolated companion scope per user.
+_Avoid_: Shared public character, multi-user persona
+
+## World Administration
+
+An authenticated management operation over a Dedicated Companion, such as export, archival, correction, privacy revision, or a future reset/fork. It is initiated through the management panel and becomes an auditable command or event; ordinary QQ dialogue is not an administration interface.
+_Avoid_: Chat command, direct database edit
+
+## System Notice
+
+A platform-authored statement about technical availability, maintenance, delivery, or billing that is visibly distinct from character Expression and cannot create World or relationship facts.
+_Avoid_: Character excuse, fallback role message
+
+## Adult Eligibility
+
+A current, independently attested qualification that both the user and fictional character are adults for an adult-content capability. Relationship stage, conversational wording, appearance, or model inference cannot establish it.
+_Avoid_: Age guess, relationship proxy
+
+## Intimate Consent
+
+A recipient-, channel-, content-class-, and capability-scoped permission that is explicit, current, and revocable. It permits consideration or delivery inside its scope but never proves desire or commands the character to participate.
+_Avoid_: Relationship stage, blanket permanent consent
+
+## Intimate Expression
+
+A Character-authored romantic, sensual, or sexual communication whose content class remains explicit through planning, provider execution, delivery, and memory. Its existence and form belong to the character; Adult Eligibility, Intimate Consent, privacy, and provider capability remain hard prerequisites.
+_Avoid_: Intimacy script, consent grant
+
+## Capability Allowlist
+
+The currently deployed set of external effects the companion may request. An unspecified future capability is unavailable until explicitly designed, authorized, qualified, and added; extensibility does not imply latent permission.
+_Avoid_: Open-ended tool access
+
 ## Fast Reply Interface
 
 The production interactive expression path. One Character Model request owns the
@@ -344,36 +379,93 @@ The companion's stable identity, values, preferences, boundaries, and experience
 
 A deterministic summary of Character Core, current goals, relationship, and committed continuity. It is a read model, not a free-form write authority.
 
-## Current Self State
+## Character Interior
 
-A compact, source-bound model view derived from the verified Context Capsule
-for one Pinned Turn. It keeps Character Core, current Situation, active
-Appraisals, concurrent Affect components, relationship state, unresolved
-Threads, and non-authoritative Inner Advisories legible together. It is not a
-second truth store, does not flatten mixed feelings into one mood label, and
-keeps each emotional component bound to its accepted Appraisal cause. Local
-semantic advisories may contribute readable weighted candidates only after
-source binding; raw model drafts and operational scheduling verdicts never
-enter this state. A production-visible turn may finish before its durable
-local Appraisal/Affect follow-up; once that source-bound follow-up is accepted,
-subsequent turns include it here. Local schema correction may ask the same
-model to reselect a valid value, but deterministic code never maps message
-keywords to Affect or invents an emotion-display relation. Its bounded recent
-self-experience view preserves representatives from both immediate World Life
-occurrences and committed Experiences so activity churn cannot erase durable
-personal experience from the character's own attention. The background local
-Appraisal lane receives only logical time, this sourced Current Self State, at
-most four recent dialogue items, and the current Observation; this is a
-model-facing performance projection, while the complete Capsule remains the
-validation and replay authority.
-_Avoid_: Current personality rewrite, emotion-to-expression rule
+The actor-scoped deep Module that owns the single production boundary for
+subjective integration and Character Decisions. It deterministically projects
+one Inner Life Snapshot and lets the actor model either experience a committed
+stimulus or consider one opportunity. It coordinates instantaneous private
+self, attention, selective Recall, Appraisal/Affect, emotional continuity,
+subjective relationships, aspirations/conflicts, impulses and pre-expression
+stance without owning their durable domain authorities. World facts, typed
+acceptance, privacy, consent, safety, Actions, CAS, receipts and replay remain
+outside it. Production callers do not assemble an alternative self or invoke a
+role model beside it.
+_Avoid_: Mind database, behavior controller, role-model facade over old paths
+
+## NPC Actor-Isolated Semantic Domain
+
+The explicitly approved low-cost autonomy boundary for NPCs. Each decision is
+bound to one NPC actor ref and that NPC's private capsule; it must not read or
+reuse the protagonist's Inner Life Snapshot. Its durable result becomes a
+source-bound World stimulus that the protagonist may experience through her
+single Character Interior. This is not a second protagonist author and it is
+not permission to add arbitrary actor-model lanes: production composition,
+health and the architecture guard recognize only the registered NPC Ecology
+domain. A future full NPC Interior requires a separate actor-scoped instance
+and private authority.
+_Avoid_: Shared protagonist/NPC mind, unregistered actor model, NPC plot script
+
+## Inner Life Snapshot
+
+The canonical, deterministic, source-bound read model compiled by Character
+Interior for one actor, complete ledger cursor, Logical Time, privacy scope and
+compiler version. It keeps Character Core, Situation, concurrent Appraisals
+and Affect episodes, directional relationships, Private Impressions, open
+Threads and Commitments, aspirations, goals, recent self Experiences, memory
+candidates, perception and bounded Inner Advisories legible together without
+flattening them into one mood or behavior verdict. Each item retains its
+source, authority, availability and expiry; deterministic purpose views may
+only redact or remove items. The snapshot has a stable semantic hash and is
+not a second truth store or a free-form model write authority.
+_Avoid_: Current personality rewrite, mutable mind blob, consumer-specific self
+
+## Inner Turn
+
+One actor-owned, effect-once instance of private integration or choice. It
+binds purpose, stimulus or opportunity identity, Pinned Turn cursor, Inner
+Life Snapshot hash, capabilities, privacy scope, role-provider request, Recall
+and correction lineage, final Private Turn State and terminal result. A new
+Observation or cursor invalidates an older unaccepted result. Apart from
+recorded actor-chosen Recall and one constrained reselection by the same role
+model, one opportunity cannot have a second character author.
+_Avoid_: Chat session, hidden chain-of-thought, parallel role winner
+
+## Inner Transition
+
+A Character-Model-authored proposal that a committed stimulus may have changed
+one or more subjective domains, or changed none. Character Interior routes its
+source-bound items to the existing Appraisal, Affect, Relationship, Private
+Impression, Memory, Aspiration, Goal, Thread or Commitment authorities. It
+cannot replace those projections and technical failure is not `no_change`.
+_Avoid_: Inner-state replacement event, deterministic emotional reaction
+
+## Inner Decision
+
+The auditable result of Character Interior considering one opportunity. It
+contains the same Inner Turn's final Private Turn State, optional typed Inner
+Transitions and one purpose-specific Character Decision. It grants no World or
+Action authority by itself; the corresponding Acceptance and Action layers
+still validate every effect.
+_Avoid_: Behavior policy verdict, unpinned model reply
+
+## Historical Current Self State Contract
+
+`current-self-state.1` is the former compact provider view that preceded Inner
+Life Snapshot. Its recorded payloads remain readable by historical replay
+codecs so old Model Results and events retain their exact meaning. New
+production compilation, provider requests and business callers must not emit,
+accept or depend on this contract; it is not a compatibility route or a
+synonym for Inner Life Snapshot.
+_Avoid_: Legacy production fallback, second canonical self
 
 ## Private Turn State
 
 A concise, free-text, role-model-owned account of what is salient to the
 companion as she forms one Expression choice. It is a required member of the
 same model result that selects silence, timing, questions and Expression
-Beats, and its attended source refs must come from that Pinned Turn. JSON
+Beats, and its attended source refs must come from that Inner Turn's Inner Life
+Snapshot. JSON
 object member order is transport serialization, not evidence of causal order.
 It is
 audit material bound into Proposal identity, not hidden chain-of-thought,
@@ -385,8 +477,9 @@ a World claim, an Action payload, Memory, Relationship, or another durable
 effect must establish source closure again at that effect-bearing boundary and
 cannot inherit authority from this private state.
 When the character chooses bounded Recall, she forms one Private Turn State
-before requesting it and a new one from the augmented Context before the final
-Expression.
+before requesting it and a new one from the augmented Inner Life Snapshot
+before the final Expression. New ExpressionDrafts must carry the same final
+Inner Turn identity; no production expression path may bypass it.
 _Avoid_: Post-hoc rationale, response policy, question quota, motive enum
 
 ## Expression Reliability Lifecycle
@@ -397,7 +490,7 @@ attempt to its Model Result, and distinguishes a character-authored silent
 Proposal from technical failure. A crash before a model result resumes the
 same failure ordinal: only that live Runtime instance may continue generation
 before its 120-second provider in-flight lease expires, while another Runtime
-waits to reclaim it. Snapshot, Context, or current-self preparation failure is
+waits to reclaim it. Inner Life Snapshot or Context preparation failure is
 itself a source-bound technical Model Result, so it cannot busy-spin an
 unaudited claim. The short ownership lease is independent of terminal
 technical retry deadlines, which remain 10, 30, then 120 minutes; and a
@@ -497,14 +590,19 @@ _Avoid_: Rule verdict, mandatory stance
 ## Context Capsule
 
 A bounded, revision-pinned packet compiled from authoritative World Projections plus explicitly non-authoritative advisories for one Deliberation. It has a token budget and truncation log, and is not a second store of truth.
+Character Interior is the only production role boundary that may join its
+actor-scoped material into an Inner Life Snapshot; a business consumer cannot
+turn a separately compacted Capsule into another current self.
 _Avoid_: Full-history prompt, free-form context dump
 
 ## Pinned Turn
 
-One effect-once deliberation attempt whose Context Capsule, Inner Advisories,
-Model Result and Proposal Audit all refer to the same complete ledger cursor.
-If that cursor becomes stale before an authoritative write, the Pinned Turn is
-discarded and rebuilt; it never grants a stale Proposal acceptance.
+One effect-once deliberation attempt whose Context Capsule, Inner Life
+Snapshot, Inner Advisories, Model Result and Proposal Audit all refer to the
+same complete ledger cursor. Character Interior gives the actor-owned private
+portion of the attempt an Inner Turn identity. If that cursor becomes stale
+before an authoritative write, the Pinned Turn is discarded and rebuilt; it
+never grants a stale Proposal acceptance.
 _Avoid_: Chat turn, mutable prompt session
 
 ## Text Turn Endpoint

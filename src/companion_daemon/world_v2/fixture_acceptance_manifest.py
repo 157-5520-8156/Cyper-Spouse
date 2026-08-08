@@ -293,9 +293,9 @@ FIXTURE_ACCEPTANCE_MANIFEST: tuple[FixtureAcceptance, ...] = (
     ),
     _fixture(
         "W2-AFF-001",
-        "repeated user disappointment is noticed and remains optional advisory material on the next turn",
+        "repeated user disappointment is appraised in the inner turn and remains optional context on the next turn",
         (
-            "same-turn semantic advisory",
+            "same-turn CharacterInterior appraisal",
             "appraisal-to-affect",
             "next-turn Context",
             "relationship signal and repair option",
@@ -309,11 +309,15 @@ FIXTURE_ACCEPTANCE_MANIFEST: tuple[FixtureAcceptance, ...] = (
             _AFFECT,
         ),
         ("AppraisalAccepted", "AffectEpisodeOpened", "RelationshipSignalAccepted"),
-        ("advisory slice", "Affect projection", "Thread projection", "Relationship projection"),
         (
-            "tests/world_v2/test_production_same_turn_advisory.py::test_current_disappointment_and_thread_advice_reach_reply_model_without_forcing_comfort",
+            "InnerLifeSnapshot appraisal material",
+            "Affect projection",
+            "Thread projection",
+            "Relationship projection",
+        ),
+        (
+            "tests/world_v2/test_character_interior_inbound_appraisal_wire.py::test_materializer_binds_same_turn_appraisal_and_affect",
             "tests/world_v2/test_affect_acceptance_runtime.py::test_accepted_affect_is_source_bound_into_the_next_context_capsule",
-            "tests/world_v2/test_production_turn_application.py::test_significant_interaction_state_is_consumed_by_the_next_visible_turn",
             "tests/world_v2/test_appraisal_authority.py::test_accepted_appraisal_opens_a_replayable_relationship_trigger",
         ),
         coverage_tags=("emotion", "relationship", "repair"),
@@ -326,7 +330,7 @@ FIXTURE_ACCEPTANCE_MANIFEST: tuple[FixtureAcceptance, ...] = (
         ("AppraisalAccepted", "AffectEpisodeOpened", "AffectEpisodeDecayed"),
         ("open Affect episode",),
         (
-            "tests/world_v2/test_appraisal_authority.py::test_accepted_appraisal_can_open_affect_through_an_independent_authority_path",
+            "tests/world_v2/test_appraisal_authority.py::test_typed_affect_acceptance_replays_and_decays",
             "tests/world_v2/test_affect_acceptance_runtime.py::test_accepted_affect_is_source_bound_into_the_next_context_capsule",
         ),
         coverage_tags=("emotion", "resistance"),
@@ -334,19 +338,19 @@ FIXTURE_ACCEPTANCE_MANIFEST: tuple[FixtureAcceptance, ...] = (
     _fixture(
         "W2-IMP-001",
         "sarcasm uncertainty remains multiple expiring interpretations instead of a user fact",
-        ("multi-hypothesis appraisal", "semantic advisory", "expiry"),
+        ("multi-hypothesis appraisal", "CharacterInterior", "expiry"),
         (
             _APPRAISAL,
             _anchor(
-                "src/companion_daemon/world_v2/semantic_advisory_adapter.py",
-                "class SemanticAdvisoryAdapter",
+                "src/companion_daemon/world_v2/character_interior/inbound_wire.py",
+                "appraisal_draft",
             ),
         ),
         ("AppraisalAccepted",),
-        ("Appraisal hypotheses", "advisory slice"),
+        ("Appraisal hypotheses", "InnerLifeSnapshot appraisal material"),
         (
             "tests/world_v2/test_life_projection.py::test_claimed_world_trigger_can_commit_multi_hypothesis_appraisal",
-            "tests/world_v2/test_semantic_advisory_adapter.py::test_semantic_adapter_returns_only_source_bound_catalog_alternatives",
+            "tests/world_v2/test_character_interior_inbound_wire.py::test_v8_lane_unsupported_declared_claim_is_rejected",
         ),
     ),
     _fixture(
@@ -361,15 +365,15 @@ FIXTURE_ACCEPTANCE_MANIFEST: tuple[FixtureAcceptance, ...] = (
         (
             _LIFE,
             _anchor(
-                "src/companion_daemon/world_v2/npc_world_appraisal_trigger_runtime.py",
-                "class NpcWorldAppraisalTriggerRuntime",
+                "src/companion_daemon/world_v2/character_interior/world_stimulus.py",
+                "class CharacterInteriorWorldStimulusRuntime",
             ),
             _AFFECT,
         ),
         ("WorldOccurrenceSettled", "AppraisalAccepted", "AffectEpisodeOpened"),
         ("occurrence head", "Experience head", "Affect projection"),
         (
-            "tests/world_v2/test_npc_world_appraisal_trigger_runtime.py::test_settled_npc_event_can_create_a_source_bound_companion_appraisal",
+            "tests/world_v2/test_character_interior_world_stimulus.py::test_settled_world_change_crosses_one_eight_facet_character_interior_turn",
             "tests/world_v2/test_scenario_runner.py::test_seeded_multiturn_mechanism_cases_use_the_public_app_and_assert_predicates",
         ),
         coverage_tags=("npc", "emotion"),
@@ -624,7 +628,8 @@ FIXTURE_ACCEPTANCE_MANIFEST: tuple[FixtureAcceptance, ...] = (
             _anchor(
                 "src/companion_daemon/world_v2/production_turn_application.py",
                 "MemoryWithdrawalReviewRuntime(",
-                "memory_model is not None",
+                "character_interior=character_interior",
+                "actor_ref=config.companion_actor_ref",
             ),
         ),
         ("FactWithdrawn", "TriggerProcessOpened", "MemoryCandidateForgotten"),
@@ -633,7 +638,7 @@ FIXTURE_ACCEPTANCE_MANIFEST: tuple[FixtureAcceptance, ...] = (
             "tests/world_v2/test_fact_authority.py::test_fact_withdrawal_freezes_claim_and_closes_authority",
             "tests/world_v2/test_memory_candidate_authority.py::test_correction_cannot_drop_current_source_but_may_drop_stale_source",
             "tests/world_v2/test_memory_withdrawal_review_runtime.py::test_fact_reducer_does_not_cascade_but_review_forgets_exactly_once",
-            "tests/world_v2/test_memory_withdrawal_review_runtime.py::test_production_builder_drains_withdrawal_review_when_memory_model_is_injected",
+            "tests/world_v2/test_memory_withdrawal_review_runtime.py::test_production_builder_drains_character_interior_memory_withdrawal_review",
         ),
     ),
     _fixture(
@@ -664,13 +669,14 @@ FIXTURE_ACCEPTANCE_MANIFEST: tuple[FixtureAcceptance, ...] = (
         (
             _SOCIAL,
             _anchor(
-                "src/companion_daemon/world_v2/production_turn_application.py",
-                "expression_reconsideration_reviewer",
-                "social_action_worker=",
+                "src/companion_daemon/world_v2/character_interior/production.py",
+                "CharacterInteriorExpressionReconsiderationReviewer(",
+                "character_interior=interior",
+                "ExpressionReconsiderationRuntime(",
             ),
             _RECONSIDER,
         ),
-        ("ExpressionReconsiderationOpened", "ActionCancelled"),
+        ("TriggerProcessOpened", "ActionCancelled"),
         ("ExpressionPlan head", "Action head"),
         (
             "tests/world_v2/test_production_turn_application.py::test_production_user_interjection_cancels_shared_deferred_followup",
@@ -708,7 +714,7 @@ FIXTURE_ACCEPTANCE_MANIFEST: tuple[FixtureAcceptance, ...] = (
         "interjection reopens deliberation for all remaining beats",
         ("ExpressionPlan", "interjection gate", "reconsideration"),
         (_EXPRESSION, _RECONSIDER),
-        ("ExpressionReconsiderationOpened",),
+        ("TriggerProcessOpened",),
         ("gated remaining beats",),
         (
             "tests/world_v2/test_expression_reconsideration.py::test_interjection_gates_every_remaining_beat_of_a_multi_beat_plan_in_stable_order",
@@ -747,7 +753,7 @@ FIXTURE_ACCEPTANCE_MANIFEST: tuple[FixtureAcceptance, ...] = (
         "concurrent scheduler and user interjection produce one CAS-bound reconsideration",
         ("deterministic trigger", "CAS gate", "immutable payload"),
         (_RECONSIDER,),
-        ("ExpressionReconsiderationOpened",),
+        ("TriggerProcessOpened",),
         ("unique reconsideration process",),
         (
             "tests/world_v2/test_expression_reconsideration.py::test_user_interjection_opens_one_deterministic_reconsideration_trigger_for_undispatched_beat",
@@ -767,36 +773,42 @@ FIXTURE_ACCEPTANCE_MANIFEST: tuple[FixtureAcceptance, ...] = (
     ),
     _fixture(
         "W2-INT-001",
-        "high-interest interruption advice may be accepted or rejected by the main model",
-        ("semantic interrupt advisory", "model autonomy", "no keyword action"),
+        "a continuation estimate may be accepted or rejected by CharacterInterior",
+        ("endpoint continuation estimate", "model autonomy", "no keyword action"),
         (
-            _anchor("src/companion_daemon/world_v2/semantic_advisory_adapter.py", "interrupt"),
             _anchor(
-                "src/companion_daemon/world_v2/chat_model_deliberation_adapter.py",
-                "RoutedChatModelDeliberationAdapter",
+                "src/companion_daemon/world_v2/text_turn_endpoint.py",
+                "probability that the same user will add another message bubble",
+            ),
+            _anchor(
+                "src/companion_daemon/world_v2/character_interior/inbound_wire.py",
+                "_RoutedExpressionDraftWire",
             ),
         ),
         ("ProposalRecorded",),
-        ("advisory slice", "DecisionProposal audit"),
+        ("TurnAttentionAdvisory", "DecisionProposal audit"),
         (
-            "tests/world_v2/test_semantic_advisory_adapter.py::test_semantic_adapter_returns_only_source_bound_catalog_alternatives",
-            "tests/world_v2/test_production_same_turn_advisory.py::test_current_disappointment_and_thread_advice_reach_reply_model_without_forcing_comfort",
+            "tests/world_v2/test_text_turn_endpoint.py::test_chat_endpoint_model_returns_only_a_probability_estimate",
+            "tests/world_v2/test_character_interior_single_author_composition.py::test_production_interfaces_expose_no_secondary_semantic_appraisal_author",
         ),
         coverage_tags=("resistance",),
     ),
     _fixture(
         "W2-INT-002",
-        "interest plus high interruption cost may preserve a thread without interrupting",
-        ("relationship-aware advisory", "Thread authority", "model choice"),
+        "the character may preserve a thread without interrupting",
+        ("CharacterInterior", "Thread authority", "model choice"),
         (
-            _anchor("src/companion_daemon/world_v2/semantic_advisory_adapter.py", "interrupt"),
+            _anchor(
+                "src/companion_daemon/world_v2/character_interior/inbound_wire.py",
+                "turn_posture",
+            ),
             _anchor("src/companion_daemon/world_v2/thread_reducers.py", "ThreadOpened"),
         ),
         ("ThreadOpened", "ProposalRecorded"),
         ("Thread head", "no forced Action"),
         (
             "tests/world_v2/test_thread_authority.py::test_thread_open_is_typed_persistent_and_behavior_neutral",
-            "tests/world_v2/test_semantic_advisory_adapter.py::test_semantic_adapter_returns_only_source_bound_catalog_alternatives",
+            "tests/world_v2/test_character_interior_single_author_composition.py::test_production_composition_keeps_world_support_outside_character_interior",
         ),
     ),
     _fixture(
@@ -1027,31 +1039,31 @@ FIXTURE_ACCEPTANCE_MANIFEST: tuple[FixtureAcceptance, ...] = (
         (
             _PERCEPTION,
             _anchor(
-                "src/companion_daemon/world_v2/perception_result_trigger_runtime.py",
-                "PerceptionResultTriggerRuntime",
+                "src/companion_daemon/world_v2/character_interior/world_stimulus.py",
+                "CharacterInteriorWorldStimulusRuntime",
             ),
         ),
-        ("VisionResultAccepted", "TriggerProcessOpened"),
-        ("perception result", "external-result process"),
+        ("PerceptionResultAccepted", "TriggerProcessOpened", "ModelResultRecorded"),
+        ("perception result", "CharacterInterior private experience"),
         (
             "tests/world_v2/test_perception_vertical.py::test_injected_perception_provider_is_source_bound_private_and_result_triggered_once",
         ),
     ),
     _fixture(
         "W2-TOOL-001",
-        "read-only tool receipt replay opens one result decision and settles once",
-        ("tool capability", "receipt-bound result", "external-result trigger"),
+        "read-only tool receipt replay accepts one sourced result without a retired side lane",
+        ("tool capability", "receipt-bound result", "CharacterInterior context"),
         (
             _TOOL,
             _anchor(
-                "src/companion_daemon/world_v2/external_result_trigger_runtime.py",
-                "ExternalResultTriggerRuntime",
+                "src/companion_daemon/world_v2/read_only_tool.py",
+                "accepted_tool_result_events",
             ),
         ),
-        ("ToolResultAccepted", "TriggerProcessOpened", "BudgetSettled"),
-        ("tool result", "external-result process"),
+        ("ToolResultAccepted", "BudgetSettled"),
+        ("tool result",),
         (
-            "tests/world_v2/test_read_only_tool_vertical.py::test_source_bound_tool_request_settles_result_and_opens_one_result_trigger",
+            "tests/world_v2/test_read_only_tool_vertical.py::test_source_bound_tool_request_settles_result_without_retired_side_trigger",
         ),
     ),
     _fixture(

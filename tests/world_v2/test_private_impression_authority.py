@@ -19,9 +19,7 @@ from companion_daemon.world_v2.private_impression_events import (
     private_impression_payload_material,
 )
 from companion_daemon.world_v2.private_impression_producer import (
-    PrivateImpressionDraftAdapter,
     PrivateImpressionTriggerOpener,
-    PrivateImpressionTriggerRuntime,
 )
 from companion_daemon.world_v2.schemas import (
     AppraisalMeaningRef,
@@ -40,6 +38,7 @@ from test_appraisal_authority import (
     prepare_claimed_interaction,
     record_proposal as record_appraisal_proposal,
 )
+from test_private_impression_producer import _private_runtime
 
 
 def _private_payload(ledger) -> dict[str, object]:
@@ -166,11 +165,12 @@ def test_private_impression_is_appraisal_bound_and_visible_only_to_internal_cont
             ledger=ledger,
             owner_id="worker:test:private-impression",
         ).open_once()
-        result = await PrivateImpressionTriggerRuntime(
-            ledger=ledger,
-            adapter=PrivateImpressionDraftAdapter(model=Model()),
+        runtime, _interior = _private_runtime(
+            ledger,
+            Model(),
             owner_id="worker:test:private-impression",
-        ).drain_one()
+        )
+        result = await runtime.drain_one()
         assert result.work_status == "accepted"
 
     asyncio.run(produce())
@@ -282,11 +282,12 @@ def test_v44_head_with_v4_private_impression_cold_replays_under_v45(tmp_path) ->
             ledger=ledger,
             owner_id="worker:test:private-impression",
         ).open_once()
-        result = await PrivateImpressionTriggerRuntime(
-            ledger=ledger,
-            adapter=PrivateImpressionDraftAdapter(model=Model()),
+        runtime, _interior = _private_runtime(
+            ledger,
+            Model(),
             owner_id="worker:test:private-impression",
-        ).drain_one()
+        )
+        result = await runtime.drain_one()
         assert result.work_status == "accepted"
 
     asyncio.run(produce())
@@ -361,7 +362,7 @@ def test_v44_head_with_v4_private_impression_cold_replays_under_v45(tmp_path) ->
 
     reopened = SQLiteWorldLedger(path=path, world_id=expected.world_id)
     migrated = reopened.project()
-    assert migrated.reducer_bundle_version == "world-v2-reducers.51"
+    assert migrated.reducer_bundle_version == "world-v2-reducers.52"
     assert migrated.private_impressions == expected.private_impressions
     assert reopened.rebuild() == migrated
     reopened.close()

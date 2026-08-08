@@ -12,7 +12,7 @@ from companion_daemon.world_v2.change_phase_view import (
     change_phase_readings,
     change_phase_summary_prose,
 )
-from companion_daemon.world_v2.life_author_runtime import LifeAuthorWeightPolicy
+from companion_daemon.world_v2.life_author_weight_policy import LifeAuthorWeightPolicy
 from companion_daemon.world_v2.schemas import (
     AffectComponentProjection,
     AffectDecayProfileProjection,

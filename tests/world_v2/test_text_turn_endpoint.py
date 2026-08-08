@@ -230,7 +230,8 @@ class _EndpointChat:
 async def test_chat_endpoint_model_returns_only_a_probability_estimate() -> None:
     chat = _EndpointChat(
         '{"continuation_probability_bp":8200,"confidence_bp":7600,'
-        '"evidence_summary":"the current bubble is semantically unfinished"}'
+        '"evidence_summary":"the current bubble is semantically unfinished",'
+        '"compact_reply_hint_bp":7400}'
     )
     model = ChatSemanticEndpointModel(chat)
     evidence = TextTurnEndpointEvidence(
@@ -248,6 +249,7 @@ async def test_chat_endpoint_model_returns_only_a_probability_estimate() -> None
 
     assert prediction.continuation_probability_bp == 8_200
     assert prediction.confidence_bp == 7_600
+    assert prediction.compact_reply_hint_bp == 7_400
     assert prediction.model_id == chat.model
     prompt = chat.messages[0][-1]["content"]
     assert "我下午本来想" in prompt

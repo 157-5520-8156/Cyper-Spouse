@@ -13,9 +13,6 @@ from companion_daemon.config import Settings
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.world_v2 import runtime as runtime_module
 from companion_daemon.world_v2 import deliberation as deliberation_module
-from companion_daemon.world_v2.appraisal_trigger import (
-    interaction_appraisal_trigger_events as real_interaction_appraisal_trigger_events,
-)
 from companion_daemon.world_v2.expression_episode_lifecycle import (
     next_expression_retry_due,
 )
@@ -183,6 +180,31 @@ class _BlockingExpressionModel:
 
     async def complete(self, messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
         prompt = "\n".join(message["content"] for message in messages)
+        try:
+            interior_request = json.loads(messages[-1]["content"])
+        except (KeyError, TypeError, json.JSONDecodeError):
+            interior_request = {}
+        inner_turn = interior_request.get("inner_turn", {})
+        capability = interior_request.get("capability_manifest", {})
+        if (
+            isinstance(inner_turn, dict)
+            and inner_turn.get("purpose") == "fact_memory_retention"
+            and isinstance(capability, dict)
+        ):
+            return json.dumps(
+                {
+                    "status": "decision",
+                    "summary": "这条位置更新不需要再建立第二份检索记忆。",
+                    "attended_source_refs": [],
+                    "decision": {
+                        "source_refs": capability.get("source_refs", []),
+                        "payload": {"retain": False},
+                    },
+                    "recall_query": None,
+                    "proposals": [],
+                },
+                ensure_ascii=False,
+            )
         if not _is_expression_prompt(prompt):
             return await self._fallback.complete(messages, temperature=temperature)
         self.expression_calls += 1
@@ -252,48 +274,6 @@ class _CountingFactModel:
                 ensure_ascii=False,
             )
         return '{"retain":false}'
-
-
-class _BlockingExpressionAndAppraisalModel:
-    """Expose both obsolete provider calls so newer inbound can cancel them."""
-
-    model = "fixture:blocking-expression-and-appraisal"
-
-    def __init__(self) -> None:
-        self.expression_entered = asyncio.Event()
-        self.appraisal_entered = asyncio.Event()
-        self.expression_cancelled = asyncio.Event()
-        self.appraisal_cancelled = asyncio.Event()
-        self.expression_calls = 0
-        self.appraisal_calls = 0
-        self._fallback = FakeCompanionModel()
-
-    async def complete(self, messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
-        prompt = "\n".join(message["content"] for message in messages)
-        if (
-            "appraisal_draft and expression_draft" in prompt
-            and "COMBINED OUTPUT ENVELOPE" in prompt
-        ):
-            self.appraisal_calls += 1
-            if self.appraisal_calls == 1:
-                self.appraisal_entered.set()
-                try:
-                    await asyncio.Event().wait()
-                except asyncio.CancelledError:
-                    self.appraisal_cancelled.set()
-                    raise
-            return await self._fallback.complete(messages, temperature=temperature)
-        if not _is_expression_prompt(prompt):
-            return await self._fallback.complete(messages, temperature=temperature)
-        self.expression_calls += 1
-        if self.expression_calls == 1:
-            self.expression_entered.set()
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                self.expression_cancelled.set()
-                raise
-        return _expression_response(prompt, text="新的这句接住了。")
 
 
 class _BatchUpdatingFactModel:
@@ -540,7 +520,7 @@ async def test_live_ingest_model_call_is_not_mistaken_for_crash_recovery(
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
         use_configured_recall_embedding=False,
     )
@@ -592,7 +572,7 @@ async def test_newest_inbound_cancels_superseded_provider_work_before_authoring(
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
         use_configured_recall_embedding=False,
     )
@@ -650,13 +630,13 @@ async def test_superseded_volley_folds_appraisal_and_batches_fact_model_work(
         settings=Settings(
             database_path=tmp_path / "volley-background-cognition.sqlite",
             PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
             WORLD_V2_EXPRESSION_EPISODE_MODE="off",
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=fact_model,
+        world_support_model=fact_model,
         delivery=_Delivery(),
         use_configured_recall_embedding=False,
     )
@@ -718,14 +698,19 @@ async def test_superseded_volley_folds_appraisal_and_batches_fact_model_work(
             for process in appraisals
         ) == 2
         # Three visible attempts include the two promptly cancelled calls.
-        # The two folded appraisal processes cannot have proposal audits, so
-        # only the newest conversational moment receives background appraisal;
-        # Fact keeps all three exact sources in one model batch.
+        # The two folded appraisal processes cannot have proposal audits. The
+        # newest conversational moment owns one combined CharacterInterior
+        # proposal, in which the role may choose that no durable Appraisal is
+        # needed; Fact still keeps all three exact sources in one model batch.
         assert model.expression_calls in {3, 4}
         assert sum(
-            audit.proposal_id.startswith("proposal:appraisal-draft:")
+            audit.proposal_id.startswith("proposal:expression:")
             for audit in projection.proposal_audits
         ) == 1
+        assert not any(
+            audit.proposal_id.startswith("proposal:appraisal-draft:")
+            for audit in projection.proposal_audits
+        )
         assert fact_model.fact_calls == 1
     finally:
         for task in (first, second, third):
@@ -733,76 +718,6 @@ async def test_superseded_volley_folds_appraisal_and_batches_fact_model_work(
                 task.cancel()
         await asyncio.gather(
             *(task for task in (first, second, third) if task is not None),
-            return_exceptions=True,
-        )
-        await host.aclose()
-
-
-@pytest.mark.asyncio
-async def test_new_inbound_cancels_an_appraisal_provider_after_durable_fold(
-    tmp_path: Path,
-) -> None:
-    model = _BlockingExpressionAndAppraisalModel()
-    host = build_qq_c2c_host(
-        settings=Settings(
-            database_path=tmp_path / "appraisal-provider-fold.sqlite",
-            PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=False,
-            WORLD_V2_EXPRESSION_EPISODE_MODE="off",
-        ),
-        recipient_id="10001",
-        bootstrap_at=NOW,
-        model=model,
-        advisory_model=_CountingFactModel(),
-        delivery=_Delivery(),
-        use_configured_recall_embedding=False,
-    )
-    first = asyncio.create_task(
-        _direct_inbound(host, message_id="appraisal-fold-1", text="我先说半句")
-    )
-    scheduler: asyncio.Task[object] | None = None
-    second: asyncio.Task[object] | None = None
-    try:
-        await asyncio.wait_for(model.expression_entered.wait(), timeout=3)
-        scheduler = asyncio.create_task(
-            host.scheduler_once(
-                observed_at=NOW + timedelta(seconds=1),
-                max_action_units=0,
-                max_background_units=2,
-            )
-        )
-        await asyncio.wait_for(model.appraisal_entered.wait(), timeout=3)
-        second = asyncio.create_task(
-            _direct_inbound(host, message_id="appraisal-fold-2", text="现在说完整了")
-        )
-        first_outcome, second_outcome, _scheduler_outcome = await asyncio.wait_for(
-            asyncio.gather(first, second, scheduler),
-            timeout=5,
-        )
-
-        assert first_outcome.status == "observed_only"
-        assert second_outcome.status == "action_authorized"
-        assert model.expression_cancelled.is_set()
-        assert model.appraisal_cancelled.is_set()
-        projection = await host._host.action_due_projection()  # noqa: SLF001
-        old_observation = projection.message_observations[0]
-        old_appraisal = next(
-            process
-            for process in projection.trigger_processes
-            if process.process_kind == "interaction_appraisal"
-            and process.source_evidence_ref == old_observation.observation_id
-        )
-        assert old_appraisal.state == "terminal"
-        assert (
-            old_appraisal.runtime_outcome_ref
-            == "interaction-appraisal:folded-into-newer-inbound"
-        )
-    finally:
-        for task in (first, second, scheduler):
-            if task is not None and not task.done():
-                task.cancel()
-        await asyncio.gather(
-            *(task for task in (first, second, scheduler) if task is not None),
             return_exceptions=True,
         )
         await host.aclose()
@@ -818,13 +733,13 @@ async def test_fact_batch_settles_ordered_slot_updates_without_a_second_model_ca
         settings=Settings(
             database_path=tmp_path / "fact-batch-slot-update.sqlite",
             PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
             WORLD_V2_EXPRESSION_EPISODE_MODE="off",
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=fact_model,
+        world_support_model=fact_model,
         delivery=_Delivery(),
         use_configured_recall_embedding=False,
     )
@@ -857,6 +772,9 @@ async def test_fact_batch_settles_ordered_slot_updates_without_a_second_model_ca
             for process in midway.trigger_processes
             if process.process_kind == "interaction_fact"
         )
+        # The one semantic batch records both decisions, then removes each
+        # temporary decision as its Fact slot settles.  A crash between slots
+        # therefore leaves exactly the unconsumed decision without another call.
         assert len(midway.interaction_fact_decisions) == 1
         assert sum(process.state == "terminal" for process in midway_facts) == 1
         assert fact_model.fact_calls == 1
@@ -869,13 +787,13 @@ async def test_fact_batch_settles_ordered_slot_updates_without_a_second_model_ca
             settings=Settings(
                 database_path=tmp_path / "fact-batch-slot-update.sqlite",
                 PRIMARY_USER_ID="geoff",
-                LOCAL_APPRAISAL_ENABLED=False,
+                WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
                 WORLD_V2_EXPRESSION_EPISODE_MODE="off",
             ),
             recipient_id="10001",
             bootstrap_at=NOW + timedelta(minutes=1),
             model=model,
-            advisory_model=fact_model,
+            world_support_model=fact_model,
             delivery=_Delivery(),
             use_configured_recall_embedding=False,
         )
@@ -938,7 +856,7 @@ async def test_newer_inbound_cancels_scheduler_owned_retry_without_stopping_reco
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
         use_configured_recall_embedding=False,
     )
@@ -1001,7 +919,7 @@ async def test_unrelated_head_advance_repins_valid_expression_before_delivery(
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=delivery,
         use_configured_recall_embedding=False,
     )
@@ -1067,7 +985,7 @@ async def test_due_previous_delivery_reconciliation_waits_for_visible_reply(
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=delivery,
         action_due_now=lambda: scheduler_now[0],
         use_configured_recall_embedding=False,
@@ -1169,7 +1087,7 @@ async def test_world_only_head_advance_repins_with_same_absolute_turn_budget(
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
         interactive_turn_budget_policy=policy,
         use_configured_recall_embedding=False,
@@ -1248,7 +1166,7 @@ async def test_exhausted_repin_budget_records_durable_defer_without_reauthoring(
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
         interactive_turn_budget_policy=policy,
         use_configured_recall_embedding=False,
@@ -1321,7 +1239,7 @@ async def test_fresh_context_repin_cap_is_durable_across_scheduler_recovery(
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
         use_configured_recall_embedding=False,
     )
@@ -1400,7 +1318,7 @@ async def test_same_runtime_resumes_its_unrecorded_expression_claim_immediately(
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
         use_configured_recall_embedding=False,
     )
@@ -1462,7 +1380,7 @@ async def test_scheduler_and_duplicate_ingress_join_one_recovery_provider_call(
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
         use_configured_recall_embedding=False,
     )
@@ -1582,7 +1500,7 @@ async def test_foreign_runtime_waits_for_expression_claim_expiry_before_recovery
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
         use_configured_recall_embedding=False,
     )
@@ -1601,7 +1519,7 @@ async def test_foreign_runtime_waits_for_expression_claim_expiry_before_recovery
             recipient_id="10001",
             bootstrap_at=NOW,
             model=model,
-            advisory_model=FakeCompanionModel(),
+            world_support_model=FakeCompanionModel(),
             delivery=_Delivery(),
             use_configured_recall_embedding=False,
         )
@@ -1685,7 +1603,7 @@ async def test_context_preparation_failure_is_a_durable_backed_off_attempt(
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
         use_configured_recall_embedding=False,
     )
@@ -1789,7 +1707,7 @@ async def test_snapshot_failure_is_a_durable_backed_off_pre_provider_attempt(
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
         use_configured_recall_embedding=False,
     )
@@ -1888,7 +1806,7 @@ async def test_new_inbound_atomically_supersedes_old_retry_after_restart(
         recipient_id="10001",
         bootstrap_at=NOW,
         model=_CountingExpressionModel(),
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
         use_configured_recall_embedding=False,
     )
@@ -1929,7 +1847,7 @@ async def test_new_inbound_atomically_supersedes_old_retry_after_restart(
             recipient_id="10001",
             bootstrap_at=NOW,
             model=blocking_model,
-            advisory_model=FakeCompanionModel(),
+            world_support_model=FakeCompanionModel(),
             delivery=_Delivery(),
             use_configured_recall_embedding=False,
         )
@@ -1987,7 +1905,7 @@ async def test_new_inbound_preserves_old_episode_with_authorized_action(
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
         use_configured_recall_embedding=False,
     )
@@ -2053,68 +1971,6 @@ async def test_new_inbound_preserves_old_episode_with_authorized_action(
 
 
 @pytest.mark.asyncio
-async def test_foreign_background_appraisal_claim_does_not_delay_the_visible_reply(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Durable Affect follows in background and is never an Expression dependency."""
-
-    model = _CountingExpressionModel()
-
-    def foreign_appraisal_claim(**kwargs):  # type: ignore[no-untyped-def]
-        # Commit the production open+claim pair, but bind the live lease to a
-        # different durable owner. Expression must remain independent of it.
-        return real_interaction_appraisal_trigger_events(
-            observation=kwargs["observation"],
-            observation_event=kwargs["observation_event"],
-            owner_id="worker:foreign-appraisal",
-            lease_seconds=120,
-        )
-
-    monkeypatch.setattr(
-        runtime_module,
-        "interaction_appraisal_trigger_events",
-        foreign_appraisal_claim,
-    )
-    host = build_qq_c2c_host(
-            settings=Settings(
-                database_path=tmp_path / "owned-emotion-keeps-expression.sqlite",
-                PRIMARY_USER_ID="geoff",
-                LOCAL_APPRAISAL_ENABLED=False,
-                WORLD_V2_EXPRESSION_EPISODE_MODE="off",
-            ),
-        recipient_id="10001",
-        bootstrap_at=NOW,
-        model=model,
-        advisory_model=FakeCompanionModel(),
-        delivery=_Delivery(),
-        use_configured_recall_embedding=False,
-    )
-    try:
-        outcome = await _direct_inbound(
-            host,
-            message_id="owned-emotion-keeps-expression",
-            text="这句话需要先处理当轮情绪。",
-        )
-        projection = await host._host.action_due_projection()  # noqa: SLF001
-        appraisal = next(
-            item
-            for item in projection.trigger_processes
-            if item.process_kind == "interaction_appraisal"
-        )
-
-        assert outcome.status == "action_authorized"
-        assert model.expression_calls == 1
-        assert appraisal.state == "claimed"
-        assert appraisal.claim_lease is not None
-        assert appraisal.claim_lease.owner_id == "worker:foreign-appraisal"
-        assert await _runtime(host).drain_background_once() is not None
-        assert model.expression_calls == 1
-    finally:
-        await host.aclose()
-
-
-@pytest.mark.asyncio
 async def test_stale_crash_proposal_is_closed_then_redeliberated_at_current_revision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2131,14 +1987,17 @@ async def test_stale_crash_proposal_is_closed_then_redeliberated_at_current_revi
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
         use_configured_recall_embedding=False,
     )
     runtime = _runtime(host)
     # These cases isolate reply Proposal recovery.  Appraisal has its own
     # durable claim regression above and must not become a prerequisite here.
-    runtime._interaction_appraisal_owner = None  # noqa: SLF001
+    # The unified inbound-state trigger is retained: the .52 fold keeps an
+    # expression episode only while that CharacterInterior authority exists,
+    # so clearing it would fold the episode out from under the retry path.
+    runtime._appraisal_worker = None  # noqa: SLF001
     real_commit_visible_acceptance = runtime._commit_visible_acceptance  # noqa: SLF001
 
     async def crash_after_proposal(**_kwargs):  # type: ignore[no-untyped-def]
@@ -2248,12 +2107,14 @@ async def test_budget_rejected_crash_proposal_uses_capped_retry_schedule_without
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
         use_configured_recall_embedding=False,
     )
     runtime = _runtime(host)
-    runtime._interaction_appraisal_owner = None  # noqa: SLF001
+    # Retain the unified inbound-state trigger: the .52 fold keeps an
+    # expression episode only while that CharacterInterior authority exists.
+    runtime._appraisal_worker = None  # noqa: SLF001
     real_commit_visible_acceptance = runtime._commit_visible_acceptance  # noqa: SLF001
     real_derive_expression_plan_material = (
         runtime_module.derive_expression_plan_material
@@ -2388,92 +2249,5 @@ async def test_budget_rejected_crash_proposal_uses_capped_retry_schedule_without
         assert episode.state == "terminal"
         assert len(episode.attempt_ids) == 4
         assert next_expression_retry_due(final) is None
-    finally:
-        await host.aclose()
-
-
-@pytest.mark.asyncio
-async def test_on_episode_can_complete_from_action_receipt_after_claim_lease(
-    tmp_path: Path,
-) -> None:
-    """Provider latency must not make a model-authored append episode unfinishable."""
-
-    model = _AppendEpisodeModel()
-    host = build_qq_c2c_host(
-        settings=Settings(
-            database_path=tmp_path / "late-receipt-expression-episode.sqlite",
-            PRIMARY_USER_ID="geoff",
-        ),
-        _test_only_expression_episode_mode="on",
-        recipient_id="10001",
-        bootstrap_at=NOW,
-        model=model,
-        advisory_model=FakeCompanionModel(),
-        delivery=_Delivery(),
-        use_configured_recall_embedding=False,
-    )
-    try:
-        outcome = await _direct_inbound(
-            host,
-            message_id="late-receipt-expression-episode",
-            text="这条回执可能过很久才回来。",
-        )
-        assert outcome.status == "action_authorized"
-        assert outcome.authorized_action_ids
-
-        before = await host._host.action_due_projection()  # noqa: SLF001
-        episode_before = next(
-            item
-            for item in before.trigger_processes
-            if item.process_kind == "expression_episode"
-        )
-        assert episode_before.state == "claimed"
-        assert episode_before.claim_lease is not None
-        action = next(
-            item
-            for item in before.actions
-            if item.action_id == outcome.authorized_action_ids[0]
-        )
-
-        receipt_at = episode_before.claim_lease.expires_at + timedelta(seconds=1)
-        await _application(host).tick(
-            tick_id="late-expression-receipt-clock",
-            logical_time_from=NOW,
-            logical_time_to=receipt_at,
-            observed_at=receipt_at,
-            trace_id="trace:late-expression-receipt-clock",
-            causation_id="cause:late-expression-receipt-clock",
-            correlation_id="correlation:late-expression-receipt",
-            reason="expression_episode_late_receipt_regression",
-            run_life_ecology=False,
-        )
-        receipt = await _application(host).receipt(
-            source="provider:test",
-            source_event_id="late-expression-receipt",
-            action_id=action.action_id,
-            idempotency_key=action.idempotency_key,
-            status="provider_accepted",
-            provider_ref="provider-ref:late-expression-receipt",
-            observed_at=receipt_at,
-            trace_id="trace:late-expression-receipt",
-            causation_id="cause:late-expression-receipt",
-            correlation_id="correlation:late-expression-receipt",
-            raw_payload_hash="raw:late-expression-receipt",
-        )
-
-        # Settlement may also open a durable external-result cognition trigger,
-        # so its host-facing status is allowed to be deferred.  The reliability
-        # assertion below is the expression episode's own terminal state.
-        assert receipt.status in {"observed_only", "deferred"}
-        projection = await host._host.action_due_projection()  # noqa: SLF001
-        episode = next(
-            item
-            for item in projection.trigger_processes
-            if item.process_kind == "expression_episode"
-        )
-        assert episode.state == "terminal"
-        assert len(episode.attempt_ids) == 2
-        assert episode.runtime_outcome_ref is not None
-        assert episode.runtime_outcome_ref.endswith(":provider_accepted")
     finally:
         await host.aclose()

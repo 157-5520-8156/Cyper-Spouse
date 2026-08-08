@@ -41,6 +41,26 @@ from companion_daemon.world_v2.schemas import ProviderMediaGrantBinding
 NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
 
 
+def _ready_character_interior_health(
+    *,
+    parallel_conflicts: int = 0,
+) -> dict[str, object]:
+    return {
+        "status": "ready",
+        "installed": True,
+        "semantic_author_count": 1,
+        "legacy_interface_invocations": 0,
+        "parallel_character_author_conflicts": parallel_conflicts,
+        "dual_write_conflicts": 0,
+        "topology_issues": [],
+        "topology_evidence": {
+            "duplicate_purpose_owner_count": 0,
+            "legacy_compatibility_route_installed": False,
+            "semantic_author_ids": ["character-semantic-author:test"],
+        },
+    }
+
+
 def _post_with_world_v2_readiness_retry(client: TestClient, payload: dict[str, object]):
     """Retry a bounded 503 without changing the message id or payload.
 
@@ -113,6 +133,50 @@ class _NoCallMediaPlanner:
         raise AssertionError("a deployment seam must not plan without an accepted candidate")
 
 
+def _inbound_character_result(
+    expression_draft: dict[str, object],
+    *,
+    private_self: str,
+) -> str:
+    """Return the complete production CharacterInterior inbound wire.
+
+    HTTP host tests exercise the strict production composition, where omission
+    must not let adapter defaults choose appraisal, Affect, relationship,
+    expectation, cadence, or visible-expression semantics for the character.
+    These fixtures therefore make the role's no-change choices explicit while
+    leaving each individual test free to select its own timing and beats.
+    """
+
+    expression = {
+        "private_turn_state": {
+            "inner_state_summary": private_self,
+            "attended_source_refs": [],
+        },
+        "cadence": "conversational",
+        "response_expectation": None,
+        "response_expectation_assessment": None,
+        "world_claims": [],
+        **expression_draft,
+    }
+    return json.dumps(
+        {
+            "appraisal_draft": {
+                "appraise": False,
+                "affect": "no_change",
+                "brief_rationale": (
+                    "她把这句当作当前对话来接，没有形成需要持久化的新解释。"
+                ),
+                "behavior_tendency": "按自己的当下判断回应",
+                "stance": "自然在场",
+                "display_strategy": "直接表达",
+                "confidence": 7_000,
+            },
+            "expression_draft": expression,
+        },
+        ensure_ascii=False,
+    )
+
+
 @pytest.mark.asyncio
 async def test_http_composition_wires_proactive_identity_reviewer_and_inventory(
     tmp_path: Path,
@@ -130,16 +194,37 @@ async def test_http_composition_wires_proactive_identity_reviewer_and_inventory(
         candidate_external_proposition_inventory_model=inventory,
     )
     try:
-        runtime = (  # noqa: SLF001
-            host._host._application._turns._runtime._proactive_action_runtime
-        )
-        adapter = runtime._turn._deliberation._main  # noqa: SLF001
+        interior_health = host.character_interior_health()
+        source_health = host.proactive_source_authority_health()
+        interior = host._semantic_chat.character_interior  # noqa: SLF001
+        identity = interior._production_identity_frame  # noqa: SLF001
 
-        assert adapter._identity_frame is not None  # noqa: SLF001
-        assert adapter._source_closure_reviewer is reviewer  # noqa: SLF001
-        assert (  # noqa: SLF001
-            adapter._candidate_external_proposition_inventory_model is inventory
-        )
+        assert interior_health["status"] == "ready"
+        assert interior_health["primary_author_model"] == author.model
+        assert interior_health["semantic_author_count"] == 1
+        assert interior_health["primary_author_faculty"] == "structured-character-role"
+        primary_route = interior_health["primary_author_route"]
+        assert primary_route["name"] == "structured-character-role"
+        assert primary_route["version"] == "structured-character-role.1"
+        assert primary_route["model_id"] == author.model
+        assert interior_health["legacy_interface_invocations"] == 0
+        assert interior_health["parallel_character_author_conflicts"] == 0
+        assert interior_health["dual_write_conflicts"] == 0
+        assert "inbound_turn" in interior_health["purpose_faculties"]
+        topology = interior_health["topology_evidence"]
+        assert topology["duplicate_purpose_owner_count"] == 0
+        assert topology["legacy_compatibility_route_installed"] is False
+        assert topology["legacy_compatibility_route_names"] == []
+        assert identity is host._semantic_chat.identity_frame  # noqa: SLF001
+        assert identity.companion_name == "沈知栀"
+        assert source_health["author_model"] == author.model
+        assert source_health["reviewer_model"] == reviewer.model
+        assert source_health["candidate_inventory_model"] == inventory.model
+        assert source_health["candidate_review_capabilities"]["ordinary"] == {
+            "inventory_v5": True,
+            "coverage_v5": True,
+            "roles_independent": True,
+        }
         development = (  # noqa: SLF001
             host._host._application._life_ecology._life_development_followup
         )
@@ -151,7 +236,7 @@ async def test_http_composition_wires_proactive_identity_reviewer_and_inventory(
             development._source_closure_reviewer.authority_origin is life_reviewer
         )
         assert development._source_closure_reviewer_is_independent is True  # noqa: SLF001
-        assert host.proactive_source_authority_health()["status"] == "ready"
+        assert source_health["status"] == "ready"
         assert host.life_source_authority_health()["status"] == (
             "operational_unqualified"
         )
@@ -182,8 +267,63 @@ class _CognitiveHostModel:
                 '"emotional_residue_bp":0,"unfinished_business_bp":0,"recurrence_bp":1200,'
                 '"novelty_bp":2800,"future_utility_bp":7600,"world_continuity_bp":1000}}'
             )
-        if "private identity frame" in prompt:
+        if "sole semantic author" in prompt:
+            request = json.loads(messages[-1]["content"])
+            inner_turn = request["inner_turn"]
+            if inner_turn["purpose"] == "fact_memory_retention":
+                return json.dumps(
+                    {
+                        "status": "decision",
+                        "summary": (
+                            "她觉得这项明确偏好以后能帮助自己自然接续对话，想保留下来。"
+                        ),
+                        "attended_source_refs": [],
+                        "decision": {
+                            "source_refs": inner_turn["subject_source_refs"],
+                            "payload": {
+                                "retain": True,
+                                "cue_kind": "future_utility",
+                                "retention_rationales": ["future_utility"],
+                                "salience": {
+                                    "autobiographical_relevance_bp": 6200,
+                                    "relationship_relevance_bp": 1800,
+                                    "emotional_residue_bp": 0,
+                                    "unfinished_business_bp": 0,
+                                    "recurrence_bp": 1200,
+                                    "novelty_bp": 2800,
+                                    "future_utility_bp": 7600,
+                                    "world_continuity_bp": 1000,
+                                },
+                            },
+                        },
+                        "recall_query": None,
+                        "proposals": [],
+                    },
+                    ensure_ascii=False,
+                )
+            return json.dumps(
+                {
+                    "status": "no_change",
+                    "summary": "她看过这次机会，没有形成需要落实的新选择。",
+                    "attended_source_refs": [],
+                    "decision": None,
+                    "recall_query": None,
+                    "proposals": [],
+                },
+                ensure_ascii=False,
+            )
+        if "COMBINED OUTPUT ENVELOPE" in prompt:
             self.reply_requests.append(messages)
+            return _inbound_character_result(
+                {
+                    "timing_choice": "now",
+                    "beats": [{"modality": "text", "text": "记下了。"}],
+                    "stance": "acknowledge_briefly",
+                    "brief_rationale": "她想简短接住这项明确偏好。",
+                    "confidence": 7_200,
+                },
+                private_self="她注意到对方在分享自己的偏好，想先自然接住。",
+            )
         return (
             '{"response_text":"记下了。","stance":"acknowledge_briefly",'
             '"brief_rationale":"test","confidence":7200}'
@@ -199,7 +339,7 @@ class _LaterHostModel:
     async def complete(self, _messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
         del temperature
         self.calls += 1
-        return json.dumps(
+        return _inbound_character_result(
             {
                 "timing_choice": "later",
                 "beats": [{"modality": "text", "text": "等我忙完回来。"}],
@@ -209,7 +349,7 @@ class _LaterHostModel:
                 "brief_rationale": "稍后接续",
                 "confidence": 7200,
             },
-            ensure_ascii=False,
+            private_self="她现在不想草率接话，决定明确约一个稍后的接续。",
         )
 
 
@@ -222,7 +362,7 @@ class _TwoBeatHostModel:
     async def complete(self, _messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
         del temperature
         self.calls += 1
-        return json.dumps(
+        return _inbound_character_result(
             {
                 "timing_choice": "now",
                 "beats": [
@@ -233,7 +373,7 @@ class _TwoBeatHostModel:
                 "brief_rationale": "Use two natural beats selected in the one draft.",
                 "confidence": 7600,
             },
-            ensure_ascii=False,
+            private_self="她察觉对方想认真说件事，愿意停下来听完整。",
         )
 
 
@@ -242,13 +382,15 @@ class _UnavailableHttpExpressionModel:
 
     async def complete(self, _messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
         del temperature
-        return json.dumps(
+        return _inbound_character_result(
             {
                 "timing_choice": "now",
                 "beats": [{"modality": "reaction", "reaction_id": "like"}],
                 "stance": "acknowledge_briefly",
                 "brief_rationale": "Attempt an unavailable HTTP modality.",
-            }
+                "confidence": 7_000,
+            },
+            private_self="她此刻只想用一个轻量反应接住这句话。",
         )
 
 
@@ -279,7 +421,7 @@ async def test_http_production_profile_fails_closed_when_model_selects_unavailab
         settings=Settings(database_path=tmp_path / "http-v2-no-reaction.sqlite"),
         bootstrap_at=NOW,
         model=_UnavailableHttpExpressionModel(),
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
     )
     try:
         result = await host.respond(
@@ -307,7 +449,7 @@ async def test_http_multi_beat_expression_reaches_terminal_receipts_from_one_mai
         settings=Settings(database_path=tmp_path / "http-v2-two-beat.sqlite"),
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
     )
     try:
         result = await host.respond(
@@ -339,7 +481,7 @@ async def test_http_shared_reply_audit_reaches_deferred_followup_with_one_main_c
         settings=Settings(database_path=tmp_path / "http-v2-shared-later.sqlite"),
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
     )
     try:
         result = await host.respond(
@@ -416,7 +558,7 @@ async def test_http_regular_drain_does_not_hold_the_inbound_lock(tmp_path: Path)
         settings=Settings(database_path=tmp_path / "http-v2-background-nonblocking.sqlite"),
         bootstrap_at=NOW,
         model=_TwoBeatHostModel(),
-        advisory_model=background,
+        world_support_model=background,
     )
     drain_task: asyncio.Task[object] | None = None
     try:
@@ -518,7 +660,6 @@ async def test_http_builder_installs_only_a_complete_media_preview_deployment(
     tmp_path: Path,
 ) -> None:
     deployment = MediaPreviewDeployment(
-        selection_model=_CognitiveHostModel(),
         planner=_NoCallMediaPlanner(),
         acceptance=MediaSelectionAcceptanceComposition(
             grant=ProviderMediaGrantBinding(
@@ -556,7 +697,6 @@ def test_real_http_asgi_factory_carries_complete_media_deployment_to_conductor(
 
     monkeypatch.setattr(semantic_chat_composition.DeepSeekChatModel, "complete", unavailable_model)
     deployment = MediaPreviewDeployment(
-        selection_model=_CognitiveHostModel(),
         planner=_NoCallMediaPlanner(),
         acceptance=MediaSelectionAcceptanceComposition(
             grant=ProviderMediaGrantBinding(
@@ -721,6 +861,9 @@ def test_explicit_message_retries_failed_health_warmup_and_restores_ready_status
         def proactive_source_authority_health(self) -> dict[str, object]:
             return {"status": "ready"}
 
+        def character_interior_health(self) -> dict[str, object]:
+            return _ready_character_interior_health()
+
         async def aclose(self) -> None:
             return None
 
@@ -770,6 +913,7 @@ def test_explicit_message_retries_failed_health_warmup_and_restores_ready_status
     assert build_calls == 2
     assert ready.json()["status"] == "ok"
     assert ready.json()["world_v2_capture"] == {"status": "ready"}
+    assert ready.json()["character_interior"]["status"] == "ready"
     assert ready.json()["proactive_source_authority"] == {"status": "ready"}
     assert ready.json()["life_source_authority"]["status"] == "unavailable"
 
@@ -805,8 +949,23 @@ def test_health_reports_running_warmup_without_starting_another_build(
         first = client.get("/health")
         assert build_started.wait(timeout=2)
         second = client.get("/health")
+        assert first.json()["status"] == "degraded"
+        assert second.json()["status"] == "degraded"
         assert first.json()["world_v2_capture"] == {"status": "warming"}
         assert second.json()["world_v2_capture"] == {"status": "warming"}
+        assert first.json()["character_interior"] == {
+            "status": "unavailable",
+            "installed": False,
+            "semantic_author_count": 0,
+            "primary_author_model": None,
+            "primary_author_route": None,
+            "legacy_interface_invocations": 0,
+            "parallel_character_author_conflicts": 0,
+            "dual_write_conflicts": 0,
+            "metrics_available": False,
+            "warning": True,
+            "warning_reasons": ["character_interior.composition_unavailable"],
+        }
         assert build_calls == 1
         release_build.set()
 
@@ -815,6 +974,35 @@ def test_health_reports_running_warmup_without_starting_another_build(
             time.sleep(0.01)
 
     assert build_calls == 1
+
+
+def test_health_degrades_when_character_interior_reports_parallel_author_conflict(
+    tmp_path: Path,
+) -> None:
+    class _ConflictedCapture:
+        def character_interior_health(self) -> dict[str, object]:
+            return _ready_character_interior_health(parallel_conflicts=1)
+
+        def proactive_source_authority_health(self) -> dict[str, object]:
+            return {"status": "ready"}
+
+        async def aclose(self) -> None:
+            return None
+
+    configured = app_module.create_http_asgi_app(
+        settings=Settings(database_path=tmp_path / "http-v2-conflicted.sqlite")
+    )
+    configured.state.http_v2_capture = _ConflictedCapture()
+
+    with TestClient(configured) as client:
+        current = client.get("/health")
+
+    assert current.status_code == 200
+    assert current.json()["status"] == "degraded"
+    assert current.json()["world_v2_capture"] == {"status": "ready"}
+    assert current.json()["character_interior"][
+        "parallel_character_author_conflicts"
+    ] == 1
 
 
 @pytest.mark.asyncio
@@ -917,7 +1105,10 @@ async def test_http_default_composition_retains_a_fact_and_retrieval_memory_off_
 ) -> None:
     model = _CognitiveHostModel()
     host = build_http_v2_capture_host(
-        settings=Settings(database_path=tmp_path / "http-v2-cognitive.sqlite"),
+        settings=Settings(
+            database_path=tmp_path / "http-v2-cognitive.sqlite",
+            WORLD_V2_RECALL_SEMANTIC_ENABLED=False,
+        ),
         bootstrap_at=NOW,
         model=model,
     )
@@ -958,10 +1149,19 @@ async def test_http_default_composition_retains_a_fact_and_retrieval_memory_off_
     assert projection.facts[0].values.value_hash
     assert len(projection.memory_candidates) == 1
     assert projection.memory_candidates[0].values.status == "active"
-    next_request = json.loads(model.reply_requests[-1][1]["content"])["request"]
-    context = json.loads(next_request["model_content_json"])
-    memories = context["slices"]["active_memory_candidates"]
-    assert memories["items"][0]["value"]["source_excerpts"][0]["text"] == "我最喜欢喝乌龙茶。"
+    next_turn = json.loads(model.reply_requests[-1][1]["content"])
+    snapshot = next_turn["inner_life_snapshot"]
+    assert snapshot["faculties"]["selective_memory"]["availability"] == "available"
+    memories = snapshot["materials"]["remembered_material"]
+    assert memories[0]["source_excerpts"][0]["text"] == "我最喜欢喝乌龙茶。"
+    # The canonical InnerLifeSnapshot replaces the old independently arranged
+    # Capsule slices in the provider request; both must never be sent in
+    # parallel as competing versions of the character's current interior.
+    compact_request_context = json.loads(
+        next_turn["request"]["model_content_json"]
+    )
+    assert "slices" not in compact_request_context
+    assert "inner_life_snapshot" not in compact_request_context
 
 
 def test_http_capture_host_composes_only_an_explicit_durable_media_transport(

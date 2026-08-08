@@ -1,22 +1,24 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
+from world_v2_application import (
+    build_sqlite_world_v2_test_application,
+    compose_fixture_character_interior,
+)
 
-from companion_daemon.world_v2.chat_model_deliberation_adapter import (
-    ChatModelDeliberationAdapter,
+from companion_daemon.world_v2.character_interior.inbound_wire import (
+    _ExpressionDraftWire,
 )
 from companion_daemon.world_v2.deliberation import ModelRoute, RouteRequest
 from companion_daemon.world_v2.platform_action_executor import PlatformDispatchReceipt
 from companion_daemon.world_v2.production_performance_evidence import WarmChatPerformanceGate
 from companion_daemon.world_v2.production_turn_application import (
     WorldV2TurnApplicationConfig,
-    build_sqlite_world_v2_turn_application,
 )
-
 
 NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
 
@@ -43,9 +45,25 @@ class _MeteredChat:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def complete_with_usage(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+    async def complete_with_usage(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
         del temperature
         self.calls += 1
+        supplied = None
+        for message in messages:
+            try:
+                value = json.loads(message["content"])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict) and isinstance(
+                value.get("current_trigger_message"), dict
+            ):
+                supplied = value
+                break
+        assert isinstance(supplied, dict)
+        trigger = supplied["current_trigger_message"]
+        assert isinstance(trigger, dict)
+        observation_ref = trigger["observation_ref"]
+        assert isinstance(observation_ref, str)
         usage = {
             "usage_contract": "model-usage.1",
             "route_class": "chat",
@@ -61,10 +79,18 @@ class _MeteredChat:
         return (
             json.dumps(
                 {
-                    "response_text": "我在，接着说吧。",
+                    "private_turn_state": {
+                        "contract": "private-turn-state.1",
+                        "inner_state_summary": "我注意到这句，想自然地接住她。",
+                        "attended_source_refs": [observation_ref],
+                    },
+                    "timing_choice": "now",
+                    "cadence": "conversational",
+                    "beats": [{"modality": "text", "text": "我在，接着说吧。"}],
                     "stance": "acknowledge_briefly",
                     "brief_rationale": "ordinary warm chat",
                     "confidence": 7000,
+                    "world_claims": [],
                 },
                 ensure_ascii=False,
             ),
@@ -110,19 +136,21 @@ async def test_twenty_production_warm_turns_are_incremental_metered_and_under_of
     tmp_path,
 ) -> None:
     chat = _MeteredChat()
-    adapter = ChatModelDeliberationAdapter(model=chat)
-    app = build_sqlite_world_v2_turn_application(
+    adapter = _ExpressionDraftWire(model=chat)
+    app = build_sqlite_world_v2_test_application(
         path=tmp_path / "twenty-warm.sqlite3",
         config=WorldV2TurnApplicationConfig(
             world_id="world:twenty-warm",
             companion_actor_ref="agent:companion",
             reply_target="user:user.1",
             action_pump_owner="pump:twenty-warm",
+            character_memory_enabled=False,
         ),
         identities=_Identities(),
         router=_Router(),
-        main_model=adapter,
-        quick_recovery=adapter,
+        character_interior=compose_fixture_character_interior(
+            inbound_author=adapter,
+        ),
         transport=_DeliveredTransport(),
         now=NOW,
     )
@@ -207,22 +235,24 @@ async def test_production_trace_restart_and_duplicate_do_not_repeat_model_or_reb
 ) -> None:
     path = tmp_path / "restart-trace.sqlite3"
     chat = _MeteredChat()
-    adapter = ChatModelDeliberationAdapter(model=chat)
+    adapter = _ExpressionDraftWire(model=chat)
     config = WorldV2TurnApplicationConfig(
         world_id="world:restart-trace",
         companion_actor_ref="agent:companion",
         reply_target="user:user.1",
         action_pump_owner="pump:restart-trace",
+        character_memory_enabled=False,
     )
 
     def build():
-        return build_sqlite_world_v2_turn_application(
+        return build_sqlite_world_v2_test_application(
             path=path,
             config=config,
             identities=_Identities(),
             router=_Router(),
-            main_model=adapter,
-            quick_recovery=adapter,
+            character_interior=compose_fixture_character_interior(
+                inbound_author=adapter,
+            ),
             transport=_DeliveredTransport(),
             now=NOW,
         )
@@ -274,23 +304,25 @@ async def test_wall_arrival_never_advances_clock_and_clock_authority_survives_re
 ) -> None:
     path = tmp_path / "clock-pinned-ingress.sqlite3"
     chat = _MeteredChat()
-    adapter = ChatModelDeliberationAdapter(model=chat)
+    adapter = _ExpressionDraftWire(model=chat)
     transport = _DeliveredTransport()
     config = WorldV2TurnApplicationConfig(
         world_id="world:clock-pinned-ingress",
         companion_actor_ref="agent:companion",
         reply_target="user:user.1",
         action_pump_owner="pump:clock-pinned-ingress",
+        character_memory_enabled=False,
     )
 
     def build():
-        return build_sqlite_world_v2_turn_application(
+        return build_sqlite_world_v2_test_application(
             path=path,
             config=config,
             identities=_Identities(),
             router=_Router(),
-            main_model=adapter,
-            quick_recovery=adapter,
+            character_interior=compose_fixture_character_interior(
+                inbound_author=adapter,
+            ),
             transport=transport,
             now=NOW,
         )

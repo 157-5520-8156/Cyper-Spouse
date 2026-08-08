@@ -135,9 +135,7 @@ class ProposalAuditRecorder:
             raise ValueError("proposal audit belongs to another world")
         result = _strict_result(result)
         proposal = (
-            validate_proposal_envelope(result.proposal)
-            if result.proposal is not None
-            else None
+            validate_proposal_envelope(result.proposal) if result.proposal is not None else None
         )
         if proposal is not None and (
             proposal.trigger_ref != context.trigger_ref
@@ -151,26 +149,23 @@ class ProposalAuditRecorder:
         )
 
         model_events: list[WorldEvent] = []
-        authored_candidates: list[
-            tuple[ModelResultAudit, AuthoredCandidateInvocationAudit]
-        ] = []
+        authored_candidates: list[tuple[ModelResultAudit, AuthoredCandidateInvocationAudit]] = []
         provider_subcalls: list[tuple[ModelResultAudit, ProviderSubcallAudit]] = []
-        physical_providers: list[
-            tuple[ModelResultAudit, PhysicalProviderInvocationAudit]
-        ] = []
+        physical_providers: list[tuple[ModelResultAudit, PhysicalProviderInvocationAudit]] = []
         previous_cause = context.causation_id
         for index, audit in enumerate(result.attempt_audits):
             audit_json = model_audit_json(audit)  # type: ignore[arg-type]
             model_payload = ModelResultRecordedPayload(
                 audit_contract=(
-                    "model-result-audit.6"
+                    "model-result-audit.7"
+                    if audit.character_interior_lineage is not None
+                    else "model-result-audit.6"
                     if audit.semantic_stream_part is not None
                     or audit.status.startswith("provider_")
                     else "model-result-audit.5"
                     if audit.presented_prefetch_traces
                     else "model-result-audit.4"
-                    if audit.recall_trace is not None
-                    or audit.prefetch_trace is not None
+                    if audit.recall_trace is not None or audit.prefetch_trace is not None
                     else "model-result-audit.3"
                     if audit.slot is not None
                     else "model-result-audit.2"
@@ -201,15 +196,11 @@ class ProposalAuditRecorder:
             model_events.append(model_event)
             previous_cause = model_event.event_id
             authored_candidates.extend(
-                (audit, candidate)
-                for candidate in audit.authored_candidate_audits
+                (audit, candidate) for candidate in audit.authored_candidate_audits
             )
-            provider_subcalls.extend(
-                (audit, subcall) for subcall in audit.provider_subcall_audits
-            )
+            provider_subcalls.extend((audit, subcall) for subcall in audit.provider_subcall_audits)
             physical_providers.extend(
-                (audit, physical)
-                for physical in audit.physical_provider_audits
+                (audit, physical) for physical in audit.physical_provider_audits
             )
         # Keep the authored main/recovery attempts as the first complete
         # deliberation group. Earlier author candidates and reviewer
@@ -376,9 +367,7 @@ def _strict_result(value: DeliberationResult) -> DeliberationResult:
         if not isinstance(raw_attempts, tuple) or not 1 <= len(raw_attempts) <= 2:
             raise ValueError("model attempt audit count is out of bounds")
         proposal = (
-            validate_proposal_envelope(value.proposal)
-            if value.proposal is not None
-            else None
+            validate_proposal_envelope(value.proposal) if value.proposal is not None else None
         )
         audits = tuple(_strict_audit(audit) for audit in raw_attempts)
         final = _strict_audit(value.audit)
@@ -390,6 +379,14 @@ def _strict_result(value: DeliberationResult) -> DeliberationResult:
             attempt_audits=audits,
         )
     except Exception as exc:
+        import logging
+
+        logging.getLogger("revalidprobe").warning(
+            "strict revalidation inner %s: %s",
+            type(exc).__name__,
+            str(exc)[:400],
+            exc_info=True,
+        )
         raise ValueError("deliberation result failed strict revalidation") from exc
 
 
@@ -435,10 +432,7 @@ def _strict_audit(value: ModelResultAudit) -> ModelResultAudit:
         )
         for item in raw_subcalls
     )
-    physical = tuple(
-        PhysicalProviderInvocationAudit.model_validate(item)
-        for item in raw_physical
-    )
+    physical = tuple(PhysicalProviderInvocationAudit.model_validate(item) for item in raw_physical)
     route = ModelRoute(
         tier=value.route.tier,
         reason_code=value.route.reason_code,
@@ -479,9 +473,7 @@ def _strict_audit(value: ModelResultAudit) -> ModelResultAudit:
     # nested reviewer-parent checks below remain strict and batch-local.
     if audit.parent_model_call_id == audit.model_call_id:
         raise ValueError("model result cannot be its own provider parent")
-    candidate_ids = tuple(
-        candidate.model_call_id for candidate in audit.authored_candidate_audits
-    )
+    candidate_ids = tuple(candidate.model_call_id for candidate in audit.authored_candidate_audits)
     allowed_parents = {audit.model_call_id, *candidate_ids}
     all_call_ids = (
         audit.model_call_id,
@@ -495,9 +487,7 @@ def _strict_audit(value: ModelResultAudit) -> ModelResultAudit:
         or subcall.parent_model_call_id == subcall.model_call_id
         for subcall in audit.provider_subcall_audits
     ):
-        raise ValueError(
-            "provider subcall parent has no batch-persisted author attempt"
-        )
+        raise ValueError("provider subcall parent has no batch-persisted author attempt")
     if physical:
         terminal = physical[0]
         if (
@@ -506,6 +496,20 @@ def _strict_audit(value: ModelResultAudit) -> ModelResultAudit:
             or audit.model_call_id not in terminal.semantic_model_call_ids
             or audit.request_hash != terminal.request_hash
         ):
+            import logging
+
+            logging.getLogger("tailprobe").warning(
+                "tail binding mismatch part=%s parent=%s call=%s in_semantic=%s hash_ok=%s "
+                "terminal_call=%s terminal_semantic=%s terminal_hash=%s",
+                audit.semantic_stream_part,
+                audit.parent_model_call_id,
+                audit.model_call_id,
+                audit.model_call_id in terminal.semantic_model_call_ids,
+                audit.request_hash == terminal.request_hash,
+                terminal.model_call_id,
+                tuple(terminal.semantic_model_call_ids),
+                terminal.request_hash,
+            )
             raise ValueError("physical provider terminal is not bound to its stream tail")
     return audit
 
@@ -537,9 +541,7 @@ def authored_candidate_model_audit(
         attempt_id=attempt_id,
         route=ModelRoute(
             tier="flash",
-            reason_code=(
-                f"author_candidate.{value.purpose}.{value.outcome}"[:128]
-            ),
+            reason_code=(f"author_candidate.{value.purpose}.{value.outcome}"[:128]),
             router_version="authored-candidate-audit.1",
         ),
         model_id=value.model_id,
@@ -548,11 +550,7 @@ def authored_candidate_model_audit(
         response_hash=value.response_hash,
         status="candidate_returned" if unresolved else "main_invalid",
         failure_code=(
-            None
-            if unresolved
-            else "corrective_invalid"
-            if corrective
-            else "primary_invalid"
+            None if unresolved else "corrective_invalid" if corrective else "primary_invalid"
         ),
         slot="corrective" if corrective else "primary",
         outcome="returned" if unresolved else "invalid",
@@ -607,16 +605,10 @@ def provider_subcall_model_audit(
             if succeeded
             else value.failure_code
             or (
-                "source_review_timeout"
-                if value.outcome == "timeout"
-                else "source_review_exception"
+                "source_review_timeout" if value.outcome == "timeout" else "source_review_exception"
             )
         ),
-        slot=(
-            "primary"
-            if value.lane in {"primary", "direct"}
-            else "backup"
-        ),
+        slot=("primary" if value.lane in {"primary", "direct"} else "backup"),
         outcome=value.outcome,
         input_tokens=value.usage.input_tokens if value.usage is not None else None,
         output_tokens=value.usage.output_tokens if value.usage is not None else None,

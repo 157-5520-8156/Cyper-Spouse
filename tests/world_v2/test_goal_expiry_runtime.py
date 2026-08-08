@@ -479,6 +479,7 @@ async def test_a_terminal_goal_is_not_expired_again_on_a_later_clock() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ("paused", "blocked"))
+@pytest.mark.asyncio
 async def test_advance_expires_paused_and_blocked_goal_heads(status: str) -> None:
     seed = WorldLedger.in_memory(world_id=WORLD_ID)
     seed_runtime = WorldRuntime(world_id=WORLD_ID, ledger=seed)

@@ -110,7 +110,7 @@
    结算：mood 顾问参与双结局选择、强制开 `npc_world_appraisal`、提交
    Committed Experience 与 life content。NPC 不在场时段绝不发生（种子
    载入时校验事件窗 ⊆ NPC 作息，运行时再核对）。配置
-   `npc_initiative_enabled`（默认 True）。阶段一为单 NPC、无独立关系
+   `npc_ecology_enabled`（默认 True）。阶段一为单 NPC、无独立关系
    状态；每 NPC 独立关系状态仍是后续项，届时把权重政策的关系读数换成
    真正的 per-NPC 关系投影并 bump 权重版本。
 7. **远期日历（多日计划）**：新的"远期生活作者"通路——模型在世界约束下

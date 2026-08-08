@@ -24,13 +24,10 @@ Three lifecycle engines cover the shapes catalogued in
   proposal prefix on the audit projection, every failure silent by contract.
   Interpreter: :class:`InlineOnceVerticalWorker`.
 
-Replay-compatibility contract: the engines are byte-compatible with the
-hand-written pilots they absorb (``quick_reaction.py``,
-the afterthought vertical).  Every identity string, projection re-read and
-commit boundary is preserved exactly; the shadow-replay suite holds both
-implementations to zero byte difference.  The framework version is therefore
-deliberately *not* part of any event identity material (owner decision 3,
-2026-07-20).
+Replay-compatibility contract: framework refactors must preserve every frozen
+identity string, projection re-read and commit boundary.  Retired authors are
+not retained here as executable compatibility surfaces; their immutable events
+remain readable by the schemas and reducers that originally accepted them.
 
 Escape hatch: a vertical may always stay hand-written.  Hand-rolled wells
 register ``hand_rolled=True`` in ``vertical_registry`` and never import this
@@ -50,7 +47,7 @@ import time
 from typing import Any, Literal, Protocol
 
 from .action_pump import ActionExecutor, ActionPump
-from .chat_model_deliberation_adapter import ChatCompletionModel
+from .model_completion import ChatCompletionModel
 from .deliberation import (
     DeliberationResult,
     ModelResultAudit,

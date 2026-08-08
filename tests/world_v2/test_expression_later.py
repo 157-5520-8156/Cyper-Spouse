@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from companion_daemon.world_v2.chat_model_deliberation_adapter import (
+from companion_daemon.world_v2.character_interior.inbound_wire import (
     _proposal_from_model_text,
 )
 from companion_daemon.world_v2.deliberation import ModelInput, ModelRoute, TriggerMessage

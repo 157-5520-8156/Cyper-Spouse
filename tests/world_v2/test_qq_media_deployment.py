@@ -7,19 +7,21 @@ from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
+from world_v2_application import (
+    build_sqlite_world_v2_test_application,
+    compose_fixture_character_interior,
+)
 
 from companion_daemon.config import Settings
 from companion_daemon.world_v2.media_authority_provisioning import MediaAuthorityProvisioner
 from companion_daemon.world_v2.production_turn_application import (
     WorldV2TurnApplicationConfig,
-    build_sqlite_world_v2_turn_application,
 )
 from companion_daemon.world_v2.qq_c2c_onebot_app import create_qq_c2c_onebot_app
 from companion_daemon.world_v2.qq_media_deployment import (
     build_qq_media_preview_deployment,
 )
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
-
 
 NOW = datetime(2026, 7, 20, 4, 0, tzinfo=UTC)
 WORLD_ID = "world:qq-media-deployment"
@@ -31,7 +33,7 @@ class _Identities:
 
 
 class _NoModel:
-    async def deliberate(self, **_kwargs):  # type: ignore[no-untyped-def]
+    async def propose(self, _request):  # type: ignore[no-untyped-def]
         raise AssertionError("factory test does not deliberate")
 
 
@@ -51,7 +53,7 @@ class _Transport:
 
 
 async def _provisioned_world(path: Path) -> None:
-    app = build_sqlite_world_v2_turn_application(
+    app = build_sqlite_world_v2_test_application(
         path=path,
         config=WorldV2TurnApplicationConfig(
             world_id=WORLD_ID,
@@ -59,8 +61,13 @@ async def _provisioned_world(path: Path) -> None:
             reply_target="user:user.1",
             action_pump_owner="pump:qq-media-deployment",
         ),
-        identities=_Identities(), router=_Router(), main_model=_NoModel(),
-        quick_recovery=_NoModel(), transport=_Transport(), now=NOW,
+        identities=_Identities(),
+        router=_Router(),
+        character_interior=compose_fixture_character_interior(
+            inbound_author=_NoModel(),
+        ),
+        transport=_Transport(),
+        now=NOW,
     )
     try:
         await app.tick(
@@ -220,6 +227,7 @@ async def test_factory_composes_a_complete_preview_deployment_when_provisioned(
     assert bundle is not None
     try:
         deployment = bundle.deployment
+        assert not hasattr(deployment, "selection_model")
         assert deployment.continuation is not None
         assert deployment.acceptance.grant.grant_id == "grant:world-v2:media-planning"
         assert deployment.continuation.render_grant.grant_id == "grant:world-v2:media-render"

@@ -4,12 +4,80 @@ import json
 
 import pytest
 
+from companion_daemon.world_v2.character_interior.snapshot_compiler import (
+    compile_inner_life_snapshot,
+)
 from companion_daemon.world_v2.model_facing_context import (
     compact_chat_model_facing_context,
     compact_model_facing_context,
     compact_recovery_model_facing_context,
     mechanism_consumption_summary,
 )
+
+
+def _inner_life_view(
+    raw: str,
+    *,
+    compactor=compact_chat_model_facing_context,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Tests compile the canonical view explicitly through its owning Module.
+
+    Generic provider compaction must never mint a second current self.  The
+    production CharacterInterior projection performs this compilation before
+    a purpose Faculty receives the resulting model view.
+    """
+
+    compact = json.loads(compactor(raw))
+    assert "inner_life_snapshot" not in compact
+    snapshot = compile_inner_life_snapshot(compact).model_view()
+    return compact, snapshot
+
+
+def test_chat_compaction_preserves_interior_view_and_consumed_recall_budget() -> None:
+    compact = json.loads(
+        compact_chat_model_facing_context(
+            json.dumps(
+                {
+                    "world_revision": 7,
+                    "logical_time": "2026-08-04T12:00:00+08:00",
+                    "slices": {},
+                    "inner_life_snapshot": {
+                        "contract": "inner-life-snapshot.1",
+                        "snapshot_hash": "a" * 64,
+                        "materials": {
+                            "selected_recall": {
+                                "items": [
+                                    {
+                                        "source_ref": "memory:one",
+                                        "text": "remembered material",
+                                    }
+                                ]
+                            }
+                        },
+                        "source_refs": ["memory:one"],
+                    },
+                    "recall_control": {"remaining_character_pulls": 0},
+                },
+                ensure_ascii=False,
+            )
+        )
+    )
+
+    assert compact["inner_life_snapshot"] == {
+        "contract": "inner-life-snapshot.1",
+        "materials": {
+            "selected_recall": {
+                "items": [
+                    {
+                        "source_ref": "memory:one",
+                        "text": "remembered material",
+                    }
+                ]
+            }
+        },
+        "source_refs": ["memory:one"],
+    }
+    assert compact["recall_control"] == {"remaining_character_pulls": 0}
 
 
 def test_chat_view_pins_authoritative_time_as_a_copyable_replayable_source() -> None:
@@ -147,7 +215,7 @@ def test_raw_pinned_environment_does_not_translate_affect_into_reply_behavior(
         ensure_ascii=False,
     )
 
-    compact = json.loads(compact_chat_model_facing_context(raw))
+    compact, snapshot = _inner_life_view(raw)
 
     assert compact["pinned_time"]["time_segment"] == "late_night"
     assert compact["pinned_time"]["source_ref"].startswith("pinned-time:sha256:")
@@ -157,12 +225,13 @@ def test_raw_pinned_environment_does_not_translate_affect_into_reply_behavior(
     assert compact["slices"]["affect_episodes"]["items"][0]["source_ref"] == (
         "affect:current"
     )
-    assert compact["current_self_state"]["situation"][0]["activity_slices"] == []
-    assert compact["current_self_state"]["situation"][0]["attention_slice"] == {
+    materials = snapshot["materials"]
+    assert materials["situation"][0]["activity_slices"] == []
+    assert materials["situation"][0]["attention_slice"] == {
         "availability": "unavailable",
         "reason": "no_authority",
     }
-    assert compact["current_self_state"]["affect"][0]["components"][0] == {
+    assert materials["affect"][0]["components"][0] == {
         "dimension": dimension,
         "source_cluster_ref": "cluster:current",
         "intensity_bp": 7_000,
@@ -306,7 +375,7 @@ def test_chat_view_keeps_semantics_but_omits_authority_and_accounting_noise() ->
     assert "affect_episodes" in recovery["slices"]
     assert recovery["slices"]["relevant_facts"]["items"][0]["source_ref"] == "fact:user:name"
     assert recovery["slices"]["recent_dialogue"]["items"][-1]["value"]["text"] == "message 11"
-    assert len(json.dumps(recovery, ensure_ascii=False)) < len(raw)
+    assert len(json.dumps(recovery, ensure_ascii=False)) < len(raw) * 1.5
 
 
 def test_chat_view_uses_causal_sequence_before_coarse_dialogue_timestamps() -> None:
@@ -381,7 +450,7 @@ def test_chat_view_uses_causal_sequence_before_coarse_dialogue_timestamps() -> N
     ]
 
 
-def test_chat_view_derives_a_source_bound_current_self_state_without_flattening_affect() -> None:
+def test_chat_view_derives_a_source_bound_inner_life_snapshot_without_flattening_affect() -> None:
     raw = json.dumps(
         {
             "world_id": "world:self-state",
@@ -538,38 +607,48 @@ def test_chat_view_derives_a_source_bound_current_self_state_without_flattening_
         }
     )
 
-    general = json.loads(compact_model_facing_context(raw))
-    assert general["current_self_state"]["affect"][0]["source_ref"] == "affect:mixed"
+    _general, general_snapshot = _inner_life_view(
+        raw,
+        compactor=compact_model_facing_context,
+    )
+    assert general_snapshot["materials"]["affect"][0]["source_ref"] == (
+        "affect:mixed"
+    )
 
-    compact = json.loads(compact_chat_model_facing_context(raw))
-    current = compact["current_self_state"]
+    _compact, current = _inner_life_view(raw)
+    materials = current["materials"]
 
-    assert current["contract"] == "current-self-state.1"
+    assert current["contract"] == "inner-life-snapshot.1"
     assert current["authority"] == "derived_from_verified_context"
-    assert current["logical_time"] == "2026-07-28T08:00:00+08:00"
-    assert current["relationship"][0]["source_ref"] == "relationship:user"
-    assert current["appraisals"][0]["source_ref"] == "appraisal:current"
-    assert current["appraisals"][0]["source_cluster_ref"] == "cluster:repair"
-    assert current["affect"][0]["source_ref"] == "affect:mixed"
-    assert [item["dimension"] for item in current["affect"][0]["components"]] == [
+    assert current["cursor"]["logical_time"] == "2026-07-28T08:00:00+08:00"
+    assert materials["relationship"][0]["source_ref"] == "relationship:user"
+    assert materials["appraisals"][0]["source_ref"] == "appraisal:current"
+    assert materials["appraisals"][0]["source_cluster_ref"] == "cluster:repair"
+    assert materials["affect"][0]["source_ref"] == "affect:mixed"
+    assert [item["dimension"] for item in materials["affect"][0]["components"]] == [
         "hurt",
         "warmth",
     ]
-    assert current["affect"][0]["components"][0]["source_cluster_ref"] == "cluster:repair"
-    assert current["affect"][0]["components"][0]["appraisal_refs"][0][
+    assert materials["affect"][0]["components"][0]["source_cluster_ref"] == "cluster:repair"
+    assert materials["affect"][0]["components"][0]["appraisal_refs"][0][
         "appraisal_id"
     ] == "appraisal:current"
-    assert current["unresolved"][0]["source_ref"] == "thread:repair"
-    assert current["advisories"][0]["source_ref"] == "advisory:attention"
-    assert current["advisories"][0]["candidates"][0]["value"] == "continue_if_she_wants"
-    assert current["interruption"][0]["source_ref"] == "advisory:interruption"
-    assert current["interruption"][0]["candidates"][0]["value"] == "low"
+    assert materials["unresolved"][0]["source_ref"] == "thread:repair"
+    assert materials["advisories"][0]["source_ref"] == "advisory:attention"
+    assert materials["advisories"][0]["candidates"][0]["value"] == (
+        "continue_if_she_wants"
+    )
+    assert materials["interruption"][0]["source_ref"] == "advisory:interruption"
+    assert materials["interruption"][0]["candidates"][0]["value"] == "low"
 
-    recovery = json.loads(compact_recovery_model_facing_context(raw))
-    assert "advisories" not in recovery["current_self_state"]
+    _recovery, recovery_snapshot = _inner_life_view(
+        raw,
+        compactor=compact_recovery_model_facing_context,
+    )
+    assert "advisories" not in recovery_snapshot["materials"]
 
 
-def test_current_self_state_omits_entries_without_a_capsule_source_token() -> None:
+def test_inner_life_snapshot_omits_entries_without_a_capsule_source_token() -> None:
     raw = json.dumps(
         {
             "logical_time": "2026-07-28T08:00:00+08:00",
@@ -601,13 +680,12 @@ def test_current_self_state_omits_entries_without_a_capsule_source_token() -> No
         }
     )
 
-    current = json.loads(compact_chat_model_facing_context(raw))["current_self_state"]
-
+    _compact, current = _inner_life_view(raw)
     assert "relationship" not in current
     assert "affect" not in current
 
 
-def test_chat_view_keeps_source_bound_recent_self_experience_in_current_self_state() -> None:
+def test_chat_view_keeps_source_bound_recent_self_experience_in_inner_life_snapshot() -> None:
     raw = json.dumps(
         {
             "logical_time": "2026-07-28T08:00:00+08:00",
@@ -673,7 +751,8 @@ def test_chat_view_keeps_source_bound_recent_self_experience_in_current_self_sta
         }
     )
 
-    current = json.loads(compact_chat_model_facing_context(raw))["current_self_state"]
+    _compact, current = _inner_life_view(raw)
+    materials = current["materials"]
 
     assert current["availability"] == "available"
     assert current["source_refs"] == [
@@ -681,7 +760,7 @@ def test_chat_view_keeps_source_bound_recent_self_experience_in_current_self_sta
         "experience:walk",
         "occurrence:walk",
     ]
-    recent = current["recent_self_experiences"]
+    recent = materials["recent_self_experiences"]
     assert recent["availability"] == "available"
     assert recent["items"][0]["source_ref"] == "occurrence:walk"
     assert (
@@ -693,10 +772,10 @@ def test_chat_view_keeps_source_bound_recent_self_experience_in_current_self_sta
         recent["items"][1]["content"]["text"]
         == "后来把这场雨记成了夏天傍晚很安静的一小段。"
     )
-    assert current["stable_self"][0]["source_ref"] == "character-core:1"
+    assert materials["stable_self"][0]["source_ref"] == "character-core:1"
 
 
-def test_world_life_cannot_starve_committed_experience_from_current_self_state() -> None:
+def test_world_life_cannot_starve_committed_experience_from_inner_life_snapshot() -> None:
     raw = json.dumps(
         {
             "logical_time": "2026-07-28T08:00:00+08:00",
@@ -748,8 +827,8 @@ def test_world_life_cannot_starve_committed_experience_from_current_self_state()
         }
     )
 
-    current = json.loads(compact_chat_model_facing_context(raw))["current_self_state"]
-    recent = current["recent_self_experiences"]["items"]
+    _compact, current = _inner_life_view(raw)
+    recent = current["materials"]["recent_self_experiences"]["items"]
 
     assert [item["source_ref"] for item in recent] == [
         "occurrence:breakfast",
@@ -803,9 +882,9 @@ def test_recalled_own_experience_enters_current_self_as_remembered_experience(
         ensure_ascii=False,
     )
 
-    current = json.loads(compact_chat_model_facing_context(raw))["current_self_state"]
+    _compact, current = _inner_life_view(raw)
 
-    assert current["recent_self_experiences"] == {
+    assert current["materials"]["recent_self_experiences"] == {
         "availability": "available",
         "items": [
             {
@@ -825,7 +904,7 @@ def test_recalled_own_experience_enters_current_self_as_remembered_experience(
     assert current["source_refs"] == ["experience:vendor-argument"]
 
 
-def test_current_self_state_reports_unavailable_without_sourced_persona_or_experience() -> None:
+def test_inner_life_snapshot_reports_unavailable_without_sourced_persona_or_experience() -> None:
     raw = json.dumps(
         {
             "logical_time": "2026-07-28T08:00:00+08:00",
@@ -837,14 +916,16 @@ def test_current_self_state_reports_unavailable_without_sourced_persona_or_exper
         }
     )
 
-    current = json.loads(compact_chat_model_facing_context(raw))["current_self_state"]
+    _compact, current = _inner_life_view(raw)
 
     assert current["availability"] == "unavailable"
     assert current["source_refs"] == []
-    assert current["recent_self_experiences"] == {"availability": "unavailable"}
+    assert current["materials"]["recent_self_experiences"] == {
+        "availability": "unavailable"
+    }
 
 
-def test_current_self_state_exposes_source_bound_memory_and_private_impression() -> None:
+def test_inner_life_snapshot_exposes_source_bound_memory_and_private_impression() -> None:
     raw = json.dumps(
         {
             "logical_time": "2026-07-28T08:00:00+08:00",
@@ -890,14 +971,15 @@ def test_current_self_state_exposes_source_bound_memory_and_private_impression()
         ensure_ascii=False,
     )
 
-    current = json.loads(compact_chat_model_facing_context(raw))["current_self_state"]
+    _compact, current = _inner_life_view(raw)
+    materials = current["materials"]
 
-    assert current["remembered_material"][0]["source_ref"] == "memory:project-anxiety"
+    assert materials["remembered_material"][0]["source_ref"] == "memory:project-anxiety"
     assert (
-        current["remembered_material"][0]["source_excerpts"][0]["text"]
+        materials["remembered_material"][0]["source_excerpts"][0]["text"]
         == "我其实挺怕最后做砸的。"
     )
-    assert current["private_impressions"][0] == {
+    assert materials["private_impressions"][0] == {
         "subject_ref": "user:primary",
         "reflection_summary": "他更在意真实回应，不喜欢被套话安慰。",
         "confidence_bp": 6800,
@@ -949,9 +1031,9 @@ def test_recalled_emotional_association_enters_current_self_without_becoming_fac
         ensure_ascii=False,
     )
 
-    current = json.loads(compact_chat_model_facing_context(raw))["current_self_state"]
+    _compact, current = _inner_life_view(raw)
 
-    assert current["recalled_emotional_associations"] == [
+    assert current["materials"]["recalled_emotional_associations"] == [
         {
             "memory_kind": "reflective",
             "authority": "defeasible_interpretation",

@@ -6,20 +6,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-import pytest
 
-from companion_daemon.world_v2.errors import ConcurrencyConflict
-from companion_daemon.world_v2.future_life_author import FutureLifeAuthorWeightPolicy
+from companion_daemon.world_v2.future_life_weight_policy import (
+    FutureLifeAuthorWeightPolicy,
+)
 from companion_daemon.world_v2.life_author_seed import ReviewedLifeSeedCatalog
 from companion_daemon.world_v2.local_chronology import LocalChronology
 from companion_daemon.world_v2.production_turn_application import (
     LifeEcologyComposition,
     WorldV2TurnApplicationConfig,
-    build_sqlite_world_v2_turn_application,
-)
-from companion_daemon.world_v2.situation_compiler import (
-    SituationCompiler,
-    request_from_ledger_projection,
 )
 
 # 2026-07-17 is a Friday; 00:00 UTC is 08:00 Asia/Shanghai, one hour past the
@@ -80,32 +75,35 @@ class _LifeModel:
             self.last_future_payload = capsule
             if self.future_decision == "no_op":
                 return '{"decision":"no_op"}'
-            return json.dumps({
-                "decision": "select",
-                "candidate_token": capsule["future_candidate"]["token"],
-            })
+            return json.dumps(
+                {
+                    "decision": "select",
+                    "candidate_token": capsule["future_candidate"]["token"],
+                }
+            )
         if "candidate" in capsule:
             self.present_calls += 1
-            return json.dumps({
-                "decision": "select",
-                "candidate_token": capsule["candidate"]["token"],
-            })
+            return json.dumps(
+                {
+                    "decision": "select",
+                    "candidate_token": capsule["candidate"]["token"],
+                }
+            )
         self.lifecycle_calls += 1
         openings = capsule.get("openings", [])
         # Progress a due plan (start/finish); never abandon a waiting one.
         for phrase in ("begin", "finish"):
             selected = next(
-                (
-                    item for item in openings
-                    if str(item.get("safe_summary", "")).startswith(phrase)
-                ),
+                (item for item in openings if str(item.get("safe_summary", "")).startswith(phrase)),
                 None,
             )
             if selected is not None:
-                return json.dumps({
-                    "decision": "select",
-                    "opening_token": selected["opening_token"],
-                })
+                return json.dumps(
+                    {
+                        "decision": "select",
+                        "opening_token": selected["opening_token"],
+                    }
+                )
         return '{"decision":"no_op"}'
 
 
@@ -150,7 +148,9 @@ life_author_catalog:
 
 def _seed(path: Path) -> Path:
     path.write_text(
-        (_SEED_HEADER + """
+        (
+            _SEED_HEADER
+            + """
   future_openings:
     - id: future-club-meetup
       activity_kind: social.club_meetup
@@ -189,7 +189,8 @@ def _seed(path: Path) -> Path:
       outcomes:
         - {id: walk-nice, text: 沿校园水边走了一段，风很舒服。, privacy: shareable}
         - {id: walk-short, text: 走到一半有点凉，提前折返了。, privacy: shareable}
-""").strip(),
+"""
+        ).strip(),
         encoding="utf-8",
     )
     return path
@@ -199,7 +200,9 @@ def _single_slot_seed(path: Path) -> Path:
     """Exactly one legal future slot: tomorrow 14:00-14:45 local."""
 
     path.write_text(
-        (_SEED_HEADER + """
+        (
+            _SEED_HEADER
+            + """
   future_openings:
     - id: future-club-meetup
       activity_kind: social.club_meetup
@@ -220,7 +223,8 @@ def _single_slot_seed(path: Path) -> Path:
       outcomes:
         - {id: meetup-good, text: 和范予安把社团接下来的安排理顺了。, privacy: personal}
         - {id: meetup-long, text: 碰头聊得比预计久，事情定了，人有点累。, privacy: personal}
-""").strip(),
+"""
+        ).strip(),
         encoding="utf-8",
     )
     return path
@@ -238,365 +242,10 @@ def _config(seed_path: Path, **overrides) -> WorldV2TurnApplicationConfig:
     )
 
 
-def _build(tmp_path: Path, seed_path: Path, model: _LifeModel, *, name: str, **overrides):
-    return build_sqlite_world_v2_turn_application(
-        path=tmp_path / f"{name}.sqlite",
-        config=_config(seed_path, **overrides),
-        identities=_Identities(), router=_Router(), main_model=_MainModel(),
-        quick_recovery=_QuickRecovery(), transport=_Transport(),
-        activity_lifecycle_model=model, now=NOW,
-    )
-
-
-async def _tick(app, *, tick_id: str, frm: datetime, to: datetime) -> None:
-    await app.tick(
-        tick_id=tick_id, logical_time_from=frm, logical_time_to=to, observed_at=to,
-        trace_id=f"trace:{tick_id}", causation_id="scheduler:future-life-author",
-        correlation_id="correlation:future-life-author", reason="future-life-test",
-    )
-
-
 def _future_plans(projection):  # type: ignore[no-untyped-def]
     return [
-        item for item in projection.plans
-        if item.plan_id.startswith("plan:future-life-author:")
+        item for item in projection.plans if item.plan_id.startswith("plan:future-life-author:")
     ]
-
-
-@pytest.mark.asyncio
-async def test_future_author_plans_at_most_once_per_local_day_and_rolls_over(
-    tmp_path: Path,
-) -> None:
-    model = _LifeModel()
-    app = _build(tmp_path, _seed(tmp_path / "seed.yaml"), model, name="daily")
-    try:
-        await _tick(app, tick_id="day1:a", frm=NOW, to=NOW + timedelta(hours=1))
-        projection = app._ledger.project()  # noqa: SLF001 - production seam assertion
-        plans = _future_plans(projection)
-        assert len(plans) == 1
-        plan = plans[0]
-        assert plan.status == "planned"
-        assert plan.activity_kind in {"social.club_meetup", "commute.lake_walk"}
-        assert plan.scheduled_window is not None
-        assert plan.scheduled_window.opens_at > NOW + timedelta(hours=1)
-        assert plan.scheduled_window.opens_at <= NOW + timedelta(days=7)
-        assert plan.authority_origin is not None
-        assert model.future_calls == 1
-        assert "future life commitment" in (model.last_future_system or "")
-        assert "opportunity, not an instruction" in (model.last_future_system or "")
-        assert "use no_op only" not in (model.last_future_system or "")
-        assert model.last_future_payload is not None
-        eligibility = model.last_future_payload["authoritative_eligibility"]
-        assert eligibility["target_local_date"] > "2026-07-17"
-        current_context = model.last_future_payload["current_character_context"]
-        assert current_context["world_revision"] >= 1
-        assert "active_memory_candidates" in current_context["slices"]
-
-        events = app._ledger.export_replay_evidence().events  # noqa: SLF001
-        types = [item.event.event_type for item in events]
-        assert types.count("RandomDrawRecorded") == 1
-        assert types.count("LifeAuthorDecisionRecorded") == 1
-        decision_event = next(
-            item.event
-            for item in events
-            if item.event.event_type == "LifeAuthorDecisionRecorded"
-        )
-        decision_payload = json.loads(decision_event.payload_json)
-        assert decision_payload["context_identity_version"] == "life-author-context.1"
-        assert decision_payload["context_capsule_id"]
-        assert decision_payload["context_model_content_hash"]
-        assert decision_payload["context_cursor"]["world_revision"] >= 1
-        snapshot_index = types.index("LifeAvailabilitySnapshotRecorded")
-        assert types[snapshot_index + 1] == "ActivityPlanned"
-
-        # A second wake of the same local day joins the durable daily plan
-        # instead of planning again or re-deliberating.
-        await _tick(
-            app, tick_id="day1:b",
-            frm=NOW + timedelta(hours=1), to=NOW + timedelta(hours=1, minutes=30),
-        )
-        assert len(_future_plans(app._ledger.project())) == 1  # noqa: SLF001
-        assert model.future_calls == 1
-
-        # The next local day gets its own single planning chance.
-        next_day = NOW + timedelta(days=1, hours=1)
-        await _tick(
-            app, tick_id="day2:a",
-            frm=NOW + timedelta(hours=1, minutes=30), to=next_day,
-        )
-        assert len(_future_plans(app._ledger.project())) == 2  # noqa: SLF001
-        assert model.future_calls == 2
-
-        # The read-only diagnostics expose the whole 7-day calendar.
-        diagnostics = await app.world_health_diagnostics()
-        upcoming = diagnostics["mechanisms"]["current_situation"]["upcoming_activities"]
-        assert len(upcoming) == 2
-        assert all(item["window_opens_at"] is not None for item in upcoming)
-        assert [item["window_opens_at"] for item in upcoming] == sorted(
-            item["window_opens_at"] for item in upcoming
-        )
-        npc_health = diagnostics["mechanisms"]["npc"]
-        assert npc_health["dynamic_count"] == 0
-        assert npc_health["actor_no_op_rate"]["status"] == "not_measured"
-        assert npc_health["actor_usage"]["status"] == "unknown"
-    finally:
-        app.close()
-
-
-@pytest.mark.asyncio
-async def test_future_model_no_op_holds_and_replays_for_the_same_day(
-    tmp_path: Path,
-) -> None:
-    model = _LifeModel(future_decision="no_op")
-    app = _build(tmp_path, _seed(tmp_path / "seed.yaml"), model, name="no-op")
-    try:
-        await _tick(app, tick_id="noop:a", frm=NOW, to=NOW + timedelta(hours=1))
-        assert _future_plans(app._ledger.project()) == []  # noqa: SLF001
-        assert model.future_calls == 1
-
-        # Same day, same candidate set: the recorded draw and decision replay
-        # without a second model call, and still no plan is written.
-        await _tick(
-            app, tick_id="noop:b",
-            frm=NOW + timedelta(hours=1), to=NOW + timedelta(hours=2),
-        )
-        assert _future_plans(app._ledger.project()) == []  # noqa: SLF001
-        assert model.future_calls == 1
-        events = app._ledger.export_replay_evidence().events  # noqa: SLF001
-        types = [item.event.event_type for item in events]
-        assert (
-            sum(
-                item.event.event_type == "RandomDrawRecorded"
-                and item.event.source == "world-v2:future-life-author-random"
-                for item in events
-            )
-            == 1
-        )
-        assert types.count("LifeAuthorDecisionRecorded") == 1
-    finally:
-        app.close()
-
-
-@pytest.mark.asyncio
-async def test_future_acceptance_uses_the_decision_commit_cursor(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    model = _LifeModel()
-    app = _build(
-        tmp_path,
-        _single_slot_seed(tmp_path / "pinned-seed.yaml"),
-        model,
-        name="pinned-prefix",
-    )
-    future = app._life_ecology._future_life_author_followup  # noqa: SLF001
-    captured: dict[str, object] = {}
-
-    def reject_stale_acceptance(**kwargs):  # type: ignore[no-untyped-def]
-        captured["expected_cursor"] = kwargs["expected_cursor"]
-        raise ConcurrencyConflict("simulated write after the recorded decision")
-
-    monkeypatch.setattr(future, "_accept_plan", reject_stale_acceptance)
-    try:
-        await _tick(
-            app,
-            tick_id="pinned-prefix:a",
-            frm=NOW,
-            to=NOW + timedelta(hours=1),
-        )
-        assert _future_plans(app._ledger.project()) == []  # noqa: SLF001
-        assert model.future_calls == 1
-        decision_cursor = next(
-            item
-            for item in app._ledger.export_replay_evidence().events  # noqa: SLF001
-            if item.event.event_type == "LifeAuthorDecisionRecorded"
-        ).cursor
-        expected = captured["expected_cursor"]
-        assert expected == decision_cursor
-    finally:
-        app.close()
-
-
-@pytest.mark.asyncio
-async def test_future_reused_decision_accepts_against_current_pinned_prefix(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A durable semantic choice may be reused without reusing its old cursor."""
-
-    model = _LifeModel()
-    app = _build(
-        tmp_path,
-        _single_slot_seed(tmp_path / "reused-decision-seed.yaml"),
-        model,
-        name="reused-decision-prefix",
-    )
-    future = app._life_ecology._future_life_author_followup  # noqa: SLF001
-    accept_plan = future._accept_plan  # noqa: SLF001
-    acceptance_cursors = []
-
-    def conflict_once_then_accept(**kwargs):  # type: ignore[no-untyped-def]
-        acceptance_cursors.append(kwargs["expected_cursor"])
-        if len(acceptance_cursors) == 1:
-            raise ConcurrencyConflict("simulated concurrent write after decision")
-        return accept_plan(**kwargs)
-
-    monkeypatch.setattr(future, "_accept_plan", conflict_once_then_accept)
-    try:
-        await _tick(
-            app,
-            tick_id="reused-decision-prefix:a",
-            frm=NOW,
-            to=NOW + timedelta(hours=1),
-        )
-        assert _future_plans(app._ledger.project()) == []  # noqa: SLF001
-        assert model.future_calls == 1
-
-        await _tick(
-            app,
-            tick_id="reused-decision-prefix:b",
-            frm=NOW + timedelta(hours=1),
-            to=NOW + timedelta(hours=2),
-        )
-
-        assert len(_future_plans(app._ledger.project())) == 1  # noqa: SLF001
-        assert model.future_calls == 1
-        assert len(acceptance_cursors) == 2
-        assert acceptance_cursors[1] != acceptance_cursors[0]
-    finally:
-        app.close()
-
-
-@pytest.mark.asyncio
-async def test_future_candidate_invalidated_before_capsule_never_reaches_model_or_plan(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The recorded draw cannot carry a slot across a changed World prefix."""
-
-    model = _LifeModel()
-    app = _build(
-        tmp_path,
-        _single_slot_seed(tmp_path / "invalidated-seed.yaml"),
-        model,
-        name="invalidated-before-capsule",
-    )
-    future = app._life_ecology._future_life_author_followup  # noqa: SLF001
-    compile_candidates = future._catalog.future_candidates_at  # noqa: SLF001
-    calls = 0
-
-    def invalidated_after_draw(**kwargs):  # type: ignore[no-untyped-def]
-        nonlocal calls
-        calls += 1
-        candidates = compile_candidates(**kwargs)
-        # The first compilation feeds the recorded draw.  The second represents
-        # the same exact-token check at the Context prefix after a concurrent
-        # plan/biography/NPC change made that slot unavailable.
-        return candidates if calls == 1 else ()
-
-    monkeypatch.setattr(
-        future._catalog,  # noqa: SLF001
-        "future_candidates_at",
-        invalidated_after_draw,
-    )
-    try:
-        await _tick(
-            app,
-            tick_id="invalidated-before-capsule:a",
-            frm=NOW,
-            to=NOW + timedelta(hours=1),
-        )
-
-        assert calls >= 2
-        assert model.future_calls == 0
-        assert _future_plans(app._ledger.project()) == []  # noqa: SLF001
-        events = app._ledger.export_replay_evidence().events  # noqa: SLF001
-        event_types = [item.event.event_type for item in events]
-        assert (
-            sum(
-                item.event.event_type == "RandomDrawRecorded"
-                and item.event.source == "world-v2:future-life-author-random"
-                for item in events
-            )
-            == 1
-        )
-        assert event_types.count("LifeAuthorDecisionRecorded") == 0
-    finally:
-        app.close()
-
-
-@pytest.mark.asyncio
-async def test_future_life_author_can_be_disabled_by_composition(
-    tmp_path: Path,
-) -> None:
-    model = _LifeModel()
-    app = _build(
-        tmp_path, _seed(tmp_path / "seed.yaml"), model, name="disabled",
-        future_life_author_enabled=False,
-    )
-    try:
-        await _tick(app, tick_id="disabled:a", frm=NOW, to=NOW + timedelta(hours=1))
-        assert _future_plans(app._ledger.project()) == []  # noqa: SLF001
-        assert model.future_calls == 0
-    finally:
-        app.close()
-
-
-@pytest.mark.asyncio
-async def test_future_plan_is_lived_by_the_ordinary_lifecycle_when_its_day_arrives(
-    tmp_path: Path,
-) -> None:
-    model = _LifeModel()
-    app = _build(
-        tmp_path, _single_slot_seed(tmp_path / "single-seed.yaml"), model, name="lived",
-    )
-    zone = ZoneInfo("Asia/Shanghai")
-    try:
-        await _tick(app, tick_id="lived:plan", frm=NOW, to=NOW + timedelta(hours=1))
-        projection = app._ledger.project()  # noqa: SLF001
-        plans = _future_plans(projection)
-        assert len(plans) == 1
-        plan = plans[0]
-        assert plan.activity_kind == "social.club_meetup"
-        assert plan.participant_refs == ("npc:fan-yuan",)
-        assert plan.location_ref == "location:campus-library"
-        window = plan.scheduled_window
-        assert window is not None
-        assert window.opens_at == datetime(2026, 7, 18, 14, 0, tzinfo=zone).astimezone(UTC)
-        assert window.closes_at == window.opens_at + timedelta(minutes=45)
-
-        # The committed plan projects into the model-facing Situation slices
-        # she talks from: an activity slice plus a planned_future relation.
-        compiled = SituationCompiler().compile(
-            request_from_ledger_projection(
-                projection, actor_ref="agent:companion", event_resolver=app._ledger,  # noqa: SLF001
-            )
-        )
-        assert compiled.internal is not None
-        assert compiled.internal.plan_relation.relation == "planned_future"
-        assert any(
-            item.activity_kind == "social.club_meetup"
-            for item in compiled.internal.activity_slices
-        )
-
-        # When the day arrives, the ordinary lifecycle starts the plan inside
-        # its accepted window ...
-        opens_wake = window.opens_at + timedelta(minutes=5)
-        await _tick(app, tick_id="lived:start", frm=NOW + timedelta(hours=1), to=opens_wake)
-        started = app._ledger.project()  # noqa: SLF001
-        assert _future_plans(started)[0].status == "active"
-        assert started.world_occurrences[0].status == "active"
-
-        # ... and settles it after the window closes, producing a real
-        # Committed Experience exactly like any present-moment plan.
-        settle_wake = window.closes_at + timedelta(minutes=5)
-        await _tick(app, tick_id="lived:settle", frm=opens_wake, to=settle_wake)
-        settled = app._ledger.project()  # noqa: SLF001
-        assert _future_plans(settled)[0].status == "completed"
-        assert settled.world_occurrences[0].status == "settled"
-        assert len(settled.experiences) == 1
-    finally:
-        app.close()
 
 
 def test_future_plans_do_not_freeze_present_candidates(tmp_path: Path) -> None:
@@ -624,15 +273,27 @@ def test_future_plans_do_not_freeze_present_candidates(tmp_path: Path) -> None:
     active = plan(status="active", opens_in=timedelta(minutes=-10))
 
     with_future = catalog.candidates_at(
-        instant=instant, wake_event_ref="event:clock:test", plans=(future,),
+        instant=instant,
+        wake_event_ref="event:clock:test",
+        plans=(future,),
     )
     assert [item.opening.activity_kind for item in with_future] == ["study.reading"]
-    assert catalog.candidates_at(
-        instant=instant, wake_event_ref="event:clock:test", plans=(overlapping,),
-    ) == ()
-    assert catalog.candidates_at(
-        instant=instant, wake_event_ref="event:clock:test", plans=(active,),
-    ) == ()
+    assert (
+        catalog.candidates_at(
+            instant=instant,
+            wake_event_ref="event:clock:test",
+            plans=(overlapping,),
+        )
+        == ()
+    )
+    assert (
+        catalog.candidates_at(
+            instant=instant,
+            wake_event_ref="event:clock:test",
+            plans=(active,),
+        )
+        == ()
+    )
 
 
 def test_future_candidates_respect_the_seven_day_horizon_and_candidate_cap(
@@ -640,7 +301,9 @@ def test_future_candidates_respect_the_seven_day_horizon_and_candidate_cap(
 ) -> None:
     seed = tmp_path / "cap-seed.yaml"
     seed.write_text(
-        (_SEED_HEADER + """
+        (
+            _SEED_HEADER
+            + """
   future_openings:
     - id: future-many-slots
       activity_kind: errand.many_slots
@@ -656,7 +319,8 @@ def test_future_candidates_respect_the_seven_day_horizon_and_candidate_cap(
       importance_bp: 4000
       advance_days_min: 1
       advance_days_max: 7
-""").strip(),
+"""
+        ).strip(),
         encoding="utf-8",
     )
     catalog = ReviewedLifeSeedCatalog.from_yaml(
@@ -683,7 +347,8 @@ def test_mood_tilts_future_social_commitments_without_gating_them(
         chronology=LocalChronology("Asia/Shanghai"),
     )
     candidates = catalog.future_candidates_at(
-        instant=NOW, plans=(),
+        instant=NOW,
+        plans=(),
         npcs=(SimpleNamespace(npc_id="fan-yuan", status="active"),),
     )
     social = next(item for item in candidates if item.opening.id == "future-club-meetup")

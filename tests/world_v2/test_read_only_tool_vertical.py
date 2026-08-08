@@ -7,11 +7,9 @@ import pytest
 
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
-from companion_daemon.world_v2.external_result_trigger_runtime import NoopToolResultDeliberator
 from companion_daemon.world_v2.read_only_tool import (
     ReadOnlyToolAcceptanceRuntime,
     ReadOnlyToolProposal,
-    external_result_trigger_id,
 )
 from companion_daemon.world_v2.read_only_tool_executor import ReadOnlyToolActionExecutor
 from companion_daemon.world_v2.runtime import WorldRuntime
@@ -115,7 +113,9 @@ class Provider:
 
 
 @pytest.mark.asyncio
-async def test_source_bound_tool_request_settles_result_and_opens_one_result_trigger(monkeypatch) -> None:
+async def test_source_bound_tool_request_settles_result_without_retired_side_trigger(
+    monkeypatch,
+) -> None:
     ledger, authorization = enforcement_tool_ledger(
         monkeypatch, world_id=WORLD, now=NOW, actor="agent:companion", subject="user:primary"
     )
@@ -148,8 +148,6 @@ async def test_source_bound_tool_request_settles_result_and_opens_one_result_tri
         ledger=ledger,
         action_executor=ReadOnlyToolActionExecutor(queries=Queries(), transport=provider),
         action_pump_owner="pump:tool",
-        external_result_owner="worker:external-result",
-        external_result_deliberator=NoopToolResultDeliberator(),
     )
 
     outcome = await runtime.drain_actions_once()
@@ -160,17 +158,11 @@ async def test_source_bound_tool_request_settles_result_and_opens_one_result_tri
     assert projection.actions[0].state == "delivered"
     assert projection.budget_reservations[0].state == "settled"
     assert projection.tool_results[0].result_ref == "result:weather:1"
-    trigger = projection.trigger_processes[-1]
-    assert trigger.process_kind == "external_result_deliberation"
-    assert trigger.trigger_id == external_result_trigger_id(
-        world_id=WORLD, result_id=projection.tool_results[0].result_id
+    assert not any(
+        process.process_kind == "external_result_deliberation"
+        for process in projection.trigger_processes
     )
-    assert trigger.state == "open"
-    completed = await runtime.drain_background_once()
-    repeated = await runtime.drain_background_once()
-    assert completed.status == "processed"
-    assert repeated is None
-    assert ledger.project().trigger_processes[-1].state == "terminal"
+    assert await runtime.drain_background_once() is None
 
 
 @pytest.mark.asyncio

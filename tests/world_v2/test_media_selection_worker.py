@@ -5,7 +5,6 @@ from types import SimpleNamespace
 from datetime import UTC, datetime
 import json
 
-from companion_daemon.world_v2.media_selection_draft import MediaSelectionDraftAdapter
 from companion_daemon.world_v2.media_selection_worker import MediaSelectionWorker
 from companion_daemon.world_v2.media_v2 import (
     CharacterMediaCandidateContract,
@@ -13,33 +12,65 @@ from companion_daemon.world_v2.media_v2 import (
     PhotoCandidate,
     character_media_contract_digest,
 )
+from character_interior import canonical_inner_decision
 
 NOW = datetime(2026, 7, 16, tzinfo=UTC)
 
-class _Model:
-    model = "test"
+class _Interior:
     def __init__(self) -> None:
         self.calls = 0
-        self.messages = []
+        self.opportunities = []
 
-    async def complete(self, messages, *, temperature=0.2):  # type: ignore[no-untyped-def]
+    async def consider(self, opportunity):  # type: ignore[no-untyped-def]
         self.calls += 1
-        self.messages.append(messages)
-        return '{"decision":"no_op"}'
+        self.opportunities.append(opportunity)
+        manifest = opportunity.capability_manifest
+        assert manifest is not None
+        return canonical_inner_decision(
+            opportunity,
+            decision={
+                "contract": "character-interior-purpose-decision.1",
+                "purpose": "media_selection",
+                "source_refs": list(manifest.source_refs),
+                "capability_ref": manifest.capability_ref,
+                "capability_payload_hash": manifest.payload_hash,
+                "payload": {
+                    "contract": "character-interior-media-selection-decision.1",
+                    "decision": "no_op",
+                },
+            },
+            identity=f"media-selection:{self.calls}",
+        )
 
 
-class _InvalidModel(_Model):
-    async def complete(self, messages, *, temperature=0.2):  # type: ignore[no-untyped-def]
+class _InvalidInterior(_Interior):
+    async def consider(self, opportunity):  # type: ignore[no-untyped-def]
         self.calls += 1
-        self.messages.append(messages)
-        return "not-json"
+        self.opportunities.append(opportunity)
+        return SimpleNamespace(
+            cursor=opportunity.cursor,
+            actor_ref=opportunity.actor_ref,
+            opportunity_ref=opportunity.opportunity_ref,
+            status="technical_failure",
+            decision=None,
+            author_lineage=None,
+            failure_code="invalid_role_result",
+        )
 
 
-class _UnavailableModel(_Model):
-    async def complete(self, messages, *, temperature=0.2):  # type: ignore[no-untyped-def]
+class _UnavailableInterior(_Interior):
+    async def consider(self, opportunity):  # type: ignore[no-untyped-def]
         self.calls += 1
-        self.messages.append(messages)
-        raise ConnectionError("provider offline")
+        self.opportunities.append(opportunity)
+        return SimpleNamespace(
+            cursor=opportunity.cursor,
+            actor_ref=opportunity.actor_ref,
+            opportunity_ref=opportunity.opportunity_ref,
+            status="technical_failure",
+            decision=None,
+            author_lineage=None,
+            failure_code="role_unavailable",
+        )
 
 class _Ledger:
     def project(self):
@@ -50,15 +81,16 @@ class _Recorder:
 
 @pytest.mark.asyncio
 async def test_worker_does_not_call_the_model_or_write_when_no_candidate_exists() -> None:
-    model = _Model()
+    interior = _Interior()
     worker = MediaSelectionWorker(
-        ledger=_Ledger(), draft_adapter=MediaSelectionDraftAdapter(model=model),
+        ledger=_Ledger(), character_interior=interior,
+        character_actor_ref="agent:companion",
         proposal_recorder=_Recorder(), catalog_version="test.1",
     )
     result = await worker.select_once(logical_time=NOW, actor="worker", trace_id="trace", correlation_id="correlation")
     assert result.status == "no_op"
     assert result.reason_code == "media_selection.no_available_candidates"
-    assert model.calls == 0
+    assert interior.calls == 0
 
 
 @pytest.mark.asyncio
@@ -71,7 +103,7 @@ async def test_worker_recovers_the_current_head_proposal_without_repeating_the_m
         ecology_category="activity_result", ecology_observed_at=NOW,
         source_events=(MediaEvidenceSource(event_ref="event:source", payload_hash="a" * 64),),
     )
-    model = _Model()
+    interior = _Interior()
     proposal = SimpleNamespace(
         proposal_id="proposal:pending",
         candidate_id=candidate.candidate_id,
@@ -108,7 +140,8 @@ async def test_worker_recovers_the_current_head_proposal_without_repeating_the_m
         ),
     )
     worker = MediaSelectionWorker(
-        ledger=ledger, draft_adapter=MediaSelectionDraftAdapter(model=model),
+        ledger=ledger, character_interior=interior,
+        character_actor_ref="agent:companion",
         proposal_recorder=_Recorder(), catalog_version="test.1",
     )
 
@@ -117,7 +150,7 @@ async def test_worker_recovers_the_current_head_proposal_without_repeating_the_m
     assert result.status == "proposed"
     assert result.proposal_event_ref == "event:proposal:pending"
     assert result.reason_code == "media_selection.recovered_pending_proposal"
-    assert model.calls == 0
+    assert interior.calls == 0
 
 
 @pytest.mark.asyncio
@@ -130,7 +163,7 @@ async def test_worker_re_deliberates_when_a_valid_pending_proposal_is_no_longer_
         ecology_category="activity_result", ecology_observed_at=NOW,
         source_events=(MediaEvidenceSource(event_ref="event:source", payload_hash="a" * 64),),
     )
-    model = _Model()
+    interior = _Interior()
     proposal = SimpleNamespace(
         proposal_id="proposal:stale",
         candidate_id=candidate.candidate_id,
@@ -174,7 +207,8 @@ async def test_worker_re_deliberates_when_a_valid_pending_proposal_is_no_longer_
         lookup_event_commit=lookup_stale,
     )
     worker = MediaSelectionWorker(
-        ledger=ledger, draft_adapter=MediaSelectionDraftAdapter(model=model),
+        ledger=ledger, character_interior=interior,
+        character_actor_ref="agent:companion",
         proposal_recorder=_Recorder(), catalog_version="test.1",
     )
     worker._random = SimpleNamespace(  # type: ignore[assignment]
@@ -191,22 +225,26 @@ async def test_worker_re_deliberates_when_a_valid_pending_proposal_is_no_longer_
 
     assert result.status == "no_op"
     assert result.reason_code == "media_selection.model_declined"
-    assert model.calls == 1
+    assert interior.calls == 1
+    manifest = interior.opportunities[0].capability_manifest
+    assert manifest is not None
+    assert "draw_suggestion" not in manifest.payload
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("model_type", "first_reason", "second_reason", "expected_status"),
     (
-        (_Model, "media_selection.model_declined", "media_selection.recovered_decline", "no_op"),
+        (_Interior, "media_selection.model_declined", "media_selection.recovered_decline", "no_op"),
         (
-            _InvalidModel,
-            "media_selection.model_not_json",
-            "media_selection.model_not_json",
+            _InvalidInterior,
+            "media_selection.character_interior.invalid_role_result",
+            "media_selection.character_interior.invalid_role_result",
             "blocked",
         ),
     ),
 )
+@pytest.mark.asyncio
 async def test_worker_persists_and_recovers_terminal_attempt_at_same_logical_time(
     model_type, first_reason: str, second_reason: str, expected_status: str,
 ) -> None:  # type: ignore[no-untyped-def]
@@ -262,9 +300,10 @@ async def test_worker_persists_and_recovers_terminal_attempt_at_same_logical_tim
         world_id="world:test", project=lambda: projection,
         lookup_event_commit=lookup, commit_at_cursor=commit_at_cursor,
     )
-    model = model_type()
+    interior = model_type()
     worker = MediaSelectionWorker(
-        ledger=ledger, draft_adapter=MediaSelectionDraftAdapter(model=model),
+        ledger=ledger, character_interior=interior,
+        character_actor_ref="agent:companion",
         proposal_recorder=_Recorder(), catalog_version="test.1",
     )
 
@@ -279,12 +318,24 @@ async def test_worker_persists_and_recovers_terminal_attempt_at_same_logical_tim
     assert second.status == expected_status
     assert first.reason_code == first_reason
     assert second.reason_code == second_reason
-    assert model.calls == 1
-    assert any(
-        event.event_type == "MediaSelectionAttemptRecorded"
-        for event, _commit in events.values()
-    )
-    if model_type is _Model:
+    assert interior.calls == (1 if model_type is _Interior else 2)
+    if model_type is _Interior:
+        terminal_event = next(
+            event
+            for event, _commit in events.values()
+            if event.event_type == "MediaSelectionAttemptRecorded"
+        )
+        assert any(
+            event.event_type == "MediaSelectionAttemptRecorded"
+            for event, _commit in events.values()
+        )
+        durable_model = json.loads(terminal_event.payload_json)[
+            "character_interior_model_result"
+        ]
+        assert durable_model["audit_contract"] == "model-result-audit.7"
+        assert json.loads(durable_model["audit_json"])[
+            "character_interior_lineage"
+        ]["purpose"] == "media_selection"
         projection.logical_time = NOW.replace(minute=10)
         later = await worker.select_once(
             logical_time=projection.logical_time,
@@ -294,7 +345,12 @@ async def test_worker_persists_and_recovers_terminal_attempt_at_same_logical_tim
         )
         assert later.status == "no_op"
         assert later.reason_code == "media_selection.recovered_decline"
-        assert model.calls == 1
+        assert interior.calls == 1
+    else:
+        assert not any(
+            event.event_type == "MediaSelectionAttemptRecorded"
+            for event, _commit in events.values()
+        )
 
 
 @pytest.mark.asyncio
@@ -306,7 +362,7 @@ async def test_worker_structures_invalid_model_output_without_writing_a_proposal
         ecology_observed_at=NOW,
         source_events=(MediaEvidenceSource(event_ref="event:source", payload_hash="a" * 64),),
     )
-    model = _InvalidModel()
+    interior = _InvalidInterior()
     ledger = SimpleNamespace(
         project=lambda: SimpleNamespace(
             logical_time=NOW, world_revision=3, deliberation_revision=0,
@@ -314,7 +370,8 @@ async def test_worker_structures_invalid_model_output_without_writing_a_proposal
         ),
     )
     worker = MediaSelectionWorker(
-        ledger=ledger, draft_adapter=MediaSelectionDraftAdapter(model=model),
+        ledger=ledger, character_interior=interior,
+        character_actor_ref="agent:companion",
         proposal_recorder=_Recorder(), catalog_version="test.1",
     )
 
@@ -323,8 +380,8 @@ async def test_worker_structures_invalid_model_output_without_writing_a_proposal
     )
 
     assert result.status == "blocked"
-    assert result.reason_code == "media_selection.model_not_json"
-    assert model.calls == 1
+    assert result.reason_code == "media_selection.character_interior.invalid_role_result"
+    assert interior.calls == 1
 
 
 @pytest.mark.asyncio
@@ -336,13 +393,14 @@ async def test_worker_structures_retryable_model_outage_for_scheduler_isolation(
         ecology_observed_at=NOW,
         source_events=(MediaEvidenceSource(event_ref="event:source", payload_hash="a" * 64),),
     )
-    model = _UnavailableModel()
+    interior = _UnavailableInterior()
     worker = MediaSelectionWorker(
         ledger=SimpleNamespace(project=lambda: SimpleNamespace(
             logical_time=NOW, world_revision=3, deliberation_revision=0,
             ledger_sequence=3, photo_candidates=(candidate,), proposal_revisions=(),
         )),
-        draft_adapter=MediaSelectionDraftAdapter(model=model),
+        character_interior=interior,
+        character_actor_ref="agent:companion",
         proposal_recorder=_Recorder(), catalog_version="test.1",
     )
 
@@ -351,8 +409,8 @@ async def test_worker_structures_retryable_model_outage_for_scheduler_isolation(
     )
 
     assert result.status == "blocked"
-    assert result.reason_code == "media_selection.model_unavailable"
-    assert model.calls == 1
+    assert result.reason_code == "media_selection.character_interior.role_unavailable"
+    assert interior.calls == 1
 
 
 @pytest.mark.asyncio
@@ -364,7 +422,7 @@ async def test_worker_blocks_instead_of_deliberating_around_missing_pending_auth
         ecology_observed_at=NOW,
         source_events=(MediaEvidenceSource(event_ref="event:source", payload_hash="a" * 64),),
     )
-    model = _Model()
+    interior = _Interior()
     projection = SimpleNamespace(
         logical_time=NOW, world_revision=4, deliberation_revision=5, ledger_sequence=9,
         world_id="world:test", photo_candidates=(candidate,),
@@ -377,7 +435,8 @@ async def test_worker_blocks_instead_of_deliberating_around_missing_pending_auth
     )
     ledger = SimpleNamespace(project=lambda: projection, lookup_event_commit=lambda _ref: None)
     worker = MediaSelectionWorker(
-        ledger=ledger, draft_adapter=MediaSelectionDraftAdapter(model=model),
+        ledger=ledger, character_interior=interior,
+        character_actor_ref="agent:companion",
         proposal_recorder=_Recorder(), catalog_version="test.1",
     )
 
@@ -387,7 +446,7 @@ async def test_worker_blocks_instead_of_deliberating_around_missing_pending_auth
 
     assert result.status == "blocked"
     assert result.reason_code == "media_selection.pending_proposal_invalid"
-    assert model.calls == 0
+    assert interior.calls == 0
 
 
 @pytest.mark.asyncio
@@ -407,7 +466,7 @@ async def test_worker_asks_the_model_about_an_ordinary_character_candidate() -> 
         ecology_category="character_media:mirror", ecology_observed_at=NOW, source_events=(source,),
         character_media_contract=contract,
     )
-    model = _Model()
+    interior = _Interior()
     ledger = SimpleNamespace(
         project=lambda: SimpleNamespace(
             logical_time=NOW, world_revision=3, deliberation_revision=0, ledger_sequence=3,
@@ -415,14 +474,15 @@ async def test_worker_asks_the_model_about_an_ordinary_character_candidate() -> 
         ),
     )
     worker = MediaSelectionWorker(
-        ledger=ledger, draft_adapter=MediaSelectionDraftAdapter(model=model),
+        ledger=ledger, character_interior=interior,
+        character_actor_ref="agent:companion",
         proposal_recorder=_Recorder(), catalog_version="test.1",
     )
 
     result = await worker.select_once(logical_time=NOW, actor="worker", trace_id="trace", correlation_id="correlation")
 
     assert result.reason_code == "media_selection.model_declined"
-    assert model.calls == 1
+    assert interior.calls == 1
 
 
 @pytest.mark.asyncio
@@ -436,7 +496,7 @@ async def test_worker_gives_the_model_deterministic_non_authoritative_candidate_
             MediaEvidenceSource(event_ref="event:source", payload_hash="a" * 64),
         ),
     )
-    model = _Model()
+    interior = _Interior()
     ledger = SimpleNamespace(
         project=lambda: SimpleNamespace(
             logical_time=NOW, world_revision=3, deliberation_revision=0, ledger_sequence=3,
@@ -444,14 +504,18 @@ async def test_worker_gives_the_model_deterministic_non_authoritative_candidate_
         ),
     )
     worker = MediaSelectionWorker(
-        ledger=ledger, draft_adapter=MediaSelectionDraftAdapter(model=model),
+        ledger=ledger, character_interior=interior,
+        character_actor_ref="agent:companion",
         proposal_recorder=_Recorder(), catalog_version="test.1",
     )
 
     result = await worker.select_once(logical_time=NOW, actor="worker", trace_id="trace", correlation_id="correlation")
 
     assert result.reason_code == "media_selection.model_declined"
-    choice = json.loads(model.messages[0][1]["content"])["candidates"][0]
+    opportunity = interior.opportunities[0]
+    assert opportunity.purpose == "media_selection"
+    assert opportunity.capability_manifest.capability_kind == "media_selection"
+    choice = opportunity.capability_manifest.payload["candidates"][0]
     assert choice["advisory"] == {
         "category": "activity_result",
         "freshness_bp": 10_000,
@@ -459,6 +523,7 @@ async def test_worker_gives_the_model_deterministic_non_authoritative_candidate_
         "visual_evidence_bp": 10_000,
         "budget_state": "unconfigured",
         "advisory_score_bp": 8_750,
-        "missing_signals": ["emotional_meaning", "existing_media", "user_preference"],
+        "missing_signals": ["existing_media", "user_preference"],
     }
-    assert "candidate:advisory" not in model.messages[0][1]["content"]
+    assert "emotional_meaning" not in choice["advisory"]
+    assert "candidate:advisory" not in opportunity.capability_manifest.payload_json

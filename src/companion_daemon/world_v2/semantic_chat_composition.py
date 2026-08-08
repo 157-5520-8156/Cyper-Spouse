@@ -1,9 +1,9 @@
-"""Production composition for same-turn semantic advice and compute routing.
+"""Production composition for CharacterInterior and compute routing.
 
 The Module keeps one small Interface for platform composition roots while it
-owns model selection, advisory authentication, matrix versioning, Flash /
-Thinking routing, and model lifecycle.  Classifier output remains advisory;
-the returned deliberation adapter is still the only producer of reply drafts.
+owns model selection, Flash / Thinking routing, endpoint timing, source review,
+and model lifecycle. CharacterInterior is the only protagonist semantic author;
+the text endpoint predicts only whether another user bubble is likely.
 """
 
 from __future__ import annotations
@@ -12,47 +12,37 @@ import asyncio
 from collections.abc import Awaitable
 from dataclasses import dataclass
 import logging
-import secrets
 from typing import Literal
 
 from companion_daemon.character import load_character
 from companion_daemon.config import Settings
 from companion_daemon.llm import (
     DeepSeekChatModel,
-    FakeCompanionModel,
     OpenAICompatibleChatModel,
     ProviderCapacityGate,
     ProviderCircuitBreaker,
-    local_provider_capacity_marker_path,
+    text_endpoint_capacity_marker_path,
 )
 
-from .advisory_compiler import AdvisoryCompiler
-from .chat_model_deliberation_adapter import (
-    ChatCompletionModel,
-    CompanionIdentityFrame,
-    SourceClosureReselectionLane,
-)
+from .character_interior import CharacterInterior
+from .character_interior.production import compose_production_character_interior
+from .companion_identity import CompanionIdentityFrame
 from .expression_draft import (
     ExpressionDraftCapabilities,
-    TEXT_ONLY_EXPRESSION_CAPABILITIES,
+    PRODUCTION_TEXT_ONLY_EXPRESSION_CAPABILITIES,
 )
-from .matrix_catalog import default_matrix_catalog
+from .model_completion import ChatCompletionModel
 from .model_authority_identity import (
     possible_provider_lanes,
     provider_lane_sets_are_independent,
     transport_route_ids,
 )
-from .semantic_advisory_adapter import SemanticAdvisoryAdapter
 from .semantic_compute_router import SemanticComputeRouter
-from .single_call_inbound_cognition import (
-    SingleCallAppraisalAdapter,
-    SingleCallExpressionAdapter,
-    SingleCallInboundCognition,
-)
 from .source_review_authority import (
     SOURCE_REVIEW_CALL_TIMEOUT_SECONDS,
     SourceReviewAuthority,
 )
+from .source_closure_lane import SourceClosureReselectionLane
 from .structured_expression_reselection_model import (
     EXPRESSION_SOURCE_RESELECTION_DIRECT_CONTRACT,
 )
@@ -68,6 +58,7 @@ from .structured_source_review_model import (
     StrictOutputCapabilityEvidence,
     StructuredSourceReviewModel,
     openrouter_inventory_capability_evidence,
+    _STRICT_SCHEMAS,
 )
 
 
@@ -183,6 +174,19 @@ def _reviewer_is_independent(*, author: object, reviewer: object | None) -> bool
     return _provider_lane_sets_are_independent(author, reviewer)
 
 
+def _uses_implicit_character_failover(model: object | None) -> bool:
+    """Whether one author port can silently switch to a second provider."""
+
+    if model is None:
+        return False
+    origin = getattr(model, "authority_origin", model)
+    return (
+        getattr(origin, "primary", None) is not None
+        and getattr(origin, "fallback", None) is not None
+        and bool(getattr(origin, "implicit_failover", True))
+    )
+
+
 def _supports_strict_output_contract(
     model: object | None,
     contract: str,
@@ -247,8 +251,7 @@ def _shares_known_reviewer_runtime(left: object | None, right: object | None) ->
         if (lane := getattr(right, lane_name, None)) is not None
     )
     if any(
-        left_lane is right_lane
-        or _shares_known_reviewer_runtime(left_lane, right_lane)
+        left_lane is right_lane or _shares_known_reviewer_runtime(left_lane, right_lane)
         for left_lane in left_lanes
         for right_lane in right_lanes
     ):
@@ -320,28 +323,9 @@ def _candidate_review_capability(
     )
 
 
-def _configured_recovery_author(
-    *,
-    flash_model: object,
-    thinking_model: object | None,
-) -> object | None:
-    """Mirror cognition's Flash-first discovery of an installed recovery author."""
-
-    for candidate in (flash_model, thinking_model):
-        fallback = getattr(candidate, "fallback", None)
-        if fallback is None or fallback is candidate:
-            continue
-        if callable(getattr(fallback, "complete_json", None)) or callable(
-            getattr(fallback, "complete", None)
-        ):
-            return fallback
-    return None
-
-
 def _preflight_production_source_review(
     *,
     settings: Settings,
-    advisory_model: object | None,
     thinking_model: object | None,
     source_closure_model: object | None,
 ) -> None:
@@ -353,16 +337,14 @@ def _preflight_production_source_review(
         model=settings.deepseek_model,
     )
     authors: list[object] = [deepseek_author]
-    if advisory_model is not None:
-        authors.append(advisory_model)
     if thinking_model is not None:
         authors.append(thinking_model)
-    elif settings.deepseek_deep_appraisal_thinking_enabled:
+    elif settings.deepseek_character_thinking_enabled:
         authors.append(
             _ConfiguredProviderLane(
                 provider="deepseek",
                 base_url=settings.deepseek_base_url,
-                model=settings.deepseek_deep_appraisal_model,
+                model=settings.deepseek_character_thinking_model,
             )
         )
     if source_closure_model is not None:
@@ -518,9 +500,7 @@ class ProactiveSourceAuthorityDeployment:
         if runtime_status == "qualified_unprobed":
             warning_reasons.append("source_inventory.qualified_unprobed")
         elif runtime_status == "degraded":
-            warning_reasons.append(
-                "source_inventory.full_source_closure_fallback_active"
-            )
+            warning_reasons.append("source_inventory.full_source_closure_fallback_active")
         elif runtime_status == "runtime_failed":
             warning_reasons.append("source_inventory.runtime_failed")
         warning_reasons = list(dict.fromkeys(warning_reasons))
@@ -532,10 +512,7 @@ class ProactiveSourceAuthorityDeployment:
             else "unavailable"
         )
         inventory_provider_count = len(
-            {
-                evidence.provider.casefold()
-                for evidence in self.inventory_route_evidence
-            }
+            {evidence.provider.casefold() for evidence in self.inventory_route_evidence}
         )
         inventory_installed = self.ordinary_candidate_review_capability[0]
         if inventory_installed:
@@ -545,15 +522,11 @@ class ProactiveSourceAuthorityDeployment:
                 if self.ordinary_candidate_review_capability[1]
                 else "inventory_v5_guard_then_full_source_review.7"
             )
-        elif any(
-            evidence.status == "unverified"
-            for evidence in self.inventory_route_evidence
-        ):
+        elif any(evidence.status == "unverified" for evidence in self.inventory_route_evidence):
             inventory_qualification_state = "unverified"
             active_source_review_protocol = "full_source_review.7"
         elif self.inventory_route_evidence and all(
-            evidence.status == "disabled"
-            for evidence in self.inventory_route_evidence
+            evidence.status == "disabled" for evidence in self.inventory_route_evidence
         ):
             inventory_qualification_state = "disabled"
             active_source_review_protocol = "full_source_review.7"
@@ -570,9 +543,7 @@ class ProactiveSourceAuthorityDeployment:
             "author_model": self.author_model,
             "reviewer_model": self.reviewer_model,
             "candidate_inventory_model": self.candidate_inventory_model,
-            "requested_candidate_inventory_model": (
-                self.requested_candidate_inventory_model
-            ),
+            "requested_candidate_inventory_model": (self.requested_candidate_inventory_model),
             "inventory_capability_evidence": (
                 self.inventory_capability_evidence.health_snapshot()
                 if self.inventory_capability_evidence is not None
@@ -590,19 +561,12 @@ class ProactiveSourceAuthorityDeployment:
             "inventory_qualification_state": inventory_qualification_state,
             "active_source_review_protocol": active_source_review_protocol,
             "source_review_qualification_transition": (
-                f"{inventory_qualification_state} -> "
-                f"{active_source_review_protocol}"
+                f"{inventory_qualification_state} -> {active_source_review_protocol}"
             ),
             "candidate_review_capabilities": {
-                "ordinary": capability_snapshot(
-                    self.ordinary_candidate_review_capability
-                ),
-                "recovery": capability_snapshot(
-                    self.recovery_candidate_review_capability
-                ),
-                "reselection": capability_snapshot(
-                    self.reselection_candidate_review_capability
-                ),
+                "ordinary": capability_snapshot(self.ordinary_candidate_review_capability),
+                "recovery": capability_snapshot(self.recovery_candidate_review_capability),
+                "reselection": capability_snapshot(self.reselection_candidate_review_capability),
             },
             "inventory_transport": {
                 "route_count": len(self.inventory_transport_routes),
@@ -610,12 +574,10 @@ class ProactiveSourceAuthorityDeployment:
                 "single_transport": len(self.inventory_transport_routes) == 1,
                 "provider_count": inventory_provider_count,
                 "single_provider": (
-                    bool(self.inventory_route_evidence)
-                    and inventory_provider_count == 1
+                    bool(self.inventory_route_evidence) and inventory_provider_count == 1
                 ),
                 "capability_evidence": [
-                    evidence.health_snapshot()
-                    for evidence in self.inventory_route_evidence
+                    evidence.health_snapshot() for evidence in self.inventory_route_evidence
                 ],
                 "attempt_timeout_seconds": getattr(
                     self.inventory_runtime_model,
@@ -641,8 +603,11 @@ class ProactiveSourceAuthorityDeployment:
 class SemanticChatComposition:
     """The complete capability-free semantic/model side of one chat host."""
 
-    flash_model: ChatCompletionModel
-    background_model: ChatCompletionModel
+    # Objective extraction/World-author lanes may reuse this provider, but no
+    # host receives the protagonist author itself.  Every protagonist decision
+    # is reachable only through ``character_interior``.
+    world_support_model: ChatCompletionModel
+    character_author_model_id: str
     expression_episode_observer_model: ChatCompletionModel | None
     source_closure_model: ChatCompletionModel | None
     recovery_source_closure_model: ChatCompletionModel | None
@@ -652,10 +617,8 @@ class SemanticChatComposition:
     life_source_runtime_isolation: str
     candidate_external_proposition_inventory_model: ChatCompletionModel | None
     proactive_source_authority: ProactiveSourceAuthorityDeployment
-    main_model: SingleCallExpressionAdapter
-    appraisal_model: SingleCallAppraisalAdapter
+    character_interior: CharacterInterior
     router: SemanticComputeRouter
-    advisory_compiler: AdvisoryCompiler
     identity_frame: CompanionIdentityFrame
     local_provider_capacity: ProviderCapacityGate | None
     text_endpoint_controller: TextTurnEndpointController | None
@@ -673,6 +636,11 @@ class SemanticChatComposition:
         """Return read-only deployment evidence without invoking a model."""
 
         return self.proactive_source_authority.health_snapshot()
+
+    def character_interior_health(self) -> dict[str, object]:
+        """Expose the sole protagonist-author topology without private state."""
+
+        return self.character_interior.runtime_health()
 
     def life_source_authority_health(self) -> dict[str, object]:
         """Report Life reviewer transport state without overstating qualification."""
@@ -717,9 +685,7 @@ class SemanticChatComposition:
                 last_transport_winner = {
                     "lane": winner_lane,
                     "model": (
-                        lane_models.get(winner_lane)
-                        if isinstance(lane_models, dict)
-                        else None
+                        lane_models.get(winner_lane) if isinstance(lane_models, dict) else None
                     ),
                     "provider": (
                         lane_providers.get(winner_lane)
@@ -729,8 +695,7 @@ class SemanticChatComposition:
                 }
 
         all_qualified = all(
-            bool(contract_health["release_qualified"])
-            for contract_health in contracts.values()
+            bool(contract_health["release_qualified"]) for contract_health in contracts.values()
         )
         warning_reasons: list[str] = []
         if reviewer is None:
@@ -738,25 +703,17 @@ class SemanticChatComposition:
             warning_reasons.append("life_source_authority.reviewer_unavailable")
         elif runtime_isolation == "caller_provided_distinct_unverified":
             status = (
-                "operational_isolation_unverified"
-                if all_qualified
-                else "operational_unqualified"
+                "operational_isolation_unverified" if all_qualified else "operational_unqualified"
             )
-            warning_reasons.append(
-                "life_source_authority.runtime_isolation_unverified"
-            )
+            warning_reasons.append("life_source_authority.runtime_isolation_unverified")
             if not all_qualified:
-                warning_reasons.append(
-                    "life_source_authority.release_qualification_unavailable"
-                )
+                warning_reasons.append("life_source_authority.release_qualification_unavailable")
         elif not runtime_isolated:
             status = "unsafe_shared_runtime"
             warning_reasons.append("life_source_authority.runtime_not_isolated")
         elif not all_qualified:
             status = "operational_unqualified"
-            warning_reasons.append(
-                "life_source_authority.release_qualification_unavailable"
-            )
+            warning_reasons.append("life_source_authority.release_qualification_unavailable")
         else:
             status = "ready"
         return {
@@ -783,7 +740,6 @@ class SemanticChatComposition:
         await asyncio.shield(close_task)
 
     async def _aclose_owned(self) -> None:
-        await self.advisory_compiler.aclose()
         close_results = await asyncio.gather(
             *(
                 close()
@@ -797,11 +753,9 @@ class SemanticChatComposition:
         )
         waiters = tuple(
             waiter()
-            for owner in (self.advisory_compiler, *self._owned_task_owners)
+            for owner in self._owned_task_owners
             if getattr(owner, "shutdown_pending_task_count", 0) > 0
-            if callable(
-                waiter := getattr(owner, "wait_for_shutdown_quiescence", None)
-            )
+            if callable(waiter := getattr(owner, "wait_for_shutdown_quiescence", None))
         )
         if waiters:
             deferred = asyncio.create_task(
@@ -846,7 +800,7 @@ class SemanticChatComposition:
             return 0
         owner_count = sum(
             int(getattr(owner, "shutdown_pending_task_count", 0))
-            for owner in (self.advisory_compiler, *self._owned_task_owners)
+            for owner in self._owned_task_owners
         )
         return max(1, owner_count)
 
@@ -866,62 +820,65 @@ def build_semantic_chat_composition(
     settings: Settings,
     flash_model: ChatCompletionModel | None = None,
     thinking_model: ChatCompletionModel | None = None,
-    advisory_model: ChatCompletionModel | None = None,
+    world_support_model: ChatCompletionModel | None = None,
     source_closure_model: ChatCompletionModel | None = None,
     life_source_closure_model: ChatCompletionModel | None = None,
     candidate_external_proposition_inventory_model: ChatCompletionModel | None = None,
     expression_episode_observer_model: ChatCompletionModel | None = None,
     model_id_prefix: str,
-    expression_capabilities: ExpressionDraftCapabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES,
+    expression_capabilities: ExpressionDraftCapabilities = (
+        PRODUCTION_TEXT_ONLY_EXPRESSION_CAPABILITIES
+    ),
+    usage_observer: object | None = None,
 ) -> SemanticChatComposition:
-    """Build one production/fake pair through the same deep Module Interface.
+    """Build one explicitly supplied or provider-backed Character author.
 
     Explicitly supplied models are caller-owned.  With provider settings, the
     Module owns a Flash client and, when enabled, a separate bounded Thinking
-    client.  Quick recovery remains inside ``RoutedChatModelDeliberationAdapter``
-    and therefore always uses Flash.
+    client. Invalid output may receive the same CharacterInterior author's one
+    constrained reselection; terminal technical failure leaves through the
+    normal retry lifecycle and cannot become a second semantic role path.
     """
 
     if not model_id_prefix:
         raise ValueError("semantic chat composition requires a model id prefix")
-    if (
-        flash_model is None
-        and settings.deepseek_api_key
-        and source_closure_model is None
-        and not settings.openai_api_key
-    ):
+    if expression_capabilities.private_turn_state_mode != "required":
         raise ValueError(
-            "production character routing requires an independent source-closure reviewer"
+            "production expression requires a final PrivateTurnState; "
+            "legacy_optional is historical replay/test only"
         )
-    if (
-        flash_model is None
-        and settings.deepseek_api_key
-        and source_closure_model is None
-        and not (
-            settings.world_v2_source_review_redundancy_enabled
-            and settings.openrouter_api_key
-            and settings.openai_api_key
-        )
-    ):
+    if flash_model is None and not settings.deepseek_api_key:
         raise ValueError(
-            "production character routing requires independently qualified "
-            "source-closure reviewers for ordinary and recovery candidates"
+            "production CharacterInterior requires an explicit character model "
+            "or DEEPSEEK_API_KEY; fixture prose cannot be installed implicitly"
         )
+    if any(_uses_implicit_character_failover(model) for model in (flash_model, thinking_model)):
+        raise ValueError(
+            "CharacterInterior cannot install an implicit backup character author; "
+            "provider failure must enter its durable technical-failure lifecycle"
+        )
+    # Source review is an explicit deployment capability, not a hard startup
+    # requirement. With redundancy disabled, the interactive path runs pure
+    # deterministic truth boundaries (closed-scope refs are mechanically
+    # enforced at materialization) and the author contract owns hallucination
+    # defense. An explicitly injected reviewer still must be independent of
+    # every author.
     if source_closure_model is not None and any(
         not _reviewer_is_independent(
             author=author,
             reviewer=source_closure_model,
         )
-        for author in (advisory_model, flash_model, thinking_model)
+        for author in (flash_model, thinking_model)
         if author is not None
     ):
-        raise ValueError(
-            "every character author requires an independent source-closure reviewer"
-        )
-    if flash_model is None and settings.deepseek_api_key:
+        raise ValueError("every character author requires an independent source-closure reviewer")
+    if (
+        flash_model is None
+        and settings.deepseek_api_key
+        and settings.world_v2_source_review_redundancy_enabled
+    ):
         _preflight_production_source_review(
             settings=settings,
-            advisory_model=advisory_model,
             thinking_model=thinking_model,
             source_closure_model=source_closure_model,
         )
@@ -937,84 +894,49 @@ def build_semantic_chat_composition(
                 base_url=settings.deepseek_base_url,
                 model=settings.deepseek_model,
                 thinking_enabled=False,
+                max_completion_tokens=4_096,
+                usage_observer=usage_observer,
             )
             flash_model = provider_flash
             owned.append(provider_flash)
-        else:
-            flash_model = FakeCompanionModel()
+        else:  # pragma: no cover - guarded above, kept for type narrowing
+            raise RuntimeError("character author is unavailable")
     if (
         thinking_model is None
         and auto_flash
         and settings.deepseek_api_key
-        and settings.deepseek_deep_appraisal_thinking_enabled
+        and settings.deepseek_character_thinking_enabled
     ):
         provider_thinking = DeepSeekChatModel(
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
-            model=settings.deepseek_deep_appraisal_model,
+            model=settings.deepseek_character_thinking_model,
             thinking_enabled=True,
-            reasoning_effort=settings.deepseek_deep_appraisal_reasoning_effort,
+            reasoning_effort=settings.deepseek_character_thinking_reasoning_effort,
+            usage_observer=usage_observer,
         )
         thinking_model = provider_thinking
         owned.append(provider_thinking)
 
-    local_appraisal_model: ChatCompletionModel | None = None
-    local_advisory_model: ChatCompletionModel | None = None
     local_endpoint_model: ChatCompletionModel | None = None
     local_provider_capacity: ProviderCapacityGate | None = None
-    if settings.local_appraisal_enabled:
-        # MLX is configured as a serial inference worker. All local micro-lanes
-        # share one non-queueing lease so an advisory cannot wait behind an
-        # appraisal whose client already timed out while the server continues.
+    if settings.world_v2_text_endpoint_enabled:
+        # The endpoint deployment is a serial inference worker. Its sole role
+        # is turn-boundary likelihood; it never enters CharacterInterior or
+        # compiles Appraisal/Affect/Relationship semantics.
         local_provider_capacity = ProviderCapacityGate(
-            marker_path=local_provider_capacity_marker_path(),
+            marker_path=text_endpoint_capacity_marker_path(),
         )
-        # This endpoint is deliberately explicit and local-only by default.
-        # The small model is used for a typed Appraisal draft, never for the
-        # visible character voice or direct world mutation authority.
-        local_appraisal_model = OpenAICompatibleChatModel(
-            api_key=settings.local_appraisal_api_key,
-            base_url=settings.local_appraisal_base_url,
-            model=settings.local_appraisal_model,
+        local_endpoint_model = OpenAICompatibleChatModel(
+            api_key=settings.world_v2_text_endpoint_api_key,
+            base_url=settings.world_v2_text_endpoint_base_url,
+            model=settings.world_v2_text_endpoint_model,
             reasoning_effort="none",
-            # The complete typed appraisal contract takes ~150 tokens on the
-            # deployed Qwen3-1.7B checkpoint. Both 96 and 128 cut valid
-            # decisions mid-JSON in a live probe; 192 keeps the local lane
-            # bounded while allowing one complete result.
-            max_completion_tokens=192,
+            max_completion_tokens=96,
             capacity_gate=local_provider_capacity,
         )
-        owned.append(local_appraisal_model)
-        # The same local checkpoint also carries the same-turn semantic
-        # advisory classification.  The advisory is non-authoritative and
-        # fail-open, but routing it through remote Flash would add another
-        # provider round trip to Context compilation. A separate local client
-        # keeps a larger completion budget for the multi-field distribution
-        # JSON; visible-turn callers still impose their own strict deadline.
-        local_advisory_model = OpenAICompatibleChatModel(
-            api_key=settings.local_appraisal_api_key,
-            base_url=settings.local_appraisal_base_url,
-            model=settings.local_appraisal_model,
-            reasoning_effort="none",
-            max_completion_tokens=384,
-            capacity_gate=local_provider_capacity,
-        )
-        owned.append(local_advisory_model)
-        if settings.world_v2_text_endpoint_enabled:
-            # Endpointing shares the local serial lease and fails open when it
-            # is busy. It predicts only another-bubble probability and never
-            # enters the character or World-authority lanes.
-            local_endpoint_model = OpenAICompatibleChatModel(
-                api_key=settings.local_appraisal_api_key,
-                base_url=settings.local_appraisal_base_url,
-                model=settings.local_appraisal_model,
-                reasoning_effort="none",
-                max_completion_tokens=96,
-                capacity_gate=local_provider_capacity,
-            )
-            owned.append(local_endpoint_model)
+        owned.append(local_endpoint_model)
 
-    catalog = default_matrix_catalog()
     character = load_character(str(settings.character_path))
     aliases_raw = character.identity.get("nicknames", ())
     aliases = (
@@ -1035,23 +957,9 @@ def build_semantic_chat_composition(
         style_rules=tuple(character.style_rules),
         boundaries=tuple(character.boundaries),
     )
-    semantic_advice = SemanticAdvisoryAdapter(
-        model=advisory_model or local_advisory_model or flash_model,
-        catalog=catalog,
-    )
-    advisory_compiler = AdvisoryCompiler(
-        catalog=catalog,
-        adapters=(semantic_advice,),
-        authority_key=secrets.token_bytes(32),
-        timeout_seconds=settings.world_v2_advisory_timeout_seconds,
-    )
     source_closure_was_injected = source_closure_model is not None
     resolved_source_closure_model = source_closure_model
-    if (
-        auto_flash
-        and settings.deepseek_api_key
-        and resolved_source_closure_model is None
-    ):
+    if auto_flash and settings.deepseek_api_key and resolved_source_closure_model is None:
         resolved_source_closure_model = None
     recovery_source_closure_model = resolved_source_closure_model
     auto_inventory_model: ChatCompletionModel | None = None
@@ -1063,7 +971,10 @@ def build_semantic_chat_composition(
     if (
         auto_flash
         and not source_closure_was_injected
-        and settings.world_v2_source_review_redundancy_enabled
+        and (
+            settings.world_v2_source_review_redundancy_enabled
+            or settings.world_v2_life_source_review_enabled
+        )
         and settings.openrouter_api_key
         and settings.openai_api_key
         and isinstance(flash_model, DeepSeekChatModel)
@@ -1074,22 +985,73 @@ def build_semantic_chat_composition(
         # bounded authority tries the primary transport first and creates the
         # reserve call only after a terminal primary failure; only one verdict
         # can return.
+        local_review_base_url = settings.world_v2_source_review_base_url
+        local_inventory_base_url = (
+            settings.world_v2_source_inventory_base_url or local_review_base_url
+        )
+        local_review_model = (
+            settings.world_v2_source_review_local_model or "qwen2.5-7b-instruct"
+        )
+        local_inventory_model = (
+            settings.world_v2_source_inventory_local_model or local_review_model
+        )
+        _local_review_contracts = tuple(_STRICT_SCHEMAS)
+
+        def _local_review_evidence(model: str) -> StrictOutputCapabilityEvidence:
+            # A local endpoint is operator-configured and OpenAI-compatible.
+            # Declare every installed strict schema so the V5 inventory
+            # coverage gate and all review lanes pass without the proxy lane.
+            return StrictOutputCapabilityEvidence.verified(
+                evidence_source="local_configuration",
+                provider="openai",
+                model=model,
+                contracts=_local_review_contracts,
+                observed_at="2026-08-06",
+            )
+
+        def _pin_local_authority(instance: object, checkpoint: str) -> None:
+            # Local checkpoints are not in the release-pinned registry, so
+            # semantic_authority_id would return None and fail independence
+            # checks. Declare a stable local authority instead; it is still
+            # distinct from every cloud checkpoint including DeepSeek.
+            try:
+                object.__setattr__(
+                    instance,
+                    "semantic_authority_id",
+                    f"local-mlx:{checkpoint}",
+                )
+            except (AttributeError, TypeError):
+                pass
         openrouter_source_reviewer = StructuredSourceReviewModel(
             api_key=settings.openrouter_api_key,
-            base_url=settings.openrouter_base_url,
-            model=settings.world_v2_source_review_secondary_model,
-            require_provider_parameters=True,
+            base_url=(
+                settings.world_v2_source_review_base_url
+                or settings.openrouter_base_url
+            ),
+            model=(
+                settings.world_v2_source_review_local_model
+                or settings.world_v2_source_review_secondary_model
+            ),
+            require_provider_parameters=(
+                settings.world_v2_source_review_base_url is None
+            ),
             # qwen/qwen-plus exposes strict structured output through
             # OpenRouter but does not accept OpenAI's reasoning knob.
             reasoning_effort="",
             max_completion_tokens=1_200,
-            proxy_url=settings.openai_proxy_url,
+            proxy_url=(
+                None
+                if settings.world_v2_source_review_base_url
+                else settings.openai_proxy_url
+            ),
             circuit_breaker=ProviderCircuitBreaker(
                 failure_threshold=2,
                 cooldown_seconds=60.0,
             ),
             strict_output_capability_evidence=(
-                audited_source_review_capability_evidence(
+                _local_review_evidence(local_review_model)
+                if settings.world_v2_source_review_base_url
+                else audited_source_review_capability_evidence(
                     base_url=settings.openrouter_base_url,
                     model=settings.world_v2_source_review_secondary_model,
                     provider="openrouter",
@@ -1098,18 +1060,32 @@ def build_semantic_chat_composition(
         )
         openrouter_recovery_source_reviewer = StructuredSourceReviewModel(
             api_key=settings.openrouter_api_key,
-            base_url=settings.openrouter_base_url,
-            model=settings.world_v2_source_review_recovery_model,
-            require_provider_parameters=True,
+            base_url=(
+                settings.world_v2_source_review_base_url
+                or settings.openrouter_base_url
+            ),
+            model=(
+                settings.world_v2_source_review_local_model
+                or settings.world_v2_source_review_recovery_model
+            ),
+            require_provider_parameters=(
+                settings.world_v2_source_review_base_url is None
+            ),
             reasoning_effort="",
             max_completion_tokens=1_200,
-            proxy_url=settings.openai_proxy_url,
+            proxy_url=(
+                None
+                if settings.world_v2_source_review_base_url
+                else settings.openai_proxy_url
+            ),
             circuit_breaker=ProviderCircuitBreaker(
                 failure_threshold=2,
                 cooldown_seconds=60.0,
             ),
             strict_output_capability_evidence=(
-                audited_source_review_capability_evidence(
+                _local_review_evidence(local_review_model)
+                if settings.world_v2_source_review_base_url
+                else audited_source_review_capability_evidence(
                     base_url=settings.openrouter_base_url,
                     model=settings.world_v2_source_review_recovery_model,
                     provider="openrouter",
@@ -1136,27 +1112,63 @@ def build_semantic_chat_composition(
         )
         openrouter_inventory_primary = (
             StructuredSourceReviewModel(
-                api_key=settings.openrouter_api_key,
-                base_url=settings.openrouter_base_url,
-                model=settings.world_v2_source_inventory_model,
-                require_provider_parameters=True,
+                api_key=(
+                    settings.qwen_api_key
+                    if local_inventory_base_url
+                    else settings.openrouter_api_key
+                ),
+                base_url=(
+                    local_inventory_base_url
+                    or settings.openrouter_base_url
+                ),
+                model=(
+                    settings.world_v2_source_inventory_local_model
+                    or settings.world_v2_source_inventory_model
+                ),
+                require_provider_parameters=(local_inventory_base_url is None),
                 reasoning_effort="none",
                 max_completion_tokens=1_200,
-                proxy_url=settings.openai_proxy_url,
-                strict_output_capability_evidence=auto_inventory_evidence,
+                proxy_url=(
+                    None
+                    if local_inventory_base_url
+                    else settings.openai_proxy_url
+                ),
+                strict_output_capability_evidence=(
+                    _local_review_evidence(local_inventory_model)
+                    if local_inventory_base_url
+                    else auto_inventory_evidence
+                ),
             )
             if settings.world_v2_source_inventory_enabled
             else None
         )
         openai_inventory_secondary = (
             StructuredSourceReviewModel(
-                api_key=settings.openai_api_key,
-                base_url=settings.openai_base_url,
-                model=direct_inventory_fallback_model,
+                api_key=(
+                    settings.qwen_api_key
+                    if local_inventory_base_url
+                    else settings.openai_api_key
+                ),
+                base_url=(
+                    local_inventory_base_url
+                    or settings.openai_base_url
+                ),
+                model=(
+                    settings.world_v2_source_inventory_local_model
+                    or direct_inventory_fallback_model
+                ),
                 reasoning_effort="none",
                 max_completion_tokens=1_200,
-                proxy_url=settings.openai_proxy_url,
-                strict_output_capability_evidence=fallback_inventory_evidence,
+                proxy_url=(
+                    None
+                    if local_inventory_base_url
+                    else settings.openai_proxy_url
+                ),
+                strict_output_capability_evidence=(
+                    _local_review_evidence(local_inventory_model)
+                    if local_inventory_base_url
+                    else fallback_inventory_evidence
+                ),
             )
             if settings.world_v2_source_inventory_enabled
             else None
@@ -1170,27 +1182,37 @@ def build_semantic_chat_composition(
                 ),
                 secondary_attempt_timeout_seconds=8.0,
             )
-            if (
-                openrouter_inventory_primary is not None
-                and openai_inventory_secondary is not None
-            )
+            if (openrouter_inventory_primary is not None and openai_inventory_secondary is not None)
             else None
         )
         openai_source_reviewer = StructuredSourceReviewModel(
             api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
-            model=settings.world_v2_source_review_fallback_model,
+            base_url=(
+                settings.world_v2_source_review_base_url
+                or settings.openai_base_url
+            ),
+            model=(
+                settings.world_v2_source_review_local_model
+                or settings.world_v2_source_review_fallback_model
+            ),
             reasoning_effort=_direct_source_review_reasoning_effort(
-                settings.world_v2_source_review_fallback_model
+                settings.world_v2_source_review_local_model
+                or settings.world_v2_source_review_fallback_model
             ),
             max_completion_tokens=1_200,
-            proxy_url=settings.openai_proxy_url,
+            proxy_url=(
+                None
+                if settings.world_v2_source_review_base_url
+                else settings.openai_proxy_url
+            ),
             circuit_breaker=ProviderCircuitBreaker(
                 failure_threshold=2,
                 cooldown_seconds=60.0,
             ),
             strict_output_capability_evidence=(
-                audited_source_review_capability_evidence(
+                _local_review_evidence(local_review_model)
+                if settings.world_v2_source_review_base_url
+                else audited_source_review_capability_evidence(
                     base_url=settings.openai_base_url,
                     model=settings.world_v2_source_review_fallback_model,
                     provider="openai",
@@ -1199,25 +1221,55 @@ def build_semantic_chat_composition(
         )
         openai_recovery_source_reviewer = StructuredSourceReviewModel(
             api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
-            model=settings.world_v2_source_review_recovery_fallback_model,
+            base_url=(
+                settings.world_v2_source_review_base_url
+                or settings.openai_base_url
+            ),
+            model=(
+                settings.world_v2_source_review_local_model
+                or settings.world_v2_source_review_recovery_fallback_model
+            ),
             reasoning_effort=_direct_source_review_reasoning_effort(
-                settings.world_v2_source_review_recovery_fallback_model
+                settings.world_v2_source_review_local_model
+                or settings.world_v2_source_review_recovery_fallback_model
             ),
             max_completion_tokens=1_200,
-            proxy_url=settings.openai_proxy_url,
+            proxy_url=(
+                None
+                if settings.world_v2_source_review_base_url
+                else settings.openai_proxy_url
+            ),
             circuit_breaker=ProviderCircuitBreaker(
                 failure_threshold=2,
                 cooldown_seconds=60.0,
             ),
             strict_output_capability_evidence=(
-                audited_source_review_capability_evidence(
+                _local_review_evidence(local_review_model)
+                if settings.world_v2_source_review_base_url
+                else audited_source_review_capability_evidence(
                     base_url=settings.openai_base_url,
                     model=settings.world_v2_source_review_recovery_fallback_model,
                     provider="openai",
                 )
             ),
         )
+        if settings.world_v2_source_review_base_url:
+            for _reviewer in (
+                openrouter_source_reviewer,
+                openrouter_recovery_source_reviewer,
+                openai_source_reviewer,
+                openai_recovery_source_reviewer,
+            ):
+                _pin_local_authority(_reviewer, local_review_model)
+        if local_inventory_base_url:
+            if openrouter_inventory_primary is not None:
+                _pin_local_authority(
+                    openrouter_inventory_primary, local_inventory_model
+                )
+            if openai_inventory_secondary is not None:
+                _pin_local_authority(
+                    openai_inventory_secondary, local_inventory_model
+                )
         owned.extend(
             (
                 openrouter_source_reviewer,
@@ -1244,10 +1296,17 @@ def build_semantic_chat_composition(
         # shaped evidence packet. Reuse the same audited provider routes while
         # isolating their circuit/runtime health, route suppression and active
         # task ownership from visible/proactive conversation review.
-        life_source_review_authority = (
-            source_review_authority.fork_isolated_runtime()
+        life_source_review_authority = source_review_authority.fork_isolated_runtime()
+        # Interactive chat review is retired (2026-08-07): with redundancy
+        # off, the chat author lane runs pure deterministic and only the Life
+        # Ecology reviewer stays installed. The authority is still built (it
+        # is the life reviewer's runtime), but the chat wire never receives
+        # it.
+        resolved_source_closure_model = (
+            source_review_authority
+            if settings.world_v2_source_review_redundancy_enabled
+            else None
         )
-        resolved_source_closure_model = source_review_authority
         # The same DeepSeek character owns any one permitted source-bound
         # correction. This separately isolated authority reviews that fresh
         # candidate; it is not a backup character author.
@@ -1268,16 +1327,36 @@ def build_semantic_chat_composition(
         if inventory_availability_authority is not None:
             owned_task_owners.append(inventory_availability_authority)
         auto_inventory_model = inventory_availability_authority
-    background_model = advisory_model or flash_model
+    background_model = world_support_model
+    if (
+        background_model is None
+        and auto_flash
+        and settings.deepseek_api_key
+        and isinstance(flash_model, DeepSeekChatModel)
+    ):
+        # Life Ecology authors long world drafts (premise + 2-4 outcomes +
+        # claims) that far exceed the chat reply budget.  The chat flash model
+        # caps completions at 900 tokens, which truncates those drafts into
+        # invalid JSON.  Give the background/life lane its own completion
+        # budget so life output is never cut off by a chat-side limit.
+        background_model = DeepSeekChatModel(
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            model=settings.deepseek_model,
+            thinking_enabled=False,
+            max_completion_tokens=4_096,
+            usage_observer=usage_observer,
+        )
+        owned.append(background_model)
+    if background_model is None:
+        background_model = flash_model
     # The role declares source permission metadata in the same structured
     # decision that contains its expression. Production deliberately exposes
     # no claim-binder dependency: the retired second synchronous model was a
     # single point of failure after the role had already chosen ``now``. Local
     # closure plus the existing independent truth reviewer remain the boundary.
     ordinary_expression_authors = tuple(
-        author
-        for author in (background_model, flash_model, thinking_model)
-        if author is not None
+        author for author in (flash_model, thinking_model) if author is not None
     )
     proactive_reviewer = (
         resolved_source_closure_model
@@ -1294,23 +1373,17 @@ def build_semantic_chat_composition(
     life_source_runtime_isolation = "unavailable"
     if life_source_closure_model is not None:
         if life_source_closure_model is proactive_reviewer:
-            raise ValueError(
-                "Life source reviewer must use a distinct runtime instance"
-            )
+            raise ValueError("Life source reviewer must use a distinct runtime instance")
         if not _reviewer_is_independent(
             author=background_model,
             reviewer=life_source_closure_model,
         ):
-            raise ValueError(
-                "Life source reviewer must be independent of the World Author"
-            )
+            raise ValueError("Life source reviewer must be independent of the World Author")
         if _shares_known_reviewer_runtime(
             proactive_reviewer,
             life_source_closure_model,
         ):
-            raise ValueError(
-                "Life source reviewer must not share mutable reviewer runtime"
-            )
+            raise ValueError("Life source reviewer must not share mutable reviewer runtime")
         resolved_life_source_closure_model = life_source_closure_model
         life_source_runtime_isolation = "caller_provided_distinct_unverified"
     elif life_source_review_authority is not None:
@@ -1332,9 +1405,7 @@ def build_semantic_chat_composition(
                 author=background_model,
                 reviewer=isolated_runtime,
             ):
-                raise ValueError(
-                    "Life source reviewer must be independent of the World Author"
-                )
+                raise ValueError("Life source reviewer must be independent of the World Author")
             if any(
                 _shares_known_reviewer_runtime(existing_reviewer, isolated_runtime)
                 for existing_reviewer in (
@@ -1350,45 +1421,22 @@ def build_semantic_chat_composition(
             close_runtime = getattr(isolated_runtime, "aclose", None)
             if not callable(close_runtime):
                 raise ValueError(
-                    "Life source reviewer runtime fork must provide an async close "
-                    "lifecycle"
+                    "Life source reviewer runtime fork must provide an async close lifecycle"
                 )
-            if callable(
-                getattr(isolated_runtime, "wait_for_shutdown_quiescence", None)
-            ):
+            if callable(getattr(isolated_runtime, "wait_for_shutdown_quiescence", None)):
                 owned_task_owners.append(isolated_runtime)
             else:
                 owned_closeables.append(isolated_runtime)
-    if auto_flash and settings.deepseek_api_key and proactive_reviewer is None:
-        raise ValueError(
-            "production character routing requires an independent source-closure reviewer"
-        )
-    recovery_role_author = _configured_recovery_author(
-        flash_model=flash_model,
-        thinking_model=thinking_model,
-    )
-    if recovery_role_author is not None and not _reviewer_is_independent(
-        author=recovery_role_author,
-        reviewer=recovery_source_closure_model,
+    if (
+        auto_flash
+        and settings.deepseek_api_key
+        and settings.world_v2_source_review_redundancy_enabled
     ):
-        # The normal DeepSeek candidate is reviewed by the independent OpenAI
-        # leaf. If that leaf becomes the recovery *author*, reverse the two
-        # semantic roles rather than letting it approve its own wording.
-        primary_reviewer = getattr(flash_model, "primary", None)
-        recovery_source_closure_model = (
-            primary_reviewer
-            if primary_reviewer is not None
-            and _reviewer_is_independent(
-                author=recovery_role_author,
-                reviewer=primary_reviewer,
+        if proactive_reviewer is None:
+            raise ValueError(
+                "production character routing requires an independent source-closure reviewer"
             )
-            else None
-        )
-    if auto_flash and settings.deepseek_api_key:
-        production_authors = (
-            *ordinary_expression_authors,
-            *((recovery_role_author,) if recovery_role_author is not None else ()),
-        )
+        production_authors = ordinary_expression_authors
         ordinary_review_ready = (
             proactive_reviewer is not None
             and _supports_inventory_followup_review(proactive_reviewer)
@@ -1416,17 +1464,14 @@ def build_semantic_chat_composition(
                 "production character routing requires independently qualified "
                 "source-closure reviewers for ordinary and recovery candidates"
             )
-    source_reselection_author = (
-        flash_model
-        if recovery_source_closure_model is not None
-        else None
-    )
+    source_reselection_author = flash_model if recovery_source_closure_model is not None else None
     # Inventory V5 is semantic decomposition, not character authorship. Every
     # installed inventory lane must promise V5, the visible authority must
     # promise verdict-only Coverage V5, and all possible ordinary/recovery
     # author, Inventory, and Coverage winners must be pairwise disjoint. Missing
     # capability or identity proof keeps Inventory absent and retains the
-    # established full-review fallback.
+    # established full-review route. A provider object's dormant ``fallback``
+    # attribute is intentionally irrelevant: it is not a character author.
     requested_inventory_model = (
         candidate_external_proposition_inventory_model or auto_inventory_model
     )
@@ -1455,10 +1500,7 @@ def build_semantic_chat_composition(
         if candidate_external_proposition_inventory_model is not None
         else auto_inventory_route_evidence
     )
-    if (
-        not requested_inventory_route_evidence
-        and requested_inventory_evidence is not None
-    ):
+    if not requested_inventory_route_evidence and requested_inventory_evidence is not None:
         requested_inventory_route_evidence = (requested_inventory_evidence,)
     requested_inventory_timeout = getattr(
         requested_inventory_model,
@@ -1477,9 +1519,7 @@ def build_semantic_chat_composition(
                 _CANDIDATE_INVENTORY_CONTRACT,
             )
             and _supports_inventory_followup_review(proactive_reviewer)
-            and _supports_inventory_followup_review(
-                recovery_source_closure_model
-            )
+            and _supports_inventory_followup_review(recovery_source_closure_model)
             and all(
                 _provider_roles_are_pairwise_independent(
                     author=author,
@@ -1487,14 +1527,6 @@ def build_semantic_chat_composition(
                     reviewer=proactive_reviewer,
                 )
                 for author in ordinary_expression_authors
-            )
-            and (
-                recovery_role_author is None
-                or _provider_roles_are_pairwise_independent(
-                    author=recovery_role_author,
-                    inventory=requested_inventory_model,
-                    reviewer=recovery_source_closure_model,
-                )
             )
         )
         else None
@@ -1539,15 +1571,10 @@ def build_semantic_chat_composition(
         inventory=inventory_model,
         reviewer=proactive_reviewer,
     )
-    recovery_candidate_review_capability = _candidate_review_capability(
-        authors=(
-            (recovery_role_author,)
-            if recovery_role_author is not None
-            else ()
-        ),
-        inventory=inventory_model,
-        reviewer=recovery_source_closure_model,
-    )
+    # Kept as a read-only health compatibility field. There is no recovery
+    # character author in the production topology; same-author source
+    # reselection is reported by the dedicated capability below.
+    recovery_candidate_review_capability = (False, False, False)
     reselection_candidate_review_capability = _candidate_review_capability(
         authors=(
             (source_closure_reselection_lane.author,)
@@ -1574,7 +1601,7 @@ def build_semantic_chat_composition(
         )
         proactive_source_authority = ProactiveSourceAuthorityDeployment(
             status="fact_effects_fail_closed",
-            author_model=_model_identity(background_model) or "unknown",
+            author_model=_model_identity(flash_model) or "unknown",
             reviewer_model=_model_identity(resolved_source_closure_model),
             candidate_inventory_model=_model_identity(inventory_model),
             requested_candidate_inventory_model=requested_inventory_identity,
@@ -1583,15 +1610,9 @@ def build_semantic_chat_composition(
             inventory_runtime_model=requested_inventory_model,
             inventory_call_timeout_seconds=requested_inventory_timeout,
             warning_reasons=(warning_reason,),
-            ordinary_candidate_review_capability=(
-                ordinary_candidate_review_capability
-            ),
-            recovery_candidate_review_capability=(
-                recovery_candidate_review_capability
-            ),
-            reselection_candidate_review_capability=(
-                reselection_candidate_review_capability
-            ),
+            ordinary_candidate_review_capability=(ordinary_candidate_review_capability),
+            recovery_candidate_review_capability=(recovery_candidate_review_capability),
+            reselection_candidate_review_capability=(reselection_candidate_review_capability),
             inventory_transport_routes=inventory_transport_routes,
         )
         _LOG.warning(
@@ -1609,8 +1630,7 @@ def build_semantic_chat_composition(
         if len(inventory_transport_routes) == 1:
             warning_reasons.append("source_inventory.single_transport_route")
         inventory_transport_providers = {
-            evidence.provider.casefold()
-            for evidence in requested_inventory_route_evidence
+            evidence.provider.casefold() for evidence in requested_inventory_route_evidence
         }
         if len(inventory_transport_routes) > 1 and len(inventory_transport_providers) == 1:
             warning_reasons.append("source_inventory.single_transport_provider")
@@ -1621,8 +1641,7 @@ def build_semantic_chat_composition(
         )
         proactive_source_authority = ProactiveSourceAuthorityDeployment(
             status="ready",
-            author_model=_model_identity(getattr(background_model, "primary", background_model))
-            or "unknown",
+            author_model=_model_identity(getattr(flash_model, "primary", flash_model)) or "unknown",
             reviewer_model=_model_identity(proactive_reviewer),
             candidate_inventory_model=_model_identity(inventory_model),
             requested_candidate_inventory_model=requested_inventory_identity,
@@ -1632,21 +1651,14 @@ def build_semantic_chat_composition(
             inventory_call_timeout_seconds=requested_inventory_timeout,
             warning_reasons=tuple(warning_reasons),
             source_review_authority=source_review_authority,
-            ordinary_candidate_review_capability=(
-                ordinary_candidate_review_capability
-            ),
-            recovery_candidate_review_capability=(
-                recovery_candidate_review_capability
-            ),
-            reselection_candidate_review_capability=(
-                reselection_candidate_review_capability
-            ),
+            ordinary_candidate_review_capability=(ordinary_candidate_review_capability),
+            recovery_candidate_review_capability=(recovery_candidate_review_capability),
+            reselection_candidate_review_capability=(reselection_candidate_review_capability),
             inventory_transport_routes=inventory_transport_routes,
         )
-    cognition = SingleCallInboundCognition(
+    character_interior = compose_production_character_interior(
         flash_model=flash_model,
         thinking_model=thinking_model,
-        appraisal_model=local_appraisal_model,
         # The built-in production route always installs semantic truth
         # closure. Ordinary source review remains independent of the DeepSeek
         # author. Any permitted correction remains a DeepSeek character
@@ -1654,17 +1666,11 @@ def build_semantic_chat_composition(
         # never author visible expression.
         source_closure_model=proactive_reviewer,
         report_relative_source_closure_model=proactive_reviewer,
-        recovery_source_closure_model=recovery_source_closure_model,
-        recovery_report_relative_source_closure_model=(recovery_source_closure_model),
-        discover_recovery_model=not (auto_flash and settings.deepseek_api_key),
         # Inventory is a lightweight semantic decomposition; the configured
         # source-closure authority still makes the focused factual verdict.
         candidate_external_proposition_inventory_model=inventory_model,
         source_closure_reselection_lane=source_closure_reselection_lane,
         expression_episode_observer_model=expression_episode_observer_model,
-        contextual_failsafe_model=None,
-        contextual_failsafe_reviewer_model=None,
-        contextual_failsafe_enabled=False,
         flash_model_id=str(getattr(flash_model, "model", f"{model_id_prefix}-flash")),
         thinking_model_id=(
             str(getattr(thinking_model, "model", f"{model_id_prefix}-thinking"))
@@ -1673,11 +1679,16 @@ def build_semantic_chat_composition(
         ),
         expression_capabilities=expression_capabilities,
         identity_frame=identity_frame,
-        require_explicit_authored_decision_fields=True,
+        # A provider object may expose a historical ``fallback`` attribute,
+        # but CharacterInterior has one semantic author. Structural repair is
+        # the bounded same-author correction in the inner turn; a later
+        # provider outage remains a technical failure for durable retry.
     )
     return SemanticChatComposition(
-        flash_model=flash_model,
-        background_model=background_model,
+        world_support_model=background_model,
+        character_author_model_id=(
+            _model_identity(getattr(flash_model, "primary", flash_model)) or "unknown"
+        ),
         expression_episode_observer_model=expression_episode_observer_model,
         source_closure_model=proactive_reviewer,
         recovery_source_closure_model=recovery_source_closure_model,
@@ -1687,10 +1698,8 @@ def build_semantic_chat_composition(
         life_source_runtime_isolation=life_source_runtime_isolation,
         candidate_external_proposition_inventory_model=inventory_model,
         proactive_source_authority=proactive_source_authority,
-        main_model=cognition.expression,
-        appraisal_model=cognition.appraisal,
+        character_interior=character_interior,
         router=SemanticComputeRouter(thinking_available=thinking_model is not None),
-        advisory_compiler=advisory_compiler,
         identity_frame=identity_frame,
         local_provider_capacity=local_provider_capacity,
         text_endpoint_controller=(

@@ -56,23 +56,6 @@ def test_drift_detection_names_the_file_that_must_change(monkeypatch) -> None:
     assert "afterthought_author" in message
 
 
-def test_framework_hard_gate_requires_a_resolvable_spec(monkeypatch) -> None:
-    """A non-hand-rolled row must resolve to a real VerticalSpec surface."""
-
-    import dataclasses
-
-    broken = tuple(
-        dataclasses.replace(item, spec_builder="does_not_exist")
-        if item.lane_id == "quick_reaction"
-        else item
-        for item in VERTICAL_REGISTRY
-    )
-    monkeypatch.setattr(vertical_registry, "VERTICAL_REGISTRY", broken)
-    with pytest.raises(VerticalRegistryError) as caught:
-        assert_bounded_vertical_coverage()
-    assert "does_not_exist" in str(caught.value)
-
-
 def test_composition_root_asserts_coverage_before_building() -> None:
     source = (WORLD_V2 / "production_turn_application.py").read_text(encoding="utf-8")
     build_start = source.index("def build_sqlite_world_v2_turn_application")
@@ -99,9 +82,7 @@ def _imported_modules(path: Path) -> set[str]:
 
 
 def test_hand_rolled_wells_never_import_the_framework() -> None:
-    """P3 discipline, raised early: framework evolution must never require a
-    hand-written well to change; the frozen pilot twins especially must stay
-    byte-stable for the hot-rollback window."""
+    """Framework evolution must never require a hand-written well to change."""
 
     violations: list[str] = []
     for row in VERTICAL_REGISTRY:
@@ -117,25 +98,13 @@ def test_hand_rolled_wells_never_import_the_framework() -> None:
         forbidden = _imported_modules(path) & FRAMEWORK_MODULES
         if forbidden:
             violations.append(f"{row.module}: imports {sorted(forbidden)}")
-    # The frozen pilot twins are hand-written implementations that no longer
-    # own a registry row of their own; guard them explicitly.
-    for frozen_twin in ("quick_reaction.py",):
-        forbidden = _imported_modules(WORLD_V2 / frozen_twin) & FRAMEWORK_MODULES
-        if forbidden:
-            violations.append(f"{frozen_twin}: imports {sorted(forbidden)}")
     assert violations == []
 
 
-def test_framework_editions_do_not_import_the_frozen_twins() -> None:
-    """The coexistence window must not create a hidden coupling: deleting the
-    hand-written files later must not break the framework editions."""
-
-    frozen = {
-        "companion_daemon.world_v2.quick_reaction",
-    }
-    for module in ("quick_reaction_vertical.py",):
-        overlap = _imported_modules(WORLD_V2 / module) & frozen
-        assert not overlap, f"{module} imports the frozen twin(s): {sorted(overlap)}"
+def test_retired_quick_reaction_author_has_no_registry_or_module_surface() -> None:
+    assert all(item.lane_id != "quick_reaction" for item in VERTICAL_REGISTRY)
+    assert not (WORLD_V2 / "quick_reaction.py").exists()
+    assert not (WORLD_V2 / "quick_reaction_vertical.py").exists()
 
 
 def test_retired_afterthought_process_kind_is_replay_only() -> None:
@@ -148,28 +117,33 @@ def test_retired_afterthought_process_kind_is_replay_only() -> None:
     assert not (WORLD_V2 / "afterthought_author_vertical.py").exists()
 
 
-def test_pilot_rollback_switch_reads_the_environment(monkeypatch) -> None:
-    from companion_daemon.world_v2.production_turn_application import _bdv_pilot_disabled
+def test_retired_external_result_author_is_replay_only() -> None:
+    row = next(item for item in VERTICAL_REGISTRY if item.lane_id == "external_result")
 
-    monkeypatch.delenv("WORLD_V2_BDV_PILOT_DISABLED", raising=False)
-    assert _bdv_pilot_disabled() is False
-    for value in ("1", "true", "YES", " on "):
-        monkeypatch.setenv("WORLD_V2_BDV_PILOT_DISABLED", value)
-        assert _bdv_pilot_disabled() is True, value
-    for value in ("", "0", "false", "off"):
-        monkeypatch.setenv("WORLD_V2_BDV_PILOT_DISABLED", value)
-        assert _bdv_pilot_disabled() is False, value
+    assert row.process_kinds == ("external_result_deliberation",)
+    assert row.shape == "infrastructure"
+    assert row.module == "reducers.py"
+    assert row.runtime_drain_markers == ()
+    assert row.composition_markers == ()
+    assert "retired" in row.drain_site
+    assert not (WORLD_V2 / "external_result_trigger_runtime.py").exists()
 
 
-def test_frozen_twin_identity_constants_stay_equal() -> None:
-    """Both editions must keep byte-identical proposal namespaces while the
-    rollback window is open."""
-
-    from companion_daemon.world_v2.quick_reaction import (
-        QUICK_REACTION_PROPOSAL_PREFIX as hand_quick,
-    )
-    from companion_daemon.world_v2.quick_reaction_vertical import (
-        QUICK_REACTION_PROPOSAL_PREFIX as framework_quick,
+def test_live_affect_and_historical_trigger_are_registered_separately() -> None:
+    live = next(item for item in VERTICAL_REGISTRY if item.lane_id == "affect")
+    replay = next(
+        item
+        for item in VERTICAL_REGISTRY
+        if item.lane_id == "affect_deliberation_replay"
     )
 
-    assert hand_quick == framework_quick
+    assert live.shape == "inline_once"
+    assert live.module == "immediate_emotion_proposal_worker.py"
+    assert live.grammar_lanes == ("affect",)
+    assert live.process_kinds == ()
+    assert replay.shape == "infrastructure"
+    assert replay.module == "reducers.py"
+    assert replay.process_kinds == ("affect_deliberation",)
+    assert replay.runtime_drain_markers == ()
+    assert replay.composition_markers == ()
+    assert "retired" in replay.drain_site

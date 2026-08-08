@@ -165,6 +165,15 @@ TEXT_ONLY_EXPRESSION_CAPABILITIES = ExpressionDraftCapabilities(
     modalities=("text",),
 )
 
+# Every live conversation entry requires the final model-owned private state.
+# ``TEXT_ONLY_EXPRESSION_CAPABILITIES`` remains byte-compatible for historical
+# replay and explicitly scoped parser tests only.
+PRODUCTION_TEXT_ONLY_EXPRESSION_CAPABILITIES = (
+    TEXT_ONLY_EXPRESSION_CAPABILITIES.model_copy(
+        update={"private_turn_state_mode": "required"}
+    )
+)
+
 QQ_NAPCAT_EXPRESSION_CAPABILITIES = ExpressionDraftCapabilities(
     profile_id="expression:qq-napcat.1",
     modalities=("text", "reaction", "sticker", "typing"),
@@ -1317,12 +1326,6 @@ def expression_hard_boundary_manifest(
         for source_ref in aliases.canonical_refs - claim_authority_refs
         if source_ref in _all_context_attention_tokens(context)
     )
-    attention_only_aliases = {
-        alias: canonical
-        for alias, canonical in aliases.entries
-        if canonical not in claim_authority_refs
-        and canonical in _all_context_attention_tokens(context)
-    }
     claim_authority_aliases = {
         alias: canonical
         for alias, canonical in aliases.entries
@@ -1341,7 +1344,6 @@ def expression_hard_boundary_manifest(
                 "unique": True,
                 "authority": "attention_provenance_only_not_world_fact_authority",
                 "attention_only_not_fact_authority": attention_only_refs,
-                "additional_attention_only_source_ref_aliases": (attention_only_aliases),
             },
             "epistemic_authority": {
                 "character_private_mental_state": {
@@ -1476,6 +1478,46 @@ def invalid_world_claim_source_indexes(
         if claim.scope == "subjective_or_hypothetical"
         or not set(claim.source_refs).issubset(allowed[claim.scope])
     )
+
+
+def strip_unpinned_world_claims(
+    *,
+    draft: ExpressionDraft,
+    request: ModelInput,
+    stable_identity_source_refs: frozenset[str] = frozenset(),
+) -> ExpressionDraft:
+    """Drop world claims whose source refs fall outside their semantic lane.
+
+    The author model sometimes cites a plausible-looking ref that the frozen
+    Capsule does not bind (a fabricated ref). Without this deterministic
+    strip the whole turn fails closed and the character goes silent. Stripping
+    keeps the reply and still honors the truth boundary: an unpinned claim is
+    never committed to the World ledger. Only lane-invalid claims are
+    dropped; all other claim validation stays strict.
+    """
+
+    invalid_indexes = frozenset(
+        invalid_world_claim_source_indexes(
+            draft=draft,
+            request=request,
+            stable_identity_source_refs=stable_identity_source_refs,
+        )
+    )
+    if not invalid_indexes:
+        return draft
+    remaining = [
+        claim
+        for index, claim in enumerate(draft.world_claims)
+        if index not in invalid_indexes
+    ]
+    import logging
+
+    logging.getLogger("world_v2.claim_strip").warning(
+        "stripped %d unpinned world claim(s) (fabricated refs): %s",
+        len(draft.world_claims) - len(remaining),
+        [claim.claim_text[:60] for claim in draft.world_claims if draft.world_claims.index(claim) in invalid_indexes][:5],
+    )
+    return draft.model_copy(update={"world_claims": tuple(remaining)})
 
 
 def _validate_world_claims(
@@ -1870,8 +1912,14 @@ def materialize_expression_draft(
     stable_identity_source_refs: frozenset[str] = frozenset(),
     private_state_context_json: str | None = None,
     source_ref_aliases: SourceRefAliasTable | None = None,
+    strip_unpinned_claims: bool = False,
 ) -> DecisionProposal:
-    """Bind one model choice to the verified trigger and immutable effects."""
+    """Bind one model choice to the verified trigger and immutable effects.
+
+    ``strip_unpinned_claims`` enables the deterministic fabricated-ref
+    degradation: lane-invalid world claims are dropped so the reply survives
+    instead of failing closed (see ``strip_unpinned_world_claims``).
+    """
 
     trigger = request.trigger_message
     if trigger is None:
@@ -1894,6 +1942,12 @@ def materialize_expression_draft(
     # JSON arrays are the natural wire representation of immutable tuples.
     # Field validators remain strict about every scalar and cross-field rule.
     draft = ExpressionDraft.model_validate_json(_canonical_json(value), strict=True)
+    if strip_unpinned_claims:
+        draft = strip_unpinned_world_claims(
+            draft=draft,
+            request=request,
+            stable_identity_source_refs=stable_identity_source_refs,
+        )
     _validate_world_claims(
         draft=draft,
         request=request,
@@ -2163,6 +2217,7 @@ __all__ = [
     "QQ_NAPCAT_EXPRESSION_CAPABILITIES",
     "SourceRefAliasTable",
     "TEXT_ONLY_EXPRESSION_CAPABILITIES",
+    "PRODUCTION_TEXT_ONLY_EXPRESSION_CAPABILITIES",
     "build_source_ref_alias_table",
     "current_counterpart_report_source_refs",
     "expand_expression_source_ref_aliases",

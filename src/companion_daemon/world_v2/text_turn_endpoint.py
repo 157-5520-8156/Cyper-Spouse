@@ -82,10 +82,12 @@ class SemanticEndpointPrediction:
     confidence_bp: int
     evidence_summary: str
     model_id: str
+    compact_reply_hint_bp: int = 5_000
 
     def __post_init__(self) -> None:
         _basis_points("continuation_probability_bp", self.continuation_probability_bp)
         _basis_points("confidence_bp", self.confidence_bp)
+        _basis_points("compact_reply_hint_bp", self.compact_reply_hint_bp)
         if not self.evidence_summary or len(self.evidence_summary) > 512:
             raise ValueError("endpoint evidence summary is empty or too large")
         if not self.model_id or len(self.model_id) > 256:
@@ -112,6 +114,7 @@ class ChatSemanticEndpointModel:
             "continuation_probability_bp",
             "confidence_bp",
             "evidence_summary",
+            "compact_reply_hint_bp",
         }
     )
 
@@ -128,10 +131,15 @@ class ChatSemanticEndpointModel:
                 "content": (
                     "You are a typed-conversation endpoint estimator. Estimate only the "
                     "probability that the same user will add another message bubble to the "
-                    "current thought soon. You have no authority over whether or how the "
+                    "current thought soon, and how suitable a short single reply would be. "
+                    "You have no authority over whether or how the "
                     "character replies, waits, interrupts, or stays silent. Return exactly "
                     "one JSON object with continuation_probability_bp (integer 0..10000), "
-                    "confidence_bp (integer 0..10000), and evidence_summary (brief text). "
+                    "confidence_bp (integer 0..10000), evidence_summary (brief text), and "
+                    "compact_reply_hint_bp (integer 0..10000: how well a short single text "
+                    "reply fits this message; high for greetings, small talk, and simple "
+                    "questions, low for questions that need a factual answer or a story, "
+                    "or messages with complex content). "
                     "Do not return a reply decision, response wording, motive, or character state."
                 ),
             },
@@ -176,17 +184,21 @@ class ChatSemanticEndpointModel:
         probability = value["continuation_probability_bp"]
         confidence = value["confidence_bp"]
         summary = value["evidence_summary"]
+        compact_hint = value["compact_reply_hint_bp"]
         if not isinstance(probability, int) or isinstance(probability, bool):
             raise ValueError("endpoint continuation probability must be integer basis points")
         if not isinstance(confidence, int) or isinstance(confidence, bool):
             raise ValueError("endpoint confidence must be integer basis points")
         if not isinstance(summary, str):
             raise ValueError("endpoint evidence summary must be text")
+        if not isinstance(compact_hint, int) or isinstance(compact_hint, bool):
+            raise ValueError("endpoint compact reply hint must be integer basis points")
         return SemanticEndpointPrediction(
             continuation_probability_bp=probability,
             confidence_bp=confidence,
             evidence_summary=summary.strip(),
             model_id=self.model,
+            compact_reply_hint_bp=compact_hint,
         )
 
 
@@ -203,6 +215,7 @@ class TextTurnEndpointSchedule:
     evaluated_in_ms: float
     failure_code: str | None = None
     semantic_evidence_summary: str | None = None
+    semantic_compact_reply_hint_bp: int | None = None
 
 
 class TextTurnEndpointController:
@@ -268,7 +281,7 @@ class TextTurnEndpointController:
                         # Timing out the listener must not cancel a request
                         # which may still be running in the serial local model.
                         # Cancellation would poison its conservative capacity
-                        # lease and suppress appraisal/emotion work for minutes.
+                        # lease and suppress later endpoint predictions for minutes.
                         prediction = await asyncio.shield(active)
                 except TimeoutError:
                     failure_code = "timeout"
@@ -299,6 +312,7 @@ class TextTurnEndpointController:
                 evaluated_in_ms=max(0.0, (perf_counter() - started) * 1_000),
                 failure_code=failure_code,
                 semantic_evidence_summary=None,
+                semantic_compact_reply_hint_bp=None,
             )
         else:
             self._model_successes += 1
@@ -315,6 +329,7 @@ class TextTurnEndpointController:
                 reason_codes=tuple(reason_codes),
                 evaluated_in_ms=max(0.0, (perf_counter() - started) * 1_000),
                 semantic_evidence_summary=prediction.evidence_summary,
+                semantic_compact_reply_hint_bp=prediction.compact_reply_hint_bp,
             )
         self._last = schedule
         return schedule

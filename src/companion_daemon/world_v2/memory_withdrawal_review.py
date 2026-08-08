@@ -13,7 +13,7 @@ import asyncio
 from datetime import timedelta
 import hashlib
 import json
-from typing import Literal, Protocol
+from typing import Literal
 
 from .errors import ConcurrencyConflict, IdempotencyConflict
 from .event_identity import domain_idempotency_key
@@ -31,7 +31,6 @@ from .memory_reducers import (
     MEMORY_POLICY_VERSION,
 )
 from .schema_core import FrozenModel
-from .structured_completion import complete_json_object
 from .schemas import (
     ClaimLease,
     MemoryCandidateOrigin,
@@ -46,6 +45,15 @@ from .schemas import (
     memory_source_cluster_fingerprint,
 )
 from .sqlite_ledger import SQLiteWorldLedger
+from .character_interior.core import CharacterInterior
+from .character_interior.audit import recorded_character_interior_model_result
+from .character_interior.life_memory import (
+    _WITHDRAWAL_PURPOSE,
+    _materialize_withdrawal_decision,
+    _memory_opportunity,
+    _withdrawal_capability,
+)
+from .character_interior.purpose_context import InteriorPurposeContext
 
 
 def _canonical(value: object) -> str:
@@ -56,20 +64,26 @@ def _digest(value: object) -> str:
     return hashlib.sha256(_canonical(value).encode()).hexdigest()
 
 
-class MemoryWithdrawalReviewChatModel(Protocol):
-    model: str
-
-    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.2) -> str: ...
-
-
 class MemoryWithdrawalReviewDecision(FrozenModel):
     disposition: Literal["retain", "forget", "revise"]
 
 
-def materialize_memory_withdrawal_review_draft(raw: str) -> MemoryWithdrawalReviewDecision:
+class MemoryWithdrawalReviewTechnicalFailure(RuntimeError):
+    """The sole character author did not produce a valid review decision."""
+
+    def __init__(self, failure_code: str) -> None:
+        super().__init__(failure_code)
+        self.failure_code = failure_code
+
+
+def materialize_memory_withdrawal_review_draft(
+    raw: object,
+) -> MemoryWithdrawalReviewDecision:
+    if not isinstance(raw, str):
+        raise ValueError("memory review model result was not JSON text")
     try:
         value = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except (TypeError, json.JSONDecodeError) as exc:
         raise ValueError("memory review model did not return one JSON object") from exc
     if not isinstance(value, dict) or set(value) != {"disposition"}:
         raise ValueError("memory review draft contains unsupported fields")
@@ -79,73 +93,10 @@ def materialize_memory_withdrawal_review_draft(raw: str) -> MemoryWithdrawalRevi
         raise ValueError("memory review disposition is invalid") from exc
 
 
-class MemoryWithdrawalReviewAdapter:
-    """Expose classification, never authority-bearing ids, hashes, or payloads."""
-
-    VERSION = "memory-withdrawal-review.1"
-
-    def __init__(self, *, model: MemoryWithdrawalReviewChatModel, temperature: float = 0.15) -> None:
-        if not 0 <= temperature <= 2:
-            raise ValueError("memory review temperature must be between 0 and 2")
-        self._model = model
-        self._temperature = temperature
-
-    async def review(
-        self,
-        *,
-        candidate: MemoryCandidateProjection,
-        withdrawal: FactChangedPayload,
-        withdrawal_payload_hash: str,
-        can_revise: bool,
-    ) -> MemoryWithdrawalReviewDecision:
-        raw = await complete_json_object(
-            self._model,
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "Review one retrieval-memory cue after one of its verified Fact sources was "
-                        "withdrawn. Return exactly one JSON object with disposition retain, forget, "
-                        "or revise. retain means preserve the historical cue without active retrieval "
-                        "changes; forget means deactivate retrieval while preserving history; revise "
-                        "means remove only the invalidated source and is valid only when can_revise is "
-                        "true. Decide by future continuity, relationship relevance, privacy, emotional "
-                        "residue, and whether surviving sources independently support the cue. Do not "
-                        "return prose, ids, hashes, summaries, actions, or replacement facts."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": _canonical(
-                        {
-                            "candidate": {
-                                "cue_kind": candidate.values.cue_kind,
-                                "retention_rationales": candidate.values.retention_rationales,
-                                "privacy_ceiling": candidate.values.privacy_ceiling,
-                                "salience": candidate.values.salience.model_dump(mode="json"),
-                                "source_count": len(candidate.values.source_bindings),
-                                "can_revise": can_revise,
-                            },
-                            "withdrawal": {
-                                "predicate_code": withdrawal.fact_after.values.predicate_code,
-                                "reason_code": withdrawal.fact_after.values.withdrawal_reason_code,
-                                "source_hash": withdrawal_payload_hash,
-                            },
-                        }
-                    ),
-                },
-            ],
-            temperature=self._temperature,
-        )
-        return materialize_memory_withdrawal_review_draft(raw)
-
-
 class MemoryWithdrawalReviewRunResult(FrozenModel):
     trigger_id: str
     status: Literal["idle", "owned_elsewhere", "processed", "joined"]
-    work_status: Literal[
-        "retain", "forget", "revise", "invalid_revise", "invalid_draft"
-    ] | None = None
+    work_status: Literal["retain", "forget", "revise", "technical_failure"] | None = None
 
 
 class MemoryWithdrawalReviewRuntime:
@@ -157,17 +108,23 @@ class MemoryWithdrawalReviewRuntime:
         self,
         *,
         ledger: SQLiteWorldLedger,
-        reviewer: MemoryWithdrawalReviewAdapter,
+        character_interior: CharacterInterior,
+        actor_ref: str,
         owner_id: str,
         lease_seconds: int = 120,
         source: str = "world-v2:memory-withdrawal-review",
     ) -> None:
         if type(ledger) is not SQLiteWorldLedger:
             raise ValueError("memory withdrawal review requires the production SQLite ledger")
-        if not owner_id or not source or lease_seconds <= 0:
-            raise ValueError("memory withdrawal review requires owner, source, and positive lease")
+        if not actor_ref or not owner_id or not source or lease_seconds <= 0:
+            raise ValueError(
+                "memory withdrawal review requires character, owner, source, and positive lease"
+            )
+        if not callable(getattr(character_interior, "consider", None)):
+            raise TypeError("memory withdrawal review requires CharacterInterior.consider")
         self._ledger = ledger
-        self._reviewer = reviewer
+        self._character_interior = character_interior
+        self._actor_ref = actor_ref
         self._owner_id = owner_id
         self._lease_seconds = lease_seconds
         self._source = source
@@ -191,17 +148,28 @@ class MemoryWithdrawalReviewRuntime:
             if process is None:
                 return MemoryWithdrawalReviewRunResult(trigger_id="", status="idle")
             projection = await self._project()
-            process = next(item for item in projection.trigger_processes if item.trigger_id == process.trigger_id)
+            process = next(
+                item
+                for item in projection.trigger_processes
+                if item.trigger_id == process.trigger_id
+            )
 
         source_event, withdrawal = await self._withdrawal(process.source_evidence_ref or "")
         proposal_id = self._proposal_id(process.trigger_id)
         existing = next(
-            (item for item in projection.memory_candidate_proposals if item.proposal_id == proposal_id),
+            (
+                item
+                for item in projection.memory_candidate_proposals
+                if item.proposal_id == proposal_id
+            ),
             None,
         )
         candidate = self._candidate_for_process(
-            process=process, source_event=source_event, withdrawal=withdrawal,
-            projection=projection, existing=existing,
+            process=process,
+            source_event=source_event,
+            withdrawal=withdrawal,
+            projection=projection,
+            existing=existing,
         )
         active = await self._claim_or_reclaim(
             process=process, source_event=source_event, projection=projection
@@ -216,12 +184,17 @@ class MemoryWithdrawalReviewRuntime:
                 existing.proposed_mutation.payload_json
             )
             current = next(
-                (item for item in (await self._project()).memory_candidates if item.candidate_id == mutation.candidate_after.candidate_id),
+                (
+                    item
+                    for item in (await self._project()).memory_candidates
+                    if item.candidate_id == mutation.candidate_after.candidate_id
+                ),
                 None,
             )
             if current == mutation.candidate_after:
                 await self._complete(
-                    process=active, source_event=source_event,
+                    process=active,
+                    source_event=source_event,
                     outcome_ref=f"outcome:{active.trigger_id}:{mutation.operation}:joined",
                 )
                 return MemoryWithdrawalReviewRunResult(
@@ -237,41 +210,74 @@ class MemoryWithdrawalReviewRuntime:
             )
 
         invalidated = self._invalidated_bindings(candidate, withdrawal)
-        surviving = tuple(item for item in candidate.values.source_bindings if item not in invalidated)
+        surviving = tuple(
+            item for item in candidate.values.source_bindings if item not in invalidated
+        )
+        decision_projection = await self._project()
         try:
-            decision = await self._reviewer.review(
-                candidate=candidate,
-                withdrawal=withdrawal,
-                withdrawal_payload_hash=source_event.payload_hash,
-                can_revise=bool(surviving),
-            )
-        except ValueError:
-            # A structurally invalid classification has no authority.  Consume
-            # the exact review opportunity as an explicit no-change so a
-            # deterministic bad response cannot leave a permanent hot loop.
-            await self._complete(
-                process=active,
-                source_event=source_event,
-                outcome_ref=(
-                    f"outcome:{active.trigger_id}:invalid-draft:"
-                    + _digest(
-                        {
-                            "adapter": self._reviewer.VERSION,
-                            "source_hash": source_event.payload_hash,
-                            "candidate_revision": candidate.entity_revision,
-                        }
+            context = InteriorPurposeContext(
+                inner_turn_ref=f"memory:withdrawal:{active.trigger_id}",
+                trigger_ref=source_event.event_id,
+                cursor=self._cursor(decision_projection),
+                logical_time=(
+                    decision_projection.logical_time or source_event.logical_time
+                ),
+                source_refs=tuple(
+                    dict.fromkeys(
+                        (
+                            source_event.event_id,
+                            candidate.origin.accepted_event_ref,
+                        )
                     )
                 ),
             )
+            opportunity = _memory_opportunity(
+                world_id=self._ledger.world_id,
+                actor_ref=self._actor_ref,
+                purpose=_WITHDRAWAL_PURPOSE,
+                context=context,
+                capability_payload=_withdrawal_capability(
+                    candidate=candidate,
+                    withdrawal=withdrawal,
+                    withdrawal_payload_hash=source_event.payload_hash,
+                    can_revise=bool(surviving),
+                    technical_failure=MemoryWithdrawalReviewTechnicalFailure,
+                ),
+            )
+            interior_result = await self._character_interior.consider(opportunity)
+            decision = _materialize_withdrawal_decision(
+                result=interior_result,
+                opportunity=opportunity,
+                technical_failure=MemoryWithdrawalReviewTechnicalFailure,
+            )
+            decision = MemoryWithdrawalReviewDecision(disposition=decision)
+        except MemoryWithdrawalReviewTechnicalFailure:
+            # Invalid or unavailable model output is not a character choice.
+            # Keep the trigger non-terminal so the existing claim/reclaim
+            # lifecycle can retry; never manufacture retain/no-change.
             return MemoryWithdrawalReviewRunResult(
                 trigger_id=active.trigger_id,
                 status="processed",
-                work_status="invalid_draft",
+                work_status="technical_failure",
             )
-        if decision.disposition == "retain" or (
-            decision.disposition == "revise" and not surviving
-        ):
-            work_status = "invalid_revise" if decision.disposition == "revise" else "retain"
+        manifest = opportunity.capability_manifest
+        if manifest is None:
+            raise MemoryWithdrawalReviewTechnicalFailure(
+                "character_interior_capability_missing"
+            )
+        model_result_audit = recorded_character_interior_model_result(
+            interior_result,
+            purpose=_WITHDRAWAL_PURPOSE,
+            subject_ref=interior_result.opportunity_ref,
+            trigger_ref=opportunity.trigger_ref,
+            capability_ref=manifest.capability_ref,
+            route_tier="flash",
+            route_reason_code="memory_withdrawal.character_review",
+            router_version="character-interior-memory-withdrawal-review.1",
+            proposal_hash="sha256:" + _digest(decision.model_dump(mode="json")),
+        )
+        if decision.disposition == "retain":
+            work_status = "retain"
             await self._complete(
                 process=active,
                 source_event=source_event,
@@ -279,13 +285,15 @@ class MemoryWithdrawalReviewRuntime:
                     f"outcome:{active.trigger_id}:{work_status}:"
                     + _digest(
                         {
-                            "adapter": self._reviewer.VERSION,
+                            "adapter": "character-interior-memory-withdrawal-review.1",
+                            "inner_turn_id": interior_result.inner_turn_id,
                             "decision": decision.model_dump(mode="json"),
                             "source_hash": source_event.payload_hash,
                             "candidate_revision": candidate.entity_revision,
                         }
                     )
                 ),
+                model_result_audit=model_result_audit,
             )
             return MemoryWithdrawalReviewRunResult(
                 trigger_id=active.trigger_id, status="processed", work_status=work_status
@@ -298,12 +306,14 @@ class MemoryWithdrawalReviewRuntime:
             surviving=surviving,
             disposition=decision.disposition,
             evaluated_world_revision=(await self._project()).world_revision,
-            at=max((await self._project()).logical_time or source_event.logical_time, source_event.logical_time),
+            at=max(
+                (await self._project()).logical_time or source_event.logical_time,
+                source_event.logical_time,
+            ),
+            character_interior_model_result=model_result_audit,
         )
         proposal = self._proposal(mutation)
-        await self._record_proposal(
-            proposal=proposal, source_event=source_event, process=active
-        )
+        await self._record_proposal(proposal=proposal, source_event=source_event, process=active)
         await self._accept_mutation_and_complete(
             process=active, source_event=source_event, proposal=proposal, mutation=mutation
         )
@@ -328,7 +338,9 @@ class MemoryWithdrawalReviewRuntime:
             source_event = located[0]
             withdrawal = FactChangedPayload.model_validate_json(source_event.payload_json)
             for candidate in projection.memory_candidates:
-                if candidate.values.status != "active" or not self._invalidated_bindings(candidate, withdrawal):
+                if candidate.values.status != "active" or not self._invalidated_bindings(
+                    candidate, withdrawal
+                ):
                     continue
                 trigger_id = self._trigger_id(source_event=source_event, candidate=candidate)
                 if trigger_id in terminal:
@@ -352,14 +364,16 @@ class MemoryWithdrawalReviewRuntime:
                 )
                 try:
                     await self._commit_at_cursor(
-                        (opened,), cursor=self._cursor(projection),
+                        (opened,),
+                        cursor=self._cursor(projection),
                         commit_id="commit:memory-review:open:" + _digest(trigger_id),
                     )
                 except (ConcurrencyConflict, IdempotencyConflict):
                     joined = await self._project()
                     return next(
                         (
-                            item for item in joined.trigger_processes
+                            item
+                            for item in joined.trigger_processes
                             if item.trigger_id == trigger_id and item.state != "terminal"
                         ),
                         None,
@@ -380,18 +394,23 @@ class MemoryWithdrawalReviewRuntime:
         else:
             candidate = next(
                 (
-                    item for item in projection.memory_candidates
+                    item
+                    for item in projection.memory_candidates
                     if item.values.status == "active"
                     and self._invalidated_bindings(item, withdrawal)
-                    and self._trigger_id(source_event=source_event, candidate=item) == process.trigger_id
+                    and self._trigger_id(source_event=source_event, candidate=item)
+                    == process.trigger_id
                 ),
                 None,
             )
             if candidate is None:
-                raise ValueError("memory review trigger does not bind an affected candidate revision")
+                raise ValueError(
+                    "memory review trigger does not bind an affected candidate revision"
+                )
         if (
             self._trigger_id(source_event=source_event, candidate=candidate) != process.trigger_id
-            or self._trigger_ref(source_event=source_event, candidate=candidate) != process.trigger_ref
+            or self._trigger_ref(source_event=source_event, candidate=candidate)
+            != process.trigger_ref
         ):
             raise ValueError("memory review trigger source hash or candidate revision is forged")
         return candidate
@@ -412,7 +431,10 @@ class MemoryWithdrawalReviewRuntime:
     async def _claim_or_reclaim(self, *, process, source_event, projection):
         at = projection.logical_time or source_event.logical_time
         if process.state == "claimed" and process.claim_lease is not None:
-            if process.claim_lease.owner_id == self._owner_id and at <= process.claim_lease.expires_at:
+            if (
+                process.claim_lease.owner_id == self._owner_id
+                and at <= process.claim_lease.expires_at
+            ):
                 return process
             if at < process.claim_lease.expires_at:
                 return None
@@ -431,9 +453,12 @@ class MemoryWithdrawalReviewRuntime:
                 "attempt_ids": (*process.attempt_ids, attempt_id),
             }
         )
-        event_type = "TriggerProcessClaimed" if process.state == "open" else "TriggerProcessReclaimed"
+        event_type = (
+            "TriggerProcessClaimed" if process.state == "open" else "TriggerProcessReclaimed"
+        )
         event = self._event(
-            event_id=f"event:memory-review:{event_type.lower()}:" + _digest([process.trigger_id, attempt_id]),
+            event_id=f"event:memory-review:{event_type.lower()}:"
+            + _digest([process.trigger_id, attempt_id]),
             event_type=event_type,
             payload={"process": claimed.model_dump(mode="json")},
             logical_time=at,
@@ -444,12 +469,16 @@ class MemoryWithdrawalReviewRuntime:
         )
         try:
             await self._commit_at_cursor(
-                (event,), cursor=self._cursor(projection),
-                commit_id=f"commit:memory-review:{event_type.lower()}:" + _digest([process.trigger_id, attempt_id]),
+                (event,),
+                cursor=self._cursor(projection),
+                commit_id=f"commit:memory-review:{event_type.lower()}:"
+                + _digest([process.trigger_id, attempt_id]),
             )
         except (ConcurrencyConflict, IdempotencyConflict):
             joined = await self._project()
-            current = next(item for item in joined.trigger_processes if item.trigger_id == process.trigger_id)
+            current = next(
+                item for item in joined.trigger_processes if item.trigger_id == process.trigger_id
+            )
             if (
                 current.state == "claimed"
                 and current.claim_lease is not None
@@ -460,7 +489,16 @@ class MemoryWithdrawalReviewRuntime:
         return claimed
 
     def _mutation(
-        self, *, process, candidate, invalidated, surviving, disposition, evaluated_world_revision, at
+        self,
+        *,
+        process,
+        candidate,
+        invalidated,
+        surviving,
+        disposition,
+        evaluated_world_revision,
+        at,
+        character_interior_model_result,
     ) -> MemoryCandidateChangedPayload:
         revision = candidate.entity_revision + 1
         transition_id = "transition:memory-review:" + _digest(process.trigger_id)
@@ -498,7 +536,9 @@ class MemoryWithdrawalReviewRuntime:
             values = candidate.values.model_copy(
                 update={"source_bindings": surviving, "reviewed_at": at}
             )
-            cluster = memory_source_cluster_fingerprint(values=values, policy_refs=MEMORY_POLICY_REFS)
+            cluster = memory_source_cluster_fingerprint(
+                values=values, policy_refs=MEMORY_POLICY_REFS
+            )
             lineage = candidate.source_cluster_lineage
             if cluster != candidate.source_cluster_fingerprint:
                 lineage = (*lineage, cluster)
@@ -521,7 +561,9 @@ class MemoryWithdrawalReviewRuntime:
             "change_id": origin.change_id,
             "transition_id": origin.transition_id,
             "expected_entity_revision": candidate.entity_revision,
-            "evidence_refs": tuple(memory_source_evidence(item) for item in after.values.source_bindings),
+            "evidence_refs": tuple(
+                memory_source_evidence(item) for item in after.values.source_bindings
+            ),
             "policy_refs": MEMORY_POLICY_REFS,
             "acceptance_id": "acceptance:memory-review:" + _digest(process.trigger_id),
             "proposal_id": self._proposal_id(process.trigger_id),
@@ -534,19 +576,32 @@ class MemoryWithdrawalReviewRuntime:
             "reinforcement_reason": None,
             "rejection_reason": None,
             "forget_authority": forget_authority,
-            "strength_before_bp": candidate.values.retrieval_strength_bp if disposition == "forget" else None,
-            "strength_after_bp": after.values.retrieval_strength_bp if disposition == "forget" else None,
-            "reinforcement_count_before": candidate.values.reinforcement_count if disposition == "forget" else None,
-            "reinforcement_count_after": after.values.reinforcement_count if disposition == "forget" else None,
+            "strength_before_bp": candidate.values.retrieval_strength_bp
+            if disposition == "forget"
+            else None,
+            "strength_after_bp": after.values.retrieval_strength_bp
+            if disposition == "forget"
+            else None,
+            "reinforcement_count_before": candidate.values.reinforcement_count
+            if disposition == "forget"
+            else None,
+            "reinforcement_count_after": after.values.reinforcement_count
+            if disposition == "forget"
+            else None,
             "policy_version": MEMORY_POLICY_VERSION if disposition == "forget" else None,
             "policy_digest": MEMORY_POLICY_DIGEST if disposition == "forget" else None,
+            "character_interior_model_result": character_interior_model_result,
         }
         raw["accepted_change_hash"] = memory_candidate_mutation_hash(raw)
         return MemoryCandidateChangedPayload.model_validate(raw)
 
     @staticmethod
     def _proposal(mutation: MemoryCandidateChangedPayload) -> MemoryCandidateProposalProjection:
-        event_type = "MemoryCandidateForgotten" if mutation.operation == "forget" else "MemoryCandidateRevised"
+        event_type = (
+            "MemoryCandidateForgotten"
+            if mutation.operation == "forget"
+            else "MemoryCandidateRevised"
+        )
         return MemoryCandidateProposalProjection(
             proposal_id=mutation.proposal_id,
             proposal_encoding="typed-authority-v1",
@@ -578,19 +633,27 @@ class MemoryWithdrawalReviewRuntime:
             correlation_id=source_event.correlation_id,
         )
         await self._commit_at_cursor(
-            (event,), cursor=self._cursor(projection),
+            (event,),
+            cursor=self._cursor(projection),
             commit_id="commit:memory-review:proposal:" + _digest(process.trigger_id),
         )
 
-    async def _accept_mutation_and_complete(self, *, process, source_event, proposal, mutation) -> None:
+    async def _accept_mutation_and_complete(
+        self, *, process, source_event, proposal, mutation
+    ) -> None:
         projection = await self._project()
         current = next(
-            (item for item in projection.memory_candidates if item.candidate_id == mutation.candidate_after.candidate_id),
+            (
+                item
+                for item in projection.memory_candidates
+                if item.candidate_id == mutation.candidate_after.candidate_id
+            ),
             None,
         )
         if current == mutation.candidate_after:
             await self._complete(
-                process=process, source_event=source_event,
+                process=process,
+                source_event=source_event,
                 outcome_ref=f"outcome:{process.trigger_id}:{mutation.operation}:joined",
             )
             return
@@ -637,7 +700,14 @@ class MemoryWithdrawalReviewRuntime:
             commit_id="commit:memory-review:accepted:" + _digest(process.trigger_id),
         )
 
-    async def _complete(self, *, process, source_event, outcome_ref) -> None:
+    async def _complete(
+        self,
+        *,
+        process,
+        source_event,
+        outcome_ref,
+        model_result_audit=None,
+    ) -> None:
         projection = await self._project()
         event = self._completion_event(
             process=process,
@@ -645,13 +715,24 @@ class MemoryWithdrawalReviewRuntime:
             at=projection.logical_time or source_event.logical_time,
             outcome_ref=outcome_ref,
             causation_id=source_event.event_id,
+            model_result_audit=model_result_audit,
         )
         await self._commit_at_cursor(
-            (event,), cursor=self._cursor(projection),
+            (event,),
+            cursor=self._cursor(projection),
             commit_id="commit:memory-review:complete:" + _digest([process.trigger_id, outcome_ref]),
         )
 
-    def _completion_event(self, *, process, source_event, at, outcome_ref, causation_id):
+    def _completion_event(
+        self,
+        *,
+        process,
+        source_event,
+        at,
+        outcome_ref,
+        causation_id,
+        model_result_audit=None,
+    ):
         if process.claim_lease is None or at > process.claim_lease.expires_at:
             raise ValueError("memory review completion requires a live claim")
         payload = {
@@ -660,9 +741,19 @@ class MemoryWithdrawalReviewRuntime:
             "attempt_id": process.claim_lease.attempt_id,
             "completed_at": max(at, process.claim_lease.acquired_at).isoformat(),
             "runtime_outcome_ref": outcome_ref,
+            **(
+                {
+                    "character_interior_model_result": (
+                        model_result_audit.model_dump(mode="json")
+                    )
+                }
+                if model_result_audit is not None
+                else {}
+            ),
         }
         return self._event(
-            event_id="event:memory-review:completed:" + _digest([process.trigger_id, process.claim_lease.attempt_id]),
+            event_id="event:memory-review:completed:"
+            + _digest([process.trigger_id, process.claim_lease.attempt_id]),
             event_type="TriggerProcessCompleted",
             payload=payload,
             logical_time=max(at, process.claim_lease.acquired_at),
@@ -703,12 +794,24 @@ class MemoryWithdrawalReviewRuntime:
     @classmethod
     def _trigger_ref(cls, *, source_event, candidate) -> str:
         return "memory-review:" + _digest(
-            [cls._trigger_id(source_event=source_event, candidate=candidate), source_event.payload_hash]
+            [
+                cls._trigger_id(source_event=source_event, candidate=candidate),
+                source_event.payload_hash,
+            ]
         )
 
     def _event(
-        self, *, event_id, event_type, payload, logical_time, created_at,
-        trace_id, causation_id, correlation_id, idempotency_key=None,
+        self,
+        *,
+        event_id,
+        event_type,
+        payload,
+        logical_time,
+        created_at,
+        trace_id,
+        causation_id,
+        correlation_id,
+        idempotency_key=None,
     ) -> WorldEvent:
         identity = idempotency_key or domain_idempotency_key(
             event_type=event_type, world_id=self._ledger.world_id, payload=payload
@@ -755,10 +858,9 @@ class MemoryWithdrawalReviewRuntime:
 
 
 __all__ = [
-    "MemoryWithdrawalReviewAdapter",
-    "MemoryWithdrawalReviewChatModel",
     "MemoryWithdrawalReviewDecision",
     "MemoryWithdrawalReviewRunResult",
     "MemoryWithdrawalReviewRuntime",
+    "MemoryWithdrawalReviewTechnicalFailure",
     "materialize_memory_withdrawal_review_draft",
 ]

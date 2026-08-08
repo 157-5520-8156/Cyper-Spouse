@@ -1,38 +1,40 @@
-"""Generic expectation → feeling: the appraisal lanes see what she hoped for.
+"""Generic expectation continuity through the unified Character Interior.
 
 The expression contract already freezes a model-declared response
 expectation ("I hope they come back and tell me how it went").  These tests
-cover the deterministic resolver that reads it back from committed
-projection state, and the two feeling mounts: the silence appraisal (being
-left waiting) and the interaction appraisal (did this message land on what
-she was waiting for).
+cover the deterministic resolver that reads it back from committed projection
+state and the ordinary inbound cognition context on a later message.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 import hashlib
 import json
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
-
-from companion_daemon.world_v2.chat_model_deliberation_adapter import (
-    ChatModelDeliberationAdapter,
+from world_v2_application import (
+    build_sqlite_world_v2_test_application,
+    compose_fixture_character_interior,
 )
-from companion_daemon.world_v2.deliberation import ModelInput, ModelOutput, ModelRoute, RouteRequest
+
+from companion_daemon.world_v2.character_interior.inbound_wire import (
+    _ExpressionDraftWire,
+)
+from companion_daemon.world_v2.deliberation import ModelInput, ModelRoute, RouteRequest
+from companion_daemon.world_v2.expression_draft import (
+    PRODUCTION_TEXT_ONLY_EXPRESSION_CAPABILITIES,
+)
 from companion_daemon.world_v2.platform_action_executor import PlatformDispatchReceipt
 from companion_daemon.world_v2.production_turn_application import (
     WorldV2TurnApplicationConfig,
-    build_sqlite_world_v2_turn_application,
 )
-from companion_daemon.world_v2.proposal_envelope import DecisionProposal
 from companion_daemon.world_v2.response_expectation_view import (
     pending_response_expectation,
     pending_response_expectation_manifest,
     response_expectation_advisory,
 )
-
 
 NOW = datetime(2026, 7, 18, 21, 0, tzinfo=UTC)
 HOPED = "对方忙完后回来继续聊天"
@@ -275,6 +277,11 @@ class _ExpectingChat:
         del temperature
         return json.dumps(
             {
+                "private_turn_state": {
+                    "contract": "private-turn-state.1",
+                    "inner_state_summary": "我希望她忙完后愿意回来接着说，也想把这份期待自然地告诉她。",
+                    "attended_source_refs": [],
+                },
                 "timing_choice": "now",
                 "beats": [{"modality": "text", "text": "你忙完跟我说一声呀。"}],
                 "stance": "answer_without_world_claims",
@@ -292,63 +299,48 @@ class _ExpectingChat:
         )
 
 
-class _CapturingAppraisalModel:
-    """No-change appraiser that records every ModelInput it was shown."""
+class _CapturingInboundCognition:
+    """One unified cognition that records each cursor-pinned inbound Context."""
 
-    def __init__(self) -> None:
+    def __init__(self, delegate: _ExpressionDraftWire) -> None:
+        self._delegate = delegate
         self.requests: list[ModelInput] = []
 
-    async def propose(self, request: ModelInput) -> ModelOutput:
+    async def propose(self, request: ModelInput):  # type: ignore[no-untyped-def]
         self.requests.append(request)
-        proposal = DecisionProposal(
-            proposal_id="proposal:expectation-test:" + _digest(request.trigger_ref)[:16],
-            trigger_ref=request.trigger_ref,
-            evaluated_world_revision=request.evaluated_world_revision,
-            evidence_refs=(),
-            proposed_changes=(),
-            action_intents=(),
-            confidence=4_000,
-            brief_rationale="Nothing worth keeping from this pass.",
-            affect_decision="no_change",
-            behavior_tendency="observe",
-            stance="wait",
-            display_strategy="withhold",
-        )
-        return ModelOutput(
-            model_id="test-capturing-appraiser",
-            model_version="v1",
-            raw_proposal=proposal.model_dump(mode="json"),
-        )
-
-    async def recover(self, request: ModelInput, _failure: str) -> ModelOutput:
-        return await self.propose(request)
+        return await self._delegate.propose(request)
 
     def request_for(self, trigger_ref: str) -> ModelInput:
         return next(item for item in self.requests if item.trigger_ref == trigger_ref)
 
 
 def _build_app(tmp_path, *, name: str, silence_idle_seconds: int | None):  # type: ignore[no-untyped-def]
-    appraiser = _CapturingAppraisalModel()
     transport = _DeliveredTransport()
-    chat = ChatModelDeliberationAdapter(model=_ExpectingChat())
-    app = build_sqlite_world_v2_turn_application(
+    cognition = _CapturingInboundCognition(
+        _ExpressionDraftWire(
+            model=_ExpectingChat(),
+            expression_capabilities=PRODUCTION_TEXT_ONLY_EXPRESSION_CAPABILITIES,
+        )
+    )
+    app = build_sqlite_world_v2_test_application(
         path=tmp_path / f"{name}.sqlite3",
         config=WorldV2TurnApplicationConfig(
             world_id=f"world:{name}",
             companion_actor_ref="actor:companion",
             reply_target="user:primary",
             action_pump_owner="worker:actions",
+            character_memory_enabled=False,
             silence_appraisal_idle_seconds=silence_idle_seconds,
         ),
         identities=_Identities(),
         router=_Router(),
-        main_model=chat,
-        quick_recovery=chat,
+        character_interior=compose_fixture_character_interior(
+            inbound_author=cognition,
+        ),
         transport=transport,
-        appraisal_model=appraiser,
         now=NOW,
     )
-    return app, appraiser
+    return app, cognition
 
 
 def _event_refs(app, event_type: str) -> list[str]:  # type: ignore[no-untyped-def]
@@ -365,50 +357,8 @@ async def _drain_background(app, *, passes: int = 8) -> None:  # type: ignore[no
 
 
 @pytest.mark.asyncio
-async def test_silence_appraisal_material_names_what_she_hoped_for(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    app, appraiser = _build_app(
-        tmp_path, name="expectation-silence", silence_idle_seconds=90
-    )
-    try:
-        outcome = await app.inbound(
-            platform="http",
-            platform_user_id="user.1",
-            platform_message_id="message:1",
-            text="我先去忙一会儿",
-            observed_at=NOW,
-            trace_id="trace:expectation-silence",
-        )
-        assert len(outcome.authorized_action_ids) == 1
-        assert (await app.drain_actions_once()).status == "settled"
-        receipt_ref = _event_refs(app, "ExecutionReceiptRecorded")[-1]
-        first_observation_ref = _event_refs(app, "ObservationRecorded")[0]
-        await app.tick(
-            tick_id="tick:expectation-silence",
-            logical_time_from=NOW,
-            logical_time_to=NOW + timedelta(seconds=120),
-            observed_at=NOW + timedelta(seconds=120),
-            trace_id="trace:expectation-silence-tick",
-            causation_id="scheduler:test",
-            correlation_id="conversation:expectation-silence",
-            reason="test_idle",
-        )
-        await _drain_background(app)
-
-        silence_request = appraiser.request_for(receipt_ref)
-        assert HOPED in silence_request.model_content_json
-        assert '"response_expectation"' in silence_request.model_content_json
-        # The message that started the conversation predates the declared
-        # hope, so its own appraisal material must stay expectation-free.
-        first_request = appraiser.request_for(first_observation_ref)
-        assert HOPED not in first_request.model_content_json
-        assert "response_expectation" not in first_request.model_content_json
-    finally:
-        app.close()
-
-
-@pytest.mark.asyncio
-async def test_interaction_appraisal_material_names_the_pending_expectation(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    app, appraiser = _build_app(
+async def test_later_inbound_cognition_sees_the_pending_expectation(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    app, cognition = _build_app(
         tmp_path, name="expectation-interaction", silence_idle_seconds=None
     )
     try:
@@ -437,11 +387,11 @@ async def test_interaction_appraisal_material_names_the_pending_expectation(tmp_
         observation_refs = _event_refs(app, "ObservationRecorded")
         assert len(observation_refs) >= 2
         # The answer arrived while her declared expectation was still open.
-        second_request = appraiser.request_for(observation_refs[1])
+        second_request = cognition.request_for(observation_refs[1])
         assert HOPED in second_request.model_content_json
         assert '"response_expectation"' in second_request.model_content_json
         # The first message predates the hope: no expectation field at all.
-        first_request = appraiser.request_for(observation_refs[0])
+        first_request = cognition.request_for(observation_refs[0])
         assert HOPED not in first_request.model_content_json
         assert "response_expectation" not in first_request.model_content_json
     finally:

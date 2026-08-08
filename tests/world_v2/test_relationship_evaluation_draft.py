@@ -6,7 +6,6 @@ import json
 import pytest
 
 from companion_daemon.world_v2.relationship_evaluation_draft import (
-    RelationshipEvaluationDraftAdapter,
     RelationshipEvaluationDraftCapsule,
     materialize_relationship_evaluation_draft,
 )
@@ -99,47 +98,3 @@ def test_no_change_has_no_signal_payload() -> None:
 def test_rejects_incomplete_out_of_bound_or_authority_bearing_output(raw: str) -> None:
     with pytest.raises(ValueError):
         materialize_relationship_evaluation_draft(raw=raw, capsule=_capsule(), model="fake")
-
-
-class _Model:
-    model = "fake-flash"
-
-    def __init__(self, response: str) -> None:
-        self.response = response
-        self.calls: list[tuple[list[dict[str, str]], float]] = []
-
-    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
-        self.calls.append((messages, temperature))
-        return self.response
-
-
-@pytest.mark.asyncio
-async def test_adapter_uses_chat_model_protocol_and_only_exposes_safe_summaries() -> None:
-    model = _Model('{"decision":"no_change"}')
-    adapter = RelationshipEvaluationDraftAdapter(model=model, temperature=0.15)
-
-    draft = await adapter.deliberate(capsule=_capsule())
-
-    assert draft.decision == "no_change"
-    assert len(model.calls) == 1
-    messages, temperature = model.calls[0]
-    assert temperature == 0.15
-    assert "stage" in messages[0]["content"]
-    model_input = json.loads(messages[1]["content"])
-    assert model_input == _capsule().model_dump(mode="json")
-    rendered = messages[1]["content"]
-    assert "revision" not in rendered
-    assert "evidence" not in rendered
-    assert "accepted_event" not in rendered
-
-
-@pytest.mark.asyncio
-async def test_prompt_leaves_sustained_interaction_meaning_to_the_relationship_model() -> None:
-    model = _Model('{"decision":"no_change"}')
-
-    await RelationshipEvaluationDraftAdapter(model=model).deliberate(capsule=_capsule())
-
-    system = model.calls[0][0][0]["content"]
-    assert "interaction_continuity" in system
-    assert "does not itself imply" in system
-    assert "no fixed count" in system

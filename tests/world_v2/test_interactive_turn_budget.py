@@ -17,14 +17,14 @@ class _Clock:
         return self.now
 
 
-def test_default_validation_window_contains_two_full_source_review_attempts() -> None:
+def test_default_validation_window_contains_bounded_author_recovery() -> None:
     policy = InteractiveTurnBudgetPolicy()
 
-    assert policy.validation_recovery_seconds >= 46.0
-    # Correction uses an 8s author call plus two retryable coverage branches:
-    # inventory 44s and then focused authority 44s. The longer exceptional
-    # window is bounded rather than a hidden, sliding two-minute extension.
-    assert policy.validation_reselection_seconds >= 100.0
+    # Interactive source review is retired (2026-08-07): the author call is
+    # the only semantic provider, so recovery windows cover one re-author
+    # call plus a retry instead of review retry chains.
+    assert policy.validation_recovery_seconds >= 8.0
+    assert policy.validation_reselection_seconds >= 20.0
 
 
 def test_first_provider_entry_budget_starts_at_ingress_not_after_coalescing() -> None:

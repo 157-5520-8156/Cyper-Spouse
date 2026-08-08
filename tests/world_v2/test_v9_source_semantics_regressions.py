@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from companion_daemon.world_v2.chat_model_deliberation_adapter import (
+from companion_daemon.world_v2.character_interior.inbound_wire import (
     review_expression_with_candidate_external_coverage,
 )
 from companion_daemon.world_v2.deliberation import (

@@ -250,6 +250,7 @@ async def test_concurrent_real_clock_due_wakes_join_one_action_pump() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action_state", ["authorized", "scheduled"])
+@pytest.mark.asyncio
 async def test_exact_due_new_action_dispatch_is_not_held_by_visible_turn(
     action_state: str,
 ) -> None:

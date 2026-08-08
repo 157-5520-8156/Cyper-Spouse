@@ -12,8 +12,8 @@ from companion_daemon.llm import (
     OpenAICompatibleChatModel,
     ProviderCapacityGate,
 )
-from companion_daemon.world_v2.chat_model_deliberation_adapter import (
-    ChatModelDeliberationAdapter,
+from companion_daemon.world_v2.character_interior.inbound_wire import (
+    _ExpressionDraftWire,
 )
 from companion_daemon.world_v2.context_capsule import (
     ContextCapsuleCompiler,
@@ -63,9 +63,6 @@ from companion_daemon.world_v2.recall_runtime import (
     CharacterRecallRequest,
     PresentedPrefetchTrace,
     RecallCoordinator,
-)
-from companion_daemon.world_v2.single_call_inbound_cognition import (
-    SingleCallInboundCognition,
 )
 from test_context_capsule import HASH_B, NOW, _bound, _request
 from test_proposal_envelope import (
@@ -574,10 +571,7 @@ async def test_primary_valid_before_hedge_never_calls_backup() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("adapter_name", ("appraisal", "expression"))
-async def test_cancelled_latency_hedge_cannot_cool_down_next_turn_formal_recovery(
-    adapter_name: str,
-) -> None:
+async def test_latency_hedge_cannot_cool_down_next_turn_formal_recovery() -> None:
     """A role recovery provider is reserve capacity, not a speculative hedge."""
 
     response_allowed = asyncio.Event()
@@ -611,30 +605,16 @@ async def test_cancelled_latency_hedge_cannot_cool_down_next_turn_formal_recover
         capacity_gate=capacity,
     )
 
-    class UnusedPrimaryProvider:
-        model = "unused-primary"
-
-        async def complete(
-            self,
-            messages: list[dict[str, str]],
-            *,
-            temperature: float = 0.8,
-        ) -> str:
-            del messages, temperature
-            raise AssertionError("capability probe must not call the primary provider")
-
-    cognition = SingleCallInboundCognition(
-        flash_model=UnusedPrimaryProvider(),
-        recovery_model=recovery_provider,
-    )
-
     class FormalRecovery:
         def __init__(self) -> None:
             self.requests: list[ModelInput] = []
 
         def has_hedge_provider(self, request: ModelInput) -> bool:
-            adapter = getattr(cognition, adapter_name)
-            return bool(adapter.has_hedge_provider(request))
+            del request
+            # This provider is reserved for an observed failure.  Deliberation
+            # must honor that declared capability without reaching through the
+            # unified CharacterInterior into its private wire materializers.
+            return False
 
         async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput:
             del failure_code
@@ -1087,6 +1067,7 @@ async def test_exhausted_source_review_opens_configured_role_recovery() -> None:
         ),
     ),
 )
+@pytest.mark.asyncio
 async def test_terminal_validation_failure_mapping_is_budget_independent(
     with_budget: bool,
     failure_code: str,
@@ -1164,6 +1145,7 @@ async def test_terminal_validation_failure_mapping_is_budget_independent(
         ),
     ),
 )
+@pytest.mark.asyncio
 async def test_nested_role_transport_failure_can_use_the_configured_recovery_author(
     failure_code: str,
     expected_status: str,
@@ -1269,7 +1251,7 @@ async def test_invalid_recall_reselection_is_terminal_through_public_deliberatio
     quick = _Quick()
     result = await Deliberation(
         router=_Router(),
-        main_model=ChatModelDeliberationAdapter(
+        main_model=_ExpressionDraftWire(
             model=provider,
             expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES.model_copy(
                 update={"private_turn_state_mode": "required"}
@@ -1293,7 +1275,7 @@ async def test_invalid_recall_reselection_is_terminal_through_public_deliberatio
     assert main_audit.slot == "corrective"
     assert main_audit.outcome == "exception"
     assert main_audit.attempted_model_id == provider.model
-    assert main_audit.attempted_model_version == ChatModelDeliberationAdapter.VERSION
+    assert main_audit.attempted_model_version == _ExpressionDraftWire.VERSION
     assert main_audit.usage is not None
     assert main_audit.usage.input_tokens == 23
     assert main_audit.usage.output_tokens == 9
@@ -1703,6 +1685,7 @@ async def test_actual_failure_recovery_does_not_require_a_speculative_hedge_prov
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure_code", ("inventory_invalid", "coverage_invalid"))
+@pytest.mark.asyncio
 async def test_recovery_source_validation_failure_records_durable_invalid_outcome(
     failure_code: str,
 ) -> None:
@@ -2019,6 +2002,7 @@ async def test_recovery_audit_uses_the_actual_winning_provider_invocation_identi
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("second_kind", ["recall", "backup"])
+@pytest.mark.asyncio
 async def test_validation_correction_may_use_one_bounded_slot_after_recall_or_recovery(
     second_kind: str,
 ) -> None:
@@ -2646,6 +2630,7 @@ async def test_main_timeout_uses_only_minimal_quick_recovery() -> None:
         {**_decision_raw(), "evaluated_world_revision": 6},
     ],
 )
+@pytest.mark.asyncio
 async def test_invalid_main_output_recovers_without_accepting_unfrozen_claims(raw: object) -> None:
     quick = _Quick()
     result = await Deliberation(
@@ -2734,6 +2719,7 @@ async def test_adapter_model_construct_cannot_escape_with_huge_token_counter() -
         {"evidence_kind": "settled_world_event"},
     ],
 )
+@pytest.mark.asyncio
 async def test_evidence_must_match_exact_capsule_authority(
     evidence_update: dict[str, object],
 ) -> None:
@@ -2898,7 +2884,7 @@ async def test_private_turn_state_validation_logs_only_structured_safe_metadata(
     )
     result = await Deliberation(
         router=_Router(),
-        main_model=ChatModelDeliberationAdapter(
+        main_model=_ExpressionDraftWire(
             model=InvalidPrivateStateProvider(),
             expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
         ),
@@ -3303,74 +3289,93 @@ async def test_source_reviewed_full_reply_keeps_shadow_episode_isolated() -> Non
     assert diagnostics["slot_calls"] == 2
 
 
-@pytest.mark.asyncio
-async def test_expression_episode_on_authorizes_first_valid_provisional_only() -> None:
+def test_expression_episode_on_has_no_live_deliberation_entry() -> None:
     main = _EpisodeMain(full_delay=0.1)
-    deliberation = Deliberation(
-        router=_Router(),
-        main_model=main,
-        quick_recovery=_Quick(),
-        expression_episode_mode="on",
-    )
-    result = await deliberation.deliberate(
-        _capsule(),
-        attempt_id="attempt:episode-on",
-        budget=InteractiveTurnBudgetPolicy(
-            total_seconds=1.0,
-            hedge_after_seconds=0.2,
-            acceptance_dispatch_reserve_seconds=0.2,
-        ).start(),
-    )
-
-    assert result.proposal is not None
-    assert result.proposal.proposal_id == "proposal:episode:provisional"
-    assert len(main.requests) == 1
-    assert len(main.provisional_requests) == 1
-    assert len(result.attempt_audits) == 1
-    tail = await deliberation.await_expression_episode_tail(result.proposal.trigger_ref)
-    assert tail is not None
-    assert tail.disposition == "complete_without_more"
+    with pytest.raises(
+        ValueError,
+        match="expression episode mode must be off, shadow, or stream",
+    ):
+        Deliberation(
+            router=_Router(),
+            main_model=main,
+            quick_recovery=_Quick(),
+            expression_episode_mode="on",  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.asyncio
-async def test_expression_episode_on_retains_auditable_full_append_tail() -> None:
-    class AppendMain(_EpisodeMain):
-        async def propose(self, request: ModelInput) -> ModelOutput:
-            output = await super().propose(request)
-            return output.model_copy(
-                update={
-                    "episode_disposition": "append",
-                    "raw_proposal": {
-                        **output.raw_proposal,
-                        "episode_disposition": "append",
-                    },
-                }
+async def test_stream_head_failure_retires_original_tail_before_recovery_wins() -> None:
+    class FailingStreamMain(_Main):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tail_started = asyncio.Event()
+            self.tail_cancelled = asyncio.Event()
+
+        def stream_provider_available(self, _request: ModelInput) -> bool:
+            return True
+
+        async def propose_stream_head(self, request: ModelInput) -> ModelOutput:
+            self.requests.append(request)
+            await self.tail_started.wait()
+            raise RuntimeError("stream head failed")
+
+        async def propose_stream_tail(self, _request: ModelInput) -> ModelOutput:
+            self.tail_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                self.tail_cancelled.set()
+                raise
+
+    class StreamHeadRecovery(_Quick):
+        def __init__(self, main: FailingStreamMain) -> None:
+            super().__init__()
+            self._main = main
+
+        async def recover_stream_head(
+            self, request: ModelInput, failure_code: str
+        ) -> ModelOutput:
+            # Recovery must not race or inherit the rejected physical stream's
+            # continuation.  Deliberation settles that tail first.
+            assert self._main.tail_cancelled.is_set()
+            self.requests.append(request)
+            self.failure_codes.append(failure_code)
+            return ModelOutput(
+                model_id="stream-recovery",
+                model_version="v1",
+                raw_proposal=self.raw,  # type: ignore[arg-type]
             )
 
-    main = AppendMain(full_delay=0.05)
+    main = FailingStreamMain()
+    quick = StreamHeadRecovery(main)
     deliberation = Deliberation(
         router=_Router(),
         main_model=main,
-        quick_recovery=_Quick(),
-        expression_episode_mode="on",
+        quick_recovery=quick,
+        expression_episode_mode="stream",
     )
+
     result = await deliberation.deliberate(
         _capsule(),
-        attempt_id="attempt:episode-on-append",
+        attempt_id="attempt:stream-head-failure-recovery",
         budget=InteractiveTurnBudgetPolicy(
             total_seconds=1.0,
             hedge_after_seconds=0.2,
+            technical_recovery_seconds=0.4,
             acceptance_dispatch_reserve_seconds=0.2,
         ).start(),
     )
 
     assert result.proposal is not None
-    tail = await deliberation.await_expression_episode_tail(result.proposal.trigger_ref)
-    assert tail is not None
-    assert tail.disposition == "append"
-    assert tail.deliberation is not None
-    assert tail.deliberation.proposal is not None
-    assert tail.deliberation.audit.status == "proposal_validated"
+    assert result.audit.status == "main_exception_recovered"
+    assert quick.failure_codes == ["main_exception"]
+    assert main.tail_cancelled.is_set()
+    assert not deliberation.has_expression_episode_tail(result.proposal.trigger_ref)
+    assert [audit.status for audit in result.attempt_audits] == [
+        "main_exception",
+        "main_exception_recovered",
+    ]
+    await deliberation.aclose()
 
 
 @pytest.mark.asyncio

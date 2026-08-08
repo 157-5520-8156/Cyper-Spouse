@@ -587,7 +587,7 @@ class NaturalnessSourceBoundSelfMaterialAudit(FrozenModel):
 
 
 class NaturalnessCurrentSelfStateAudit(FrozenModel):
-    """Whether replay exposes inputs from which current_self_state is built.
+    """Whether replay exposes inputs from which inner_life_snapshot is built.
 
     The runner cannot observe the provider request body.  This field therefore
     says only whether immutable projection inputs were available to the normal
@@ -688,7 +688,7 @@ class NaturalnessReadinessAudit(FrozenModel):
     requested_preconversation_life_ecology_units: int = Field(ge=0)
     zero_preheat_semantics: Literal["reliability_only"] = "reliability_only"
     source_bound_self_material: NaturalnessSourceBoundSelfMaterialAudit
-    current_self_state: NaturalnessCurrentSelfStateAudit
+    inner_life_snapshot: NaturalnessCurrentSelfStateAudit
     prior_interaction_appraisal: NaturalnessPriorInteractionAppraisalAudit
     reason_codes: tuple[str, ...]
 
@@ -792,7 +792,7 @@ def _source_bound_self_material(
     )
 
 
-def _current_self_state_readiness(
+def _inner_life_snapshot_readiness(
     projection: object,
     *,
     self_material: NaturalnessSourceBoundSelfMaterialAudit,
@@ -928,7 +928,7 @@ def assess_naturalness_readiness(
     if requested_preconversation_units < 0:
         raise ValueError("preconversation unit count cannot be negative")
     self_material = _source_bound_self_material(projection)
-    current_self_state = _current_self_state_readiness(
+    inner_life_snapshot = _inner_life_snapshot_readiness(
         projection,
         self_material=self_material,
     )
@@ -943,10 +943,10 @@ def assess_naturalness_readiness(
         reason_codes.append("no_source_bound_self_experience_or_memory")
     elif self_material.status == "unknown":
         reason_codes.append("self_material_evidence_unknown")
-    if current_self_state.status == "unavailable":
-        reason_codes.append("current_self_state_inputs_unavailable")
-    elif current_self_state.status == "unknown":
-        reason_codes.append("current_self_state_evidence_unknown")
+    if inner_life_snapshot.status == "unavailable":
+        reason_codes.append("inner_life_snapshot_inputs_unavailable")
+    elif inner_life_snapshot.status == "unknown":
+        reason_codes.append("inner_life_snapshot_evidence_unknown")
     if prior_appraisal.status == "pending":
         reason_codes.append("prior_interaction_appraisal_pending")
     elif prior_appraisal.status == "unknown":
@@ -956,13 +956,13 @@ def assess_naturalness_readiness(
         assessment = "reliability_only"
     elif (
         self_material.status == "unavailable"
-        or current_self_state.status == "unavailable"
+        or inner_life_snapshot.status == "unavailable"
         or prior_appraisal.status == "pending"
     ):
         assessment = "not_ready_for_naturalness_observation"
     elif "unknown" in {
         self_material.status,
-        current_self_state.status,
+        inner_life_snapshot.status,
         prior_appraisal.status,
     }:
         assessment = "indeterminate"
@@ -972,7 +972,7 @@ def assess_naturalness_readiness(
         assessment=assessment,
         requested_preconversation_life_ecology_units=requested_preconversation_units,
         source_bound_self_material=self_material,
-        current_self_state=current_self_state,
+        inner_life_snapshot=inner_life_snapshot,
         prior_interaction_appraisal=prior_appraisal,
         reason_codes=tuple(reason_codes),
     )

@@ -11,6 +11,9 @@ from companion_daemon.world_v2.biographical_lifecycle import (
 from companion_daemon.world_v2.biographical_timeline_authority import (
     BiographicalTimelineConfiguredPayload,
 )
+from companion_daemon.world_v2.character_interior.snapshot_compiler import (
+    compile_inner_life_snapshot,
+)
 from companion_daemon.world_v2.context_resolver import query_from_projection
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.ledger_context_resolver import (
@@ -116,9 +119,9 @@ def test_pinned_chat_context_tracks_biography_arc_and_graduation(
         "residence:family_home_jiaxing"
     ]
     assert summer_biography["active_life_arcs"] == []
-    assert summer_context["current_self_state"]["biographical_context"][0][
-        "age"
-    ] == 21
+    assert "inner_life_snapshot" not in summer_context
+    summer_inner_life = compile_inner_life_snapshot(summer_context).model_view()
+    assert summer_inner_life["materials"]["biographical_context"][0]["age"] == 21
     full_item = next(
         item
         for item in summer_capsule.world_life.items

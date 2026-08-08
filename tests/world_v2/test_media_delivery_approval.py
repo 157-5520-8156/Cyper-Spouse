@@ -250,12 +250,15 @@ def test_settlement_uow_only_derives_media_share_from_delivered_receipt(status: 
     plan = SettlementPlanner(world_id=WORLD).plan(result, trigger_id=trigger_id, projection=_projection(state))
     event_types = tuple(event.event_type for event in plan.events)
     assert ("MediaDeliveryShared" in event_types) is shared
-    assert ("TriggerProcessOpened" in event_types) is shared
-    if shared:
-        delivery_index = event_types.index("MediaDeliveryShared")
-        trigger = plan.events[delivery_index + 1]
-        assert trigger.event_type == "TriggerProcessOpened"
-        assert trigger.payload()["process"]["process_kind"] == "media_delivery_interaction"
+    # Media planning already carries the character's source-bound interaction
+    # intent.  Settlement is a hard transport boundary and must not open the
+    # retired, independently-authored post-delivery character lane.
+    assert not any(
+        event.event_type == "TriggerProcessOpened"
+        and event.payload().get("process", {}).get("process_kind")
+        == "media_delivery_interaction"
+        for event in plan.events
+    )
 
 
 def _projection(state: ReducerState):

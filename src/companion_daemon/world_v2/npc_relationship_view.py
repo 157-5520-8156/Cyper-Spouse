@@ -1,18 +1,17 @@
 """Per-NPC relationship reading: a pure projection over lived shared history.
 
 ``relationship_states`` describes the slow variables of the user
-relationship; NPCs had nothing — the NPC-initiative weight policy noted
-"phase one has no per-NPC relationship state yet" and used accepted Affect as
-a stand-in.  This module closes that gap as a *derived Projection* in the
-CONTEXT.md sense: a deterministic, rebuildable view over already-committed
-World Events, never a second write authority.
+relationship.  This module provides the narrower, observable side of an NPC
+relationship as a *derived Projection* in the CONTEXT.md sense: a
+deterministic, rebuildable view over already-settled shared World Events,
+never a second write authority and never a reader of the protagonist's
+private Appraisal/Affect.
 
 Per registered NPC it reads:
 
 * ``familiarity_bp`` — how much settled shared history exists at all;
 * ``closeness_bp``   — a resting 3_000bp baseline warmed by recent settled
-  shared occurrences and cooled by unresolved friction;
-* ``friction_bp``    — active, unexpired ``npc_conflict`` appraisal weight.
+  shared occurrences.
 
 All arithmetic is integer and every input is committed authority (settled
 occurrence events, accepted appraisals), so any weight policy consuming the
@@ -40,7 +39,6 @@ RESTING_CLOSENESS_BP = 3_000
 _RECENT_SHARED_BP = 450
 _OLDER_SHARED_BP = 150
 _FAMILIARITY_PER_SHARED_BP = 900
-_FRICTION_COOLING_NUMERATOR = 4_000  # closeness -= friction * this // 10_000
 
 
 def _digest(value: object) -> str:
@@ -55,21 +53,31 @@ class NpcRelationshipReading(FrozenModel):
     npc_ref: str
     closeness_bp: int
     familiarity_bp: int
-    friction_bp: int
     settled_shared_count: int
     last_shared_at: datetime | None = None
     source_event_refs: tuple[str, ...] = ()
 
 
-def npc_relationship_readings(projection) -> tuple[NpcRelationshipReading, ...]:
-    """Derive every registered NPC's reading from committed shared history."""
+def npc_relationship_readings(
+    projection,
+    *,
+    protagonist_actor_ref: str,
+) -> tuple[NpcRelationshipReading, ...]:
+    """Derive each NPC reading from events both actors actually participated in.
 
+    An NPC-only occurrence is valid NPC history, but it is not shared history
+    with the protagonist and therefore cannot warm familiarity or closeness.
+    The protagonist identity is explicit so deployments cannot silently rely
+    on one conventional actor ref.
+    """
+
+    if not protagonist_actor_ref:
+        raise ValueError("NPC relationship view requires the protagonist actor ref")
     logical_time = getattr(projection, "logical_time", None)
     npcs = tuple(getattr(projection, "npcs", ()))
     if logical_time is None or not npcs:
         return ()
     occurrences = tuple(getattr(projection, "world_occurrences", ()))
-    appraisals = tuple(getattr(projection, "appraisals", ()))
     readings: list[NpcRelationshipReading] = []
     for npc in npcs:
         npc_ref = f"npc:{npc.npc_id}"
@@ -82,6 +90,7 @@ def npc_relationship_readings(projection) -> tuple[NpcRelationshipReading, ...]:
                 or occurrence.settled_at is None
                 or occurrence.settlement_event_ref is None
                 or npc_ref not in occurrence.participant_refs
+                or protagonist_actor_ref not in occurrence.participant_refs
             ):
                 continue
             if logical_time - occurrence.settled_at <= _RECENT_WINDOW:
@@ -91,38 +100,16 @@ def npc_relationship_readings(projection) -> tuple[NpcRelationshipReading, ...]:
             sources.append(occurrence.settlement_event_ref)
             if last_shared is None or occurrence.settled_at > last_shared:
                 last_shared = occurrence.settled_at
-        friction = 0
-        for appraisal in appraisals:
-            if (
-                appraisal.status != "active"
-                or appraisal.expires_at <= logical_time
-                or appraisal.subject_ref != npc_ref
-            ):
-                continue
-            conflict_weight = sum(
-                item.weight_bp
-                for item in appraisal.hypotheses
-                if item.meaning == "npc_conflict" and item.attribution == "npc"
-            )
-            if not conflict_weight:
-                continue
-            friction = max(
-                friction,
-                conflict_weight * appraisal.confidence_bp // 10_000,
-            )
-            sources.append(appraisal.origin.accepted_event_ref)
         shared_count = recent + older
         closeness = (
             RESTING_CLOSENESS_BP
             + recent * _RECENT_SHARED_BP
             + older * _OLDER_SHARED_BP
-            - friction * _FRICTION_COOLING_NUMERATOR // 10_000
         )
         readings.append(NpcRelationshipReading(
             npc_ref=npc_ref,
             closeness_bp=max(0, min(10_000, closeness)),
             familiarity_bp=max(0, min(10_000, shared_count * _FAMILIARITY_PER_SHARED_BP)),
-            friction_bp=max(0, min(10_000, friction)),
             settled_shared_count=shared_count,
             last_shared_at=last_shared,
             source_event_refs=tuple(dict.fromkeys(sources)),
@@ -146,12 +133,14 @@ def _closeness_prose(reading: NpcRelationshipReading) -> str:
         base = f"关系在慢慢熟起来（一起经历过 {reading.settled_shared_count} 件小事）"
     else:
         base = f"有点疏远（虽然一起经历过 {reading.settled_shared_count} 件小事）"
-    if reading.friction_bp >= 2_000:
-        base += "，之间还搁着一点没说开的别扭"
     return base
 
 
-def npc_relationship_advisories(projection) -> tuple:
+def npc_relationship_advisories(
+    projection,
+    *,
+    protagonist_actor_ref: str,
+) -> tuple:
     """Expose the reading through the ordinary non-authoritative advisory envelope.
 
     Only NPCs with any committed shared history (or live friction) appear:
@@ -166,7 +155,10 @@ def npc_relationship_advisories(projection) -> tuple:
         return ()
     readings = tuple(
         item
-        for item in npc_relationship_readings(projection)
+        for item in npc_relationship_readings(
+            projection,
+            protagonist_actor_ref=protagonist_actor_ref,
+        )
         if item.source_event_refs
     )[:3]
     if not readings:

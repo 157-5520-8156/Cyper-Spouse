@@ -33,10 +33,19 @@ from .fact_memory_decision import (
     fact_memory_decision_hash,
 )
 from .fact_memory_draft import (
-    FactMemoryDraftAdapter,
     FactMemoryDraftTechnicalFailure,
     FactMemoryRetentionDraft,
 )
+from .character_interior.core import CharacterInterior
+from .character_interior.audit import recorded_character_interior_model_result
+from .character_interior.life_memory import (
+    _FACT_MEMORY_PURPOSE,
+    _decision_model_id,
+    _materialize_memory_retention,
+    _memory_opportunity,
+    _memory_retention_capability,
+)
+from .character_interior.purpose_context import InteriorPurposeContext
 from .fact_trigger import (
     INTERACTION_FACT_RETRY_DELAYS_SECONDS,
     InteractionFactDecisionRecordedPayload,
@@ -74,6 +83,7 @@ logger = logging.getLogger(__name__)
 _NO_FACT_DECISION = object()
 _NO_MEMORY_DECISION = object()
 _STALE_MEMORY_DECISION = object()
+_FACT_MEMORY_INTERIOR_VERSION = "character-interior-fact-memory-retention.1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,8 +123,9 @@ class InteractionFactTriggerRuntime:
         ledger: SQLiteWorldLedger,
         acceptance: FactV2AcceptanceRuntime,
         adapter: FactObservationProposalAdapter,
-        memory_adapter: FactMemoryDraftAdapter | None = None,
+        character_interior: CharacterInterior | None = None,
         memory_lifecycle: FactMemoryCandidateLifecycle | None = None,
+        memory_actor_ref: str | None = None,
         owner_id: str,
         lease_seconds: int = 120,
         source: str = "world-v2:interaction-fact-trigger-runtime",
@@ -123,13 +134,18 @@ class InteractionFactTriggerRuntime:
             raise ValueError("Fact trigger must use the acceptance runtime's exact SQLite ledger")
         if not owner_id or lease_seconds <= 0:
             raise ValueError("Fact trigger runtime needs an owner and positive lease")
-        if (memory_adapter is None) != (memory_lifecycle is None):
-            raise ValueError("Fact memory adapter and lifecycle must be configured together")
+        if memory_lifecycle is not None and character_interior is None:
+            raise ValueError("Fact memory lifecycle requires CharacterInterior")
+        if memory_lifecycle is not None and not memory_actor_ref:
+            raise ValueError("Fact memory lifecycle requires its character actor")
+        if memory_lifecycle is None and memory_actor_ref is not None:
+            raise ValueError("Fact memory actor requires the memory lifecycle")
         self._ledger = ledger
         self._acceptance = acceptance
         self._adapter = adapter
-        self._memory_adapter = memory_adapter
+        self._character_interior = character_interior
         self._memory_lifecycle = memory_lifecycle
+        self._memory_actor_ref = memory_actor_ref
         self._owner_id = owner_id
         self._lease_seconds = lease_seconds
         self._source = source
@@ -348,7 +364,7 @@ class InteractionFactTriggerRuntime:
         )
         if duplicate_fact is not None:
             if (
-                self._memory_adapter is not None
+                self._memory_lifecycle is not None
                 and duplicate_fact.values.assertion_binding.source_ref
                 == observation.observation_id
             ):
@@ -483,7 +499,7 @@ class InteractionFactTriggerRuntime:
                     acceptance_logical_time,
                 ),
             )
-            if self._memory_adapter is not None:
+            if self._memory_lifecycle is not None:
                 try:
                     await self._materialize_memory(
                         process=active,
@@ -573,7 +589,7 @@ class InteractionFactTriggerRuntime:
             # A cursor race is retryable; the durable audit is rejoined on the
             # next wake and acceptance is attempted again at a fresh cursor.
             raise
-        if self._memory_adapter is not None:
+        if self._memory_lifecycle is not None:
             assert self._memory_lifecycle is not None
             try:
                 await self._materialize_memory(
@@ -1564,15 +1580,61 @@ class InteractionFactTriggerRuntime:
             raise ValueError("accepted Fact event is unavailable")
         fact_event, fact_commit = stored
         memory_logical_time = projection.logical_time or source_event.logical_time
-        assert self._memory_adapter is not None
+        if self._character_interior is None:
+            raise ValueError("Fact memory classification requires CharacterInterior")
         decision = await self._existing_memory_decision(
             trigger_id=process.trigger_id,
             fact_authority_event_ref=fact_event.event_id,
         )
         if decision is None:
-            draft = await self._memory_adapter.classify(
-                predicate_code=fact.values.predicate_code,
-                source_text=observation.text,
+            context = InteriorPurposeContext(
+                inner_turn_ref=f"memory:fact:{fact_event.event_id}",
+                trigger_ref=fact_event.event_id,
+                cursor=self._cursor(projection),
+                logical_time=memory_logical_time,
+                source_refs=tuple(
+                    dict.fromkeys((fact_event.event_id, source_event.event_id))
+                ),
+            )
+            opportunity = _memory_opportunity(
+                world_id=self._ledger.world_id,
+                actor_ref=self._memory_actor_ref or "",
+                purpose=_FACT_MEMORY_PURPOSE,
+                context=context,
+                capability_payload=_memory_retention_capability(
+                    source_kind="verified_user_fact",
+                    predicate_code=fact.values.predicate_code,
+                    source_text=observation.text,
+                ),
+            )
+            interior_result = await self._character_interior.consider(opportunity)
+            draft = _materialize_memory_retention(
+                result=interior_result,
+                opportunity=opportunity,
+                purpose=_FACT_MEMORY_PURPOSE,
+            )
+            manifest = opportunity.capability_manifest
+            if manifest is None:
+                raise FactMemoryDraftTechnicalFailure(
+                    "character_interior_capability_missing"
+                )
+            model_result_audit = recorded_character_interior_model_result(
+                interior_result,
+                purpose=_FACT_MEMORY_PURPOSE,
+                subject_ref=interior_result.opportunity_ref,
+                trigger_ref=opportunity.trigger_ref,
+                capability_ref=manifest.capability_ref,
+                route_tier="flash",
+                route_reason_code="fact_memory.character_retention",
+                router_version=_FACT_MEMORY_INTERIOR_VERSION,
+                proposal_hash="sha256:"
+                + hashlib.sha256(
+                    canonical_fact_memory_decision_json(
+                        draft.model_dump(mode="json")
+                        if draft is not None
+                        else {"decision": "no_change"}
+                    ).encode()
+                ).hexdigest(),
             )
             decision = await self._record_memory_decision(
                 process=process,
@@ -1584,6 +1646,8 @@ class InteractionFactTriggerRuntime:
                 evaluated_cursor=self._cursor(projection),
                 source_text=observation.text,
                 decision=draft,
+                author_model_id=_decision_model_id(interior_result),
+                character_interior_model_result=model_result_audit,
             )
             projection = await self._project()
             memory_logical_time = projection.logical_time or source_event.logical_time
@@ -1674,6 +1738,8 @@ class InteractionFactTriggerRuntime:
         evaluated_cursor: ProjectionCursor,
         source_text: str,
         decision: FactMemoryRetentionDraft | None,
+        author_model_id: str,
+        character_interior_model_result,
     ):
         if process.claim_lease is None:
             raise ValueError("Fact-memory decision requires a claimed process")
@@ -1686,7 +1752,7 @@ class InteractionFactTriggerRuntime:
         decision_json = canonical_fact_memory_decision_json(decision_value)
         request_hash = _digest(
             {
-                "adapter_version": self._memory_adapter.adapter_version,
+                "adapter_version": _FACT_MEMORY_INTERIOR_VERSION,
                 "fact": fact.model_dump(mode="json"),
                 "fact_authority_event_ref": fact_event.event_id,
                 "fact_authority_payload_hash": fact_event.payload_hash,
@@ -1717,13 +1783,14 @@ class InteractionFactTriggerRuntime:
                     evaluated_cursor.deliberation_revision
                 ),
                 evaluated_ledger_sequence=evaluated_cursor.ledger_sequence,
-                adapter_version=self._memory_adapter.adapter_version,
-                model_id=self._memory_adapter.model_id,
+                adapter_version=_FACT_MEMORY_INTERIOR_VERSION,
+                model_id=author_model_id,
                 request_hash=request_hash,
                 decision_kind=decision_kind,
                 decision_json=decision_json,
                 decision_hash=fact_memory_decision_hash(decision_json),
                 recorded_at=recorded_at,
+                character_interior_model_result=character_interior_model_result,
             )
             payload_json = payload.model_dump(mode="json")
             identity = domain_idempotency_key(

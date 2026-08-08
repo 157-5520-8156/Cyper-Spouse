@@ -22,7 +22,7 @@ from companion_daemon.world_v2.expression_draft import (
     ExpressionDraftCapabilities,
     materialize_expression_draft,
 )
-from companion_daemon.world_v2.chat_model_deliberation_adapter import (
+from companion_daemon.world_v2.character_interior.inbound_wire import (
     expression_draft_shape_contract,
 )
 

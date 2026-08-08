@@ -214,6 +214,44 @@ async def test_action_due_wake_uses_scheduler_clock_and_dispatches_effect_once(
         await host.aclose()
 
 
+def _fixture_observation_ref(messages: list[dict[str, str]]) -> str:
+    for message in messages:
+        try:
+            material = json.loads(message["content"])
+        except (json.JSONDecodeError, KeyError, TypeError):
+            continue
+        if not isinstance(material, dict):
+            continue
+        trigger = material.get("current_trigger_message")
+        if isinstance(trigger, dict) and isinstance(trigger.get("observation_ref"), str):
+            return trigger["observation_ref"]
+    raise AssertionError("fixture expression call omitted the pinned observation")
+
+
+def _fixture_expression_response(
+    messages: list[dict[str, str]],
+    expression: dict[str, object],
+) -> str:
+    system = messages[0]["content"]
+    if "appraisal_draft" not in system or "expression_draft" not in system:
+        return json.dumps(expression, ensure_ascii=False)
+    return json.dumps(
+        {
+            "appraisal_draft": {
+                "appraise": False,
+                "affect": "no_change",
+                "brief_rationale": "This timing fixture needs no durable appraisal.",
+                "behavior_tendency": "choose_own_response",
+                "stance": "self_directed",
+                "display_strategy": "model_owned",
+                "confidence": 7_000,
+            },
+            "expression_draft": expression,
+        },
+        ensure_ascii=False,
+    )
+
+
 class _EightHourLaterModel:
     model = "fixture:qq-eight-hour-later"
 
@@ -224,11 +262,14 @@ class _EightHourLaterModel:
         temperature: float = 0.8,
     ) -> str:
         del temperature
-        return json.dumps(
+        observation_ref = _fixture_observation_ref(_messages)
+        return _fixture_expression_response(
+            _messages,
             {
                 "private_turn_state": {
+                    "contract": "private-turn-state.1",
                     "inner_state_summary": "我想等忙完以后再认真接这句话。",
-                    "attended_source_refs": [],
+                    "attended_source_refs": [observation_ref],
                 },
                 "timing_choice": "later",
                 "beats": [{"modality": "text", "text": "我忙完来找你。"}],
@@ -238,16 +279,18 @@ class _EightHourLaterModel:
                 "stance": "defer",
                 "brief_rationale": "I chose to return later.",
                 "confidence": 7_200,
+                "world_claims": [],
             },
-            ensure_ascii=False,
         )
 
 
 class _LaterThenNowModel(_EightHourLaterModel):
     model = "fixture:qq-later-then-now"
 
-    def __init__(self) -> None:
+    def __init__(self, *, start_with_now: bool = False) -> None:
         self.calls = 0
+        self.start_with_now = start_with_now
+        self.seen_observation_refs: list[str] = []
 
     async def complete(
         self,
@@ -256,13 +299,19 @@ class _LaterThenNowModel(_EightHourLaterModel):
         temperature: float = 0.8,
     ) -> str:
         self.calls += 1
-        if self.calls == 1:
+        observation_ref = _fixture_observation_ref(messages)
+        if observation_ref not in self.seen_observation_refs:
+            self.seen_observation_refs.append(observation_ref)
+        should_answer_now = self.start_with_now or len(self.seen_observation_refs) > 1
+        if not should_answer_now:
             return await super().complete(messages, temperature=temperature)
-        return json.dumps(
+        return _fixture_expression_response(
+            messages,
             {
                 "private_turn_state": {
+                    "contract": "private-turn-state.1",
                     "inner_state_summary": "她又发来一句，我现在想直接接住。",
-                    "attended_source_refs": [],
+                    "attended_source_refs": [observation_ref],
                 },
                 "timing_choice": "now",
                 "beats": [{"modality": "text", "text": "我在，接着说。"}],
@@ -270,8 +319,8 @@ class _LaterThenNowModel(_EightHourLaterModel):
                 "stance": "present",
                 "brief_rationale": "I chose to answer the newer message now.",
                 "confidence": 7_500,
+                "world_claims": [],
             },
-            ensure_ascii=False,
         )
 
 
@@ -340,8 +389,7 @@ async def test_explicit_scheduler_clock_keeps_receipt_after_virtual_inbound(
     observed_at = started_at + timedelta(minutes=9)
     virtual_clock = {"now": observed_at}
     delivery = _VerifiedDelivery()
-    model = _LaterThenNowModel()
-    model.calls = 1
+    model = _LaterThenNowModel(start_with_now=True)
 
     async def skip_pacing(seconds: float) -> None:
         virtual_clock["now"] += timedelta(seconds=max(0.0, seconds))
@@ -356,7 +404,7 @@ async def test_explicit_scheduler_clock_keeps_receipt_after_virtual_inbound(
         recipient_id="10001",
         bootstrap_at=started_at,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=delivery,
         ingress_now=lambda: virtual_clock["now"],
         ingress_sleep=skip_pacing,
@@ -427,7 +475,7 @@ async def test_fast_paced_later_turn_does_not_poison_the_next_inbound_clock(
         recipient_id="10001",
         bootstrap_at=started_at,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=delivery,
         ingress_now=lambda: pacing_clock["now"],
         ingress_sleep=skip_pacing,
@@ -489,7 +537,7 @@ async def test_future_followup_survives_restart_and_settles_once_at_due_boundari
         recipient_id="10001",
         bootstrap_at=started_at,
         model=_EightHourLaterModel(),
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=delivery,
         ingress_now=lambda: pacing_clock["now"],
         ingress_sleep=skip_pacing,
@@ -517,7 +565,7 @@ async def test_future_followup_survives_restart_and_settles_once_at_due_boundari
         recipient_id="10001",
         bootstrap_at=started_at,
         model=_EightHourLaterModel(),
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=delivery,
         ingress_now=lambda: pacing_clock["now"],
         ingress_sleep=skip_pacing,

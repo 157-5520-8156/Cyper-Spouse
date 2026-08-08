@@ -13,6 +13,9 @@ import json
 from typing import Literal
 
 from .decision_proposal_authority import DecisionProposalAuthorityReader
+from .character_interior.relationship_context import (
+    relationship_transition_subject_refs,
+)
 from .event_identity import domain_idempotency_key
 from .ledger import LedgerPort
 from .relationship_events import relationship_mutation_hash
@@ -37,7 +40,14 @@ from .schemas import (
 
 
 _CONTRACT = "relationship-proposal-compiler.1"
+_WORLD_STIMULUS_CONTRACT = "relationship-proposal-compiler.world-stimulus.1"
 _POLICY_REFS = ("policy:relationship-signal-v1",)
+_WORLD_STIMULUS_SOURCE_EVIDENCE = {
+    "WorldOccurrenceSettled": "settled_world_event",
+    "ExecutionReceiptRecorded": "committed_world_event",
+    "ActivityAbandoned": "committed_world_event",
+    "PerceptionResultAccepted": "committed_world_event",
+}
 
 
 def _canonical(value: object) -> str:
@@ -73,6 +83,7 @@ class RelationshipProposalCompilation(FrozenModel):
     source_proposal_event_ref: str
     typed_proposal_id: str | None = None
     commit: CommitResult | None = None
+    acceptance_cursor: ProjectionCursor | None = None
 
 
 class RelationshipProposalCompiler:
@@ -92,6 +103,282 @@ class RelationshipProposalCompiler:
         authority = self._reader.read(
             self._reader.pin(world_id=world_id, cursor=cursor, proposal_id=proposal_id)
         )
+        return self._record_authority(
+            authority=authority,
+            commit_cursor=cursor,
+            identity_world_revision=None,
+        )
+
+    def record_rebased(
+        self,
+        *,
+        world_id: str,
+        audit_cursor: ProjectionCursor,
+        current_cursor: ProjectionCursor,
+        proposal_id: str,
+    ) -> RelationshipProposalCompilation:
+        """Compile one already-authored signal against the current World head.
+
+        The Character decision is authenticated only at ``audit_cursor``.
+        Trigger ownership and the typed signal candidate are checked at
+        ``current_cursor`` so expression or same-turn inner-state acceptance
+        may advance the World without causing a second character call.
+        """
+
+        if (
+            current_cursor.ledger_sequence < audit_cursor.ledger_sequence
+            or current_cursor.world_revision < audit_cursor.world_revision
+            or current_cursor.deliberation_revision < audit_cursor.deliberation_revision
+        ):
+            raise RelationshipProposalCompilerError("rebase_cursor_precedes_audit")
+        authority = self._reader.read(
+            self._reader.pin(
+                world_id=world_id,
+                cursor=audit_cursor,
+                proposal_id=proposal_id,
+            )
+        )
+        changes = tuple(
+            item
+            for item in authority.proposal.proposed_changes
+            if item.kind == "relationship_signal"
+        )
+        if not changes:
+            return RelationshipProposalCompilation(
+                status="no_change",
+                source_proposal_id=authority.proposal.proposal_id,
+                source_proposal_event_ref=authority.audit.event_ref,
+            )
+        if len(changes) != 1 or changes[0].transition != "suggest":
+            raise RelationshipProposalCompilerError("signal_change_invalid")
+        projection = self._ledger.project_at(current_cursor)
+        existing = self._existing_rebased_candidate(
+            projection=projection,
+            authority=authority,
+            change=changes[0],
+            current_cursor=current_cursor,
+        )
+        if existing is not None:
+            candidate, commit, acceptance_cursor = existing
+            return RelationshipProposalCompilation(
+                status="candidate_recorded",
+                source_proposal_id=authority.proposal.proposal_id,
+                source_proposal_event_ref=authority.audit.event_ref,
+                typed_proposal_id=candidate.proposal_id,
+                commit=commit,
+                acceptance_cursor=acceptance_cursor,
+            )
+        return self._record_authority(
+            authority=authority,
+            commit_cursor=current_cursor,
+            identity_world_revision=current_cursor.world_revision,
+        )
+
+    def accepted_descendant(
+        self,
+        *,
+        world_id: str,
+        audit_cursor: ProjectionCursor,
+        current_cursor: ProjectionCursor,
+        proposal_id: str,
+    ) -> str | None:
+        """Return the accepted typed descendant of one exact audited choice."""
+
+        if (
+            current_cursor.ledger_sequence < audit_cursor.ledger_sequence
+            or current_cursor.world_revision < audit_cursor.world_revision
+            or current_cursor.deliberation_revision < audit_cursor.deliberation_revision
+        ):
+            raise RelationshipProposalCompilerError("rebase_cursor_precedes_audit")
+        authority = self._reader.read(
+            self._reader.pin(
+                world_id=world_id,
+                cursor=audit_cursor,
+                proposal_id=proposal_id,
+            )
+        )
+        changes = tuple(
+            item
+            for item in authority.proposal.proposed_changes
+            if item.kind == "relationship_signal"
+        )
+        if len(changes) != 1 or changes[0].transition != "suggest":
+            return None
+        accepted = self._accepted_rebased_candidate(
+            projection=self._ledger.project_at(current_cursor),
+            authority=authority,
+            change=changes[0],
+        )
+        return accepted[0].proposal_id if accepted is not None else None
+
+    def record_world_stimulus_rebased(
+        self,
+        *,
+        world_id: str,
+        audit_cursor: ProjectionCursor,
+        current_cursor: ProjectionCursor,
+        proposal_id: str,
+        source_event_id: str,
+    ) -> RelationshipProposalCompilation:
+        """Compile one same-audit world-stimulus signal without a second author.
+
+        This deliberately separate entry point accepts only the three committed
+        CharacterInterior world-stimulus event kinds.  It re-proves the exact
+        capability subject set recorded by that purpose and never weakens the
+        Observation/Appraisal trigger requirements of :meth:`record_rebased`.
+        """
+
+        self._require_rebase_order(
+            audit_cursor=audit_cursor,
+            current_cursor=current_cursor,
+        )
+        authority = self._reader.read(
+            self._reader.pin(
+                world_id=world_id,
+                cursor=audit_cursor,
+                proposal_id=proposal_id,
+            )
+        )
+        changes = tuple(
+            item
+            for item in authority.proposal.proposed_changes
+            if item.kind == "relationship_signal"
+        )
+        if not changes:
+            return RelationshipProposalCompilation(
+                status="no_change",
+                source_proposal_id=authority.proposal.proposal_id,
+                source_proposal_event_ref=authority.audit.event_ref,
+            )
+        if len(changes) != 1 or changes[0].transition != "suggest":
+            raise RelationshipProposalCompilerError("signal_change_invalid")
+        current_projection = self._ledger.project_at(current_cursor)
+        source_event, subject, evidence = self._world_stimulus_binding(
+            authority=authority,
+            change=changes[0],
+            audit_projection=self._ledger.project_at(audit_cursor),
+            current_projection=current_projection,
+            source_event_id=source_event_id,
+        )
+        existing = self._existing_rebased_candidate(
+            projection=current_projection,
+            authority=authority,
+            change=changes[0],
+            current_cursor=current_cursor,
+        )
+        if existing is not None:
+            candidate, commit, acceptance_cursor = existing
+            return RelationshipProposalCompilation(
+                status="candidate_recorded",
+                source_proposal_id=authority.proposal.proposal_id,
+                source_proposal_event_ref=authority.audit.event_ref,
+                typed_proposal_id=candidate.proposal_id,
+                commit=commit,
+                acceptance_cursor=acceptance_cursor,
+            )
+        return self._record_authority(
+            authority=authority,
+            commit_cursor=current_cursor,
+            identity_world_revision=current_cursor.world_revision,
+            source_binding=(source_event, subject, evidence),
+            identity_contract=_WORLD_STIMULUS_CONTRACT,
+        )
+
+    def accepted_world_stimulus_descendant(
+        self,
+        *,
+        world_id: str,
+        audit_cursor: ProjectionCursor,
+        current_cursor: ProjectionCursor,
+        proposal_id: str,
+        source_event_id: str,
+    ) -> str | None:
+        """Return an accepted descendant only after re-proving its purpose binding."""
+
+        self._require_rebase_order(
+            audit_cursor=audit_cursor,
+            current_cursor=current_cursor,
+        )
+        authority = self._reader.read(
+            self._reader.pin(
+                world_id=world_id,
+                cursor=audit_cursor,
+                proposal_id=proposal_id,
+            )
+        )
+        changes = tuple(
+            item
+            for item in authority.proposal.proposed_changes
+            if item.kind == "relationship_signal"
+        )
+        if not changes:
+            return None
+        if len(changes) != 1 or changes[0].transition != "suggest":
+            raise RelationshipProposalCompilerError("signal_change_invalid")
+        current_projection = self._ledger.project_at(current_cursor)
+        self._world_stimulus_binding(
+            authority=authority,
+            change=changes[0],
+            audit_projection=self._ledger.project_at(audit_cursor),
+            current_projection=current_projection,
+            source_event_id=source_event_id,
+        )
+        accepted = self._accepted_rebased_candidate(
+            projection=current_projection,
+            authority=authority,
+            change=changes[0],
+        )
+        return accepted[0].proposal_id if accepted is not None else None
+
+    def world_stimulus_signal_present(
+        self,
+        *,
+        world_id: str,
+        audit_cursor: ProjectionCursor,
+        current_cursor: ProjectionCursor,
+        proposal_id: str,
+        source_event_id: str,
+    ) -> bool:
+        """Read-only proof that this exact purpose audit authored one signal."""
+
+        self._require_rebase_order(
+            audit_cursor=audit_cursor,
+            current_cursor=current_cursor,
+        )
+        authority = self._reader.read(
+            self._reader.pin(
+                world_id=world_id,
+                cursor=audit_cursor,
+                proposal_id=proposal_id,
+            )
+        )
+        changes = tuple(
+            item
+            for item in authority.proposal.proposed_changes
+            if item.kind == "relationship_signal"
+        )
+        if not changes:
+            return False
+        if len(changes) != 1 or changes[0].transition != "suggest":
+            raise RelationshipProposalCompilerError("signal_change_invalid")
+        self._world_stimulus_binding(
+            authority=authority,
+            change=changes[0],
+            audit_projection=self._ledger.project_at(audit_cursor),
+            current_projection=self._ledger.project_at(current_cursor),
+            source_event_id=source_event_id,
+        )
+        return True
+
+    def _record_authority(
+        self,
+        *,
+        authority,
+        commit_cursor: ProjectionCursor,
+        identity_world_revision: int | None,
+        source_binding: tuple[WorldEvent, str, tuple[EvidenceRef, ...]] | None = None,
+        identity_contract: str = _CONTRACT,
+    ) -> RelationshipProposalCompilation:
         change = tuple(
             item
             for item in authority.proposal.proposed_changes
@@ -105,18 +392,24 @@ class RelationshipProposalCompiler:
             )
         if len(change) != 1 or change[0].transition != "suggest":
             raise RelationshipProposalCompilerError("signal_change_invalid")
-        projection = self._ledger.project_at(cursor)
-        typed = self._compile_signal(authority=authority, change=change[0], projection=projection)
+        projection = self._ledger.project_at(commit_cursor)
+        typed = self._compile_signal(
+            authority=authority,
+            change=change[0],
+            projection=projection,
+            identity_world_revision=identity_world_revision,
+            source_binding=source_binding,
+            identity_contract=identity_contract,
+        )
         source_event = self._event(authority.audit.event_ref)
         event = self._proposal_event(typed=typed, source_event=source_event, logical_time=projection.logical_time)
-        commit = self._ledger.commit(
+        commit = self._ledger.commit_at_cursor(
             [event],
-            expected_world_revision=cursor.world_revision,
-            expected_deliberation_revision=cursor.deliberation_revision,
+            expected_cursor=commit_cursor,
             commit_id="commit:relationship-proposal-compiler:"
             + _digest(
                 {
-                    "cursor": cursor.model_dump(mode="json"),
+                    "cursor": commit_cursor.model_dump(mode="json"),
                     "source": authority.audit.event_ref,
                     "typed_proposal_id": typed.proposal_id,
                 }
@@ -128,13 +421,162 @@ class RelationshipProposalCompiler:
             source_proposal_event_ref=authority.audit.event_ref,
             typed_proposal_id=typed.proposal_id,
             commit=commit,
+            acceptance_cursor=self._cursor_from_commit(commit),
         )
 
-    def _compile_signal(self, *, authority, change, projection) -> RelationshipProposalProjection:
-        source_event, subject = self._source_relationship_subject(
-            trigger_ref=authority.proposal.trigger_ref, projection=projection
+    def _existing_rebased_candidate(
+        self,
+        *,
+        projection,
+        authority,
+        change,
+        current_cursor: ProjectionCursor,
+    ) -> tuple[RelationshipProposalProjection, CommitResult, ProjectionCursor] | None:
+        accepted = self._accepted_rebased_candidate(
+            projection=projection,
+            authority=authority,
+            change=change,
         )
-        self._require_claimed_trigger(source_event=source_event, projection=projection)
+        if accepted is not None:
+            candidate, commit = accepted
+            return candidate, commit, self._cursor_from_commit(commit)
+
+        located_existing: list[
+            tuple[RelationshipProposalProjection, CommitResult]
+        ] = []
+        for candidate in projection.relationship_proposals:
+            binding = candidate.source_audit
+            if (
+                binding is None
+                or binding.proposal_event_ref != authority.audit.event_ref
+                or binding.proposal_event_payload_hash
+                != authority.audit.event_payload_hash
+                or binding.model_result_ref != authority.audit.model_result_ref
+                or binding.capsule_id != authority.audit.capsule_id
+                or binding.change_id != change.change_id
+                or binding.change_payload_hash != change.payload.payload_hash
+            ):
+                continue
+            located = (
+                self._ledger.lookup_event_commit(candidate.recorded_event_ref)
+                if candidate.recorded_event_ref is not None
+                else None
+            )
+            if (
+                located is None
+                or located[0].event_type != "ProposalRecorded"
+                or located[0].payload_hash != candidate.recorded_event_payload_hash
+            ):
+                raise RelationshipProposalCompilerError(
+                    "rebased_candidate_event_missing"
+                )
+            located_existing.append((candidate, located[1]))
+        current = tuple(
+            item
+            for item in located_existing
+            if item[0].evaluated_world_revision == current_cursor.world_revision
+        )
+        if len(current) > 1:
+            raise RelationshipProposalCompilerError("rebased_candidate_ambiguous")
+        if current:
+            candidate, commit = current[0]
+            return candidate, commit, current_cursor
+        if located_existing:
+            # A crash may leave an unactioned typed candidate.  Reusing it at a
+            # different World revision would violate its manifest; silently
+            # creating another candidate would leave two live authorities for
+            # one character choice.  Keep the trigger retryable and expose the
+            # exact technical condition instead.
+            raise RelationshipProposalCompilerError("rebased_candidate_stale")
+        return None
+
+    def _accepted_rebased_candidate(
+        self,
+        *,
+        projection,
+        authority,
+        change,
+    ) -> tuple[RelationshipProposalProjection, CommitResult] | None:
+        matches: list[tuple[RelationshipProposalProjection, CommitResult]] = []
+        for decision in projection.acceptance_decisions:
+            if (
+                decision.manifest_version != "relationship-acceptance.1"
+                or decision.status != "accepted"
+                or decision.acceptance_event_ref is None
+            ):
+                continue
+            acceptance = self._ledger.lookup_event_commit(
+                decision.acceptance_event_ref
+            )
+            if acceptance is None:
+                continue
+            proposal_event_ref = acceptance[0].payload().get("proposal_event_ref")
+            located = (
+                self._ledger.lookup_event_commit(proposal_event_ref)
+                if isinstance(proposal_event_ref, str)
+                else None
+            )
+            if located is None or located[0].event_type != "ProposalRecorded":
+                continue
+            try:
+                candidate = RelationshipProposalProjection.model_validate_json(
+                    located[0].payload_json
+                )
+            except ValueError:
+                continue
+            binding = candidate.source_audit
+            if (
+                binding is None
+                or binding.proposal_event_ref != authority.audit.event_ref
+                or binding.proposal_event_payload_hash
+                != authority.audit.event_payload_hash
+                or binding.model_result_ref != authority.audit.model_result_ref
+                or binding.capsule_id != authority.audit.capsule_id
+                or binding.change_id != change.change_id
+                or binding.change_payload_hash != change.payload.payload_hash
+            ):
+                continue
+            matches.append((candidate, located[1]))
+        if len(matches) > 1:
+            raise RelationshipProposalCompilerError(
+                "rebased_candidate_accepted_ambiguous"
+            )
+        return matches[0] if matches else None
+
+    @staticmethod
+    def _cursor_from_commit(commit: CommitResult) -> ProjectionCursor:
+        return ProjectionCursor(
+            world_revision=commit.world_revision,
+            deliberation_revision=commit.deliberation_revision,
+            ledger_sequence=commit.ledger_sequence,
+        )
+
+    def _compile_signal(
+        self,
+        *,
+        authority,
+        change,
+        projection,
+        identity_world_revision: int | None,
+        source_binding: tuple[WorldEvent, str, tuple[EvidenceRef, ...]] | None = None,
+        identity_contract: str = _CONTRACT,
+    ) -> RelationshipProposalProjection:
+        if source_binding is None:
+            source_event, subject = self._source_relationship_subject(
+                trigger_ref=authority.proposal.trigger_ref, projection=projection
+            )
+            self._require_claimed_trigger(
+                source_event=source_event,
+                projection=projection,
+            )
+            evidence = self._evidence(
+                authority.proposal,
+                change.evidence_refs,
+                source_event,
+                projection,
+            )
+        else:
+            source_event, subject, evidence = source_binding
         raw = change.payload.value()
         subject_ref = raw.get("subject_ref")
         if subject_ref != subject:
@@ -157,14 +599,14 @@ class RelationshipProposalCompiler:
         RelationshipVariableDeltas.model_validate(deltas)
         if projection.logical_time is None:
             raise RelationshipProposalCompilerError("logical_time_missing")
-        evidence = self._evidence(authority.proposal, change.evidence_refs, source_event, projection)
-        identity = _digest(
-            {
-                "source_proposal_event": authority.audit.event_ref,
-                "source_change": change.change_id,
-                "typed_contract": _CONTRACT,
-            }
-        )
+        identity_material: dict[str, object] = {
+            "source_proposal_event": authority.audit.event_ref,
+            "source_change": change.change_id,
+            "typed_contract": identity_contract,
+        }
+        if identity_world_revision is not None:
+            identity_material["rebase_world_revision"] = identity_world_revision
+        identity = _digest(identity_material)
         typed_proposal_id = f"proposal:relationship-compiled:{identity}"
         typed_change_id = f"change:relationship-compiled:{identity}"
         transition_id = f"transition:relationship-compiled:{identity}"
@@ -230,6 +672,155 @@ class RelationshipProposalCompiler:
                 capsule_id=authority.audit.capsule_id,
                 change_id=change.change_id,
                 change_payload_hash=change.payload.payload_hash,
+            ),
+        )
+
+    @staticmethod
+    def _require_rebase_order(
+        *,
+        audit_cursor: ProjectionCursor,
+        current_cursor: ProjectionCursor,
+    ) -> None:
+        if (
+            current_cursor.ledger_sequence < audit_cursor.ledger_sequence
+            or current_cursor.world_revision < audit_cursor.world_revision
+            or current_cursor.deliberation_revision
+            < audit_cursor.deliberation_revision
+        ):
+            raise RelationshipProposalCompilerError(
+                "rebase_cursor_precedes_audit"
+            )
+
+    def _world_stimulus_binding(
+        self,
+        *,
+        authority,
+        change,
+        audit_projection,
+        current_projection,
+        source_event_id: str,
+    ) -> tuple[WorldEvent, str, tuple[EvidenceRef, ...]]:
+        if (
+            authority.proposal.trigger_ref != source_event_id
+            or authority.audit.trigger_ref != source_event_id
+            or not authority.proposal.proposal_id.startswith(
+                "proposal:character-interior-world-stimulus:"
+            )
+        ):
+            raise RelationshipProposalCompilerError(
+                "world_stimulus_source_mismatch"
+            )
+        located = self._ledger.lookup_event_commit(source_event_id)
+        if located is None:
+            raise RelationshipProposalCompilerError(
+                "world_stimulus_source_unavailable"
+            )
+        source_event, source_commit = located
+        evidence_type = _WORLD_STIMULUS_SOURCE_EVIDENCE.get(
+            source_event.event_type
+        )
+        if evidence_type is None:
+            raise RelationshipProposalCompilerError(
+                "world_stimulus_source_kind_unsupported"
+            )
+        if (
+            source_commit.world_revision > authority.cursor.world_revision
+            or source_commit.deliberation_revision
+            > authority.cursor.deliberation_revision
+            or source_commit.ledger_sequence > authority.cursor.ledger_sequence
+        ):
+            raise RelationshipProposalCompilerError(
+                "world_stimulus_source_outside_audit"
+            )
+        audit_committed = next(
+            (
+                item
+                for item in audit_projection.committed_world_event_refs
+                if item.event_id == source_event_id
+            ),
+            None,
+        )
+        current_committed = next(
+            (
+                item
+                for item in current_projection.committed_world_event_refs
+                if item.event_id == source_event_id
+            ),
+            None,
+        )
+        if (
+            audit_committed is None
+            or current_committed is None
+            or audit_committed != current_committed
+            or audit_committed.event_type != source_event.event_type
+            or audit_committed.payload_hash != source_event.payload_hash
+        ):
+            raise RelationshipProposalCompilerError(
+                "world_stimulus_source_not_authoritative"
+            )
+        raw = change.payload.value()
+        subject_ref = raw.get("subject_ref")
+        audit_event = self._event(authority.audit.event_ref)
+        if (
+            audit_event.source
+            != "world-v2:character-interior-world-stimulus-authority"
+            or not audit_event.event_id.startswith(
+                "event:character-interior-world-stimulus:proposal:"
+            )
+        ):
+            # This exact writer validates the capability manifest against the
+            # pinned relationship projection before it can persist the audit.
+            raise RelationshipProposalCompilerError(
+                "world_stimulus_subject_authority_invalid"
+            )
+        audited_subjects = relationship_transition_subject_refs(
+            projection=audit_projection,
+            source_event=source_event,
+        )
+        current_subjects = relationship_transition_subject_refs(
+            projection=current_projection,
+            source_event=source_event,
+        )
+        if (
+            not isinstance(subject_ref, str)
+            or subject_ref not in audited_subjects
+            or subject_ref not in current_subjects
+        ):
+            raise RelationshipProposalCompilerError(
+                "world_stimulus_subject_not_authorized"
+            )
+        if tuple(change.evidence_refs) != (source_event_id,):
+            raise RelationshipProposalCompilerError(
+                "signal_evidence_not_exact_trigger"
+            )
+        source = next(
+            (
+                item
+                for item in authority.proposal.evidence_refs
+                if item.ref_id == source_event_id
+            ),
+            None,
+        )
+        if (
+            source is None
+            or source.evidence_kind != evidence_type
+            or source.source_world_revision != audit_committed.world_revision
+            or source.immutable_hash != "sha256:" + source_event.payload_hash
+        ):
+            raise RelationshipProposalCompilerError(
+                "signal_evidence_not_authoritative"
+            )
+        return (
+            source_event,
+            subject_ref,
+            (
+                EvidenceRef(
+                    ref_id=source_event_id,
+                    evidence_type=evidence_type,
+                    claim_purpose="private_hypothesis",
+                    source_world_revision=audit_committed.world_revision,
+                    immutable_hash=source_event.payload_hash,
+                ),
             ),
         )
 

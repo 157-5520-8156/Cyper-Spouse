@@ -4,15 +4,14 @@ import hashlib
 import json
 import sqlite3
 
+import pytest
+
 from legacy_migration_support import read_head_state_json
 
-from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from companion_daemon.world_v2.deliberation import DeliberationResult
-from companion_daemon.world_v2.media_thread_acceptance_runtime import (
-    MediaDeliveryThreadAcceptanceRuntime,
-)
 from companion_daemon.world_v2.media_thread_proposal_compiler import (
     MediaDeliveryThreadProposalCompiler,
+    MediaThreadProposalCompilerError,
 )
 from companion_daemon.world_v2.proposal_audit import ProposalAuditContext, ProposalAuditRecorder
 from companion_daemon.world_v2.proposal_envelope import (
@@ -117,26 +116,29 @@ def _audit(ledger, source, source_revision):
 
 
 def test_delivery_can_open_thread_only_through_dedicated_atomic_lane() -> None:
+    # The independent media-delivery thread author was retired by the
+    # CharacterInterior migration (same lane as the interaction bid).  Opening
+    # and claiming the delivery trigger derives a deterministic retired
+    # outcome; the old parallel worker must never compile a thread on its own.
     ledger, source, source_revision = _prepared_ledger()
-    proposal, audited = _audit(ledger, source, source_revision)
-    compiled = MediaDeliveryThreadProposalCompiler(ledger=ledger).record(
-        world_id=WORLD, cursor=audited.cursor, proposal_id=proposal.proposal_id
-    )
-    issuer = AcceptedLedgerBatchIssuer()
-    ledger._accepted_batch_issuer = issuer  # type: ignore[attr-defined]
-    runtime = MediaDeliveryThreadAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
-    result = runtime.accept_runtime_owned(
-        handle=runtime.pin_proposal(cursor=_cursor(ledger), proposal_id=compiled.typed_proposal_id),
-        actor="worker:media-thread",
-        source="world-v2:media-thread-worker",
-    )
     projection = ledger.project()
-    assert projection.threads[0].thread_id == "thread:media:1"
-    assert projection.threads[0].origin.accepted_event_ref == result.event_ids[1]
-    assert projection.thread_proposals == ()  # generic Thread path remains unopened
-    assert tuple(
-        ledger.lookup_event_commit(event_id)[0].event_type for event_id in result.event_ids
-    ) == ("AcceptanceRecorded", "MediaDeliveryThreadOpened")
+    process = projection.trigger_processes[0]
+    assert process.process_kind == "media_delivery_interaction"
+    assert process.state == "terminal"
+    assert process.runtime_outcome_ref == (
+        "retired-technical:media-delivery-interaction-author-removed"
+    )
+    assert process.trigger_id in projection.completed_trigger_ids
+    # The retired lane cannot be re-armed: a compiler pinned at the current
+    # cursor must refuse the retired (non-claimed) source trigger.
+    proposal, audited = _audit(ledger, source, source_revision)
+    with pytest.raises(MediaThreadProposalCompilerError) as excinfo:
+        MediaDeliveryThreadProposalCompiler(ledger=ledger).record(
+            world_id=WORLD, cursor=audited.cursor, proposal_id=proposal.proposal_id
+        )
+    assert excinfo.value.code == (
+        "media_thread_proposal_compiler.delivery_source_unavailable"
+    )
 
 
 def test_sqlite_migrates_v31_head_without_inventing_media_thread_proposals(tmp_path) -> None:
@@ -169,6 +171,6 @@ def test_sqlite_migrates_v31_head_without_inventing_media_thread_proposals(tmp_p
             (legacy_hash, "world-v2-reducers.31", WORLD),
         )
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.51"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.52"
     assert migrated.project().media_thread_proposals == ()
     assert migrated.rebuild() == migrated.project()

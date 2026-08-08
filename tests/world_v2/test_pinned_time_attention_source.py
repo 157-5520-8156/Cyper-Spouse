@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from companion_daemon.world_v2.chat_model_deliberation_adapter import (
+from companion_daemon.world_v2.character_interior.inbound_wire import (
     review_expression_source_closure,
     review_expression_source_closure_appeal,
 )
@@ -248,9 +248,6 @@ def test_pinned_time_alias_is_declared_attention_only_not_world_claim_authority(
         "unique": True,
         "authority": "attention_provenance_only_not_world_fact_authority",
         "attention_only_not_fact_authority": ["T1"],
-        "additional_attention_only_source_ref_aliases": {
-            "T1": pinned_time_ref,
-        },
     }
     assert manifest["source_ref_aliases"] == {}
     assert all("T1" not in refs for refs in manifest["world_claim_source_refs"].values())
@@ -365,6 +362,7 @@ def test_recall_extension_keeps_existing_temporal_aliases_stable() -> None:
         ("已经深夜了。", False),
     ),
 )
+@pytest.mark.asyncio
 async def test_source_closure_skips_silent_turn_local_private_time_state(
     summary: str,
     cite_time: bool,

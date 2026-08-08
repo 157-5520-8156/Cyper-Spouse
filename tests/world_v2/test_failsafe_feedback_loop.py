@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime, timedelta
 import json
 import sqlite3
@@ -10,13 +9,20 @@ from pathlib import Path
 
 import pytest
 
-from companion_daemon.world_v2.deliberation import ModelInput, ModelRoute, TriggerMessage
+from companion_daemon.world_v2.deliberation import (
+    ModelInput,
+    ModelRoute,
+    TriggerMessage,
+    ValidationTechnicalFailure,
+)
 from companion_daemon.world_v2.durable_reliability import (
     clear_durable_reliability_cache_for_tests,
     durable_reliability_snapshot,
 )
 from companion_daemon.world_v2.proposal_envelope import ProposalEvidenceRef
-from companion_daemon.world_v2.single_call_inbound_cognition import SingleCallInboundCognition
+from companion_daemon.world_v2.character_interior.inbound_author import (
+    _InboundCharacterAuthor as InboundCharacterAuthor,
+)
 
 
 OLD_ENGINEERING_ACK = "我刚才没接好这句，不想装作已经回答了；但我看到你说了什么。"
@@ -29,20 +35,6 @@ class _UnusedProvider:
         self, messages: list[dict[str, str]], *, temperature: float = 0.8
     ) -> str:
         raise AssertionError("local failsafe must not call the provider")
-
-
-class _FailingRecoveryProvider:
-    model = "failed-recovery"
-
-    def __init__(self) -> None:
-        self.calls: list[list[dict[str, str]]] = []
-
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
-        del temperature
-        self.calls.append(messages)
-        raise RuntimeError("recovery provider unavailable")
 
 
 class _ContextualFailureProvider:
@@ -194,18 +186,6 @@ class _UndeclaredExcuseReviewer(_ContextualGroundingReviewer):
         )
 
 
-class _HangingRecoveryProvider(_FailingRecoveryProvider):
-    model = "hanging-recovery"
-
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
-        del temperature
-        self.calls.append(messages)
-        await asyncio.sleep(60)
-        raise AssertionError("hanging recovery should have timed out")
-
-
 def _request(text: str) -> ModelInput:
     return ModelInput(
         call_id="call:failsafe-feedback",
@@ -263,31 +243,28 @@ def _request_with_current_activity(text: str) -> ModelInput:
 
 @pytest.mark.asyncio
 async def test_generic_failure_no_longer_emits_the_engineering_ack() -> None:
-    cognition = SingleCallInboundCognition(flash_model=_UnusedProvider())
-    with pytest.raises(RuntimeError, match="model-owned expression unavailable"):
-        await cognition.expression.recover(
-            _request("所以这是我们第一次聊天吗"), "main_timeout"
-        )
+    cognition = InboundCharacterAuthor(flash_model=_UnusedProvider())
+    with pytest.raises(ValidationTechnicalFailure) as caught:
+        await cognition.recover(_request("所以这是我们第一次聊天吗"), "main_timeout")
+    assert caught.value.failure_code == "inbound_character_author_unavailable"
 
 
 @pytest.mark.asyncio
 async def test_contextual_failure_recovery_is_dormant_by_default() -> None:
-    recovery = _FailingRecoveryProvider()
     contextual = _ContextualFailureProvider()
-    cognition = SingleCallInboundCognition(
+    cognition = InboundCharacterAuthor(
         flash_model=_UnusedProvider(),
-        recovery_model=recovery,
         contextual_failsafe_model=contextual,
         contextual_failsafe_reviewer_model=_ContextualGroundingReviewer(),
     )
 
-    with pytest.raises(RuntimeError, match="model-owned expression unavailable"):
-        await cognition.expression.recover(
+    with pytest.raises(ValidationTechnicalFailure) as caught:
+        await cognition.recover(
             _request_with_current_activity("你刚才在忙吗？"),
             "main_timeout",
         )
 
-    assert len(recovery.calls) == 1
+    assert caught.value.failure_code == "inbound_character_author_unavailable"
     assert contextual.calls == []
 
 
@@ -295,9 +272,8 @@ def test_contextual_failure_recovery_rejects_self_review_configuration() -> None
     contextual = _ContextualFailureProvider()
 
     with pytest.raises(ValueError, match="generation and reviewer must be independent"):
-        SingleCallInboundCognition(
+        InboundCharacterAuthor(
             flash_model=_UnusedProvider(),
-            recovery_model=_FailingRecoveryProvider(),
             contextual_failsafe_model=contextual,
             contextual_failsafe_reviewer_model=contextual,
             contextual_failsafe_enabled=True,
@@ -306,23 +282,20 @@ def test_contextual_failure_recovery_rejects_self_review_configuration() -> None
 
 @pytest.mark.asyncio
 async def test_enabled_contextual_failure_recovery_uses_pinned_world_facts() -> None:
-    recovery = _FailingRecoveryProvider()
     contextual = _ContextualFailureProvider()
     reviewer = _ContextualGroundingReviewer()
-    cognition = SingleCallInboundCognition(
+    cognition = InboundCharacterAuthor(
         flash_model=_UnusedProvider(),
-        recovery_model=recovery,
         contextual_failsafe_model=contextual,
         contextual_failsafe_reviewer_model=reviewer,
         contextual_failsafe_enabled=True,
     )
 
-    output = await cognition.expression.recover(
+    output = await cognition.recover(
         _request_with_current_activity("你刚才在忙吗？"),
         "main_timeout",
     )
 
-    assert len(recovery.calls) == 1
     assert len(contextual.calls) == 1
     assert len(reviewer.calls) == 1
     assert "整理桌面" in contextual.calls[0][1]["content"]
@@ -339,16 +312,15 @@ async def test_enabled_contextual_failure_recovery_uses_pinned_world_facts() -> 
 async def test_contextual_failure_recovery_rejects_a_claim_outside_pinned_context() -> None:
     contextual = _InvalidContextualFailureProvider()
     reviewer = _ContextualGroundingReviewer()
-    cognition = SingleCallInboundCognition(
+    cognition = InboundCharacterAuthor(
         flash_model=_UnusedProvider(),
-        recovery_model=_FailingRecoveryProvider(),
         contextual_failsafe_model=contextual,
         contextual_failsafe_reviewer_model=reviewer,
         contextual_failsafe_enabled=True,
     )
 
-    with pytest.raises(RuntimeError, match="model-owned expression unavailable"):
-        await cognition.expression.recover(
+    with pytest.raises(ValidationTechnicalFailure):
+        await cognition.recover(
             _request_with_current_activity("你刚才在忙吗？"),
             "main_timeout",
         )
@@ -361,16 +333,15 @@ async def test_contextual_failure_recovery_rejects_a_claim_outside_pinned_contex
 async def test_contextual_failure_recovery_rejects_an_unrelated_valid_source() -> None:
     contextual = _UnrelatedContextualFailureProvider()
     reviewer = _UnrelatedGroundingReviewer()
-    cognition = SingleCallInboundCognition(
+    cognition = InboundCharacterAuthor(
         flash_model=_UnusedProvider(),
-        recovery_model=_FailingRecoveryProvider(),
         contextual_failsafe_model=contextual,
         contextual_failsafe_reviewer_model=reviewer,
         contextual_failsafe_enabled=True,
     )
 
-    with pytest.raises(RuntimeError, match="model-owned expression unavailable"):
-        await cognition.expression.recover(
+    with pytest.raises(ValidationTechnicalFailure):
+        await cognition.recover(
             _request_with_current_activity("你刚才在忙吗？"),
             "main_timeout",
         )
@@ -383,16 +354,15 @@ async def test_contextual_failure_recovery_rejects_an_unrelated_valid_source() -
 async def test_contextual_failure_recovery_rejects_an_undeclared_visible_excuse() -> None:
     contextual = _UndeclaredExcuseProvider()
     reviewer = _UndeclaredExcuseReviewer()
-    cognition = SingleCallInboundCognition(
+    cognition = InboundCharacterAuthor(
         flash_model=_UnusedProvider(),
-        recovery_model=_FailingRecoveryProvider(),
         contextual_failsafe_model=contextual,
         contextual_failsafe_reviewer_model=reviewer,
         contextual_failsafe_enabled=True,
     )
 
-    with pytest.raises(RuntimeError, match="model-owned expression unavailable"):
-        await cognition.expression.recover(
+    with pytest.raises(ValidationTechnicalFailure):
+        await cognition.recover(
             _request_with_current_activity("你刚才在忙吗？"),
             "main_timeout",
         )
@@ -402,24 +372,21 @@ async def test_contextual_failure_recovery_rejects_an_undeclared_visible_excuse(
 
 
 @pytest.mark.asyncio
-async def test_hanging_second_provider_leaves_time_for_contextual_recovery() -> None:
-    recovery = _HangingRecoveryProvider()
+async def test_contextual_recovery_does_not_wait_for_a_detached_author() -> None:
     contextual = _ContextualFailureProvider()
     reviewer = _ContextualGroundingReviewer()
-    cognition = SingleCallInboundCognition(
+    cognition = InboundCharacterAuthor(
         flash_model=_UnusedProvider(),
-        recovery_model=recovery,
         contextual_failsafe_model=contextual,
         contextual_failsafe_reviewer_model=reviewer,
         contextual_failsafe_enabled=True,
     )
 
-    output = await cognition.expression.recover(
+    output = await cognition.recover(
         _request_with_current_activity("你刚才在忙吗？"),
         "main_timeout",
     )
 
-    assert len(recovery.calls) == 1
     assert len(contextual.calls) == 1
     assert len(reviewer.calls) == 1
     assert output.model_version == "contextual-failure-recovery.1"
@@ -427,20 +394,18 @@ async def test_hanging_second_provider_leaves_time_for_contextual_recovery() -> 
 
 @pytest.mark.asyncio
 async def test_diagnosis_repro_emotion_intent_is_not_generic_ack() -> None:
-    cognition = SingleCallInboundCognition(flash_model=_UnusedProvider())
-    with pytest.raises(RuntimeError, match="model-owned expression unavailable"):
-        await cognition.expression.recover(
-            _request("你真的生气了吗？"), "main_timeout"
-        )
+    cognition = InboundCharacterAuthor(flash_model=_UnusedProvider())
+    with pytest.raises(ValidationTechnicalFailure) as caught:
+        await cognition.recover(_request("你真的生气了吗？"), "main_timeout")
+    assert caught.value.failure_code == "inbound_character_author_unavailable"
 
 
 @pytest.mark.asyncio
 async def test_future_plan_question_recovers_with_uncertainty_not_engineering_ack() -> None:
-    cognition = SingleCallInboundCognition(flash_model=_UnusedProvider())
-    with pytest.raises(RuntimeError, match="model-owned expression unavailable"):
-        await cognition.expression.recover(
-            _request("那你下午准备干嘛？"), "main_timeout"
-        )
+    cognition = InboundCharacterAuthor(flash_model=_UnusedProvider())
+    with pytest.raises(ValidationTechnicalFailure) as caught:
+        await cognition.recover(_request("那你下午准备干嘛？"), "main_timeout")
+    assert caught.value.failure_code == "inbound_character_author_unavailable"
 
 
 def test_durable_reliability_counts_delivered_replies_and_failsafe_audits(

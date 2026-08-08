@@ -1556,6 +1556,16 @@ def _compile_slice(
     return compiled, tuple(log)
 
 
+def _companion_core_actor_matches(core_actor_ref: str, request_actor_ref: str) -> bool:
+    # ``agent:companion`` is the canonical companion actor reference.
+    # Early character-core provisioning committed ``actor:companion`` as a
+    # legacy alias of the same core; ledger_context_resolver accepts both and
+    # this contract check must mirror that rule.
+    if core_actor_ref == request_actor_ref:
+        return True
+    return request_actor_ref == "agent:companion" and core_actor_ref == "actor:companion"
+
+
 def _validate_input_contract(request: ContextCapsuleRequest) -> None:
     bound_slices: tuple[tuple[SliceName, ResolvedSlice[object] | None], ...] = (
         ("current_situation", request.situation),
@@ -1666,7 +1676,9 @@ def _validate_input_contract(request: ContextCapsuleRequest) -> None:
         raise ValueError("Situation belongs to a different actor")
     if (
         request.character_core is not None
-        and request.character_core.value.actor_ref != request.actor_ref
+        and not _companion_core_actor_matches(
+            request.character_core.value.actor_ref, request.actor_ref
+        )
     ):
         raise ValueError("Character Core belongs to a different actor")
     _validate_hex_digest(
@@ -1934,6 +1946,7 @@ def _context_model_content(
         "trigger_ref": request.trigger_ref,
         "world_revision": request.world_revision,
         "deliberation_revision": request.deliberation_revision,
+        "ledger_sequence": request.ledger_sequence,
         "logical_time": request.logical_time.isoformat() if request.logical_time else None,
         "slices": {name: json.loads(slice_.model_content_json) for name, slice_ in slices.items()},
     }

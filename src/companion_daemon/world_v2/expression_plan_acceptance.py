@@ -34,6 +34,10 @@ from .schemas import (
     ProjectionCursor,
     ResponseExpectationAuthority,
 )
+from .unified_inbound_decision import (
+    UnifiedInboundDecisionError,
+    inspect_unified_inbound_decision,
+)
 
 
 EXPRESSION_PLAN_ACCEPTANCE_POLICY_VERSION = "expression-plan-acceptance.1"
@@ -153,10 +157,11 @@ def derive_expression_plan_material(
 ) -> ExpressionPlanAcceptanceMaterial:
     """Fail closed unless all external expression work is one complete plan.
 
-    Other domain changes intentionally remain for their own typed acceptance
-    families.  This prevents a generic proposal from getting a partial
-    acceptance where text actions are authorized but its claimed world changes
-    quietly disappear.
+    A unified inbound CharacterInterior decision may also carry one same-call
+    Appraisal and its optional, exactly-bound Affect.  Those state changes
+    remain inert here and are consumed by their own acceptance families.  No
+    other peer change is reachable, so accepting an ExpressionPlan cannot turn
+    a broad proposal envelope into generic mutation authority.
     """
 
     if audit.evaluated_world_revision != cursor.world_revision:
@@ -166,11 +171,13 @@ def derive_expression_plan_material(
     except Exception as exc:
         raise ExpressionPlanAcceptanceError("invalid_audit") from exc
     _validate_audit(audit=audit, proposal=proposal, cursor=cursor)
-    if len(proposal.proposed_changes) != 1:
-        raise ExpressionPlanAcceptanceError("proposal_has_other_changes")
-    change = proposal.proposed_changes[0]
-    if change.kind != "expression_plan_transition" or change.transition != "accept":
+    try:
+        shape = inspect_unified_inbound_decision(proposal)
+    except UnifiedInboundDecisionError as exc:
+        raise ExpressionPlanAcceptanceError("proposal_has_other_changes") from exc
+    if shape.expression is None:
         raise ExpressionPlanAcceptanceError("expression_change_invalid")
+    change = shape.expression
     payload = change.payload.value()
     drafts = payload.get("beat_drafts")
     if not isinstance(drafts, list) or not drafts:

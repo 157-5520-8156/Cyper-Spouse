@@ -251,7 +251,12 @@ class LedgerLifeEcologyTriggerStore:
         raise ConcurrencyConflict("life ecology trigger claim did not converge")
 
     async def complete(
-        self, *, key: LifeEcologyRunKey, trigger_id: str, outcome: str
+        self,
+        *,
+        key: LifeEcologyRunKey,
+        trigger_id: str,
+        outcome: str,
+        character_interior_model_result=None,
     ) -> None:
         validate_life_ecology_run_key(key)
         if key.world_id != self._ledger.world_id:
@@ -373,6 +378,15 @@ class LedgerLifeEcologyTriggerStore:
                 "cadence_draw_event_ref": cadence_draw_ref,
                 "cadence_delay_seconds": cadence_delay_seconds,
                 "cadence_reused": cadence_reused,
+                **(
+                    {
+                        "character_interior_model_result": (
+                            character_interior_model_result.model_dump(mode="json")
+                        )
+                    }
+                    if character_interior_model_result is not None
+                    else {}
+                ),
             }
             event = WorldEvent.from_payload(
                 schema_version="world-v2.1",

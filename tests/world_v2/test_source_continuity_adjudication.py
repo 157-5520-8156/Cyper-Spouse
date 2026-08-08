@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from companion_daemon.world_v2.chat_model_deliberation_adapter import (
+from companion_daemon.world_v2.character_interior.inbound_wire import (
     review_candidate_external_proposition_coverage,
     review_expression_source_closure,
 )
@@ -245,6 +245,7 @@ async def test_delivered_companion_dialogue_can_prove_the_companion_asked_about_
         ("delivered", "agent:forged"),
     ],
 )
+@pytest.mark.asyncio
 async def test_unverified_companion_dialogue_is_not_visible_conversation_proof(
     delivery_state: str,
     speaker_ref: str,
@@ -360,6 +361,7 @@ async def test_counterpart_intention_report_does_not_prove_a_completed_venting_e
         "我刚其实在想，你今天好像心情挺不错。",
     ],
 )
+@pytest.mark.asyncio
 async def test_complete_private_epistemic_proposition_is_not_stripped_into_a_fact(
     visible_span: str,
 ) -> None:

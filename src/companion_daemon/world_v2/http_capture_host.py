@@ -25,10 +25,8 @@ import time
 from typing import Final
 
 from companion_daemon.config import Settings
-from .affect_chat_model_adapter import AffectDraftDeliberationAdapter
-from .relationship_draft_deliberation_adapter import RelationshipDraftDeliberationAdapter
-from .chat_model_deliberation_adapter import ChatCompletionModel
-from .deliberation import DeliberationModelAdapter
+from .model_completion import ChatCompletionModel
+from .expression_draft import PRODUCTION_TEXT_ONLY_EXPRESSION_CAPABILITIES
 from .perception_executor import PerceptionTransport
 from .perception_input_source import PerceptionInputSource
 from .platform_action_executor import (
@@ -628,6 +626,22 @@ class HttpV2CaptureHost:
             }
         return self._semantic_chat.proactive_source_authority_health()
 
+    def character_interior_health(self) -> dict[str, object]:
+        """Expose the single protagonist-author topology without model work."""
+
+        if self._semantic_chat is None:
+            return {
+                "status": "unavailable",
+                "installed": False,
+                "semantic_author_count": 0,
+                "primary_author_model": None,
+                "primary_author_route": None,
+                "parallel_character_author_conflicts": 0,
+                "legacy_interface_invocations": 0,
+                "dual_write_conflicts": 0,
+            }
+        return self._semantic_chat.character_interior_health()
+
     def life_source_authority_health(self) -> dict[str, object]:
         """Expose isolated Life reviewer state without invoking a model."""
 
@@ -765,13 +779,12 @@ def build_http_v2_capture_host(
     bootstrap_at: datetime | None = None,
     model: ChatCompletionModel | None = None,
     thinking_model: ChatCompletionModel | None = None,
-    advisory_model: ChatCompletionModel | None = None,
+    world_support_model: ChatCompletionModel | None = None,
     source_closure_model: ChatCompletionModel | None = None,
     life_source_closure_model: ChatCompletionModel | None = None,
     candidate_external_proposition_inventory_model: ChatCompletionModel | None = None,
     media_transport: MediaProviderTransport | None = None,
     media_preview: MediaPreviewDeployment | None = None,
-    perception_model: DeliberationModelAdapter | None = None,
     perception_input_source: PerceptionInputSource | None = None,
     perception_transport: PerceptionTransport | None = None,
     perception_budget_limit: int = 0,
@@ -794,7 +807,7 @@ def build_http_v2_capture_host(
         settings=settings,
         flash_model=model,
         thinking_model=thinking_model,
-        advisory_model=advisory_model,
+        world_support_model=world_support_model,
         source_closure_model=source_closure_model,
         life_source_closure_model=life_source_closure_model,
         candidate_external_proposition_inventory_model=(
@@ -806,8 +819,7 @@ def build_http_v2_capture_host(
         "HTTP World v2 semantic composition ready duration_ms=%.1f",
         (time.perf_counter() - build_started) * 1000,
     )
-    model = semantic_chat.flash_model
-    background_model = semantic_chat.background_model
+    background_model = semantic_chat.world_support_model
     life_world_author = RoleBoundLifeDevelopmentModelAdapter(
         model=background_model,
         role="world_author",
@@ -815,10 +827,6 @@ def build_http_v2_capture_host(
     life_world_author_source_rewriter = RoleBoundLifeDevelopmentModelAdapter(
         model=background_model,
         role="world_author",
-    )
-    life_character = RoleBoundLifeDevelopmentModelAdapter(
-        model=background_model,
-        role="character_model",
     )
     life_source_closure_reviewer = (
         RoleBoundLifeDevelopmentModelAdapter(
@@ -895,6 +903,7 @@ def build_http_v2_capture_host(
             companion_actor_ref="agent:companion",
             reply_target=f"user:{primary_user_id}",
             action_pump_owner="pump:http-v2-capture",
+            expression_capabilities=PRODUCTION_TEXT_ONLY_EXPRESSION_CAPABILITIES,
             life_ecology=LifeEcologyComposition.production_v1(),
             media_selection_acceptance=(
                 media_preview.acceptance if media_preview is not None else None
@@ -904,46 +913,27 @@ def build_http_v2_capture_host(
         ),
         identities=HttpCaptureIdentityResolver(primary_user_id=primary_user_id),
         router=semantic_chat.router,
-        main_model=semantic_chat.main_model,
-        quick_recovery=semantic_chat.main_model,
+        character_interior=semantic_chat.character_interior,
         semantic_recall_embedding=configured_recall_embedding(settings),
-        private_impression_identity_frame=semantic_chat.identity_frame,
         transport=transport,
         media_transport=media_transport,
         media_planner=(media_preview.planner if media_preview is not None else None),
-        advisory_compiler=semantic_chat.advisory_compiler,
-        appraisal_model=semantic_chat.appraisal_model,
-        affect_model=AffectDraftDeliberationAdapter(model=background_model),
-        perception_model=perception_model,
         perception_input_source=perception_input_source,
         perception_transport=perception_transport,
-        relationship_model=RelationshipDraftDeliberationAdapter(model=background_model),
-        # World outcomes use a separate opaque-candidate selector.  The
-        # adapter derives settlement bytes from pinned authority, so this is
-        # not a generic chat reply pretending to be a life event.
-        outcome_draft_model=background_model,
         # Fact/Memory run only on the durable background queue; wiring them
         # here preserves the interactive reply budget while allowing later
         # turns to retrieve accepted user facts.
         fact_model=background_model,
-        private_impression_model=background_model,
-        memory_model=background_model,
-        proactive_model=background_model,
-        proactive_identity_frame=semantic_chat.identity_frame,
         proactive_source_closure_model=semantic_chat.proactive_source_closure_model,
         proactive_candidate_external_proposition_inventory_model=(
             semantic_chat.candidate_external_proposition_inventory_model
         ),
         # A scheduler-only, bounded selection over already legal activities.
         # Invalid provider output terminates the ecology wake fail-safe.
-        activity_lifecycle_model=background_model,
+        npc_actor_model=background_model,
         life_world_author_model=life_world_author,
         life_world_author_source_rewriter=life_world_author_source_rewriter,
-        life_character_model=life_character,
         life_source_closure_reviewer=life_source_closure_reviewer,
-        media_selection_model=(
-            media_preview.selection_model if media_preview is not None else None
-        ),
         projection_authority=projection_authority,
         # HTTP parsing happens before lazy composition.  Pinning the first
         # bootstrap to that already-observed ingress avoids rejecting the

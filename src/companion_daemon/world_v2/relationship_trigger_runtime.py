@@ -92,6 +92,35 @@ class RelationshipTriggerRuntime:
         )
         if process is None:
             return RelationshipTriggerRunResult(trigger_id="", status="idle")
+        return await self._drain(process=process, projection=projection)
+
+    async def drain_trigger(self, trigger_id: str) -> RelationshipTriggerRunResult:
+        """Finish one exact source-bound trigger without draining another lane item.
+
+        Unified CharacterInterior settlement already owns the audited inbound
+        source.  Selecting by deterministic trigger identity prevents an old
+        unrelated relationship opportunity from consuming that same-call
+        signal worker.
+        """
+
+        if not trigger_id:
+            raise ValueError("relationship trigger id is required")
+        projection = self._ledger.project()
+        process = next(
+            (
+                item
+                for item in projection.trigger_processes
+                if item.trigger_id == trigger_id
+                and item.process_kind == "relationship_deliberation"
+                and item.state != "terminal"
+            ),
+            None,
+        )
+        if process is None:
+            return RelationshipTriggerRunResult(trigger_id=trigger_id, status="idle")
+        return await self._drain(process=process, projection=projection)
+
+    async def _drain(self, *, process: TriggerProcess, projection) -> RelationshipTriggerRunResult:
         source_event = self._source_event(process)
         active = self._claim_or_reclaim(
             process=process, source_event=source_event, projection=projection

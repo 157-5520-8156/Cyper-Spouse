@@ -38,6 +38,10 @@ class AspirationPlantedPayload(DomainMutationPayload):
             item.ref_id for item in self.evidence_refs
         }:
             raise ValueError("aspiration source material must be bound as evidence")
+        if not set(self.aspiration.tension_source_refs).issubset(
+            {item.ref_id for item in self.evidence_refs}
+        ):
+            raise ValueError("aspiration tension sources must be bound as evidence")
         return self
 
 
@@ -52,6 +56,96 @@ class AspirationReinforcedPayload(DomainMutationPayload):
             item.ref_id for item in self.evidence_refs
         }:
             raise ValueError("aspiration reinforcement material must be bound as evidence")
+        return self
+
+
+class AspirationRevisedPayload(DomainMutationPayload):
+    """One free, character-authored revision of an active direction."""
+
+    aspiration_before: AspirationProjection
+    aspiration_after: AspirationProjection
+
+    @model_validator(mode="after")
+    def revision_is_source_closed(self) -> "AspirationRevisedPayload":
+        before = self.aspiration_before
+        after = self.aspiration_after
+        if (
+            self.expected_entity_revision != before.entity_revision
+            or after.entity_revision != before.entity_revision + 1
+            or before.status != "active"
+            or after.status != "active"
+        ):
+            raise ValueError("AspirationRevised must advance one active revision")
+        immutable = (
+            "aspiration_id",
+            "owner_actor_ref",
+            "seed_id",
+            "origin_kind",
+            "planted_at",
+            "planted_event_ref",
+            "source_event_ref",
+            "last_reinforced_at",
+            "reinforcement_count",
+        )
+        if any(getattr(before, name) != getattr(after, name) for name in immutable):
+            raise ValueError("AspirationRevised changed immutable planting history")
+        if after.last_revised_at is None or after.revision_event_ref is None:
+            raise ValueError("AspirationRevised needs revision time and authority ref")
+        changed = (
+            before.text != after.text
+            or before.privacy_class != after.privacy_class
+            or before.tension_summary != after.tension_summary
+            or before.tension_source_refs != after.tension_source_refs
+        )
+        if not changed:
+            raise ValueError("AspirationRevised must change the character-owned direction")
+        evidence = {item.ref_id for item in self.evidence_refs}
+        if before.planted_event_ref not in evidence:
+            raise ValueError("AspirationRevised must bind the planting authority")
+        if not set(after.tension_source_refs).issubset(evidence):
+            raise ValueError("aspiration tension sources must be bound as evidence")
+        return self
+
+
+class AspirationAbandonedPayload(DomainMutationPayload):
+    """The character explicitly stops treating one aspiration as her direction."""
+
+    aspiration_before: AspirationProjection
+    aspiration_after: AspirationProjection
+
+    @model_validator(mode="after")
+    def abandonment_is_source_closed(self) -> "AspirationAbandonedPayload":
+        before = self.aspiration_before
+        after = self.aspiration_after
+        if (
+            self.expected_entity_revision != before.entity_revision
+            or after.entity_revision != before.entity_revision + 1
+            or before.status != "active"
+            or after.status != "abandoned"
+        ):
+            raise ValueError("AspirationAbandoned must terminalize one active revision")
+        mutable_terminal = {
+            "entity_revision",
+            "status",
+            "abandoned_at",
+            "abandonment_event_ref",
+            "abandonment_summary",
+            "abandonment_source_refs",
+        }
+        fields = AspirationProjection.model_fields
+        if any(
+            getattr(before, name) != getattr(after, name)
+            for name in fields
+            if name not in mutable_terminal
+        ):
+            raise ValueError("AspirationAbandoned changed non-terminal aspiration material")
+        if after.abandoned_at is None or after.abandonment_event_ref is None:
+            raise ValueError("AspirationAbandoned needs terminal time and authority ref")
+        evidence = {item.ref_id for item in self.evidence_refs}
+        if before.planted_event_ref not in evidence:
+            raise ValueError("AspirationAbandoned must bind the planting authority")
+        if not set(after.abandonment_source_refs).issubset(evidence):
+            raise ValueError("aspiration abandonment sources must be bound as evidence")
         return self
 
 
@@ -82,6 +176,8 @@ class AspirationCrystallizedPayload(DomainMutationPayload):
 ASPIRATION_PAYLOAD_MODELS = {
     "AspirationPlanted": AspirationPlantedPayload,
     "AspirationReinforced": AspirationReinforcedPayload,
+    "AspirationRevised": AspirationRevisedPayload,
+    "AspirationAbandoned": AspirationAbandonedPayload,
     "AspirationFaded": AspirationFadedPayload,
     "AspirationCrystallized": AspirationCrystallizedPayload,
 }

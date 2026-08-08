@@ -16,9 +16,6 @@ from companion_daemon.world_v2.errors import ConcurrencyConflict
 from companion_daemon.world_v2.immediate_emotion_proposal_worker import (
     ImmediateEmotionConcurrencyConflict,
 )
-from companion_daemon.world_v2.interaction_appraisal_trigger_runtime import (
-    InteractionAppraisalTriggerRuntime,
-)
 from companion_daemon.world_v2.http_capture_host import build_http_v2_capture_host
 from companion_daemon.world_v2.pinned_turn import PinnedTurnCompiler
 from companion_daemon.world_v2.qq_c2c_host import build_qq_c2c_host
@@ -27,8 +24,8 @@ from companion_daemon.world_v2.runtime import WorldRuntime
 from companion_daemon.world_v2.semantic_chat_composition import (
     build_semantic_chat_composition,
 )
-from companion_daemon.world_v2.single_call_inbound_cognition import (
-    SingleCallInboundCognition,
+from companion_daemon.world_v2.character_interior.inbound_author import (
+    _InboundCharacterAuthor as InboundCharacterAuthor,
 )
 
 
@@ -40,7 +37,7 @@ def test_public_composition_has_no_synchronous_emotion_gate() -> None:
         build_qq_c2c_host,
         build_http_v2_capture_host,
         build_semantic_chat_composition,
-        SingleCallInboundCognition,
+        InboundCharacterAuthor,
         WorldRuntime,
     ):
         assert "immediate_emotion_gate_model" not in inspect.signature(callable_).parameters
@@ -73,7 +70,12 @@ class _FastReplyModel:
     model = "fixture:fast-reply"
     semantic_authority_id = "semantic-authority:test:fast-reply"
 
+    def __init__(self) -> None:
+        self.calls = 0
+        self.character_calls = 0
+
     async def complete(self, messages, **_kwargs) -> str:  # type: ignore[no-untyped-def]
+        self.calls += 1
         system = str(messages[0]["content"])
         if "candidate-external-proposition-inventory.3" in system:
             return json.dumps(
@@ -93,19 +95,56 @@ class _FastReplyModel:
                     ],
                 }
             )
+        if "COMBINED OUTPUT ENVELOPE" in system:
+            self.character_calls += 1
+        expression = {
+            "private_turn_state": {
+                "inner_state_summary": ("我注意到对方在等回应，现在想直接接住这句话。"),
+                "attended_source_refs": [],
+            },
+            "timing_choice": "now",
+            "cadence": "conversational",
+            "beats": [{"modality": "text", "text": "收到。"}],
+            "stance": "open",
+            "brief_rationale": "Reply to the current message.",
+            "confidence": 8_000,
+            "world_claims": [],
+        }
+        if "COMBINED OUTPUT ENVELOPE" not in system:
+            return json.dumps(expression, ensure_ascii=False)
+        joined = "\n".join(str(message.get("content", "")) for message in messages)
+        appraisal = (
+            {
+                "appraise": True,
+                "brief_rationale": "角色把这句话理解成了一次值得当下感受的难过。",
+                "behavior_tendency": "先接住对方再消化感受",
+                "stance": "在意",
+                "display_strategy": "自然回应",
+                "confidence": 7600,
+                "affect": "open",
+                "meanings": [
+                    {"meaning": "disappointment", "confidence": 7600}
+                ],
+                "attribution": "user",
+                "severity": 7200,
+                "components": [
+                    {"dimension": "sadness", "target_intensity_bp": 6400}
+                ],
+            }
+            if "我今天有点难过" in joined
+            else {
+                "appraise": False,
+                "brief_rationale": "This fixture needs no durable appraisal.",
+                "behavior_tendency": "observe",
+                "stance": "open",
+                "display_strategy": "natural",
+                "confidence": 3000,
+            }
+        )
         return json.dumps(
             {
-                "private_turn_state": {
-                    "inner_state_summary": ("我注意到对方在等回应，现在想直接接住这句话。"),
-                    "attended_source_refs": [],
-                },
-                "timing_choice": "now",
-                "cadence": "conversational",
-                "beats": [{"modality": "text", "text": "收到。"}],
-                "stance": "open",
-                "brief_rationale": "Reply to the current message.",
-                "confidence": 8_000,
-                "world_claims": [],
+                "appraisal_draft": appraisal,
+                "expression_draft": expression,
             },
             ensure_ascii=False,
         )
@@ -126,8 +165,8 @@ class _FastReplyModel:
             "input_tokens": 1,
             "output_tokens": 1,
             "thinking_tokens": 0,
-            "token_provenance": "estimated",
-            "transport": "fake",
+            "token_provenance": "offline_estimated",
+            "transport": "offline_fixture",
             "provider": "fixture",
             "provider_usage_ref": "usage:fixture:fast-reply",
         }
@@ -218,13 +257,6 @@ class _LocalAppraisalInfrastructureModel(_FastInfrastructureModel):
         return await super().complete(messages, **kwargs)
 
 
-class _FastQuickReactionModel:
-    model = "fixture:fast-quick-reaction"
-
-    async def complete(self, _messages, **_kwargs) -> str:  # type: ignore[no-untyped-def]
-        return '{"react":false}'
-
-
 @pytest.mark.asyncio
 async def test_slow_background_model_does_not_hold_the_inbound_world_lock(tmp_path) -> None:
     background = _BlockingBackgroundModel()
@@ -238,7 +270,7 @@ async def test_slow_background_model_does_not_hold_the_inbound_world_lock(tmp_pa
         recipient_id="10001",
         bootstrap_at=NOW,
         model=_FastReplyModel(),
-        advisory_model=background,
+        world_support_model=background,
         source_closure_model=infrastructure,
         delivery=delivery,
         use_configured_recall_embedding=False,
@@ -306,7 +338,7 @@ async def test_regular_host_drain_does_not_hold_the_inbound_world_lock(tmp_path)
         recipient_id="10001",
         bootstrap_at=NOW,
         model=_FastReplyModel(),
-        advisory_model=background,
+        world_support_model=background,
         source_closure_model=infrastructure,
         delivery=delivery,
         use_configured_recall_embedding=False,
@@ -365,17 +397,11 @@ async def test_regular_host_drain_does_not_hold_the_inbound_world_lock(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_production_keeps_persistent_emotion_appraisal_off_the_visible_reply_path(
+async def test_text_endpoint_cannot_author_or_delay_same_turn_emotion(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A listening local endpoint may have lost its generation worker.
-
-    The current message and PrivateTurnState still give the role model same-turn
-    emotional agency. Persisting an Appraisal/Affect result is separate durable
-    work, so a half-dead local endpoint must not even be consulted before the
-    visible role-model call.
-    """
+    """The endpoint only predicts more typing; CharacterInterior owns emotion."""
 
     infrastructure = _LocalAppraisalInfrastructureModel()
     monkeypatch.setattr(
@@ -388,7 +414,7 @@ async def test_production_keeps_persistent_emotion_appraisal_off_the_visible_rep
         settings=Settings(
             database_path=tmp_path / "half-dead-local-gate.sqlite",
             PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=True,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=True,
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
@@ -415,24 +441,12 @@ async def test_production_keeps_persistent_emotion_appraisal_off_the_visible_rep
         assert delivery.sent == ["收到。"]
         assert infrastructure.appraisal_calls == 0
 
-        # Background ordering is intentionally concurrent with the already
-        # accepted Action receipt. Drain a bounded number of scheduler passes
-        # and assert the durable eventual state, not which worker happened to
-        # win the first two-unit slice.
-        for _ in range(4):
-            await host.scheduler_once(
-                observed_at=NOW + timedelta(minutes=1),
-                max_action_units=0,
-                max_background_units=2,
-            )
-            diagnostics = await host.world_health_diagnostics()
-            affect = diagnostics["mechanisms"]["affect"]
-            if affect["episode_count"] == 1:
-                break
-        # Action receipt and another source-bound background commit can each
-        # invalidate a cursor before Appraisal acceptance.  The bounded fresh
-        # reconsiderations are valid; duplicate accepted state is not.
-        assert 1 <= infrastructure.appraisal_calls <= 3
+        diagnostics = await host.world_health_diagnostics()
+        affect = diagnostics["mechanisms"]["affect"]
+        # Appraisal/Affect were authored in the same InnerTurn as the visible
+        # response and settled before inbound returned.  The retired local
+        # appraisal endpoint never receives a semantic role call.
+        assert infrastructure.appraisal_calls == 0
         assert affect["appraisal_count"] == 1
         assert affect["episode_count"] == 1
     finally:
@@ -440,18 +454,11 @@ async def test_production_keeps_persistent_emotion_appraisal_off_the_visible_rep
 
 
 @pytest.mark.asyncio
-async def test_background_appraisal_reconsiders_after_a_real_cas_loss(
+async def test_same_turn_appraisal_settlement_retries_without_a_second_character_call(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A concurrent Action receipt must not permanently consume emotion work.
-
-    The first typed Appraisal attempt is deliberately made stale at its
-    acceptance seam.  Recovery must ask the same role model for a fresh
-    cursor-pinned private judgment, then accept exactly one Appraisal/Affect
-    pair.  A CAS loss is technical contention, not evidence that the role
-    chose ``no_change`` and not an advisory-validation rejection.
-    """
+    """A CAS loss retries typed settlement, not the character author."""
 
     infrastructure = _LocalAppraisalInfrastructureModel()
     monkeypatch.setattr(
@@ -459,7 +466,7 @@ async def test_background_appraisal_reconsiders_after_a_real_cas_loss(
         "OpenAICompatibleChatModel",
         lambda **_kwargs: infrastructure,
     )
-    original_process = AppraisalProposalWorker.process
+    original_process = AppraisalProposalWorker.process_rebased
     process_calls = 0
 
     def lose_first_acceptance(self, **kwargs):  # type: ignore[no-untyped-def]
@@ -469,17 +476,18 @@ async def test_background_appraisal_reconsiders_after_a_real_cas_loss(
             raise ImmediateEmotionConcurrencyConflict(stage="appraisal")
         return original_process(self, **kwargs)
 
-    monkeypatch.setattr(AppraisalProposalWorker, "process", lose_first_acceptance)
+    monkeypatch.setattr(AppraisalProposalWorker, "process_rebased", lose_first_acceptance)
     delivery = _Delivery()
+    model = _FastReplyModel()
     host = build_qq_c2c_host(
         settings=Settings(
             database_path=tmp_path / "appraisal-cas-reconsider.sqlite",
             PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=True,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=True,
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
-        model=_FastReplyModel(),
+        model=model,
         source_closure_model=infrastructure,
         delivery=delivery,
         use_configured_recall_embedding=False,
@@ -504,11 +512,9 @@ async def test_background_appraisal_reconsiders_after_a_real_cas_loss(
             if affect["episode_count"] == 1:
                 break
 
-        # The accepted Appraisal may immediately open relationship advisory
-        # work on this shared fixture model, so count only the lower bound
-        # proving the original and fresh cursor-pinned Appraisal calls.
-        assert infrastructure.appraisal_calls >= 2
         assert process_calls >= 2
+        assert model.character_calls == 1
+        assert infrastructure.appraisal_calls == 0
         assert affect["appraisal_count"] == 1
         assert affect["episode_count"] == 1
         replay = host.export_replay_evidence()
@@ -565,12 +571,13 @@ async def test_pending_affect_candidate_recovers_after_acceptance_cas_loss(
         "accept_runtime_owned",
         lose_first_affect_acceptance,
     )
+    settings = Settings(
+        database_path=tmp_path / "affect-acceptance-cas-recovery.sqlite",
+        PRIMARY_USER_ID="geoff",
+        WORLD_V2_TEXT_ENDPOINT_ENABLED=True,
+    )
     host = build_qq_c2c_host(
-        settings=Settings(
-            database_path=tmp_path / "affect-acceptance-cas-recovery.sqlite",
-            PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=True,
-        ),
+        settings=settings,
         recipient_id="10001",
         bootstrap_at=NOW,
         model=_FastReplyModel(),
@@ -587,6 +594,19 @@ async def test_pending_affect_candidate_recovers_after_acceptance_cas_loss(
         )
         assert result.status == "action_authorized"
 
+        # The generic CharacterInterior proposal and its partial typed
+        # settlement are the recovery journal. Prove that no process-local
+        # cache or legacy Affect worker is required after a daemon restart.
+        await host.aclose()
+        host = build_qq_c2c_host(
+            settings=settings,
+            recipient_id="10001",
+            bootstrap_at=NOW,
+            model=_FastReplyModel(),
+            source_closure_model=infrastructure,
+            delivery=_Delivery(),
+            use_configured_recall_embedding=False,
+        )
         await host.drain(
             max_action_units=0,
             max_background_units=8,
@@ -627,11 +647,11 @@ async def test_pending_affect_candidate_recovers_after_acceptance_cas_loss(
 
 
 @pytest.mark.asyncio
-async def test_claimed_appraisal_continues_affect_after_two_cas_losses(
+async def test_audited_inner_turn_continues_affect_after_two_cas_losses(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A durable Appraisal must keep its unfinished Affect continuation runnable."""
+    """The audited InnerTurn is the sole durable Affect continuation authority."""
 
     infrastructure = _LocalAppraisalInfrastructureModel()
     monkeypatch.setattr(
@@ -658,14 +678,13 @@ async def test_claimed_appraisal_continues_affect_after_two_cas_losses(
         settings=Settings(
             database_path=tmp_path / "claimed-appraisal-affect-continuation.sqlite",
             PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=True,
             WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
             WORLD_V2_EXPRESSION_EPISODE_MODE="shadow",
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
         model=_FastReplyModel(),
-        advisory_model=_FastReplyModel(),
+        world_support_model=_FastReplyModel(),
         source_closure_model=infrastructure,
         delivery=_Delivery(),
         use_configured_recall_embedding=False,
@@ -700,22 +719,19 @@ async def test_claimed_appraisal_continues_affect_after_two_cas_losses(
             for item in replay.events
             if item.event.event_type == "AppraisalAccepted"
         )
-        affect_processes = tuple(
+        legacy_affect_processes = tuple(
             item.event.payload()["process"]
             for item in replay.events
             if item.event.event_type == "TriggerProcessOpened"
             and item.event.payload()["process"]["process_kind"] == "affect_deliberation"
         )
         assert affect_conflicts == 3
-        # This fixture model is shared with downstream background consumers,
-        # so its raw call counter can include one relationship-triggered
-        # reconsideration in addition to the initial/cursor-raced appraisal.
-        # The durable event/process assertions below are the lane-specific
-        # effect-once proof; the shared provider work must still stay bounded.
-        assert 1 <= infrastructure.appraisal_calls <= 3
+        assert infrastructure.appraisal_calls == 0
         assert len(appraisal_events) == 1
-        assert len(affect_processes) == 1
-        assert affect_processes[0]["source_evidence_ref"] == appraisal_events[0].event_id
+        # Recovery reuses the same audited CharacterInterior result directly.
+        # Opening the retired independent Affect-deliberation lifecycle here
+        # would recreate a second semantic path and permit a second model call.
+        assert legacy_affect_processes == ()
         assert affect["appraisal_count"] == 1
         assert affect["episode_count"] == 1
     finally:
@@ -723,11 +739,11 @@ async def test_claimed_appraisal_continues_affect_after_two_cas_losses(
 
 
 @pytest.mark.asyncio
-async def test_fresh_appraisal_context_head_race_stays_technical_not_semantic(
+async def test_appraisal_settlement_contention_reuses_the_audited_inner_turn(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A resolver/head race must leave retryable work, not reject her appraisal."""
+    """A settlement race never re-enters PinnedTurn or invents a rejection."""
 
     infrastructure = _LocalAppraisalInfrastructureModel()
     monkeypatch.setattr(
@@ -735,7 +751,7 @@ async def test_fresh_appraisal_context_head_race_stays_technical_not_semantic(
         "OpenAICompatibleChatModel",
         lambda **_kwargs: infrastructure,
     )
-    original_process = AppraisalProposalWorker.process
+    original_process = AppraisalProposalWorker.process_rebased
     process_calls = 0
 
     def lose_first_acceptance(self, **kwargs):  # type: ignore[no-untyped-def]
@@ -747,45 +763,25 @@ async def test_fresh_appraisal_context_head_race_stays_technical_not_semantic(
 
     original_audit = PinnedTurnCompiler.audit_observation
     audit_calls = 0
-    context_race = False
 
-    async def fail_fresh_context(self, **kwargs):  # type: ignore[no-untyped-def]
-        nonlocal audit_calls, context_race
-        if not self._affect_target_bounds_enabled:  # noqa: SLF001
-            return await original_audit(self, **kwargs)
+    async def forbid_second_character_call(self, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal audit_calls
         audit_calls += 1
-        if audit_calls == 2:
-            context_race = True
-            raise ValueError("head advanced while resolving fresh context")
+        if audit_calls > 1:
+            raise AssertionError("typed settlement must not call the character again")
         return await original_audit(self, **kwargs)
 
-    original_project = InteractionAppraisalTriggerRuntime._project
-
-    async def observe_newer_head(self):  # type: ignore[no-untyped-def]
-        nonlocal context_race
-        projection = await original_project(self)
-        if not context_race:
-            return projection
-        context_race = False
-        return projection.model_copy(
-            update={
-                "world_revision": projection.world_revision + 1,
-                "ledger_sequence": projection.ledger_sequence + 1,
-            }
-        )
-
-    monkeypatch.setattr(AppraisalProposalWorker, "process", lose_first_acceptance)
-    monkeypatch.setattr(PinnedTurnCompiler, "audit_observation", fail_fresh_context)
+    monkeypatch.setattr(AppraisalProposalWorker, "process_rebased", lose_first_acceptance)
     monkeypatch.setattr(
-        InteractionAppraisalTriggerRuntime,
-        "_project",
-        observe_newer_head,
+        PinnedTurnCompiler,
+        "audit_observation",
+        forbid_second_character_call,
     )
     host = build_qq_c2c_host(
         settings=Settings(
             database_path=tmp_path / "appraisal-fresh-context-race.sqlite",
             PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=True,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=True,
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
@@ -803,15 +799,17 @@ async def test_fresh_appraisal_context_head_race_stays_technical_not_semantic(
         )
         assert result.status == "action_authorized"
 
-        # The scheduler may surface the classified contention, but it must not
-        # durably reinterpret it as a semantic advisory rejection.
-        await host.scheduler_once(
-            observed_at=NOW + timedelta(minutes=1),
-            max_action_units=0,
-            max_background_units=4,
-        )
+        for _ in range(4):
+            await host.scheduler_once(
+                observed_at=NOW + timedelta(minutes=1),
+                max_action_units=0,
+                max_background_units=4,
+            )
+            diagnostics = await host.world_health_diagnostics()
+            if diagnostics["mechanisms"]["affect"]["episode_count"] == 1:
+                break
         replay = host.export_replay_evidence()
-        assert audit_calls >= 3
+        assert audit_calls == 1
         assert not any(
             item.event.event_type == "AdvisoryAcceptanceRejected"
             for item in replay.events

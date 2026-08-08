@@ -171,6 +171,7 @@ async def test_qq_c2c_lookup_without_durable_provider_result_closes_old_action_a
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ("followup", "proactive_message"))
+@pytest.mark.asyncio
 async def test_platform_executor_preserves_social_kind_through_real_qq_transport(
     kind: str,
 ) -> None:
@@ -286,6 +287,7 @@ async def test_qq_c2c_transport_rejects_unowned_target_before_any_provider_send(
         ),
     ),
 )
+@pytest.mark.asyncio
 async def test_qq_c2c_transport_executes_each_authorized_expression_modality(
     kind: str, content_type: str, body: str, sent: str
 ) -> None:
@@ -430,6 +432,7 @@ async def test_qq_c2c_verify_delivery_upgrades_a_positively_looked_up_message() 
         ConnectionError("napcat down"),
     ),
 )
+@pytest.mark.asyncio
 async def test_qq_c2c_verify_delivery_stays_uncertain_without_positive_evidence(
     lookup_response: object,
 ) -> None:

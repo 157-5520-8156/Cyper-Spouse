@@ -13,13 +13,18 @@ from companion_daemon.world_v2.affect_proposal_compiler import (
 from companion_daemon.world_v2.appraisal_acceptance_runtime import AppraisalAcceptanceRuntime
 from companion_daemon.world_v2.appraisal_proposal_compiler import AppraisalProposalCompiler
 from companion_daemon.world_v2.appraisal_proposal_worker import AppraisalProposalWorker
+from companion_daemon.world_v2.appraisal_trigger import (
+    CHARACTER_INTERIOR_INBOUND_ATTEMPT_PREFIX,
+)
 from companion_daemon.world_v2.batch_invariants import interaction_appraisal_trigger_identity
-from companion_daemon.world_v2.deliberation import DeliberationResult, ModelResultAudit
+from companion_daemon.world_v2.deliberation import (
+    Deliberation,
+    DeliberationResult,
+    ModelResultAudit,
+    ModelRoute,
+)
 from companion_daemon.world_v2.immediate_emotion_proposal_worker import (
     ImmediateEmotionProposalWorker,
-)
-from companion_daemon.world_v2.interaction_appraisal_trigger_runtime import (
-    InteractionAppraisalTriggerRuntime,
 )
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.proposal_audit import ProposalAuditContext, ProposalAuditRecorder
@@ -29,12 +34,15 @@ from companion_daemon.world_v2.proposal_envelope import (
     ProposalEvidenceRef,
     TypedChange,
 )
+from companion_daemon.world_v2.ledger_context_resolver import context_capsule_compiler_from_ledger
+from companion_daemon.world_v2.pinned_turn import PinnedTurnCompiler
 from companion_daemon.world_v2.schemas import (
     AffectBaselineProjection,
     AffectProposalProjection,
     ClaimLease,
     ClockObservation,
     EvidenceRef,
+    Observation,
     ProjectionCursor,
     TriggerProcess,
 )
@@ -96,11 +104,13 @@ def _additional_claimed_interaction(ledger, *, sequence: int, at=NOW):
             "state": "claimed",
             "claim_lease": ClaimLease(
                 owner_id="worker:interaction-appraisal",
-                attempt_id=f"attempt:interaction:{sequence}",
+                attempt_id=CHARACTER_INTERIOR_INBOUND_ATTEMPT_PREFIX + f"interaction:{sequence}",
                 acquired_at=at,
                 expires_at=at + timedelta(minutes=2),
             ),
-            "attempt_ids": (f"attempt:interaction:{sequence}",),
+            "attempt_ids": (
+                CHARACTER_INTERIOR_INBOUND_ATTEMPT_PREFIX + f"interaction:{sequence}",
+            ),
         }
     )
     commit(
@@ -217,6 +227,7 @@ def _record_combined_emotion_proposal(
         behavior_tendency="hold_space",
         stance="care_despite_hurt",
         display_strategy="partial_disclosure",
+        timing_choice="silent",
     )
     base = _result()
     if sequence == 1:
@@ -333,11 +344,6 @@ class _BoundChangedAffectCompiler(AffectProposalCompiler):
         )
 
 
-class _UnusedPinnedTurn:
-    async def audit_observation(self, **_kwargs):
-        raise AssertionError("the existing cursor-bound decision audit must be reused")
-
-
 def test_immediate_worker_marks_a_bound_change_for_fresh_affect_consideration() -> None:
     issuer = AcceptedLedgerBatchIssuer()
     ledger = WorldLedger.in_memory(world_id=WORLD_ID, accepted_batch_issuer=issuer)
@@ -369,47 +375,6 @@ def test_immediate_worker_marks_a_bound_change_for_fresh_affect_consideration() 
     )
     assert len(ledger.project().appraisals) == 1
     assert ledger.project().affect_episodes == ()
-
-
-@pytest.mark.asyncio
-async def test_runtime_opens_fresh_affect_trigger_when_the_pinned_bound_changed() -> None:
-    issuer = AcceptedLedgerBatchIssuer()
-    ledger = WorldLedger.in_memory(world_id=WORLD_ID, accepted_batch_issuer=issuer)
-    _record_combined_emotion_proposal(
-        ledger,
-        proposal_kind="interaction-appraisal",
-        component_targets=[{"dimension": "hurt", "target_intensity_bp": 2000}],
-    )
-    appraisal_worker = AppraisalProposalWorker(
-        compiler=AppraisalProposalCompiler(ledger=ledger),
-        acceptance=AppraisalAcceptanceRuntime(ledger=ledger, batch_issuer=issuer),
-        actor="worker:immediate-appraisal",
-    )
-    immediate_worker = ImmediateEmotionProposalWorker(
-        appraisal_worker=appraisal_worker,
-        affect_compiler=_BoundChangedAffectCompiler(ledger=ledger),
-        affect_acceptance=AffectAcceptanceRuntime(ledger=ledger, batch_issuer=issuer),
-        actor="worker:immediate-affect",
-    )
-    runtime = InteractionAppraisalTriggerRuntime(
-        ledger=ledger,
-        pinned_turn=_UnusedPinnedTurn(),  # type: ignore[arg-type]
-        worker=appraisal_worker,
-        owner_id="worker:interaction-appraisal",
-        affect_owner_id="worker:affect",
-        immediate_emotion_worker=immediate_worker,
-    )
-
-    result = await runtime.drain_one()
-    projection = ledger.project()
-
-    assert result.work_status == "accepted"
-    assert len(projection.appraisals) == 1
-    assert projection.affect_episodes == ()
-    assert any(
-        process.process_kind == "affect_deliberation" and process.state != "terminal"
-        for process in projection.trigger_processes
-    )
 
 
 def test_bound_change_after_pin_preserves_appraisal_and_requests_fresh_affect_consideration() -> None:
@@ -851,4 +816,59 @@ def test_true_multi_episode_merge_conflict_fails_soft_after_appraisal() -> None:
     )
     assert joined.status == "appraisal_only"
     assert joined.affect_skip_reason == result.affect_skip_reason
+    assert ledger.project() == projection
+
+
+@pytest.mark.asyncio
+async def test_drain_settlement_skips_audit_whose_affect_was_already_accepted() -> None:
+    """Regression: accepted Affect vanishes from the pending projection, so the
+    drain seam must judge acceptance from settled state, not from the pending
+    proposal list (which would loop forever re-settling one audit)."""
+
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID, accepted_batch_issuer=issuer)
+    proposal, audit_cursor = _record_combined_emotion_proposal(ledger)
+
+    class _DrainRouter:
+        async def route(self, _request) -> ModelRoute:
+            return ModelRoute(tier="flash", reason_code="test", router_version="test.1")
+
+    class _DrainModel:
+        async def propose(self, _request):
+            raise AssertionError("drain must not call the main model")
+
+    pinned_turn = PinnedTurnCompiler(
+        ledger=ledger,
+        capsule_compiler=context_capsule_compiler_from_ledger(ledger=ledger),
+        deliberation=Deliberation(router=_DrainRouter(), main_model=_DrainModel()),
+        companion_actor_ref="agent:companion",
+    )
+    runtime = WorldRuntime(
+        world_id=WORLD_ID,
+        ledger=ledger,
+        pinned_turn=pinned_turn,
+        inbound_state_owner="worker:interaction-appraisal",
+        appraisal_worker=AppraisalProposalWorker(
+            compiler=AppraisalProposalCompiler(ledger=ledger),
+            acceptance=AppraisalAcceptanceRuntime(ledger=ledger, batch_issuer=issuer),
+            actor="worker:immediate-appraisal",
+        ),
+        immediate_emotion_worker=_worker(ledger=ledger, issuer=issuer),
+    )
+
+    settled = await runtime._settle_unified_inbound_state(  # noqa: SLF001
+        observation=Observation.model_validate_json(
+            ledger.lookup_event_commit("message-event:1")[0].payload_json
+        ),
+        observation_event=ledger.lookup_event_commit("message-event:1")[0],
+        audit_cursor=audit_cursor,
+        proposal_id=proposal.proposal_id,
+    )
+    assert settled == ()
+    projection = ledger.project()
+    assert len(projection.affect_episodes) == 1
+    assert projection.affect_proposals == ()
+
+    drain_result = await runtime._drain_inbound_state_settlement_once()
+    assert drain_result is None
     assert ledger.project() == projection

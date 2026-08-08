@@ -702,7 +702,7 @@ async def test_opening_rapid_burst_without_prior_context_still_joins_one_turn() 
 
 
 @pytest.mark.asyncio
-async def test_real_wall_clock_pair_250ms_apart_joins_one_turn() -> None:
+async def test_real_wall_clock_pair_100ms_apart_joins_one_turn() -> None:
     """Future ``observed_at`` metadata cannot fake a real batching interval."""
 
     world = _WorldHost()
@@ -715,13 +715,13 @@ async def test_real_wall_clock_pair_250ms_apart_joins_one_turn() -> None:
     first = asyncio.create_task(
         host.inbound_fragment(_text("message:wall1", "今天要打比赛了"))
     )
-    await asyncio.sleep(0.25)
+    await asyncio.sleep(0.10)
     second = asyncio.create_task(
         host.inbound_fragment(
             _text(
                 "message:wall2",
                 "还有点紧张",
-                observed_at=NOW + timedelta(milliseconds=250),
+                observed_at=NOW + timedelta(milliseconds=100),
             )
         )
     )
@@ -1146,36 +1146,36 @@ def test_adaptive_quiet_gap_follows_observed_cadence_without_reading_semantics()
     )
     # No cadence yet: different wording receives the same provider-local
     # opportunity. The host does not decide whether either thought is complete.
-    assert host._quiet_gap_seconds("今天要打比赛了") == pytest.approx(0.15)
-    assert host._quiet_gap_seconds("你吃饭了吗？") == pytest.approx(0.15)
-    assert host._quiet_gap_seconds("我跟你说，") == pytest.approx(0.15)
+    assert host._quiet_gap_seconds("今天要打比赛了") == pytest.approx(0.10)
+    assert host._quiet_gap_seconds("你吃饭了吗？") == pytest.approx(0.10)
+    assert host._quiet_gap_seconds("我跟你说，") == pytest.approx(0.10)
     # A fast typist shrinks the base; a slow one grows it, both bounded below
     # the one-second local budget.
     host._recent_gap_seconds.extend([0.1, 0.12, 0.11])
     assert host._quiet_gap_seconds("随便说点什么") == pytest.approx(0.11 * 1.3)
     host._recent_gap_seconds.clear()
     host._recent_gap_seconds.extend([2.0, 2.5, 3.0])
-    assert host._quiet_gap_seconds("嗯") == pytest.approx(0.42)
-    assert host._quiet_gap_seconds("而且") == pytest.approx(0.42)
+    assert host._quiet_gap_seconds("嗯") == pytest.approx(0.30)
+    assert host._quiet_gap_seconds("而且") == pytest.approx(0.30)
     # Burst continuation: the just-shown cadence floors the wait, so a fast
     # historical median cannot slice an ongoing volley.
     host._recent_gap_seconds.clear()
     host._recent_gap_seconds.extend([0.2, 0.7])
-    assert host._quiet_gap_seconds("中午就比完啦") == pytest.approx(0.42)
-    assert host._quiet_gap_seconds("中午就比完啦", burst=True) == pytest.approx(0.8)
+    assert host._quiet_gap_seconds("中午就比完啦") == pytest.approx(0.30)
+    assert host._quiet_gap_seconds("中午就比完啦", burst=True) == pytest.approx(0.30)
     # Wording cannot change the observed-cadence floor.
-    assert host._quiet_gap_seconds("而且", burst=True) == pytest.approx(0.8)
+    assert host._quiet_gap_seconds("而且", burst=True) == pytest.approx(0.30)
     # The floor never exceeds the bounded maximum.
     host._recent_gap_seconds.append(0.75)
-    assert host._quiet_gap_seconds("好啦", burst=True) == pytest.approx(0.8)
+    assert host._quiet_gap_seconds("好啦", burst=True) == pytest.approx(0.30)
     # A last gap slower than the maximum is a lull, not a rhythm: no lift.
     host._recent_gap_seconds.clear()
     host._recent_gap_seconds.extend([2.0, 2.5, 3.0])
-    assert host._quiet_gap_seconds("嗯", burst=True) == pytest.approx(0.42)
+    assert host._quiet_gap_seconds("嗯", burst=True) == pytest.approx(0.30)
     # Without cadence samples the burst flag alone changes nothing.
     host._recent_gap_seconds.clear()
     assert host._quiet_gap_seconds("你吃饭了吗？", burst=True) == pytest.approx(
-        0.15
+        0.10
     )
 
 
@@ -1195,7 +1195,7 @@ def test_settled_turn_gap_does_not_inflate_the_next_speculative_wait() -> None:
     )
 
     assert tuple(host._recent_gap_seconds) == ()
-    assert host._quiet_gap_seconds("下一轮") == pytest.approx(0.15)
+    assert host._quiet_gap_seconds("下一轮") == pytest.approx(0.10)
 
 
 @pytest.mark.asyncio

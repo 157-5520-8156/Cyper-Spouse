@@ -35,8 +35,14 @@ def test_compiler_records_and_accepts_a_source_bound_appraisal() -> None:
             value={
                 "appraisal_id": "appraisal:ignored-model-hint",
                 "meaning_candidates": [
-                    {"meaning": "disappointment", "confidence": 7200},
-                    {"meaning": "misunderstanding", "confidence": 2800},
+                    {
+                        "meaning": "她暂时把这句话理解为对方对刚才的距离感有些失望",
+                        "confidence": 7200,
+                    },
+                    {
+                        "meaning": "也可能只是双方对回复节奏理解不同",
+                        "confidence": 2800,
+                    },
                 ],
                 "attribution": "user",
                 "severity": 6500,
@@ -115,7 +121,11 @@ def test_compiler_records_and_accepts_a_source_bound_appraisal() -> None:
     projection = ledger.project()
     assert compilation.acceptance_commit.world_revision == projection.world_revision
     assert projection.appraisals[0].origin.change_id == change.change_id
-    assert projection.appraisals[0].hypotheses[0].meaning == "disappointment"
+    assert (
+        projection.appraisals[0].hypotheses[0].meaning
+        == "她暂时把这句话理解为对方对刚才的距离感有些失望"
+    )
+    assert projection.appraisals[0].origin.matrix_catalog_version == "appraisal-matrix.2"
     assert projection.trigger_processes[0].state == "terminal"
     decision = next(
         item

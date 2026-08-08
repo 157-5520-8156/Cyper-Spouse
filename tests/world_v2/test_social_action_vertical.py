@@ -2,22 +2,35 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+import hashlib
 import json
 
 import pytest
 
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from companion_daemon.world_v2.batch_invariants import validate_commit_batch
-from companion_daemon.world_v2.chat_model_deliberation_adapter import (
-    ChatModelDeliberationAdapter,
+from companion_daemon.world_v2.character_interior.inbound_wire import (
+    _ExpressionDraftWire,
 )
 from companion_daemon.world_v2.context_capsule import ContextCapsuleCompiler
 from companion_daemon.world_v2.action_pump import ActionPump
 from companion_daemon.world_v2.deferred_reply_runtime import DeferredReplyRuntime
-from companion_daemon.world_v2.deliberation import Deliberation, ModelRoute, RouteRequest
+from companion_daemon.world_v2.deliberation import (
+    Deliberation,
+    ModelInput,
+    ModelOutput,
+    ModelRoute,
+    RouteRequest,
+)
 from companion_daemon.world_v2.expression_plan_acceptance import ExpressionPlanBudgetPolicy
 from companion_daemon.world_v2.expression_draft import (
     TEXT_ONLY_EXPRESSION_CAPABILITIES,
+)
+from companion_daemon.world_v2.proposal_envelope import (
+    CanonicalTypedPayload,
+    DecisionProposal,
+    ProposalActionIntent,
+    TypedChange,
 )
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.ledger import WorldLedger
@@ -36,7 +49,7 @@ from companion_daemon.world_v2.social_action_acceptance import (
     parse_social_deferred_acceptance_manifest,
 )
 from companion_daemon.world_v2.social_action_acceptance import social_deferred_manifest_hash
-from companion_daemon.world_v2.social_action_draft import SocialActionDraftDeliberationAdapter
+from companion_daemon.world_v2.social_action_draft import SocialActionDraft
 from companion_daemon.world_v2.social_action_worker import SocialActionWorker
 
 
@@ -62,18 +75,142 @@ class _ChatModel:
         return self.output
 
 
-class _BarrierChatModel(_ChatModel):
-    def __init__(self, output: str) -> None:
-        super().__init__(output)
-        self.ready = asyncio.Event()
+class _FixtureSocialDraftAdapter:
+    """Historical proposal fixture, never a production character-author path."""
 
-    async def complete(self, messages, *, temperature=0.8):
-        del messages, temperature
-        self.calls += 1
-        if self.calls == 2:
-            self.ready.set()
-        await self.ready.wait()
-        return self.output
+    VERSION = "fixture-social-action-draft.1"
+
+    def __init__(self, model: _ChatModel) -> None:
+        self._model = model
+
+    async def propose(self, request: ModelInput) -> ModelOutput:
+        raw = await self._model.complete([], temperature=0.75)
+        draft = SocialActionDraft.model_validate_json(raw, strict=True)
+        return ModelOutput(
+            model_id=self._model.model,
+            model_version=self.VERSION,
+            raw_proposal=self._materialize(draft=draft, request=request).model_dump(
+                mode="json"
+            ),
+        )
+
+    async def recover(self, request: ModelInput, _failure_code: str) -> ModelOutput:
+        return await self.propose(request)
+
+    @staticmethod
+    def _materialize(
+        *, draft: SocialActionDraft, request: ModelInput
+    ) -> DecisionProposal:
+        trigger = request.trigger_message
+        assert trigger is not None
+        identity = hashlib.sha256(
+            json.dumps(
+                {
+                    "contract": "fixture-social-action-materialization.1",
+                    "call_id": request.call_id,
+                    "trigger_ref": request.trigger_ref,
+                    "world_revision": request.evaluated_world_revision,
+                    "draft": draft.model_dump(mode="json"),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        base = dict(
+            proposal_id=f"proposal:expression:{identity}",
+            trigger_ref=request.trigger_ref,
+            evaluated_world_revision=request.evaluated_world_revision,
+            evidence_refs=request.trigger_evidence,
+            confidence=draft.confidence,
+            brief_rationale=f"social_action:{draft.choice}:{draft.brief_rationale}"[
+                :240
+            ],
+            behavior_tendency="fixture_social_choice",
+            stance="fixture_social_choice",
+            display_strategy="fixture_social_choice",
+            timing_choice={
+                "reply_now": "now",
+                "defer": "later",
+                "no_reply": "silent",
+            }[draft.choice],
+        )
+        if draft.choice == "no_reply":
+            return DecisionProposal(**base)
+        text = draft.response_text
+        assert text is not None
+        payload_hash = "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+        payload_ref = f"payload:social-action:{identity}"
+        change_id = f"change:social-action:{identity}"
+        plan_id = f"plan:social-action:{identity}"
+        beat_id = f"beat:social-action:{identity}"
+        delay_window = None
+        if draft.choice == "defer":
+            assert draft.delay_seconds is not None
+            assert draft.expires_after_seconds is not None
+            origin = datetime.fromisoformat(
+                json.loads(request.model_content_json)["logical_time"]
+            )
+            delay_window = {
+                "not_before": (
+                    origin + timedelta(seconds=draft.delay_seconds)
+                ).isoformat(),
+                "expires_at": (
+                    origin + timedelta(seconds=draft.expires_after_seconds)
+                ).isoformat(),
+            }
+        change = TypedChange(
+            change_id=change_id,
+            kind="expression_plan_transition",
+            target_id=plan_id,
+            transition="accept",
+            payload=CanonicalTypedPayload.from_value(
+                payload_schema="expression_plan_transition.v1",
+                value={
+                    "plan_id": plan_id,
+                    "overall_intent": draft.choice,
+                    "ordering_policy": "dependencies",
+                    "terminal_policy": "settle",
+                    "beat_drafts": [
+                        {
+                            "beat_id": beat_id,
+                            "inline_text": text,
+                            "materialized_payload_ref": payload_ref,
+                            "payload_hash": payload_hash,
+                            "content_type": "text/plain",
+                            "dependency_beat_ids": [],
+                            "delay_window": delay_window,
+                            "cancel_policy": "cancel-before-dispatch",
+                            "reconsider_policy": "reconsider-on-new-observation",
+                            "merge_policy": "model-reconsider",
+                        }
+                    ],
+                },
+            ),
+        )
+        intent = ProposalActionIntent(
+            intent_id=f"intent:social-action:{identity}",
+            kind="followup" if draft.choice == "defer" else "reply",
+            layer="external_action",
+            target=trigger.reply_target,
+            payload_ref=payload_ref,
+            payload_hash=payload_hash,
+            causal_change_id=change_id,
+            beat_ref=beat_id,
+            due_window=(
+                (
+                    datetime.fromisoformat(delay_window["not_before"]),
+                    datetime.fromisoformat(delay_window["expires_at"]),
+                )
+                if delay_window is not None
+                else None
+            ),
+        )
+        return DecisionProposal(
+            **base,
+            proposed_changes=(change,),
+            action_intents=(intent,),
+        )
 
 
 def _event(event_id: str, event_type: str, payload: dict[str, object]) -> WorldEvent:
@@ -117,25 +254,30 @@ async def _setup(
         expected_deliberation_revision=projection.deliberation_revision)
     await WorldRuntime(world_id=WORLD, ledger=ledger).ingest(_observation())
     model = _ChatModel(output)
-    worker = (
-        _make_expression_worker(ledger=ledger, issuer=issuer, model=model)
+    turn = (
+        _make_expression_fixture_turn(ledger=ledger, model=model)
         if expression
-        else _make_worker(ledger=ledger, issuer=issuer, model=model)
+        else _make_social_fixture_turn(ledger=ledger, model=model)
     )
+    await _record_fixture_audit(ledger=ledger, turn=turn)
+    worker = _make_worker(ledger=ledger, issuer=issuer)
     return ledger, worker, model
 
 
-def _make_worker(*, ledger, issuer: AcceptedLedgerBatchIssuer, model: _ChatModel) -> SocialActionWorker:
-    adapter = SocialActionDraftDeliberationAdapter(model=model)
+def _make_social_fixture_turn(*, ledger, model: _ChatModel) -> PinnedTurnCompiler:
+    adapter = _FixtureSocialDraftAdapter(model)
     capsules: ContextCapsuleCompiler = context_capsule_compiler_from_ledger(ledger=ledger)
-    turn = PinnedTurnCompiler(
+    return PinnedTurnCompiler(
         ledger=ledger,
         capsule_compiler=capsules,
         deliberation=Deliberation(router=_Router(), main_model=adapter, quick_recovery=adapter),
         companion_actor_ref="actor:companion",
     )
+
+
+def _make_worker(*, ledger, issuer: AcceptedLedgerBatchIssuer) -> SocialActionWorker:
     return SocialActionWorker(
-        ledger=ledger, pinned_turn=turn, batch_issuer=issuer,
+        ledger=ledger, batch_issuer=issuer,
         policy=SocialDeferredPolicy(expression=ExpressionPlanBudgetPolicy(
             account_id="account:chat", amount_limit_per_action=3, actor="actor:companion",
             allowed_targets=("user:primary",), recovery_policy="effect_once",
@@ -143,17 +285,17 @@ def _make_worker(*, ledger, issuer: AcceptedLedgerBatchIssuer, model: _ChatModel
     )
 
 
-def _make_expression_worker(
-    *, ledger, issuer: AcceptedLedgerBatchIssuer, model: _ChatModel
-) -> SocialActionWorker:
-    adapter = ChatModelDeliberationAdapter(
+def _make_expression_fixture_turn(
+    *, ledger, model: _ChatModel
+) -> PinnedTurnCompiler:
+    adapter = _ExpressionDraftWire(
         model=model,
         expression_capabilities=TEXT_ONLY_EXPRESSION_CAPABILITIES,
     )
     capsules: ContextCapsuleCompiler = context_capsule_compiler_from_ledger(
         ledger=ledger
     )
-    turn = PinnedTurnCompiler(
+    return PinnedTurnCompiler(
         ledger=ledger,
         capsule_compiler=capsules,
         deliberation=Deliberation(
@@ -161,18 +303,35 @@ def _make_expression_worker(
         ),
         companion_actor_ref="actor:companion",
     )
-    return SocialActionWorker(
-        ledger=ledger,
-        pinned_turn=turn,
-        batch_issuer=issuer,
-        policy=SocialDeferredPolicy(
-            expression=ExpressionPlanBudgetPolicy(
-                account_id="account:chat",
-                amount_limit_per_action=3,
-                actor="actor:companion",
-                allowed_targets=("user:primary",),
-                recovery_policy="effect_once",
-            )
+
+
+async def _record_fixture_audit(
+    *,
+    ledger,
+    turn: PinnedTurnCompiler,
+    observation_id: str = "observation:social:1",
+) -> None:
+    projection = ledger.project()
+    event = next(
+        (
+            located[0]
+            for ref in projection.committed_world_event_refs
+            if ref.event_type == "ObservationRecorded"
+            and (located := ledger.lookup_event_commit(ref.event_id)) is not None
+            and Observation.model_validate_json(located[0].payload_json).observation_id
+            == observation_id
+        ),
+        None,
+    )
+    assert event is not None
+    observation = Observation.model_validate_json(event.payload_json)
+    await turn.audit_observation(
+        observation=observation,
+        observation_event=event,
+        cursor=ProjectionCursor(
+            world_revision=projection.world_revision,
+            deliberation_revision=projection.deliberation_revision,
+            ledger_sequence=projection.ledger_sequence,
         ),
     )
 
@@ -465,10 +624,9 @@ async def test_multiple_unaccepted_reply_audits_are_not_selected_by_ledger_order
         "event:trigger:observation:test:message:1"
     )
     assert located is not None
-    turn = worker._turn  # noqa: SLF001 - fixture authors competing durable candidates
-    assert turn is not None
+    turn = _make_social_fixture_turn(ledger=ledger, model=model)
 
-    for response in ("第一种候选。", "第二种候选。"):
+    for response in ("第二种候选。",):
         model.output = json.dumps(
             {
                 "choice": "reply_now",
@@ -492,7 +650,6 @@ async def test_multiple_unaccepted_reply_audits_are_not_selected_by_ledger_order
     result = await worker.run_observation(observation.observation_id)
     production_worker = SocialActionWorker(
         ledger=ledger,
-        pinned_turn=None,
         batch_issuer=ledger._accepted_batch_issuer,  # noqa: SLF001
         policy=SocialDeferredPolicy(
             expression=ExpressionPlanBudgetPolicy(
@@ -603,17 +760,14 @@ async def test_cancelled_followup_commitment_recovers_after_restart_gap() -> Non
 
 @pytest.mark.asyncio
 async def test_concurrent_workers_create_only_one_deferred_effect_chain() -> None:
-    ledger, _worker, _model = await _setup(output=(
-        '{"choice":"no_reply","brief_rationale":"setup only","confidence":6000}'
-    ))
-    model = _BarrierChatModel(
+    ledger, worker, _model = await _setup(output=(
         '{"choice":"defer","response_text":"我一会儿回来。","delay_seconds":60,'
         '"expires_after_seconds":600,"brief_rationale":"稍后接续","confidence":7000}'
-    )
+    ))
     issuer = ledger._accepted_batch_issuer
     workers = (
-        _make_worker(ledger=ledger, issuer=issuer, model=model),
-        _make_worker(ledger=ledger, issuer=issuer, model=model),
+        worker,
+        _make_worker(ledger=ledger, issuer=issuer),
     )
 
     results = await asyncio.gather(*(
@@ -849,7 +1003,11 @@ async def test_sqlite_restart_joins_accepted_defer_without_second_model_call(tmp
         '{"choice":"defer","response_text":"等我一下。","delay_seconds":60,'
         '"expires_after_seconds":600,"brief_rationale":"稍后回来","confidence":7000}'
     )
-    first = await _make_worker(ledger=ledger, issuer=issuer, model=first_model).run_observation(
+    await _record_fixture_audit(
+        ledger=ledger,
+        turn=_make_social_fixture_turn(ledger=ledger, model=first_model),
+    )
+    first = await _make_worker(ledger=ledger, issuer=issuer).run_observation(
         "observation:social:1"
     )
     assert first.status == "deferred"
@@ -859,8 +1017,10 @@ async def test_sqlite_restart_joins_accepted_defer_without_second_model_call(tmp
     reopened = SQLiteWorldLedger(path=path, world_id=WORLD,
         accepted_batch_issuer=reopened_issuer)
     unused_model = _ChatModel('{"choice":"no_reply","brief_rationale":"不应调用"}')
-    duplicate = await _make_worker(ledger=reopened, issuer=reopened_issuer,
-        model=unused_model).run_observation("observation:social:1")
+    duplicate = await _make_worker(
+        ledger=reopened,
+        issuer=reopened_issuer,
+    ).run_observation("observation:social:1")
     assert duplicate.status == "duplicate"
     assert duplicate.action_id == first.action_id
     assert unused_model.calls == 0

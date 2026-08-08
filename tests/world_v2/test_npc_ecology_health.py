@@ -176,8 +176,23 @@ def test_npc_health_reports_identity_calls_no_ops_reappearance_and_failures() ->
             ),
         ),
         world_occurrences=(
-            SimpleNamespace(status="settled", participant_refs=("provisional:npc:lin",)),
-            SimpleNamespace(status="settled", participant_refs=("npc:lin",)),
+            SimpleNamespace(
+                status="settled",
+                participant_refs=("provisional:npc:lin",),
+                settlement_event_ref="event:settlement:solo-1",
+            ),
+            SimpleNamespace(
+                status="settled",
+                participant_refs=("npc:lin",),
+                settlement_event_ref="event:settlement:solo-2",
+            ),
+        ),
+        trigger_processes=(
+            SimpleNamespace(
+                process_kind="npc_world_appraisal",
+                state="open",
+                source_evidence_ref="event:settlement:solo-1",
+            ),
         ),
     )
     identity = SimpleNamespace(npc_ref="npc:lin", provisional_entity_ref="provisional:npc:lin")
@@ -186,6 +201,7 @@ def test_npc_health_reports_identity_calls_no_ops_reappearance_and_failures() ->
         projection=projection,
         ledger=_Ledger(events),
         identity_views=(identity,),
+        protagonist_actor_ref="actor:companion",
     )
 
     assert health["dynamic_count"] == 2
@@ -208,8 +224,14 @@ def test_npc_health_reports_identity_calls_no_ops_reappearance_and_failures() ->
     assert health["world_first_attempt_success_rate_24h"]["value_bp"] == 0
     assert health["warning"] is True
     assert "world_consideration_success_below_90_percent" in health["warning_reasons"]
+    assert "npc_private_settlement_opened_protagonist_appraisal" in health["warning_reasons"]
     assert health["world_failed_model_attempt_count"] == 1
     assert health["provider_attempt_evidence"] == "model_result_recorded"
+    assert health["semantic_domain_contract"] == "npc-actor-isolated.1"
+    assert health["actor_scope_violation_count"] == 0
+    assert health["actor_scope_evidence"] == (
+        "proposal_event_actor_equals_decision_npc_ref"
+    )
     assert health["world_no_op_count"] == 1
     assert health["scene_reappearance_count"] == 1
     assert health["reappeared_npc_count"] == 1
@@ -224,6 +246,8 @@ def test_npc_health_reports_identity_calls_no_ops_reappearance_and_failures() ->
     assert by_ref["npc:lin"]["world_completed_call_count"] == 1
     assert by_ref["npc:lin"]["technical_failure_count"] == 1
     assert by_ref["npc:lin"]["scene_reappearance_count"] == 1
+    assert by_ref["npc:lin"]["shared_with_protagonist_scene_count"] == 0
+    assert by_ref["npc:lin"]["npc_private_scene_count"] == 2
     assert by_ref["npc:lin"]["lifecycle_reactivation_count"] == 1
     assert by_ref["npc:orphan"]["promotion_closed"] is False
 
@@ -240,6 +264,7 @@ def test_npc_health_uses_not_measured_rates_and_unknown_usage_without_evidence()
         projection=projection,
         ledger=_Ledger(()),
         identity_views=(),
+        protagonist_actor_ref="actor:companion",
     )
 
     assert health["actor_no_op_rate"] == {
@@ -251,3 +276,40 @@ def test_npc_health_uses_not_measured_rates_and_unknown_usage_without_evidence()
     assert health["provider_attempt_evidence"] == "model_result_recorded"
     assert health["world_usage"]["status"] == "unknown"
     assert health["world_usage"]["cost"] is None
+
+
+def test_npc_health_warns_when_a_recorded_actor_result_crosses_actor_scope() -> None:
+    actor = _event(
+        event_id="event:npc-ecology:actor:scope-violation",
+        event_type="ProposalRecorded",
+        actor="agent:companion",
+        payload={
+            "proposal_id": "proposal:npc-ecology:scope-violation",
+            "proposal_kind": "npc_ecology",
+            "trigger_id": "event:clock:scope-violation",
+            "decision_payload": {"decision": "no_op", "npc_ref": "npc:lin"},
+        },
+    )
+    projection = SimpleNamespace(
+        logical_time=NOW,
+        committed_world_event_refs=_authority((actor,)),
+        npcs=(
+            SimpleNamespace(
+                npc_id="lin",
+                source_event_ref=None,
+                promotion_edge=None,
+            ),
+        ),
+        world_occurrences=(),
+    )
+
+    health = npc_ecology_health_snapshot(
+        projection=projection,
+        ledger=_Ledger((actor,)),
+        identity_views=(SimpleNamespace(npc_ref="npc:lin"),),
+        protagonist_actor_ref="actor:companion",
+    )
+
+    assert health["actor_scope_violation_count"] == 1
+    assert health["warning"] is True
+    assert "npc_actor_scope_violation" in health["warning_reasons"]

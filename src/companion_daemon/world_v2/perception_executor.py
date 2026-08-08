@@ -24,6 +24,8 @@ class PerceptionInputReader(Protocol):
 
 
 class PerceptionTransport(Protocol):
+    """Durable provider/results port, including read-only dispatch evidence."""
+
     provider: str
 
     async def analyze(
@@ -39,6 +41,8 @@ class PerceptionTransport(Protocol):
         self, *, idempotency_key: str
     ) -> tuple[str, str, str, int, datetime] | None: ...
     def read_exact(self, *, result_ref: str) -> PerceptionResultContent | None: ...
+    def dispatched_count_since(self, cutoff: datetime) -> int: ...
+    def has_result_for_input(self, *, input_hash: str) -> bool: ...
 
 
 class PerceptionActionExecutor(ActionExecutor):

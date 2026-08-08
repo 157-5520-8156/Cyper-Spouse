@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
+import json
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -12,6 +13,11 @@ import httpx
 
 from companion_daemon.config import Settings
 
+from ..character_interior import CharacterInterior
+from ..character_interior.external_perception import (
+    character_interior_live_attention_port,
+    character_interior_shadow_attention_port,
+)
 from ..external_perception_acceptance import (
     ExternalPerceptionAcceptanceRuntime,
     ExternalPerceptionDeliveryProducer,
@@ -34,8 +40,6 @@ from .live_acceptance import (
 from .production_attention import (
     CapsuleBackedLiveAttentionContextPort,
     CapsuleBackedShadowAttentionContextPort,
-    ChatCompletionLiveAttentionModel,
-    ChatCompletionShadowAttentionModel,
     LedgerPublicInformationChannelPort,
     LiveAttentionChannelPort,
 )
@@ -60,12 +64,51 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _model_id(model: object) -> str:
-    for attribute in ("model_id", "model", "MODEL"):
-        value = getattr(model, attribute, None)
-        if isinstance(value, str) and value.strip():
-            return value.strip()[:256]
-    return type(model).__name__[:256]
+def _policy_revision_suffix(
+    *,
+    mode: str,
+    registry_content_hash: str | None,
+    registry_revision: str,
+    model_id: str,
+    merge_wait_seconds: int,
+    window_ttl_seconds: int,
+    lease_seconds: int,
+    model_timeout_seconds: int,
+    max_candidate_dossiers: int,
+    attempt_retention_seconds: int,
+) -> str:
+    """Derive the attention policy identity from every field that can change
+    the policy content, not just the source registry.
+
+    The policy row (``external_perception_attention_policies``) stores one
+    ``policy_json`` per ``attention_policy_revision`` and fails startup when the
+    same revision maps to different content.  If the revision only hashes the
+    source registry, a legitimate change to any runtime parameter (model id,
+    merge wait, lease, retention, ...) keeps the old revision while changing
+    the content, which collides with the previously stored row on the next
+    restart.  Hashing the full content-relevant state makes the revision move
+    with the policy, so a real change registers a fresh row instead of a
+    shadow-policy conflict.
+    """
+    material = {
+        "mode": mode,
+        "registry_content_hash": registry_content_hash or "internal-search",
+        "registry_revision": registry_revision,
+        "model_id": model_id,
+        "merge_wait_seconds": merge_wait_seconds,
+        "window_ttl_seconds": window_ttl_seconds,
+        "lease_seconds": lease_seconds,
+        "model_timeout_seconds": model_timeout_seconds,
+        "max_candidate_dossiers": max_candidate_dossiers,
+        "attempt_retention_seconds": attempt_retention_seconds,
+    }
+    encoded = json.dumps(
+        material,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
 
 
 class _OwnedWorldPerceptionHub:
@@ -119,7 +162,7 @@ def build_external_world_perception_deployment(
     settings: Settings,
     world_id: str,
     actor_ref: str,
-    model: object,
+    character_interior: CharacterInterior,
     life: LifeEcologyWakePort,
     channel_port: LiveAttentionChannelPort | None = None,
     authorized_search_profile: SourceProfile | None = None,
@@ -262,10 +305,24 @@ def build_external_world_perception_deployment(
     live_runtime: LiveAttentionRuntime | None = None
     registry_hash = registry.content_hash if registry is not None else None
     registry_revision = registry.registry_revision if registry is not None else "internal-only"
-    revision_suffix = (registry_hash or "sha256:internal-search").removeprefix("sha256:")[:16]
     if mode == "shadow" and channel_port is not None:
         world_ledger = SQLiteWorldLedger(path=Path(settings.database_path), world_id=world_id)
         compiler = context_capsule_compiler_from_ledger(ledger=world_ledger)
+        shadow_model = character_interior_shadow_attention_port(character_interior)
+        shadow_revision = _policy_revision_suffix(
+            mode="shadow",
+            registry_content_hash=registry_hash,
+            registry_revision=registry_revision,
+            model_id=shadow_model.model_id,
+            merge_wait_seconds=settings.world_v2_external_perception_merge_wait_seconds,
+            window_ttl_seconds=21_600,
+            lease_seconds=300,
+            model_timeout_seconds=120,
+            max_candidate_dossiers=12,
+            attempt_retention_seconds=(
+                settings.world_v2_external_perception_attempt_retention_seconds
+            ),
+        )
         shadow_runtime = ShadowAttentionRuntime(
             world_id=world_id,
             actor_ref=actor_ref,
@@ -273,7 +330,7 @@ def build_external_world_perception_deployment(
             # it must also change the immutable policy identity. A shared
             # revision made a legitimate shadow -> live rollout collide with
             # the old sidecar row and fail every daemon restart.
-            attention_policy_revision=f"external-attention:shadow:{revision_suffix}",
+            attention_policy_revision=f"external-attention:shadow:{shadow_revision}",
             deployment_mode_revision=f"shadow:{registry_revision}",
             worker_id="worker:external-perception:shadow",
             context_port=CapsuleBackedShadowAttentionContextPort(
@@ -281,10 +338,7 @@ def build_external_world_perception_deployment(
                 capsule_compiler=compiler,
                 channel_port=channel_port,
             ),
-            model=ChatCompletionShadowAttentionModel(
-                model=model,  # type: ignore[arg-type]
-                model_id=_model_id(model),
-            ),
+            model=shadow_model,
             merge_wait_seconds=settings.world_v2_external_perception_merge_wait_seconds,
             attempt_retention_seconds=(
                 settings.world_v2_external_perception_attempt_retention_seconds
@@ -320,10 +374,25 @@ def build_external_world_perception_deployment(
         )
         if channel_port is None:
             raise AssertionError("live channel was checked before resource composition")
+        live_model = character_interior_live_attention_port(character_interior)
+        live_revision = _policy_revision_suffix(
+            mode="live",
+            registry_content_hash=registry_hash,
+            registry_revision=registry_revision,
+            model_id=live_model.model_id,
+            merge_wait_seconds=settings.world_v2_external_perception_merge_wait_seconds,
+            window_ttl_seconds=21_600,
+            lease_seconds=300,
+            model_timeout_seconds=120,
+            max_candidate_dossiers=12,
+            attempt_retention_seconds=(
+                settings.world_v2_external_perception_attempt_retention_seconds
+            ),
+        )
         live_runtime = LiveAttentionRuntime(
             world_id=world_id,
             actor_ref=actor_ref,
-            attention_policy_revision=f"external-attention:live:{revision_suffix}",
+            attention_policy_revision=f"external-attention:live:{live_revision}",
             deployment_mode_revision=f"live:{registry_revision}",
             worker_id="worker:external-perception:live",
             context_port=CapsuleBackedLiveAttentionContextPort(
@@ -331,10 +400,7 @@ def build_external_world_perception_deployment(
                 capsule_compiler=compiler,
                 channel_port=channel_port,
             ),
-            model=ChatCompletionLiveAttentionModel(
-                model=model,  # type: ignore[arg-type]
-                model_id=_model_id(model),
-            ),
+            model=live_model,
             acceptance_port=acceptance_port,
             merge_wait_seconds=settings.world_v2_external_perception_merge_wait_seconds,
             attempt_retention_seconds=(

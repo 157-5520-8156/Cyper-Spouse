@@ -62,6 +62,36 @@ class AppraisalProposalWorker:
             cursor=cursor,
             proposal_id=proposal_id,
         )
+        return self._accept_compiled(
+            compiled=compiled,
+            fallback_cursor=cursor,
+        )
+
+    def process_rebased(
+        self,
+        *,
+        world_id: str,
+        audit_cursor: ProjectionCursor,
+        current_cursor: ProjectionCursor,
+        proposal_id: str,
+    ) -> AppraisalProposalWorkResult:
+        compiled = self._compiler.record_rebased(
+            world_id=world_id,
+            audit_cursor=audit_cursor,
+            current_cursor=current_cursor,
+            proposal_id=proposal_id,
+        )
+        return self._accept_compiled(
+            compiled=compiled,
+            fallback_cursor=current_cursor,
+        )
+
+    def _accept_compiled(
+        self,
+        *,
+        compiled,
+        fallback_cursor: ProjectionCursor,
+    ) -> AppraisalProposalWorkResult:
         if compiled.status == "no_change":
             return AppraisalProposalWorkResult(
                 status="no_change",
@@ -69,11 +99,13 @@ class AppraisalProposalWorker:
             )
         if compiled.commit is None or compiled.typed_proposal_id is None:
             raise RuntimeError("appraisal compiler returned an incomplete candidate result")
-        compiled_cursor = ProjectionCursor(
+        compiled_cursor = compiled.acceptance_cursor or ProjectionCursor(
             world_revision=compiled.commit.world_revision,
             deliberation_revision=compiled.commit.deliberation_revision,
             ledger_sequence=compiled.commit.ledger_sequence,
         )
+        if compiled_cursor.world_revision != compiled.commit.world_revision:
+            compiled_cursor = fallback_cursor
         accepted = self._acceptance.accept_runtime_owned(
             handle=self._acceptance.pin_proposal(
                 cursor=compiled_cursor,

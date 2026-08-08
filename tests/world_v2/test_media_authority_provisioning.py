@@ -6,6 +6,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from world_v2_application import (
+    build_sqlite_world_v2_test_application,
+    compose_fixture_character_interior,
+)
 
 from companion_daemon.world_v2.media_authority_provisioning import (
     MEDIA_PLANNING_GRANT_ID,
@@ -14,11 +18,9 @@ from companion_daemon.world_v2.media_authority_provisioning import (
 from companion_daemon.world_v2.media_provider_grants import require_provider_media_grant
 from companion_daemon.world_v2.production_turn_application import (
     WorldV2TurnApplicationConfig,
-    build_sqlite_world_v2_turn_application,
 )
 from companion_daemon.world_v2.schemas import Action, ProviderMediaGrantBinding
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
-
 
 NOW = datetime(2026, 7, 20, 4, 0, tzinfo=UTC)
 TEST_ROOT_SEED = "11" * 32
@@ -30,7 +32,7 @@ class _Identities:
 
 
 class _NoModel:
-    async def deliberate(self, **_kwargs):  # type: ignore[no-untyped-def]
+    async def propose(self, _request):  # type: ignore[no-untyped-def]
         raise AssertionError("provisioning test must not deliberate")
 
 
@@ -56,9 +58,16 @@ async def _clocked_world(path: Path) -> None:
         reply_target="user:user.1",
         action_pump_owner="pump:media-authority",
     )
-    app = build_sqlite_world_v2_turn_application(
-        path=path, config=config, identities=_Identities(), router=_Router(),
-        main_model=_NoModel(), quick_recovery=_NoModel(), transport=_Transport(), now=NOW,
+    app = build_sqlite_world_v2_test_application(
+        path=path,
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        character_interior=compose_fixture_character_interior(
+            inbound_author=_NoModel(),
+        ),
+        transport=_Transport(),
+        now=NOW,
     )
     try:
         await app.tick(

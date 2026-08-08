@@ -173,7 +173,7 @@ mechanisms:
     tests:
       - tests/world_v2/test_situation_compiler_v16.py::test_compile_is_order_invariant_source_bound_and_explicit_about_missing_heads
       - tests/world_v2/test_situation_compiler_v16.py::test_viewer_budget_truncates_stable_prefix_without_changing_internal_hash
-      - tests/world_v2/test_advisory_compiler.py::test_compiles_source_bound_rejectable_advisory_without_mutation_ports
+      - tests/world_v2/test_character_interior.py::test_project_builds_stable_actor_cursor_source_bound_eight_facet_snapshot
       - tests/world_v2/test_ledger_context_resolver.py::test_real_ledger_resolves_situation_core_and_authoritative_empty_domains
       - tests/world_v2/test_ledger_context_resolver.py::test_nonempty_context_is_byte_equivalent_across_memory_and_sqlite
 
@@ -186,12 +186,13 @@ mechanisms:
     events: [AppraisalAccepted, AffectEpisodeOpened, PrivateImpressionAccepted, RelationshipSignalAccepted]
     reducers: [src/companion_daemon/world_v2/reducers.py]
     projections: [appraisals, affect, private-impressions, relationship]
-    decision_consumers: [AffectDeliberationWorker, ContextCapsule, ExpressionPlanner]
+    decision_consumers: [CharacterInterior, ContextCapsule, ImmediateEmotionProposalWorker]
     actions: []
     terminal_states: []
     adapters: [internal]
     tests:
-      - tests/world_v2/test_appraisal_authority.py::test_accepted_appraisal_can_open_affect_through_an_independent_authority_path
+      - tests/world_v2/test_appraisal_authority.py::test_typed_affect_acceptance_replays_and_decays
+      - tests/world_v2/test_character_interior_inbound_appraisal_wire.py::test_materializer_binds_same_turn_appraisal_and_affect
       - tests/world_v2/test_private_impression_authority.py::test_private_impression_is_appraisal_bound_and_visible_only_to_internal_context
       - tests/world_v2/test_affect_module.py::test_resolve_is_explicit_sourced_and_terminal
 
@@ -204,15 +205,15 @@ mechanisms:
     events: [ActivityPlanned, WorldOccurrenceSettled, ExperienceCommitted]
     reducers: [src/companion_daemon/world_v2/reducers.py]
     projections: [activities, world-occurrences, life-content, experiences]
-    decision_consumers: [OutcomeProposalWorker, NpcWorldAppraisalTriggerRuntime, SituationCompiler]
+    decision_consumers: [OutcomeProposalWorker, CharacterInteriorWorldStimulusRuntime, SituationCompiler]
     actions: [life-content]
     terminal_states: [delivered, failed, cancelled, expired, unknown]
     adapters: [offline-harness, source-bound-outcome-selection, http-v2, qq-c2c-v2]
     tests:
       - tests/world_v2/test_occurrence_content_coordinator.py::test_coordinator_commits_complete_sidecar_backed_candidate_matrix
-      - tests/world_v2/test_outcome_e2e_recovery_replay.py::test_outcome_restart_recovers_full_world_to_affect_and_next_turn_context
-      - tests/world_v2/test_outcome_trigger_runtime.py::test_outcome_draft_adapter_selects_only_context_visible_sidecar_candidate
-      - tests/world_v2/test_npc_world_appraisal_trigger_runtime.py::test_settled_npc_event_can_create_a_source_bound_companion_appraisal
+      - tests/world_v2/test_outcome_e2e_recovery_replay.py::test_outcome_restart_recovers_world_result_and_next_turn_context
+      - tests/world_v2/test_outcome_trigger_runtime.py::test_outcome_trigger_recovers_a_compiled_candidate_without_recalling_the_model
+      - tests/world_v2/test_character_interior_world_stimulus.py::test_settled_world_change_crosses_one_eight_facet_character_interior_turn
 
   - id: open-world-temporary-events
     phase: 2
@@ -271,14 +272,14 @@ mechanisms:
       - tests/world_v2/test_http_v2_host_migration.py::test_http_production_profile_fails_closed_when_model_selects_unavailable_reaction
       - tests/test_qq_delivery.py::test_napcat_delivery_maps_authorized_expression_tokens_to_exact_endpoints
       - tests/world_v2/test_deferred_reply_runtime.py::test_delivered_reply_later_fulfills_exact_private_commitment
-      - tests/world_v2/test_expression_reconsideration.py::test_ingress_atomically_opens_reconsideration_gate_before_any_new_turn_work
-      - tests/world_v2/test_expression_reconsideration.py::test_only_explicit_reviewer_continuation_releases_expression_gate
+      - tests/world_v2/test_character_interior_expression_reconsideration.py::test_reconsideration_is_one_character_interior_opportunity
+      - tests/world_v2/test_character_interior_expression_reconsideration.py::test_replacement_needs_existing_accepted_plan_and_failure_is_not_continue
 
   - id: quick-reaction-same-turn-lane
     phase: 5
     status: deferred
     runtime_activation: not-wired
-    limitations: [historical-events-remain-replayable, production-reaction-is-a-model-owned-expression-beat, explicit-test-injection-only]
+    limitations: [historical-events-remain-replayable, production-reaction-is-a-model-owned-expression-beat, no-live-author-interface]
     sources: [immutable-historical-world-events]
     events: [ObservationRecorded, RandomDrawRecorded, ProposalRecorded, AcceptanceRecorded, ExpressionPlanAccepted, ActionAuthorized]
     reducers: [src/companion_daemon/world_v2/reducers.py]
@@ -288,8 +289,8 @@ mechanisms:
     terminal_states: [delivered, failed, cancelled, expired, unknown]
     adapters: []
     tests:
-      - tests/world_v2/test_qq_c2c_host_migration.py::test_qq_c2c_host_turns_a_wrapped_flash_draft_into_a_delivered_action
-      - tests/world_v2/test_quick_reaction_vertical.py::test_hold_draw_never_consults_the_local_model_and_replays_itself
+      - tests/world_v2/test_qq_c2c_host_migration.py::test_qq_c2c_host_turns_a_combined_inner_turn_into_a_delivered_action
+      - tests/world_v2/test_retired_quick_reaction_replay.py::test_historical_quick_reaction_draw_still_cold_replays_without_live_author
 
   - id: afterthought-followup-lane
     phase: 5
@@ -331,18 +332,18 @@ mechanisms:
     phase: 5
     status: closed
     runtime_activation: limited-production
-    limitations: [requires-explicit-model-and-transport-injection, only-no-change-result-deliberation-is-installed, vision-transcription-and-creative-media-remain-closed]
+    limitations: [requires-explicit-authorized-proposal-and-transport-injection, accepted-result-is-source-context-without-an-independent-result-author, vision-transcription-and-creative-media-remain-closed]
     sources: [audited-tool-proposal, claimed-tool-trigger, enforcement-authorization, provider-result-descriptor]
     events: [ToolRequestAccepted, ToolResultAccepted]
     reducers: [src/companion_daemon/world_v2/reducers.py]
-    projections: [read-only-tool-requests, read-only-tool-results, external-result-trigger]
-    decision_consumers: [ReadOnlyToolProposalCompiler, ReadOnlyToolTriggerRuntime, NoopToolResultDeliberator]
+    projections: [read-only-tool-requests, read-only-tool-results]
+    decision_consumers: [ReadOnlyToolProposalCompiler, ActionPump, CharacterInterior]
     actions: [read-only-tool]
     terminal_states: [delivered, failed, cancelled, expired, unknown]
     adapters: [injected-read-only-tool-provider]
     tests:
       - tests/world_v2/test_read_only_tool_vertical.py::test_tool_executor_rejects_a_revoked_capability_on_final_projection
-      - tests/world_v2/test_read_only_tool_production_lane.py::test_injected_tool_lane_compiles_enforced_request_then_settles_a_real_result
+      - tests/world_v2/test_read_only_tool_production_lane.py::test_injected_tool_lane_settles_result_without_retired_parallel_author
 
   - id: injected-perception-tool
     phase: 5

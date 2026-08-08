@@ -1,27 +1,32 @@
-"""The QQ perception factory fails safe; the real pieces compose end to end.
+"""The QQ perception factory fails safe; CharacterInterior composes end to end.
 
 The end-to-end case is the production analogue of
 ``test_perception_production_composition``: it swaps the test fakes for the
-real deployment implementations (attachment archive input source, decision
-adapter, durable vision transport) and fakes only the chat/vision providers.
+real attachment archive and durable vision transport while injecting one
+fixture CharacterInterior purpose faculty. No separate perception author is
+constructed.
 """
 
 from __future__ import annotations
 
 import base64
-from datetime import UTC, datetime, timedelta
+import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
 import pytest
+from world_v2_application import (
+    build_sqlite_world_v2_test_application,
+    compose_fixture_character_interior,
+)
 
 from companion_daemon.config import Settings
 from companion_daemon.world_v2.deliberation import ModelInput, ModelOutput, ModelRoute, RouteRequest
 from companion_daemon.world_v2.perception_authority_provisioning import (
     PerceptionAuthorityProvisioner,
 )
-from companion_daemon.world_v2.perception_decision_adapter import QQPerceptionDecisionModel
 from companion_daemon.world_v2.perception_vision_transport import (
     SQLiteDurableVisionPerceptionTransport,
 )
@@ -34,7 +39,6 @@ from companion_daemon.world_v2.qq_perception_deployment import (
     build_qq_perception_deployment,
 )
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
-
 
 NOW = datetime(2026, 7, 20, 4, 0, tzinfo=UTC)
 WORLD_ID = "world:qq-perception-deployment"
@@ -62,11 +66,6 @@ class _NoChangeModel:
         return ModelOutput(model_id="test", model_version="test.1", raw_proposal={})
 
 
-class _Quick:
-    async def recover(self, _request: ModelInput, _failure: str) -> ModelOutput:
-        return ModelOutput(model_id="test", model_version="test.1", raw_proposal={})
-
-
 class _Platform:
     provider = "platform:test"
 
@@ -77,14 +76,106 @@ class _Platform:
         return None
 
 
-class _LookDecision:
-    def __init__(self, raw: str = '{"look": true, "attachment_index": 0, "reason": "想看"}') -> None:
-        self.raw = raw
+class _PerceptionFaculty:
+    name = "fixture-qq-attachment-perception"
+    purposes = ("qq_attachment_perception",)
+
+    def __init__(self) -> None:
         self.calls = 0
 
-    async def complete(self, messages, *, temperature: float = 0.8) -> str:
+    @staticmethod
+    def _author_lineage(request) -> dict[str, object]:
+        request_hash = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
+        return {
+            "model_id": "fixture-perception-character",
+            "model_version": "fixture-perception-character.1",
+            "model_call_id": f"model-call:fixture-perception:{request_hash}",
+            "request_hash": f"sha256:{request_hash}",
+            "response_hash": "sha256:"
+            + hashlib.sha256(f"fixture-response:{request_hash}".encode()).hexdigest(),
+            "attempt_ordinal": request.correction_ordinal,
+            "parent_model_call_id": None,
+        }
+
+    async def experience(self, request):  # pragma: no cover - consider-only purpose
+        return {
+            "status": "no_change",
+            "summary": "fixture did not experience a capability",
+            "author_lineage": self._author_lineage(request),
+        }
+
+    async def consider(self, request):
         self.calls += 1
-        return self.raw
+        manifest = request.capability_manifest
+        assert manifest is not None
+        token = manifest.payload["offered_tokens"][0]
+        return {
+            "status": "decision",
+            "summary": "fixture character chose one offered attachment",
+            "author_lineage": self._author_lineage(request),
+            "decision": {
+                "contract": "character-interior-purpose-decision.1",
+                "purpose": "qq_attachment_perception",
+                "source_refs": list(manifest.source_refs),
+                "capability_ref": manifest.capability_ref,
+                "capability_payload_hash": manifest.payload_hash,
+                "payload": {
+                    "contract": (
+                        "character-interior-qq-attachment-perception-decision.1"
+                    ),
+                    "selected_token": token,
+                },
+            },
+        }
+
+
+class _PerceptionResultExperienceFaculty:
+    name = "fixture-perception-result-experience"
+    purposes = ("world_stimulus_appraisal",)
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def experience(self, request):
+        self.calls += 1
+        manifest = request.capability_manifest
+        assert manifest is not None
+        result = {
+            "contract": "character-interior-world-stimulus-appraisal-result.1",
+            "decision": "no_change",
+            "brief_rationale": "她看见了结果，但没有形成新的稳定变化。",
+            "behavior_tendency": "照常继续",
+            "stance": "保留不确定性",
+            "display_strategy": "withhold",
+            "confidence": 7200,
+            "meaning_candidates": None,
+            "attribution": None,
+            "severity": None,
+            "expiry": None,
+            "affect_transition": None,
+            "relationship_signal": None,
+            "aspiration_transition": None,
+        }
+        return {
+            "status": "no_change",
+            "summary": "fixture character privately considered the provider result",
+            "attended_source_refs": manifest.source_refs,
+            "proposals": (
+                {
+                    "contract": "character-interior-typed-proposal.1",
+                    "proposal_type": "world_stimulus_appraisal_result",
+                    "purpose": "world_stimulus_appraisal",
+                    "source_refs": list(manifest.source_refs),
+                    "capability_ref": manifest.capability_ref,
+                    "capability_payload_hash": manifest.payload_hash,
+                    "payload": result,
+                },
+            ),
+            "author_lineage": _PerceptionFaculty._author_lineage(request),
+        }
+
+    async def consider(self, request):  # pragma: no cover - experience-only faculty
+        raise AssertionError(f"unexpected consider request: {request.purpose}")
 
 
 def _settings(tmp_path: Path, **overrides: object) -> Settings:
@@ -104,7 +195,6 @@ def test_factory_disables_without_prerequisites(tmp_path: Path) -> None:
     for overrides in (
         {"PERCEPTION_BUDGET_LIMIT": 0},
         {"OPENAI_API_KEY": None},
-        {"DEEPSEEK_API_KEY": None},
         {},  # credentials fine, but no provisioned enforcement chain
     ):
         assert (
@@ -171,9 +261,16 @@ async def _provisioned_world(path: Path, config: WorldV2TurnApplicationConfig) -
         async def propose(self, _request):  # pragma: no cover
             raise AssertionError("bootstrap does not deliberate")
 
-    app = build_sqlite_world_v2_turn_application(
-        path=path, config=config, identities=_Identities(), router=_Router(),
-        main_model=_NoModel(), quick_recovery=_Quick(), transport=_Platform(), now=NOW,
+    app = build_sqlite_world_v2_test_application(
+        path=path,
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        character_interior=compose_fixture_character_interior(
+            inbound_author=_NoModel(),
+        ),
+        transport=_Platform(),
+        now=NOW,
     )
     try:
         await app.tick(
@@ -208,7 +305,9 @@ async def test_factory_composes_when_provisioned(
     )
     await _provisioned_world(Path(settings.database_path), config)
     bundle = build_qq_perception_deployment(
-        settings=settings, world_id=WORLD_ID, api_url="http://127.0.0.1:3000"
+        settings=_settings(tmp_path, DEEPSEEK_API_KEY=None),
+        world_id=WORLD_ID,
+        api_url="http://127.0.0.1:3000",
     )
     assert bundle is not None
     try:
@@ -259,26 +358,20 @@ async def test_real_pieces_compose_into_next_turn_context_exactly_once(
         model="gpt-4o-mini",
         transport=httpx.MockTransport(vision_handler),
     )
-    decision = _LookDecision()
-    adapter = QQPerceptionDecisionModel(
-        model=decision,
-        input_source=archive,
-        dispatch_evidence=transport,
-        budget_account_id="account:world-v2:perception",
-        budget_limit=12,
-        daily_limit=12,
-        local_timezone="Asia/Shanghai",
-    )
+    decision = _PerceptionFaculty()
+    result_experience = _PerceptionResultExperienceFaculty()
     main_model = _NoChangeModel()
+    interior = compose_fixture_character_interior(
+        inbound_author=main_model,
+        purpose_faculties=(decision, result_experience),
+    )
     app = build_sqlite_world_v2_turn_application(
         path=path,
         config=config,
         identities=_Identities(),
         router=_Router(),
-        main_model=main_model,
-        quick_recovery=_Quick(),
+        character_interior=interior,
         transport=_Platform(),
-        perception_model=adapter,
         perception_input_source=archive,
         perception_transport=transport,
         now=NOW,
@@ -323,6 +416,7 @@ async def test_real_pieces_compose_into_next_turn_context_exactly_once(
             if result_processes and result_processes[0].state == "terminal":
                 break
         assert result_processes[0].state == "terminal"
+        assert result_experience.calls == 1
 
         await app.inbound(
             platform="test",
@@ -360,6 +454,7 @@ async def test_real_pieces_compose_into_next_turn_context_exactly_once(
         assert len(perception_actions) == 1
         assert vision_calls["count"] == 1
         assert decision.calls == 1
+        assert result_experience.calls == 1
         open_perception = tuple(
             item
             for item in projection.trigger_processes

@@ -20,23 +20,17 @@ from typing import Literal
 from companion_daemon.llm import FakeCompanionModel
 
 from .activity_plan_runtime import ActivityPlanCommand
-from .chat_model_deliberation_adapter import RoutedChatModelDeliberationAdapter
-from .deliberation import ModelInput, ModelOutput, ModelRoute, RouteRequest
+from .character_interior.production import compose_fixture_character_interior
+from .deliberation import ModelRoute, RouteRequest
 from .platform_action_executor import PlatformDispatchReceipt, PlatformDispatchRequest
 from .production_turn_application import (
     WorldV2TurnApplicationConfig,
     build_sqlite_world_v2_turn_application,
 )
+from .recall_runtime import install_trace_authority_key
 from .occurrence_content_coordinator import (
     OccurrenceContentCommitRequest,
     OutcomeCandidateContent,
-)
-from .proposal_envelope import (
-    CanonicalTypedPayload,
-    DecisionProposal,
-    ProposalActionIntent,
-    ProposalEvidenceRef,
-    TypedChange,
 )
 from .replay_evaluator import ReplayEvaluator
 from .room_projection import RoomProjectionMaterializer
@@ -48,7 +42,13 @@ from .scenario_corpus import (
     verify_frozen_scenario_corpus,
 )
 from .simulator_adapters import SimulatorIdentityResolver
-from .schemas import DueWindow, EvidenceRef, OutcomeObservation, WorldOccurrenceProjection
+from .schemas import (
+    DueWindow,
+    EvidenceRef,
+    LedgerProjection,
+    OutcomeObservation,
+    WorldOccurrenceProjection,
+)
 
 
 class ScenarioVerificationError(AssertionError):
@@ -247,13 +247,43 @@ class ScenarioVerificationError(AssertionError):
 # model-owned NPC ecology behind Life Ecology. The frozen corpus contains no
 # NPC ecology wake, so its visible predicates and provider-call counts remain
 # unchanged; authenticated projection identities move with reducer .51.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.51"
+# ``.52`` cuts the seeded world-outcome fixture over to one CharacterInterior
+# world-stimulus author.  Appraisal and optional immediate Affect now share one
+# source-bound role result, so the old independent Affect trigger and third
+# background model call are deliberately absent.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.52"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
+# 2026-08-06: rebaselined to .52 after the suite's two cross-process
+# nondeterminism sources were removed: (1) the expression-episode claim owner
+# is now pinned by WorldV2TurnApplicationConfig.expression_episode_owner, and
+# (2) the recall-trace HMAC authority key is now pinned by
+# install_trace_authority_key() instead of a fresh secrets.token_bytes per
+# process. The frozen manifest hash is byte-identical across independent
+# processes; this hash was verified twice cross-process.
+# 2026-08-07: rebaselined after interactive source review was retired and the
+# author contract was hardened: the reviewer/repair lanes no longer alter
+# candidates, the author prompt gained the closed-scope "declare before you
+# assert" hard clause and beats-last serialization, and Inner Life Snapshot
+# material limits were trimmed. All drift is expected prompt/material input
+# change; the deterministic boundary itself is unchanged.
+# 2026-08-07 2nd: appraisal output length discipline (brief_rationale /
+# behavior_tendency / display_strategy <= 120 chars, meanings <= 2 at <= 64
+# chars) shifts the frozen fake-suite prompt; deterministic boundary unchanged.
+# 2026-08-07 3rd: fabricated-ref stripping (expression + proposal layers) and
+# trigger observation-event binding change accepted-proposal evidence paths;
+# the frozen fake-suite manifest shifts accordingly. Deterministic boundary
+# unchanged (strip only drops claims that would have failed closed).
+# 2026-08-08: compact reply shape (response_text without beats) accepted in
+# the stream partition; explicit authored field requirements relaxed to
+# defaults (timing/confidence/cadence); compact-shape prompt guidance rolled
+# back (model self-selection was unreliable); repair temperature lowered to
+# 0.2 and yield/now anti-pattern added to the author contract. Fake-suite
+# prompt/partition input shifts; deterministic boundary unchanged.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "8e7921d71481e136604879107d40623a0192cb9038910a3a75c3bf45d9306934"
+    "4c8c31fa5196b2a68b59b2952ddde4024321b8a2b3f1be92e5bea24b0a06cce0"
 )
 
 
@@ -318,324 +348,211 @@ class _FixedScenarioTransport:
         return receipt
 
 
-class _FixedOutcomeModel:
-    """One deterministic outcome decision for the seeded Phase-8 chain.
+class _FixedCharacterInteriorScenarioModel(FakeCompanionModel):
+    """One fixture author for both inbound turns and settled-world stimuli.
 
-    This is deliberately a deliberation adapter, not a ledger fixture: the
-    app still pins its audit, compiles the typed proposal, and atomically
-    accepts settlement before the subsequent NPC appraisal can begin.
+    The purpose switch mirrors the production CharacterInterior request
+    boundary.  It does not construct a second Appraisal or Affect adapter: one
+    ``world_stimulus_appraisal`` response owns the private appraisal and its
+    optional immediate Affect target together.
     """
 
-    def __init__(self, *, scenario_turn_id: str) -> None:
-        self._scenario_turn_id = scenario_turn_id
-        self.calls = 0
+    model = "fixture-character-author"
 
-    async def propose(self, request: ModelInput) -> ModelOutput:
-        self.calls += 1
-        source = request.trigger_evidence[0]
-        occurrence_id = f"occurrence:phase8:{self._scenario_turn_id}"
-        proposal = DecisionProposal(
-            proposal_id=f"proposal:phase8:{self._scenario_turn_id}:outcome",
-            trigger_ref=request.trigger_ref,
-            evaluated_world_revision=request.evaluated_world_revision,
-            evidence_refs=(source,),
-            proposed_changes=(
-                TypedChange(
-                    change_id=f"change:phase8:{self._scenario_turn_id}:outcome",
-                    kind="outcome_settlement",
-                    target_id=occurrence_id,
-                    transition="settle",
-                    expected_entity_revision=3,
-                    evidence_refs=(source.ref_id,),
-                    payload=CanonicalTypedPayload.from_value(
-                        payload_schema="outcome_settlement.v1",
-                        value={
-                            "outcome_proposal_id": f"model-hint:phase8:{self._scenario_turn_id}:outcome",
-                            "candidate_result_ref": f"candidate:phase8:{self._scenario_turn_id}:settled",
-                            "result_id": f"result:phase8:{self._scenario_turn_id}:settled",
-                            "entity_id": occurrence_id,
-                            "entity_revision": 3,
-                            "observations": [
+    def __init__(self) -> None:
+        super().__init__()
+        self.outcome_selection_calls = 0
+        self.world_stimulus_calls = 0
+        self.world_stimulus_requests: list[list[dict[str, str]]] = []
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+    ) -> str:
+        try:
+            request = json.loads(messages[-1]["content"])
+            inner_turn = request["inner_turn"]
+        except (IndexError, KeyError, TypeError, json.JSONDecodeError):
+            return await super().complete(messages, temperature=temperature)
+        if not isinstance(inner_turn, dict):
+            return await super().complete(messages, temperature=temperature)
+        if inner_turn.get("purpose") == "outcome_selection":
+            self.outcome_selection_calls += 1
+            capability = request["capability_manifest"]
+            source_ref = capability["source_refs"][0]
+            selected = capability["payload"]["offered_tokens"][0]
+            return json.dumps(
+                {
+                    "status": "decision",
+                    "summary": "这个已经发生的结果现在成了我生活的一部分。",
+                    "attended_source_refs": [source_ref],
+                    "decision": {
+                        "source_refs": [source_ref],
+                        "payload": {
+                            "selected_token": selected,
+                            "character_life_direction": None,
+                        },
+                    },
+                    "recall_query": None,
+                    "proposals": [],
+                },
+                ensure_ascii=False,
+            )
+        if inner_turn.get("purpose") != "world_stimulus_appraisal":
+            return await super().complete(messages, temperature=temperature)
+
+        self.world_stimulus_calls += 1
+        self.world_stimulus_requests.append(messages)
+        capability = request["capability_manifest"]
+        source_ref = capability["source_refs"][0]
+        bounds = capability["payload"]["affect_target_lower_bounds"]["bounds"]
+        warmth = next(
+            item
+            for item in bounds
+            if isinstance(item, dict) and item.get("dimension") == "warmth"
+        )
+        minimum = warmth["minimum_target_intensity_bp"]
+        if isinstance(minimum, bool) or not isinstance(minimum, int):
+            raise ScenarioVerificationError("fixture Affect bound is not an integer")
+        target = max(minimum, 3_300)
+        return json.dumps(
+            {
+                "status": "transition",
+                "summary": "这件已经发生的事让我心里有了一点踏实和暖意。",
+                "attended_source_refs": [source_ref],
+                "decision": None,
+                "recall_query": None,
+                "proposals": [
+                    {
+                        "proposal_type": "world_stimulus_appraisal_result",
+                        "decision": "activate",
+                        "brief_rationale": (
+                            "The settled private occurrence feels like bounded goal progress."
+                        ),
+                        "behavior_tendency": "quietly_take_it_in",
+                        "stance": "privately_warm",
+                        "display_strategy": "withhold",
+                        "confidence": 7_100,
+                        "meaning_candidates": [
+                            {"meaning": "goal_progress", "confidence": 7_000},
+                            {"meaning": "care", "confidence": 3_000},
+                        ],
+                        "attribution": "situation",
+                        "severity": 4_300,
+                        "expiry": None,
+                        "affect_transition": {
+                            "operation": "open",
+                            "component_targets": [
                                 {
-                                    "ref_id": f"observation:phase8:{self._scenario_turn_id}:settled",
-                                    "source_world_revision": source.source_world_revision,
-                                    "immutable_hash": source.immutable_hash,
+                                    "dimension": "warmth",
+                                    "target_intensity_bp": target,
                                 }
                             ],
-                            "result_payload": {
-                                "object_ref": f"payload:phase8:{self._scenario_turn_id}:settled",
-                                "schema_version": "outcome-result.1",
-                                "payload_hash": "sha256:" + "e" * 64,
-                            },
                         },
-                    ),
-                ),
-            ),
-            action_intents=(),
-            confidence=8400,
-            brief_rationale="The frozen sidecar candidate matches the observed result.",
-            behavior_tendency="continue_life",
-            stance="settle_verified_outcome",
-            display_strategy="withhold",
+                        "relationship_signal": None,
+                    }
+                ],
+            },
+            ensure_ascii=False,
         )
-        return ModelOutput(
-            model_id="phase8-fixed-outcome",
-            model_version="v1",
-            raw_proposal=proposal.model_dump(mode="json"),
-        )
-
-    async def recover(self, request: ModelInput, _failure: str) -> ModelOutput:
-        return await self.propose(request)
-
-
-class _FixedNpcAppraisalModel:
-    """Deterministic, source-bound appraisal for the settled seeded outcome."""
-
-    def __init__(self, *, scenario_turn_id: str) -> None:
-        self._scenario_turn_id = scenario_turn_id
-        self.calls = 0
-
-    async def propose(self, request: ModelInput) -> ModelOutput:
-        self.calls += 1
-        source = request.trigger_evidence[0]
-        proposal = DecisionProposal(
-            proposal_id=f"proposal:phase8:{self._scenario_turn_id}:npc-appraisal",
-            trigger_ref=request.trigger_ref,
-            evaluated_world_revision=request.evaluated_world_revision,
-            evidence_refs=(source,),
-            proposed_changes=(
-                TypedChange(
-                    change_id=f"change:phase8:{self._scenario_turn_id}:npc-appraisal",
-                    kind="appraisal_transition",
-                    target_id=f"appraisal:phase8:{self._scenario_turn_id}:settled-outcome",
-                    transition="activate",
-                    expected_entity_revision=0,
-                    evidence_refs=(source.ref_id,),
-                    payload=CanonicalTypedPayload.from_value(
-                        payload_schema="appraisal_transition.v1",
-                        value={
-                            "appraisal_id": f"appraisal:phase8:{self._scenario_turn_id}:settled-outcome",
-                            "meaning_candidates": [
-                                {"meaning": "goal_progress", "confidence": 7000},
-                                {"meaning": "care", "confidence": 3000},
-                            ],
-                            "attribution": "situation",
-                            "severity": 4300,
-                            "confidence": 7000,
-                            "expiry": None,
-                        },
-                    ),
-                ),
-            ),
-            action_intents=(),
-            confidence=7000,
-            brief_rationale="The settled private occurrence has bounded subjective significance.",
-            behavior_tendency="reflect",
-            stance="attend",
-            display_strategy="withhold",
-        )
-        return ModelOutput(
-            model_id="phase8-fixed-npc-appraisal",
-            model_version="v1",
-            raw_proposal=proposal.model_dump(mode="json"),
-        )
-
-    async def recover(self, request: ModelInput, _failure: str) -> ModelOutput:
-        return await self.propose(request)
-
-
-class _FixedAffectModel:
-    """Deterministic Affect proposal consuming the accepted NPC appraisal."""
-
-    def __init__(self, *, scenario_turn_id: str) -> None:
-        self._scenario_turn_id = scenario_turn_id
-        self.calls = 0
-
-    async def propose(self, request: ModelInput) -> ModelOutput:
-        self.calls += 1
-        source = request.trigger_evidence[0]
-        proposal = DecisionProposal(
-            proposal_id=f"proposal:phase8:{self._scenario_turn_id}:affect",
-            trigger_ref=request.trigger_ref,
-            evaluated_world_revision=request.evaluated_world_revision,
-            evidence_refs=(source,),
-            proposed_changes=(
-                TypedChange(
-                    change_id=f"change:phase8:{self._scenario_turn_id}:affect",
-                    kind="affect_transition",
-                    target_id=f"affect:phase8:{self._scenario_turn_id}:settled-outcome",
-                    transition="open",
-                    expected_entity_revision=0,
-                    evidence_refs=(source.ref_id,),
-                    payload=CanonicalTypedPayload.from_value(
-                        payload_schema="affect_transition.v1",
-                        value={
-                            "episode_id": f"affect:phase8:{self._scenario_turn_id}:settled-outcome",
-                            "appraisal_change_refs": [
-                                f"change:phase8:{self._scenario_turn_id}:npc-appraisal"
-                            ],
-                            "component_deltas": [{"name": "warmth", "value": 3300}],
-                            "decay_config": {
-                                "object_ref": "policy:decay:standard",
-                                "schema_version": "affect-decay.1",
-                                "payload_hash": "sha256:" + "c" * 64,
-                            },
-                            "residue_config": {
-                                "object_ref": "policy:residue:standard",
-                                "schema_version": "affect-residue.1",
-                                "payload_hash": "sha256:" + "b" * 64,
-                            },
-                        },
-                    ),
-                ),
-            ),
-            action_intents=(),
-            confidence=7100,
-            brief_rationale="The accepted appraisal warrants a bounded warm residual.",
-            affect_decision="propose",
-            behavior_tendency="hold_space",
-            stance="quietly_warm",
-            display_strategy="withhold",
-        )
-        return ModelOutput(
-            model_id="phase8-fixed-affect",
-            model_version="v1",
-            raw_proposal=proposal.model_dump(mode="json"),
-        )
-
-    async def recover(self, request: ModelInput, _failure: str) -> ModelOutput:
-        return await self.propose(request)
 
 
 class _FixedDelayedExpressionModel:
-    """One two-beat DecisionProposal, then an ordinary reply after interruption.
+    """One model-owned delayed draft, then an ordinary reply after interruption.
 
-    It is intentionally a model adapter input/output only.  The app still
-    audits, accepts and schedules the two beats; the fixture never writes
-    Actions, ExpressionPlans or receipts itself.
+    Both inbound turns and each reconsideration cross the same CharacterInterior
+    author.  The fixture returns only the current wire contract; it never builds
+    DecisionProposal, Action, ExpressionPlan or receipt authority itself.
     """
 
     def __init__(self, *, scenario_turn_id: str) -> None:
         self._scenario_turn_id = scenario_turn_id
         self.calls: list[list[dict[str, str]]] = []
+        self._inbound_calls = 0
 
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
         self.calls.append(messages)
-        if len(self.calls) != 1:
+        payload = json.loads(messages[-1]["content"])
+        inner_turn = payload.get("inner_turn")
+        if isinstance(inner_turn, dict):
+            if inner_turn.get("purpose") != "expression_reconsideration":
+                raise ScenarioVerificationError(
+                    "delayed expression fixture received an unexpected Interior purpose"
+                )
+            source_refs = payload["capability_manifest"]["source_refs"]
             return json.dumps(
                 {
-                    "response_text": "我记得。刚才没有立刻接下去，是想先把前一段话说完整。",
-                    "stance": "acknowledge_briefly",
-                    "brief_rationale": "The delayed continuation was explicitly reconsidered after the new message.",
-                    "confidence": 6100,
+                    "status": "decision",
+                    "summary": "新消息来了，但刚才想说的两句仍然值得接着说完。",
+                    "attended_source_refs": source_refs,
+                    "decision": {
+                        "source_refs": source_refs,
+                        "payload": {"disposition": "continue"},
+                    },
+                    "recall_query": None,
+                    "proposals": [],
                 },
                 ensure_ascii=False,
             )
-        request = json.loads(messages[-1]["content"])["request"]
-        trigger = request["trigger_message"]
-        source = ProposalEvidenceRef.model_validate(request["trigger_evidence"][0])
-        base = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
-        first = "我先把你这句接住。"
-        second = "等我把手头这点收完，再认真回到刚刚的话。"
-        first_hash = "sha256:" + hashlib.sha256(first.encode("utf-8")).hexdigest()
-        second_hash = "sha256:" + hashlib.sha256(second.encode("utf-8")).hexdigest()
-        suffix = self._scenario_turn_id
-        change_id = f"change:phase8:{suffix}:delayed-expression"
-        plan_id = f"plan:phase8:{suffix}:delayed-expression"
-        first_beat = f"beat:phase8:{suffix}:immediate"
-        second_beat = f"beat:phase8:{suffix}:delayed"
-        proposal = DecisionProposal(
-            proposal_id=f"proposal:phase8:{suffix}:delayed-expression",
-            trigger_ref=request["trigger_ref"],
-            evaluated_world_revision=request["evaluated_world_revision"],
-            evidence_refs=(source,),
-            proposed_changes=(
-                TypedChange(
-                    change_id=change_id,
-                    kind="expression_plan_transition",
-                    target_id=plan_id,
-                    transition="accept",
-                    evidence_refs=(source.ref_id,),
-                    payload=CanonicalTypedPayload.from_value(
-                        payload_schema="expression_plan_transition.v1",
-                        value={
-                            "plan_id": plan_id,
-                            "overall_intent": "use one short acknowledgement, then a deliberate delayed continuation",
-                            "ordering_policy": "dependencies",
-                            "terminal_policy": "settle_after_terminal_beats",
-                            "beat_drafts": [
-                                {
-                                    "beat_id": first_beat,
-                                    "inline_text": first,
-                                    "materialized_payload_ref": f"payload:phase8:{suffix}:immediate",
-                                    "payload_hash": first_hash,
-                                    "content_type": "text/plain",
-                                    "dependency_beat_ids": [],
-                                    "delay_window": None,
-                                    "cancel_policy": "cancel-before-dispatch",
-                                    "reconsider_policy": "reconsider-on-new-observation",
-                                    "merge_policy": "never",
-                                },
-                                {
-                                    "beat_id": second_beat,
-                                    "inline_text": second,
-                                    "materialized_payload_ref": f"payload:phase8:{suffix}:delayed",
-                                    "payload_hash": second_hash,
-                                    "content_type": "text/plain",
-                                    "dependency_beat_ids": [first_beat],
-                                    "delay_window": {
-                                        "not_before": (base + timedelta(minutes=2)).isoformat(),
-                                        "expires_at": (base + timedelta(minutes=10)).isoformat(),
-                                    },
-                                    "cancel_policy": "cancel-before-dispatch",
-                                    "reconsider_policy": "reconsider-on-new-observation",
-                                    "merge_policy": "merge-if-reconsidered",
-                                },
-                            ],
-                        },
-                    ),
+
+        self._inbound_calls += 1
+        delayed = self._inbound_calls == 1
+        expression = {
+            "private_turn_state": {
+                "inner_state_summary": (
+                    "这句话让我想认真接住，但我更想等手头这一点结束后再完整说。"
+                    if delayed
+                    else "对方回来了，我还记得前一轮，也想先回应这条新消息。"
                 ),
+                "attended_source_refs": [],
+            },
+            "timing_choice": "later" if delayed else "now",
+            "beats": (
+                [
+                    {"modality": "text", "text": "我想了想这句话。"},
+                    {
+                        "modality": "text",
+                        "text": "等我把手头这点收完，再认真回到刚刚的话。",
+                    },
+                ]
+                if delayed
+                else [
+                    {
+                        "modality": "text",
+                        "text": "我记得。刚才没立刻接，是想等自己能认真说的时候。",
+                    }
+                ]
             ),
-            action_intents=(
-                ProposalActionIntent(
-                    intent_id=f"intent:phase8:{suffix}:immediate",
-                    kind="reply",
-                    layer="external_action",
-                    target=trigger["reply_target"],
-                    payload_ref=f"payload:phase8:{suffix}:immediate",
-                    payload_hash=first_hash,
-                    causal_change_id=change_id,
-                    beat_ref=first_beat,
-                ),
-                ProposalActionIntent(
-                    intent_id=f"intent:phase8:{suffix}:delayed",
-                    kind="followup",
-                    layer="external_action",
-                    target=trigger["reply_target"],
-                    payload_ref=f"payload:phase8:{suffix}:delayed",
-                    payload_hash=second_hash,
-                    causal_change_id=change_id,
-                    beat_ref=second_beat,
-                    dependencies=(f"intent:phase8:{suffix}:immediate",),
-                    due_window=(base + timedelta(minutes=2), base + timedelta(minutes=10)),
-                ),
+            "cadence": "conversational",
+            "stance": "paced" if delayed else "acknowledge_briefly",
+            "brief_rationale": (
+                "I want to answer both parts after a short real delay."
+                if delayed
+                else "The new message deserves an immediate acknowledgement."
             ),
-            confidence=7800,
-            brief_rationale="The delayed beat is separate because a new user message can still change whether it should be sent.",
-            drives=("continue_conversation",),
-            behavior_tendency="engage",
-            stance="paced",
-            display_strategy="two_beats",
+            "confidence": 7_800 if delayed else 6_100,
+            "world_claims": [],
+        }
+        if delayed:
+            expression.update({"delay_seconds": 120, "expires_after_seconds": 600})
+        return json.dumps(
+            {
+                "appraisal_draft": {
+                    "appraise": False,
+                    "brief_rationale": "The fixture leaves this as an ordinary interaction.",
+                    "behavior_tendency": "stay_present",
+                    "stance": "paced",
+                    "display_strategy": "natural",
+                    "confidence": 3_000,
+                },
+                "expression_draft": expression,
+            },
+            ensure_ascii=False,
         )
-        return json.dumps(proposal.model_dump(mode="json"), ensure_ascii=False)
 
-
-class _ContinueReconsideration:
-    """Fixed semantic review used only to prove the app-owned gate path."""
-
-    async def review(self, **_kwargs) -> str:
-        return "continue"
 
 @dataclass(frozen=True, slots=True)
 class ScenarioRunResult:
@@ -742,27 +659,22 @@ class ScenarioRunner:
         model = (
             _FixedDelayedExpressionModel(scenario_turn_id=case.entry.scenario_turn_id)
             if case.execution == "seeded_expression_delay"
-            else FakeCompanionModel()
-        )
-        adapter = RoutedChatModelDeliberationAdapter(
-            flash_model=model,
-            flash_model_id="phase8-fixed-fake-flash",
+            else (
+                _FixedCharacterInteriorScenarioModel()
+                if case.execution == "seeded_world_outcome_affect"
+                else FakeCompanionModel()
+            )
         )
         transport = _FixedScenarioTransport(received_at=now, fault=case.fault)
-        outcome_model = (
-            _FixedOutcomeModel(scenario_turn_id=case.entry.scenario_turn_id)
-            if case.execution == "seeded_world_outcome_affect"
-            else None
-        )
-        appraisal_model = (
-            _FixedNpcAppraisalModel(scenario_turn_id=case.entry.scenario_turn_id)
-            if case.execution == "seeded_world_outcome_affect"
-            else None
-        )
-        affect_model = (
-            _FixedAffectModel(scenario_turn_id=case.entry.scenario_turn_id)
-            if case.execution == "seeded_world_outcome_affect"
-            else None
+        # The frozen suite must be byte-deterministic across separate
+        # processes.  Production signs recall traces with a fresh
+        # process-unique authority key; the suite pins one fixed key so
+        # prefetch-trace authority seals (and every snapshot/request hash
+        # derived from them) do not vary between processes.
+        install_trace_authority_key(
+            bytes.fromhex(
+                "7068617365382d7363656e6172696f2d74726163652d6b65792d303030303030"
+            )
         )
 
         def build_application():
@@ -773,18 +685,16 @@ class ScenarioRunner:
                     companion_actor_ref="agent:companion",
                     reply_target="user:scenario",
                     action_pump_owner="pump:phase8-scenario",
+                    # The frozen suite must be byte-deterministic across runs.
+                    # Production intentionally claims with a process-unique
+                    # episode owner; the suite pins one so claim payloads and
+                    # event identities do not vary between processes.
+                    expression_episode_owner="worker:phase8-scenario:expression-episode",
                 ),
                 identities=SimulatorIdentityResolver(canonical_user_id="scenario"),
                 router=_FixedScenarioRouter(),
-                main_model=adapter,
-                quick_recovery=adapter,
-                outcome_model=outcome_model,
-                appraisal_model=appraisal_model,
-                affect_model=affect_model,
-                expression_reconsideration_reviewer=(
-                    _ContinueReconsideration()
-                    if case.execution == "seeded_expression_delay"
-                    else None
+                character_interior=compose_fixture_character_interior(
+                    model=model,
                 ),
                 transport=transport,
                 now=now,
@@ -799,13 +709,14 @@ class ScenarioRunner:
             if case.execution == "seeded_world_outcome_affect":
                 # The fixture intentionally crashes only after the source
                 # observation/trigger were durable.  The restarted app must
-                # perform outcome settlement, its NPC appraisal continuation,
-                # then Affect before the next visible user turn is compiled.
+                # perform outcome settlement, then one CharacterInterior turn
+                # that owns both its appraisal and optional immediate Affect
+                # before the next visible user turn is compiled.
                 app.close()
                 restarted_after_seed = True
                 app = build_application()
                 statuses: list[str] = []
-                for _ in range(3):
+                for _ in range(2):
                     work = await app.drain_background_once()
                     if work is None or getattr(work, "work_status", None) is None:
                         raise ScenarioVerificationError("seeded outcome continuation did not run")
@@ -866,24 +777,28 @@ class ScenarioRunner:
                         correlation_id=f"correlation:phase8:{case.entry.scenario_turn_id}:activity-plan",
                     )
                 if case.execution == "seeded_expression_delay" and index == 1:
-                    immediate = await app.drain_actions_once()
                     delayed = await app.drain_actions_once()
-                    if getattr(immediate, "status", None) != "settled" or getattr(delayed, "status", None) != "not_due":
-                        raise ScenarioVerificationError("delayed expression fixture did not schedule an undelivered beat")
+                    if getattr(delayed, "status", None) != "not_due":
+                        raise ScenarioVerificationError(
+                            "delayed expression fixture dispatched before its authored due window"
+                        )
                 # An interruption deliberately arrives before the old action is
                 # dispatched.  Every other scripted turn reaches the same
                 # application-owned ActionPump before the next ingress.
                 if case.execution not in {"interruption", "seeded_expression_delay"}:
                     await app.drain_actions_once()
             if case.execution == "seeded_expression_delay":
-                reconsideration = None
+                reconsidered = 0
                 for _ in range(64):
                     candidate = await app.drain_background_once()
                     if getattr(candidate, "status", None) == "continued":
-                        reconsideration = candidate
-                        break
-                if reconsideration is None:
-                    raise ScenarioVerificationError("delayed expression beat was not explicitly reconsidered")
+                        reconsidered += 1
+                        if reconsidered == 2:
+                            break
+                if reconsidered != 2:
+                    raise ScenarioVerificationError(
+                        "both delayed expression beats were not explicitly reconsidered"
+                    )
                 due = now + timedelta(minutes=3)
                 await app.tick(
                     tick_id=f"{case.entry.scenario_turn_id}:delayed-beat-due",
@@ -913,11 +828,14 @@ class ScenarioRunner:
         trigger_kinds = tuple(sorted({item.process_kind for item in projection.trigger_processes}))
         room_view_json = RoomProjectionMaterializer.materialize(projection).model_dump_json()
         replay = ReplayEvaluator().evaluate(evidence=evidence)
-        background_model_calls = sum(
-            item.calls for item in (outcome_model, appraisal_model, affect_model) if item is not None
+        background_model_calls = (
+            int(getattr(model, "outcome_selection_calls", 0))
+            + int(getattr(model, "world_stimulus_calls", 0))
         )
         next_context_has_outcome_affect = self._next_context_has_outcome_affect(
-            model=model, case=case
+            model=model,
+            case=case,
+            projection=projection,
         )
         errors = self._verify(
             case=case,
@@ -960,7 +878,12 @@ class ScenarioRunner:
         )
 
     @staticmethod
-    def _next_context_has_outcome_affect(*, model: FakeCompanionModel, case: ScenarioCase) -> bool:
+    def _next_context_has_outcome_affect(
+        *,
+        model: FakeCompanionModel,
+        case: ScenarioCase,
+        projection: LedgerProjection,
+    ) -> bool:
         """Prove the next reply consumed this exact outcome and Affect episode.
 
         Merely checking that both slices are non-empty would allow an unrelated
@@ -974,30 +897,42 @@ class ScenarioRunner:
         if not model.calls:
             return False
         try:
-            request = json.loads(model.calls[-1][1]["content"])["request"]
-            context = json.loads(request["model_content_json"])
-            slices = context["slices"]
-            world_life = slices["world_life"]["items"]
-            affect = slices["affect_episodes"]["items"]
+            supplied = json.loads(model.calls[-1][1]["content"])
+            materials = supplied["inner_life_snapshot"]["materials"]
+            world_life = materials["recent_self_experiences"]["items"]
+            affect = materials["affect"]
         except (IndexError, KeyError, TypeError, json.JSONDecodeError):
             return False
         occurrence_id = f"occurrence:phase8:{case.entry.scenario_turn_id}"
         result_id = f"result:phase8:{case.entry.scenario_turn_id}:settled"
-        appraisal_change_id = f"change:phase8:{case.entry.scenario_turn_id}:npc-appraisal"
+        settlement_refs = {
+            item.event_id
+            for item in projection.committed_world_event_refs
+            if item.event_type == "WorldOccurrenceSettled"
+        }
+        appraisal_change_ids = {
+            item.origin.change_id
+            for item in projection.appraisals
+            if item.origin.change_id.startswith(
+                "change:character-interior-world-stimulus:appraisal:"
+            )
+            and any(ref.ref_id in settlement_refs for ref in item.evidence_refs)
+        }
         has_settled_outcome = any(
-            item.get("value", {}).get("occurrence_id") == occurrence_id
-            and item.get("value", {}).get("result_id") == result_id
+            item.get("occurrence_id") == occurrence_id
+            and item.get("result_id") == result_id
             for item in world_life
             if isinstance(item, dict)
         )
         # The compiler assigns the accepted episode a deterministic compiled
-        # id, so the stable source identity is the NPC appraisal change that
-        # every component must retain rather than the model's provisional id.
+        # id.  Its stable causal identity is the Appraisal change authored by
+        # the same CharacterInterior world-stimulus result, not an old
+        # independently-authored NPC/Affect fixture id.
         has_causal_affect = any(
-            appraisal_ref.get("accepted_change_id") == appraisal_change_id
+            appraisal_ref.get("accepted_change_id") in appraisal_change_ids
             for item in affect
             if isinstance(item, dict)
-            for component in item.get("value", {}).get("components", ())
+            for component in item.get("components", ())
             if isinstance(component, dict)
             for appraisal_ref in component.get("appraisal_refs", ())
             if isinstance(appraisal_ref, dict)
@@ -1011,9 +946,10 @@ class ScenarioRunner:
         """Seed one durable, private occurrence through application commands.
 
         This intentionally stops at the open outcome deliberation trigger.
-        Outcome → NPC appraisal → Affect is separately exercised with
-        deliberation models by the production recovery suite; this corpus must
-        not pretend that a chat-only fake model settled a world outcome.
+        Outcome settlement and the following CharacterInterior world-stimulus
+        turn are separately exercised after restart.  The fixture model
+        returns one source-bound private appraisal result with its optional
+        Affect target; it does not install independent semantic adapters.
         """
 
         world_id = f"world:phase8-scenario:{case.entry.scenario_turn_id}"
@@ -1189,7 +1125,10 @@ class ScenarioRunner:
             errors.append("replay_evaluator_failed")
         # test-economy-v1: regular chat has exactly one main fake call; this
         # runner deliberately does not configure background audit models.
-        if model_calls != len(case.turns):
+        expected_model_calls = len(case.turns) + (
+            2 if case.execution == "seeded_expression_delay" else 0
+        )
+        if model_calls != expected_model_calls:
             errors.append("test_economy_model_call_budget_exceeded")
         expected_observations = len(case.turns)
         if observation_count != expected_observations:
@@ -1208,10 +1147,14 @@ class ScenarioRunner:
         if case.execution == "seeded_world_outcome_affect":
             if not restarted_after_seed:
                 errors.append("outcome_chain_did_not_restart_after_seed")
-            if background_work_statuses != ("accepted", "accepted", "accepted"):
-                errors.append("outcome_npc_affect_chain_incomplete")
-            if background_model_calls != 3:
-                errors.append("outcome_npc_affect_model_call_budget_exceeded")
+            if background_work_statuses != ("accepted", "accepted"):
+                errors.append("outcome_character_interior_chain_incomplete")
+            if background_model_calls != 2:
+                errors.append("outcome_character_interior_model_call_budget_exceeded")
+            if {"affect_deliberation", "relationship_deliberation"}.intersection(
+                trigger_kinds
+            ):
+                errors.append("legacy_inner_author_trigger_present")
             if not next_context_has_outcome_affect:
                 errors.append("next_reply_did_not_consume_outcome_affect_context")
         return tuple(errors)

@@ -155,6 +155,7 @@ async def test_platform_executor_records_real_dispatch_receipt_and_visible_bound
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ("failed", "provider_accepted"))
+@pytest.mark.asyncio
 async def test_non_delivered_receipt_does_not_fabricate_visibility(status: str) -> None:
     clock = _Clock()
     recorder = ProductionLatencyRecorder(clock_ns=clock)
@@ -262,6 +263,7 @@ async def test_platform_executor_preserves_proactive_kind_for_transport_policy()
         ("sticker", "application/vnd.world-v2.sticker+json", '{"sticker_id":"s:wave"}'),
     ),
 )
+@pytest.mark.asyncio
 async def test_platform_adapter_keeps_non_text_primitives_typed_and_receipt_bound(
     kind: str, content_type: str, body: str
 ) -> None:

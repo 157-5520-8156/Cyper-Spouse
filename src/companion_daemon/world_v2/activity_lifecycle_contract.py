@@ -8,6 +8,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
+from .proposal_audit_schemas import ModelResultRecordedPayload
 from .schema_core import EvidenceRef, FrozenModel
 
 
@@ -100,6 +101,7 @@ class ActivityLifecycleProposalRecordedPayload(FrozenModel):
     model: str = Field(min_length=1, max_length=256)
     raw_output_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     normalized_output_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    character_interior_model_result: ModelResultRecordedPayload | None = None
 
     @model_validator(mode="after")
     def fields_are_closed(self) -> "ActivityLifecycleProposalRecordedPayload":

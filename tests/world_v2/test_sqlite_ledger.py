@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 import sqlite3
@@ -15,11 +15,15 @@ from legacy_migration_support import (
 
 from companion_daemon.world_v2.errors import ConcurrencyConflict, LedgerIntegrityError
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
+from companion_daemon.world_v2.aspiration_events import AspirationPlantedPayload
 from companion_daemon.world_v2.schemas import (
     Action,
+    AspirationProjection,
     BudgetAccount,
     BudgetReservation,
     BudgetSettlement,
+    ClockObservation,
+    EvidenceRef,
     ProjectionCursor,
     ResponseExpectationAssessmentProjection,
     WorldEvent,
@@ -376,6 +380,7 @@ def test_sqlite_migrates_verified_v39_head_and_cold_replays_same_history(tmp_pat
         "world-v2-reducers.47",
         "world-v2-reducers.48",
         "world-v2-reducers.50",
+        "world-v2-reducers.51",
     ),
 )
 def test_sqlite_migrates_recent_verified_head_without_rewriting_immutable_history(
@@ -534,7 +539,201 @@ def test_sqlite_migrates_recent_verified_head_without_rewriting_immutable_histor
                 ("world-sqlite-test",),
             ).fetchone()[0],
         )
-    assert immutable_history_after == immutable_history_before
+        assert immutable_history_after == immutable_history_before
+
+
+def test_v51_aspiration_head_hash_is_verified_then_cold_replayed_into_v52(
+    tmp_path,
+) -> None:
+    """New default fields cannot rewrite one archived .51 aspiration head."""
+
+    path = tmp_path / "world-v2-v51-aspiration-head.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    clock = ClockObservation(
+        schema_version="world-v2.1",
+        tick_id="v51-aspiration-migration",
+        world_id=ledger.world_id,
+        logical_time=NOW,
+        created_at=NOW,
+        trace_id="trace:v51-aspiration-migration",
+        causation_id="scheduler:v51-aspiration-migration",
+        correlation_id="correlation:v51-aspiration-migration",
+        logical_time_from=NOW - timedelta(minutes=10),
+        logical_time_to=NOW,
+        reason="migration_fixture",
+    )
+    clock_event = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event:v51-aspiration:clock",
+        world_id=ledger.world_id,
+        event_type="ClockAdvanced",
+        logical_time=NOW,
+        created_at=NOW,
+        actor="system:clock",
+        source="test:v51-aspiration-migration",
+        trace_id=clock.trace_id,
+        causation_id=clock.causation_id,
+        correlation_id=clock.correlation_id,
+        idempotency_key="clock:v51-aspiration-migration",
+        payload=clock.model_dump(mode="json"),
+    )
+    head = ledger.project()
+    ledger.commit(
+        (clock_event,),
+        expected_world_revision=head.world_revision,
+        expected_deliberation_revision=head.deliberation_revision,
+    )
+    clock_ref = ledger.project().committed_world_event_refs[-1]
+    aspiration_event_id = "event:v51-aspiration:planted"
+    aspiration = AspirationProjection(
+        aspiration_id="aspiration:v51-archive",
+        entity_revision=1,
+        owner_actor_ref="agent:companion",
+        seed_id="reviewed-seed:v51-archive",
+        text="以后想找机会学一次陶艺。",
+        privacy_class="personal",
+        planted_at=NOW,
+        planted_event_ref=aspiration_event_id,
+        source_event_ref=clock_event.event_id,
+    )
+    planting = AspirationPlantedPayload(
+        change_id="change:v51-aspiration:plant",
+        transition_id="transition:v51-aspiration:plant",
+        expected_entity_revision=0,
+        evidence_refs=(
+            EvidenceRef(
+                ref_id=clock_ref.event_id,
+                evidence_type="committed_world_event",
+                claim_purpose="life_transition",
+                source_world_revision=clock_ref.world_revision,
+                immutable_hash=clock_ref.payload_hash,
+            ),
+        ),
+        policy_refs=("policy:aspiration.1",),
+        aspiration=aspiration,
+    )
+    planting_payload = planting.model_dump(mode="json")
+    # These bytes reproduce the pre-.52 event contract rather than relying on
+    # a current model dump with defaulted future fields.
+    for field in (
+        "origin_kind",
+        "tension_summary",
+        "tension_source_refs",
+        "last_revised_at",
+        "revision_event_ref",
+        "abandoned_at",
+        "abandonment_event_ref",
+        "abandonment_summary",
+        "abandonment_source_refs",
+    ):
+        planting_payload["aspiration"].pop(field, None)
+    aspiration_event = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id=aspiration_event_id,
+        world_id=ledger.world_id,
+        event_type="AspirationPlanted",
+        logical_time=NOW,
+        created_at=NOW,
+        actor="worker:v51-aspiration",
+        source="test:v51-aspiration-migration",
+        trace_id="trace:v51-aspiration-migration",
+        causation_id=clock_event.event_id,
+        correlation_id="correlation:v51-aspiration-migration",
+        idempotency_key=(
+            domain_idempotency_key(
+                event_type="AspirationPlanted",
+                world_id=ledger.world_id,
+                payload=planting_payload,
+            )
+            or "aspiration:v51-archive"
+        ),
+        payload=planting_payload,
+    )
+    head = ledger.project()
+    ledger.commit(
+        (aspiration_event,),
+        expected_world_revision=head.world_revision,
+        expected_deliberation_revision=head.deliberation_revision,
+    )
+    expected_v52 = ledger.project()
+    cursor = ProjectionCursor(
+        world_revision=expected_v52.world_revision,
+        deliberation_revision=expected_v52.deliberation_revision,
+        ledger_sequence=expected_v52.ledger_sequence,
+    )
+    state = ledger._state_from_projection(expected_v52)  # noqa: SLF001
+    state_value = json.loads(ledger._encode_state(state))  # noqa: SLF001
+    for item in state_value["aspirations"]:
+        for field in (
+            "origin_kind",
+            "tension_summary",
+            "tension_source_refs",
+            "last_revised_at",
+            "revision_event_ref",
+            "abandoned_at",
+            "abandonment_event_ref",
+            "abandonment_summary",
+            "abandonment_source_refs",
+        ):
+            item.pop(field, None)
+    legacy_state_json = json.dumps(
+        state_value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    legacy_hash = ledger._legacy_semantic_hash(  # noqa: SLF001
+        state_json=legacy_state_json,
+        world_revision=cursor.world_revision,
+        reducer_bundle_version="world-v2-reducers.51",
+    )
+    legacy_state_hash = hashlib.sha256(
+        ledger._state_hash_material(  # noqa: SLF001
+            canonical_state=legacy_state_json,
+            cursor=cursor,
+            reducer_bundle_version="world-v2-reducers.51",
+        )
+    ).hexdigest()
+    ledger.close()
+
+    with sqlite3.connect(path) as connection:
+        immutable_before = connection.execute(
+            "SELECT COUNT(*), MAX(event_hash) FROM world_v2_events WHERE world_id = ?",
+            ("world-sqlite-test",),
+        ).fetchone()
+        connection.execute(
+            "DELETE FROM world_v2_head_state_items WHERE world_id = ?",
+            ("world-sqlite-test",),
+        )
+        connection.execute(
+            """UPDATE world_v2_heads
+               SET state_json = ?, semantic_hash = ?, state_hash = ?,
+                   reducer_bundle_version = ?
+               WHERE world_id = ?""",
+            (
+                legacy_state_json,
+                legacy_hash,
+                legacy_state_hash,
+                "world-v2-reducers.51",
+                "world-sqlite-test",
+            ),
+        )
+
+    migrated = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    projection = migrated.project()
+    assert projection.reducer_bundle_version == "world-v2-reducers.52"
+    assert projection == expected_v52
+    assert migrated.rebuild() == projection
+    migrated.close()
+    same_bundle = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    assert same_bundle.project() == projection
+    assert same_bundle.project().semantic_hash == projection.semantic_hash
+    same_bundle.close()
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*), MAX(event_hash) FROM world_v2_events WHERE world_id = ?",
+            ("world-sqlite-test",),
+        ).fetchone() == immutable_before
 
 
 def test_historical_projection_replay_reuses_verified_ascending_prefixes(tmp_path) -> None:

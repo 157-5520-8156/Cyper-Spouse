@@ -186,6 +186,7 @@ class ActivityLifecycleProposalCompiler:
             model=draft.model,
             raw_output_hash=draft.raw_output_hash,
             normalized_output_hash=draft.normalized_output_hash,
+            character_interior_model_result=draft.character_interior_model_result,
         )
 
     def _wake(self, *, projection: LedgerProjection, wake_event_ref: str):

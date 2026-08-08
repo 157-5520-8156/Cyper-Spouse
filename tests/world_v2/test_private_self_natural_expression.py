@@ -5,11 +5,17 @@ import json
 
 import pytest
 
-from companion_daemon.world_v2.chat_model_deliberation_adapter import (
-    ChatModelDeliberationAdapter,
+from companion_daemon.world_v2.character_interior.contracts import InteriorOpportunity
+from companion_daemon.world_v2.character_interior.inbound_turn import (
+    compose_character_interior_inbound_deliberation,
+)
+from companion_daemon.world_v2.character_interior.production import (
+    compose_fixture_character_interior,
+)
+from companion_daemon.world_v2.character_interior.snapshot_compiler import (
+    compile_inner_life_snapshot,
 )
 from companion_daemon.world_v2.deliberation import ModelInput, ModelRoute, TriggerMessage
-from companion_daemon.world_v2.expression_draft import QQ_NAPCAT_EXPRESSION_CAPABILITIES
 from companion_daemon.world_v2.recall_index import (
     FeatureHashRecallEmbedding,
     InMemoryRecallIndex,
@@ -22,6 +28,22 @@ from companion_daemon.world_v2.recall_runtime import RecallCoordinator
 
 NOW = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
 EXPERIENCE_EVENT_REF = "event:experience:vendor-argument"
+EXPERIENCE_ITEM_REF = "experience:vendor-argument"
+
+
+class _NaturalExpressionProjection:
+    def __init__(self, request: ModelInput) -> None:
+        self._context = json.loads(request.model_content_json)
+
+    async def project(self, *, subject: InteriorOpportunity):
+        context = {
+            **self._context,
+            "world_id": subject.world_id,
+            "actor_ref": subject.actor_ref,
+            "consumer_scope": subject.viewer_scope,
+            "viewer_privacy_ceiling": subject.privacy_ceiling,
+        }
+        return compile_inner_life_snapshot(context)
 
 
 class _RecallThenSelfShareRole:
@@ -29,6 +51,14 @@ class _RecallThenSelfShareRole:
 
     def __init__(self) -> None:
         self.calls: list[list[dict[str, str]]] = []
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+    ) -> str:
+        return await self.complete_json(messages, temperature=temperature)
 
     async def complete_json(
         self,
@@ -40,9 +70,10 @@ class _RecallThenSelfShareRole:
         self.calls.append(messages)
         if len(self.calls) == 1:
             supplied = json.loads(messages[1]["content"])
-            current = supplied["current_self_state"]
-            assert current["affect"][0]["source_ref"] == "affect:irritated-residue"
-            assert current["situation"][0]["source_ref"] == "situation:late-evening"
+            current = supplied["inner_life_snapshot"]
+            materials = current["materials"]
+            assert materials["affect"][0]["source_ref"] == "affect:irritated-residue"
+            assert materials["situation"][0]["source_ref"] == "situation:late-evening"
             return json.dumps(
                 {
                     "private_turn_state": {
@@ -52,7 +83,7 @@ class _RecallThenSelfShareRole:
                             "好像有件相似的事浮上来，但我想先把它想清楚。"
                         ),
                         "attended_source_refs": [
-                            "observation:qq:current",
+                            "event:observation:qq:current",
                             "affect:irritated-residue",
                         ],
                     },
@@ -65,46 +96,61 @@ class _RecallThenSelfShareRole:
                 ensure_ascii=False,
             )
 
-        recalled = json.loads(messages[-1]["content"].splitlines()[-1])
-        chosen = recalled["character_chosen_recall"]["candidates"]
+        supplied = json.loads(messages[1]["content"])
+        current = supplied["inner_life_snapshot"]
+        assert "selected_recall" in current["faculties"]["selective_memory"][
+            "material_keys"
+        ]
+        chosen = current["materials"]["selected_recall"]["content"]["items"]
         assert (
             chosen[0]["text"]
             == "上周也和摊贩争过一次，回去以后越想越堵，后来找朋友骂了半天。"
         )
         return json.dumps(
             {
-                "private_turn_state": {
-                    "contract": "private-turn-state.1",
-                    "inner_state_summary": (
-                        "这下想起来了。我不是只想把话再丢回给她，"
-                        "我确实想把自己那次相似的狼狈说出来，和她站在一起。"
-                    ),
-                    "attended_source_refs": [
-                        EXPERIENCE_EVENT_REF,
-                        "affect:irritated-residue",
-                    ],
+                "appraisal_draft": {
+                    "appraise": False,
+                    "brief_rationale": "这次先接住她的情绪，不另立持久评价。",
+                    "behavior_tendency": "分享自己的相似经历",
+                    "stance": "陪她一起生气",
+                    "display_strategy": "自然地说出刚想起的事",
+                    "confidence": 8_100,
                 },
-                "timing_choice": "now",
-                "beats": [
-                    {
-                        "modality": "text",
-                        "text": "我懂，最烦的就是人都走远了，脑子里还在重播。",
+                "expression_draft": {
+                    "private_turn_state": {
+                        "contract": "private-turn-state.1",
+                        "inner_state_summary": (
+                            "这下想起来了。我不是只想把话再丢回给她，"
+                            "我确实想把自己那次相似的狼狈说出来，和她站在一起。"
+                        ),
+                        "attended_source_refs": [
+                            EXPERIENCE_ITEM_REF,
+                            "affect:irritated-residue",
+                        ],
                     },
-                    {
-                        "modality": "text",
-                        "text": "我上周也跟一个摊贩争过，回去以后越想越堵，后来干脆找朋友骂了半天。",
-                    },
-                ],
-                "stance": "带着自己的相似经历陪她一起生气",
-                "brief_rationale": "我选择共情并分享刚刚想起的真实经历，不把继续说话的责任交还给她。",
-                "confidence": 8_600,
-                "world_claims": [
-                    {
-                        "claim_text": "我上周也和一个摊贩争过，后来找朋友骂了半天",
-                        "scope": "past_world",
-                        "source_refs": [EXPERIENCE_EVENT_REF],
-                    }
-                ],
+                    "timing_choice": "now",
+                    "beats": [
+                        {
+                            "modality": "text",
+                            "text": "我懂，最烦的就是人都走远了，脑子里还在重播。",
+                        },
+                        {
+                            "modality": "text",
+                            "text": "我上周也跟一个摊贩争过，回去以后越想越堵，后来干脆找朋友骂了半天。",
+                        },
+                    ],
+                    "stance": "带着自己的相似经历陪她一起生气",
+                    "brief_rationale": "我选择共情并分享刚刚想起的真实经历，不把继续说话的责任交还给她。",
+                    "confidence": 8_600,
+                    "world_claims": [
+                        {
+                            "claim_text": "我上周也和一个摊贩争过，后来找朋友骂了半天",
+                            "scope": "past_world",
+                            "source_refs": [EXPERIENCE_EVENT_REF],
+                        }
+                    ],
+                    "episode_disposition": "complete_without_more",
+                },
             },
             ensure_ascii=False,
         )
@@ -163,6 +209,24 @@ def _request() -> ModelInput:
                                         "availability": "available",
                                         "participant_refs": [],
                                     },
+                                },
+                            }
+                        ],
+                    },
+                    "recent_dialogue": {
+                        "availability": "available",
+                        "items": [
+                            {
+                                "item_ref": "event:observation:qq:current",
+                                "privacy_class": "private",
+                                "value": {
+                                    "dialogue_id": "dialogue:qq:current",
+                                    "speaker": "counterpart",
+                                    "speaker_ref": "user:primary",
+                                    "text": "就是回去以后越想越气，想找个人吐槽。",
+                                    "occurred_at": NOW.isoformat(),
+                                    "delivery_state": "observed",
+                                    "sequence": 5,
                                 },
                             }
                         ],
@@ -229,15 +293,19 @@ async def test_role_can_select_own_recall_then_empathize_and_self_share_without_
         trigger_ref="event:observation:qq:current",
     )
     role = _RecallThenSelfShareRole()
-    capabilities = QQ_NAPCAT_EXPRESSION_CAPABILITIES.model_copy(
-        update={"private_turn_state_mode": "required"}
+    request = _request()
+    interior = compose_fixture_character_interior(
+        model=role,
+        projection=_NaturalExpressionProjection(request),
+        recall_coordinator=coordinator,
+    )
+    inbound = compose_character_interior_inbound_deliberation(
+        interior=interior,
+        world_id="world:test",
+        actor_ref="agent:companion",
     )
     try:
-        output = await ChatModelDeliberationAdapter(
-            model=role,
-            recall_coordinator=coordinator,
-            expression_capabilities=capabilities,
-        ).propose(_request())
+        output = await inbound.propose(request)
     finally:
         coordinator.close()
 
@@ -245,7 +313,7 @@ async def test_role_can_select_own_recall_then_empathize_and_self_share_without_
     assert output.recall_trace is not None
     proposal = output.raw_proposal
     assert proposal["private_turn_state"]["attended_source_refs"] == [
-        EXPERIENCE_EVENT_REF,
+        EXPERIENCE_ITEM_REF,
         "affect:irritated-residue",
     ]
     plan = json.loads(proposal["proposed_changes"][0]["payload"]["canonical_json"])

@@ -15,9 +15,9 @@ from companion_daemon.world_v2.external_world_perception import (
     PerceptionChannelProof,
     RecordedSignalSourceAdapter,
     ShadowAttentionRuntime,
-    SourceBoundAttentionContextItem,
     SourcePolicyRevision,
     SourceProfile,
+    SourceBoundAttentionContextItem,
     SQLiteWorldPerceptionHub,
 )
 
@@ -90,15 +90,15 @@ def _context(
         world_id="zhizhi-world-v2",
         actor_ref="character:zhizhi",
         pinned_world_cursor=cursor,
-        current_self_state=(
+        world_logical_time=NOW,
+        situation=(
             SourceBoundAttentionContextItem(
-                context_ref="context:self:current",
-                context_kind="current_self_state",
-                text="刚从外面回来，正在休息。",
+                context_ref="world-event:activity:41",
+                context_kind="current_situation",
+                text='{"activity":"current"}',
                 source_refs=("world-event:activity:41",),
             ),
         ),
-        situation=(),
         relevant_context=(),
         available_channels=(
             PerceptionChannelProof(
@@ -300,7 +300,7 @@ async def test_invalid_shadow_selection_gets_one_exact_model_owned_reselection(
                     "selected_channel_ref": dossier.accessible_channels[0].channel_ref,
                     "subjective_summary": "我刷到附近周末的音乐节加了夜场。",
                     "epistemic_notes": "目前只有主办方这一个来源。",
-                    "attended_context_refs": ["context:self:current"],
+                    "attended_context_refs": ["world-event:activity:41"],
                 }
             ]
         }

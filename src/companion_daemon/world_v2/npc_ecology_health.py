@@ -111,9 +111,12 @@ def npc_ecology_health_snapshot(
     projection: object,
     ledger: object,
     identity_views: tuple[object, ...],
+    protagonist_actor_ref: str,
 ) -> dict[str, object]:
     """Compile truthful NPC ecology identity, recurrence, call and failure health."""
 
+    if not protagonist_actor_ref:
+        raise ValueError("NPC ecology health requires protagonist actor identity")
     logical_time = getattr(projection, "logical_time", None)
     if not isinstance(logical_time, datetime):
         logical_time = None
@@ -254,6 +257,16 @@ def npc_ecology_health_snapshot(
             for item in getattr(projection, "world_occurrences", ())
             if item.status == "settled" and participant_refs.intersection(item.participant_refs)
         )
+        shared_scenes = tuple(
+            item
+            for item in settled_scenes
+            if protagonist_actor_ref in item.participant_refs
+        )
+        npc_private_scenes = tuple(
+            item
+            for item in settled_scenes
+            if protagonist_actor_ref not in item.participant_refs
+        )
         scene_reappearance_count = max(0, len(settled_scenes) - 1)
         lifecycle_reactivation_events = []
         for event in lifecycle_events:
@@ -290,6 +303,8 @@ def npc_ecology_health_snapshot(
                 "actor_no_op_count": sum(item[1].get("decision") == "no_op" for item in npc_actor),
                 "world_no_op_count": sum(item[1].get("decision") == "no_op" for item in npc_world),
                 "settled_scene_count": len(settled_scenes),
+                "shared_with_protagonist_scene_count": len(shared_scenes),
+                "npc_private_scene_count": len(npc_private_scenes),
                 "scene_reappearance_count": scene_reappearance_count,
                 "lifecycle_reactivation_count": len(lifecycle_reactivation_events),
                 "technical_failure_count": len(npc_failures),
@@ -307,9 +322,36 @@ def npc_ecology_health_snapshot(
 
     actor_no_ops = sum(item[1].get("decision") == "no_op" for item in actor_records)
     world_no_ops = sum(item[1].get("decision") == "no_op" for item in world_records)
+    actor_scope_violation_count = sum(
+        getattr(event, "actor", None) != npc_ref
+        for event, _decision, npc_ref in actor_records
+    )
     unattributed_failures = sum(item[2] is None for item in technical_failures)
     actor_attempts = tuple(item for item in model_attempts if item[1] == "actor")
     world_attempts = tuple(item for item in model_attempts if item[1] == "world")
+    all_npc_participant_refs = {
+        ref
+        for npc_ref, npc in npc_by_ref.items()
+        for ref in _participant_refs(
+            npc_ref=npc_ref,
+            view=views_by_ref.get(npc_ref),
+            npc=npc,
+        )
+    }
+    private_settlement_refs = {
+        item.settlement_event_ref
+        for item in getattr(projection, "world_occurrences", ())
+        if item.status == "settled"
+        and protagonist_actor_ref not in item.participant_refs
+        and all_npc_participant_refs.intersection(item.participant_refs)
+        and isinstance(getattr(item, "settlement_event_ref", None), str)
+    }
+    private_open_appraisal_violations = sum(
+        item.process_kind == "npc_world_appraisal"
+        and item.state != "terminal"
+        and item.source_evidence_ref in private_settlement_refs
+        for item in getattr(projection, "trigger_processes", ())
+    )
 
     def success_rates(role: str) -> tuple[dict[str, object], dict[str, object]]:
         grouped: dict[str, list[dict[str, Any]]] = {}
@@ -353,7 +395,17 @@ def npc_ecology_health_snapshot(
         value = rate.get("value_bp")
         if isinstance(value, int) and value < 9_000:
             warning_reasons.append(name)
+    if actor_scope_violation_count:
+        warning_reasons.append("npc_actor_scope_violation")
+    if private_open_appraisal_violations:
+        warning_reasons.append("npc_private_settlement_opened_protagonist_appraisal")
     return {
+        "semantic_domain_contract": "npc-actor-isolated.1",
+        "actor_scope_evidence": "proposal_event_actor_equals_decision_npc_ref",
+        "actor_scope_violation_count": actor_scope_violation_count,
+        "private_settlement_open_appraisal_violation_count": (
+            private_open_appraisal_violations
+        ),
         "dynamic_count": len(dynamic_refs),
         "promotion_closed_count": len(closed_dynamic_refs),
         "promotion_closure_failure_count": len(closure_failure_refs),

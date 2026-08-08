@@ -60,15 +60,59 @@ def test_external_world_perception_is_fail_closed_until_a_source_registry_is_sup
         )
 
 
-def test_text_endpoint_request_does_not_make_local_appraisal_mandatory() -> None:
+def test_text_endpoint_uses_role_accurate_provider_settings() -> None:
     settings = Settings(
         _env_file=None,
         WORLD_V2_TEXT_ENDPOINT_ENABLED=True,
-        LOCAL_APPRAISAL_ENABLED=False,
+        WORLD_V2_TEXT_ENDPOINT_BASE_URL="http://127.0.0.1:8188/v1",
+        WORLD_V2_TEXT_ENDPOINT_MODEL="mlx-community/Qwen3-1.7B-4bit",
+        WORLD_V2_TEXT_ENDPOINT_API_KEY="endpoint-only",
     )
 
     assert settings.world_v2_text_endpoint_enabled is True
-    assert settings.local_appraisal_enabled is False
+    assert settings.world_v2_text_endpoint_base_url == "http://127.0.0.1:8188/v1"
+    assert settings.world_v2_text_endpoint_model == "mlx-community/Qwen3-1.7B-4bit"
+    assert settings.world_v2_text_endpoint_api_key == "endpoint-only"
+
+
+@pytest.mark.parametrize(
+    ("legacy_name", "legacy_value"),
+    (
+        ("DEEPSEEK_REPLY_MODEL", "retired-reply-model"),
+        ("DEEPSEEK_EXPRESSIVE_MODEL", "retired-expression-model"),
+        ("DEEPSEEK_EXPRESSIVE_THINKING_ENABLED", "true"),
+        ("DEEPSEEK_EXPRESSIVE_REASONING_EFFORT", "high"),
+        ("DEEPSEEK_THINKING_ENABLED", "true"),
+        ("DEEPSEEK_REASONING_EFFORT", "high"),
+        ("DEEPSEEK_DEEP_APPRAISAL_MODEL", "legacy-model"),
+        ("DEEPSEEK_DEEP_APPRAISAL_THINKING_ENABLED", "true"),
+        ("DEEPSEEK_DEEP_APPRAISAL_REASONING_EFFORT", "high"),
+        ("LOCAL_APPRAISAL_ENABLED", "true"),
+        ("LOCAL_APPRAISAL_BASE_URL", "http://127.0.0.1:8188/v1"),
+        ("LOCAL_APPRAISAL_MODEL", "legacy-model"),
+        ("LOCAL_APPRAISAL_API_KEY", "legacy-key"),
+        ("WORLD_V2_ADVISORY_TIMEOUT_SECONDS", "1.25"),
+    ),
+)
+def test_removed_semantic_model_configuration_is_rejected(
+    legacy_name: str,
+    legacy_value: str,
+) -> None:
+    with pytest.raises(ValidationError, match=f"removed configuration {legacy_name}"):
+        Settings(_env_file=None, **{legacy_name: legacy_value})
+
+
+def test_character_thinking_route_uses_role_accurate_settings() -> None:
+    settings = Settings(
+        _env_file=None,
+        DEEPSEEK_CHARACTER_THINKING_MODEL="deepseek-v4-flash",
+        DEEPSEEK_CHARACTER_THINKING_ENABLED=True,
+        DEEPSEEK_CHARACTER_THINKING_REASONING_EFFORT="high",
+    )
+
+    assert settings.deepseek_character_thinking_model == "deepseek-v4-flash"
+    assert settings.deepseek_character_thinking_enabled is True
+    assert settings.deepseek_character_thinking_reasoning_effort == "high"
 
 
 def test_napcat_settings_accept_legacy_snowluma_names() -> None:

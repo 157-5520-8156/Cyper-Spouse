@@ -9,6 +9,7 @@ from typing import Literal, Self
 
 from pydantic import Field, model_validator
 
+from .proposal_audit_schemas import ModelResultRecordedPayload
 from .schema_core import FrozenModel
 
 
@@ -52,6 +53,7 @@ class FactMemoryDecisionRecordedPayload(FrozenModel):
     decision_json: str = Field(min_length=2, max_length=_MAX_DECISION_BYTES)
     decision_hash: str = Field(pattern=_HASH)
     recorded_at: datetime
+    character_interior_model_result: ModelResultRecordedPayload | None = None
 
     @model_validator(mode="after")
     def decision_bytes_are_canonical_and_bound(self) -> Self:

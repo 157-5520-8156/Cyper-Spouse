@@ -1,22 +1,32 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from companion_daemon.world_v2.ledger import WorldLedger
+from companion_daemon.world_v2.life_aftermath_runtime import LifeAftermathRuntime
 from companion_daemon.world_v2.life_content_store import (
     InMemoryImmutableLifeContentStore,
     StoredLifeContent,
     life_content_payload_hash,
 )
-from companion_daemon.world_v2.npc_ecology import NpcEcology
+from companion_daemon.world_v2.npc_ecology import NpcEcology, NpcSocialWorldSnapshot
 from companion_daemon.world_v2.occurrence_content_coordinator import (
     OccurrenceContentCoordinator,
 )
-from test_life_projection import WORLD_ID, commit, event, seed_through_proposal
+from companion_daemon.world_v2.schemas import ProjectionCursor
+from test_life_projection import (
+    WORLD_ID,
+    commit,
+    event,
+    seed_through_proposal,
+    settlement_batch,
+)
 
 
 class _Model:
@@ -48,6 +58,31 @@ class _HttpFailureModel(_Model):
         request = httpx.Request("POST", "https://api.deepseek.com/chat/completions")
         response = httpx.Response(503, request=request)
         raise httpx.HTTPStatusError("busy", request=request, response=response)
+
+
+class _ProjectionRejectingPrivateAffectReads:
+    """Make a protagonist Affect read fail even when hidden behind getattr."""
+
+    def __init__(self, projection: object) -> None:
+        self._projection = projection
+
+    @property
+    def affect_episodes(self) -> object:
+        raise AssertionError("NPC Ecology cannot read protagonist private Affect")
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._projection, name)
+
+
+class _LedgerRejectingPrivateAffectReads:
+    def __init__(self, ledger: WorldLedger) -> None:
+        self._ledger = ledger
+
+    def project_at(self, cursor: ProjectionCursor) -> object:
+        return _ProjectionRejectingPrivateAffectReads(self._ledger.project_at(cursor))
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._ledger, name)
 
 
 def _actor(decision: str) -> dict[str, object]:
@@ -178,6 +213,32 @@ async def test_npc_no_op_still_advances_private_state_effect_once() -> None:
     assert store.read_exact(content_ref=state.inner_state_content_ref).text.startswith("实习作品集")
 
 
+def test_npc_snapshot_never_reads_or_surfaces_protagonist_private_affect() -> None:
+    ledger, _store, _actor_model, _world_model, runtime = _runtime(
+        _actor("no_op"), {"decision": "no_op"}
+    )
+    projection = ledger.project()
+    runtime._ledger = _LedgerRejectingPrivateAffectReads(ledger)  # type: ignore[assignment]
+
+    snapshot = runtime.snapshot(
+        ProjectionCursor(
+            world_revision=projection.world_revision,
+            deliberation_revision=projection.deliberation_revision,
+            ledger_sequence=projection.ledger_sequence,
+        )
+    )
+
+    assert isinstance(snapshot, NpcSocialWorldSnapshot)
+    assert set(NpcSocialWorldSnapshot.model_fields) == {
+        "cursor",
+        "logical_time",
+        "identities",
+        "available_npc_refs",
+        "available_location_refs",
+        "recent_occurrence_refs",
+    }
+
+
 @pytest.mark.asyncio
 async def test_npc_impulse_is_separately_adjudicated_and_enters_event_machine() -> None:
     ledger, _store, actor, world, runtime = _runtime(_actor("propose"), _world())
@@ -189,6 +250,12 @@ async def test_npc_impulse_is_separately_adjudicated_and_enters_event_machine() 
     assert result.status == "occurrence_committed"
     assert len(actor.calls) == 1
     assert len(world.calls) == 1
+    world_payload = json.loads(world.calls[0][1]["content"])
+    assert set(world_payload["world_capabilities"]) == {
+        "participant_refs",
+        "location_refs",
+    }
+    assert "affect" not in world.calls[0][1]["content"].lower()
     occurrence = next(
         item
         for item in ledger.project().world_occurrences
@@ -198,6 +265,89 @@ async def test_npc_impulse_is_separately_adjudicated_and_enters_event_machine() 
     assert occurrence.participant_refs == ("npc:lin",)
     assert len(occurrence.candidate_outcomes) == 2
     assert ledger.project().npcs[0].subjective_state is not None
+
+
+@pytest.mark.asyncio
+async def test_solo_npc_occurrence_settles_without_opening_protagonist_appraisal() -> None:
+    class MustNotConsider:
+        async def consider(self, _opportunity):  # pragma: no cover - hard assertion
+            raise AssertionError("a solo NPC event is not protagonist private experience")
+
+    ledger, store, actor_model, _world_model, runtime = _runtime(
+        _actor("propose"), _world()
+    )
+    # Retire the fixture's earlier occurrence so LifeAftermath reaches the
+    # NPC-owned occurrence created below rather than that unrelated seed.
+    commit(ledger, settlement_batch())
+    npc_start = ledger.project().logical_time + timedelta(minutes=10)
+    commit(
+        ledger,
+        [
+            event(
+                "clock-solo-npc-start",
+                "ClockAdvanced",
+                {
+                    "logical_time_from": ledger.project().logical_time.isoformat(),
+                    "logical_time_to": npc_start.isoformat(),
+                },
+                at=npc_start,
+            )
+        ],
+    )
+    actor_model.payload["source_refs"] = ["clock-solo-npc-start"]
+    opened = await runtime.advance_once(
+        wake_event_ref="clock-solo-npc-start",
+        trace_id="trace:solo-npc",
+        correlation_id="correlation:solo-npc",
+    )
+    occurrence = next(
+        item
+        for item in ledger.project().world_occurrences
+        if item.occurrence_id == opened.occurrence_id
+    )
+    assert occurrence.participant_refs == ("npc:lin",)
+    due = occurrence.time_window.closes_at + timedelta(seconds=1)
+    commit(
+        ledger,
+        [
+            event(
+                "clock-solo-npc-settle",
+                "ClockAdvanced",
+                {
+                    "logical_time_from": ledger.project().logical_time.isoformat(),
+                    "logical_time_to": due.isoformat(),
+                },
+                at=due,
+            )
+        ],
+    )
+    aftermath = LifeAftermathRuntime(
+        ledger=ledger,
+        catalog=SimpleNamespace(),
+        occurrence_content=OccurrenceContentCoordinator(ledger=ledger, store=store),
+        content_store=store,
+        owner_actor_ref="actor:companion",
+        character_interior=MustNotConsider(),
+        experience_memory_lifecycle=SimpleNamespace(_ledger=ledger),
+    )
+
+    settled = await aftermath.advance_once(
+        wake_event_ref="clock-solo-npc-settle",
+        trace_id="trace:solo-npc-settle",
+        correlation_id="correlation:solo-npc-settle",
+    )
+
+    assert settled.status == "settled"
+    assert not any(
+        item.process_kind == "npc_world_appraisal"
+        and item.source_evidence_ref
+        == next(
+            occurrence.settlement_event_ref
+            for occurrence in ledger.project().world_occurrences
+            if occurrence.occurrence_id == opened.occurrence_id
+        )
+        for item in ledger.project().trigger_processes
+    )
 
 
 @pytest.mark.asyncio

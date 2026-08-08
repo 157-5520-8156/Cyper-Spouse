@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from uuid import uuid4
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from .affect_math import DecayAnchor, DecayProfile, decay_intensity_bp
 from .errors import ConcurrencyConflict, IdempotencyConflict
@@ -26,7 +26,6 @@ from .expression_episode_lifecycle import (
     EXPRESSION_FRESH_CONTEXT_REPIN_LIMIT,
     due_expression_retry_processes,
     expression_episode_claim_event,
-    expression_episode_cancel_events,
     expression_episode_complete_event,
     expression_episode_has_authorized_action,
     expression_episode_open_event,
@@ -59,6 +58,8 @@ from .expression_plan_acceptance import (
 from .expression_plan_atomic_recorder import ExpressionPlanAtomicRecorder, expression_plan_event_id
 from .expression_payload_store import ImmutableExpressionPayloadStore
 from .appraisal_trigger import (
+    CHARACTER_INTERIOR_INBOUND_ATTEMPT_PREFIX,
+    DEFAULT_INTERACTION_APPRAISAL_LEASE_SECONDS,
     interaction_appraisal_folded_event,
     interaction_appraisal_trigger_events,
     is_interaction_appraisal_audit,
@@ -66,15 +67,10 @@ from .appraisal_trigger import (
 from .fact_trigger import interaction_fact_trigger_event
 from .fact_draft_adapter import FactObservationProposalAdapter
 from .fact_memory_candidate_lifecycle import FactMemoryCandidateLifecycle
-from .fact_memory_draft import FactMemoryDraftAdapter
 from .fact_v2_acceptance_runtime import FactV2AcceptanceRuntime
 from .interaction_fact_trigger_runtime import FactTriggerRunResult, InteractionFactTriggerRuntime
-from .private_impression_producer import (
-    PrivateImpressionDraftAdapter,
-    PrivateImpressionRunResult,
-    PrivateImpressionTriggerOpener,
-    PrivateImpressionTriggerRuntime,
-)
+from .character_interior import CharacterInterior
+from .character_interior.inbound_relationship import InboundRelationshipSignalWorker
 from .batch_invariants import interaction_appraisal_trigger_identity
 from .appraisal_acceptance_runtime import (
     AppraisalAcceptanceError,
@@ -82,82 +78,32 @@ from .appraisal_acceptance_runtime import (
 )
 from .appraisal_proposal_worker import AppraisalProposalWorker
 from .immediate_emotion_proposal_worker import ImmediateEmotionProposalWorker
-from .affect_trigger import affect_deliberation_trigger_events
 from .affect_acceptance_runtime import AffectAcceptanceError, AffectAcceptanceRuntime
-from .affect_deliberation_worker import AffectDeliberationWorker
-from .affect_trigger_runtime import AffectTriggerRunResult, AffectTriggerRuntime
-from .relationship_deliberation_worker import RelationshipDeliberationWorker
-from .relationship_trigger_runtime import RelationshipTriggerRuntime
 from .relationship_adjustment_worker import RelationshipAdjustmentWorker
 from .relationship_adjustment_trigger_runtime import RelationshipAdjustmentTriggerRuntime
-from .interaction_appraisal_trigger_runtime import (
-    AppraisalTriggerRunResult,
-    InteractionAppraisalTriggerRuntime,
-)
-from .npc_world_appraisal_trigger_runtime import NpcWorldAppraisalTriggerRuntime
-from .plan_disruption_appraisal_trigger import PlanDisruptionAppraisalTriggerOpener
-from .plan_disruption_appraisal_trigger_runtime import (
-    PlanDisruptionAppraisalTriggerRuntime,
-    PlanDisruptionAppraisalTurn,
-)
-from .silence_appraisal_trigger import SilenceAppraisalTriggerOpener
-from .silence_appraisal_trigger_runtime import SilenceAppraisalTriggerRuntime, SilenceAppraisalTurn
 from .outcome_deliberation_turn import OutcomeDeliberationTurn
 from .outcome_proposal_worker import OutcomeProposalWorker
 from .outcome_trigger_runtime import OutcomeTriggerRunResult, OutcomeTriggerRuntime
 from .outcome_trigger import outcome_deliberation_trigger_event, outcome_deliberation_trigger_id
-from .interaction_bid_deliberation_turn import InteractionBidDeliberationTurn
-from .interaction_bid_proposal_worker import InteractionBidProposalWorker
-from .interaction_bid_trigger_runtime import (
-    InteractionBidTriggerRunResult,
-    InteractionBidTriggerRuntime,
-)
-from .settled_world_appraisal_turn import SettledWorldAppraisalTurn
 from .action_pump import (
     ActionExecutor,
     ActionPump,
     ActionPumpResult,
     ProviderAcceptedReconciliationGate,
 )
-from .bounded_decision_vertical import AnchoredRunResult, InlineOnceRunResult
+from .bounded_decision_vertical import AnchoredRunResult
 from .expression_reconsideration import expression_reconsideration_events_for_observation
-from .expression_reconsideration_runtime import (
-    ExpressionReconsiderationReviewer,
-    ExpressionReconsiderationRunResult,
-    ExpressionReconsiderationRuntime,
-)
 from .random_authority import RandomAuthority
-from .external_result_trigger_runtime import (
-    ExternalResultTriggerRunResult,
-    ExternalResultTriggerRuntime,
-    ToolResultDeliberator,
-)
-from .read_only_tool_trigger import read_only_tool_trigger_event
-from .read_only_tool_trigger_runtime import (
-    ReadOnlyToolTriggerRunResult,
-    ReadOnlyToolTriggerRuntime,
-)
-from .perception_result_trigger_runtime import (
-    PerceptionResultDeliberator,
-    PerceptionResultTriggerRunResult,
-    PerceptionResultTriggerRuntime,
-)
 from .perception_trigger import perception_trigger_event
 from .perception_trigger_runtime import PerceptionTriggerRunResult, PerceptionTriggerRuntime
 from .social_action_worker import SocialActionRunResult, SocialActionWorker
-from .quick_reaction import (
-    QUICK_REACTION_PROPOSAL_PREFIX,
-    QuickReactionRunResult,
-    QuickReactionWorker,
-)
-from .quick_reaction_vertical import QuickReactionVerticalWorker
-from .proactive_action import ProactiveActionRunResult, ProactiveActionRuntime
 from .memory_withdrawal_review import (
     MemoryWithdrawalReviewRunResult,
     MemoryWithdrawalReviewRuntime,
 )
 from .proposal_audit import ProposalAuditCommit
 from .proposal_envelope import DecisionProposal, MinimalProposal, validate_proposal_envelope
+from .unified_inbound_decision import inspect_unified_inbound_decision
 from .response_expectation_view import pending_response_expectation_manifest
 from .schemas import (
     ClockObservation,
@@ -169,10 +115,17 @@ from .schemas import (
     ProjectionRequest,
     ResponseExpectationAssessedPayload,
     RuntimeOutcome,
+    ClaimLease,
     TriggerProcess,
     WorldEvent,
     WorldProjection,
 )
+
+
+# Immutable V2 ledgers may contain proposals written by the retired independent
+# quick-reaction author.  The prefix remains only as replay/join discrimination;
+# no live worker, model port or composition switch is retained.
+_HISTORICAL_QUICK_REACTION_PROPOSAL_PREFIX = "proposal:quick-reaction:"
 
 
 _LOG = logging.getLogger(__name__)
@@ -258,34 +211,22 @@ class WorldRuntime:
         expression_policy: ExpressionPlanBudgetPolicy | None = None,
         expression_recorder: ExpressionPlanAtomicRecorder | None = None,
         expression_payload_store: ImmutableExpressionPayloadStore | None = None,
-        interaction_appraisal_owner: str | None = None,
+        inbound_state_owner: str | None = None,
         appraisal_acceptance: AppraisalAcceptanceRuntime | None = None,
         appraisal_acceptance_actor: str | None = None,
         appraisal_worker: AppraisalProposalWorker | None = None,
-        interaction_appraisal_turn: PinnedTurnCompiler | None = None,
         immediate_emotion_worker: ImmediateEmotionProposalWorker | None = None,
-        npc_world_appraisal_turn: SettledWorldAppraisalTurn | None = None,
-        silence_appraisal_turn: SilenceAppraisalTurn | None = None,
-        silence_appraisal_idle_seconds: int | None = None,
-        plan_disruption_appraisal_turn: PlanDisruptionAppraisalTurn | None = None,
-        plan_disruption_appraisal_enabled: bool = True,
+        inbound_relationship_worker: InboundRelationshipSignalWorker | None = None,
         outcome_deliberation_turn: OutcomeDeliberationTurn | None = None,
         outcome_worker: OutcomeProposalWorker | None = None,
         outcome_deliberation_owner: str | None = None,
-        interaction_bid_turn: InteractionBidDeliberationTurn | None = None,
-        interaction_bid_worker: InteractionBidProposalWorker | None = None,
-        interaction_bid_owner: str | None = None,
         interaction_fact_owner: str | None = None,
         fact_acceptance: FactV2AcceptanceRuntime | None = None,
         fact_adapter: FactObservationProposalAdapter | None = None,
-        fact_memory_adapter: FactMemoryDraftAdapter | None = None,
         fact_memory_lifecycle: FactMemoryCandidateLifecycle | None = None,
-        private_impression_owner: str | None = None,
-        private_impression_adapter: PrivateImpressionDraftAdapter | None = None,
-        affect_deliberation_owner: str | None = None,
-        affect_worker: AffectDeliberationWorker | None = None,
-        relationship_deliberation_owner: str | None = None,
-        relationship_worker: RelationshipDeliberationWorker | None = None,
+        fact_memory_actor_ref: str | None = None,
+        character_interior: CharacterInterior | None = None,
+        reflection_scheduler: object | None = None,
         relationship_adjustment_owner: str | None = None,
         relationship_adjustment_worker: RelationshipAdjustmentWorker | None = None,
         action_executor: ActionExecutor | None = None,
@@ -293,20 +234,10 @@ class WorldRuntime:
         action_pump_excluded_kinds: frozenset[str] = frozenset(),
         affect_acceptance: AffectAcceptanceRuntime | None = None,
         affect_acceptance_actor: str | None = None,
-        expression_reconsideration_owner: str | None = None,
-        expression_reconsideration_reviewer: ExpressionReconsiderationReviewer | None = None,
         social_action_worker: SocialActionWorker | None = None,
-        quick_reaction_worker: QuickReactionWorker | QuickReactionVerticalWorker | None = None,
-        proactive_action_runtime: ProactiveActionRuntime | None = None,
         memory_withdrawal_review: MemoryWithdrawalReviewRuntime | None = None,
-        external_result_owner: str | None = None,
-        external_result_deliberator: ToolResultDeliberator | None = None,
-        read_only_tool_owner: str | None = None,
-        read_only_tool_trigger_runtime: ReadOnlyToolTriggerRuntime | None = None,
         perception_owner: str | None = None,
         perception_trigger_runtime: PerceptionTriggerRuntime | None = None,
-        perception_result_owner: str | None = None,
-        perception_result_deliberator: PerceptionResultDeliberator | None = None,
         latency_recorder: ProductionLatencyRecorder | None = None,
     ) -> None:
         if not world_id:
@@ -341,9 +272,9 @@ class WorldRuntime:
         self._expression_policy = expression_policy
         self._expression_recorder = expression_recorder
         self._expression_payload_store = expression_payload_store
-        if interaction_appraisal_owner is not None and not interaction_appraisal_owner:
-            raise ValueError("interaction appraisal owner must not be empty")
-        self._interaction_appraisal_owner = interaction_appraisal_owner
+        if inbound_state_owner is not None and not inbound_state_owner:
+            raise ValueError("inbound state owner must not be empty")
+        self._inbound_state_owner = inbound_state_owner
         if (appraisal_acceptance is None) != (appraisal_acceptance_actor is None):
             raise ValueError("appraisal acceptance runtime and actor must be configured together")
         if appraisal_acceptance is not None and appraisal_acceptance.ledger is not self._ledger:
@@ -352,43 +283,31 @@ class WorldRuntime:
         self._appraisal_acceptance_actor = appraisal_acceptance_actor
         if appraisal_worker is not None and appraisal_worker.ledger is not self._ledger:
             raise ValueError("appraisal worker must own this exact ledger")
-        if appraisal_worker is not None and interaction_appraisal_owner is None:
-            raise ValueError("appraisal worker requires interaction appraisal triggers")
+        if (
+            appraisal_worker is not None
+            and inbound_state_owner is None
+            and pinned_turn is None
+        ):
+            raise ValueError(
+                "appraisal worker requires an inbound proposal or appraisal triggers"
+            )
         self._appraisal_worker = appraisal_worker
-        if interaction_appraisal_turn is not None and appraisal_worker is None:
-            raise ValueError("interaction appraisal turn requires an appraisal worker")
-        self._interaction_appraisal_turn = interaction_appraisal_turn
         if immediate_emotion_worker is not None:
-            if interaction_appraisal_turn is None or appraisal_worker is None:
-                raise ValueError("immediate emotion worker requires the interaction appraisal lane")
+            if appraisal_worker is None:
+                raise ValueError("immediate emotion worker requires an appraisal authority")
+            if pinned_turn is None:
+                raise ValueError(
+                    "immediate emotion worker requires the unified inbound proposal lane"
+                )
             if immediate_emotion_worker.ledger is not self._ledger:
                 raise ValueError("immediate emotion worker must own this exact ledger")
         self._immediate_emotion_worker = immediate_emotion_worker
-        if npc_world_appraisal_turn is not None and appraisal_worker is None:
-            raise ValueError("NPC world appraisal turn requires an appraisal worker")
-        if npc_world_appraisal_turn is not None and interaction_appraisal_owner is None:
-            raise ValueError("NPC world appraisal turn requires an appraisal worker owner")
-        self._npc_world_appraisal_turn = npc_world_appraisal_turn
-        if silence_appraisal_turn is not None and appraisal_worker is None:
-            raise ValueError("silence appraisal turn requires an appraisal worker")
-        if silence_appraisal_turn is not None and interaction_appraisal_owner is None:
-            raise ValueError("silence appraisal turn requires an appraisal worker owner")
-        if silence_appraisal_idle_seconds is not None and silence_appraisal_idle_seconds < 0:
-            raise ValueError("silence appraisal idle threshold must not be negative")
-        self._silence_appraisal_turn = silence_appraisal_turn
-        # ``0``/``None`` disables opening new silence triggers; already-open
-        # triggers still drain so a config change never strands durable work.
-        self._silence_appraisal_idle_seconds = (
-            silence_appraisal_idle_seconds if silence_appraisal_idle_seconds else None
-        )
-        if plan_disruption_appraisal_turn is not None and appraisal_worker is None:
-            raise ValueError("plan disruption appraisal turn requires an appraisal worker")
-        if plan_disruption_appraisal_turn is not None and interaction_appraisal_owner is None:
-            raise ValueError("plan disruption appraisal turn requires an appraisal worker owner")
-        self._plan_disruption_appraisal_turn = plan_disruption_appraisal_turn
-        # Disabling stops opening new disruption triggers; already-open
-        # triggers still drain so a config change never strands durable work.
-        self._plan_disruption_appraisal_enabled = bool(plan_disruption_appraisal_enabled)
+        if (
+            inbound_relationship_worker is not None
+            and inbound_relationship_worker.ledger is not self._ledger
+        ):
+            raise ValueError("inbound relationship worker must own this exact ledger")
+        self._inbound_relationship_worker = inbound_relationship_worker
         if outcome_deliberation_owner is not None and not outcome_deliberation_owner:
             raise ValueError("outcome deliberation owner must not be empty")
         if outcome_worker is not None and outcome_worker.ledger is not self._ledger:
@@ -400,17 +319,6 @@ class WorldRuntime:
         self._outcome_deliberation_turn = outcome_deliberation_turn
         self._outcome_worker = outcome_worker
         self._outcome_deliberation_owner = outcome_deliberation_owner
-        if interaction_bid_owner is not None and not interaction_bid_owner:
-            raise ValueError("interaction bid owner must not be empty")
-        if interaction_bid_worker is not None and interaction_bid_worker.ledger is not self._ledger:
-            raise ValueError("interaction bid worker must own this exact ledger")
-        if (interaction_bid_turn is None) != (interaction_bid_worker is None):
-            raise ValueError("interaction bid turn and worker must be configured together")
-        if interaction_bid_worker is not None and interaction_bid_owner is None:
-            raise ValueError("interaction bid worker requires an interaction bid owner")
-        self._interaction_bid_turn = interaction_bid_turn
-        self._interaction_bid_worker = interaction_bid_worker
-        self._interaction_bid_owner = interaction_bid_owner
         if interaction_fact_owner is not None and not interaction_fact_owner:
             raise ValueError("interaction fact owner must not be empty")
         if (fact_acceptance is None) != (fact_adapter is None):
@@ -422,44 +330,20 @@ class WorldRuntime:
         self._interaction_fact_owner = interaction_fact_owner
         self._fact_acceptance = fact_acceptance
         self._fact_adapter = fact_adapter
-        if (fact_memory_adapter is None) != (fact_memory_lifecycle is None):
-            raise ValueError("Fact memory adapter and lifecycle must be configured together")
-        self._fact_memory_adapter = fact_memory_adapter
+        if fact_memory_lifecycle is not None and character_interior is None:
+            raise ValueError("Fact memory lifecycle requires CharacterInterior")
+        if fact_memory_lifecycle is not None and not fact_memory_actor_ref:
+            raise ValueError("Fact memory lifecycle requires its character actor")
+        if fact_memory_lifecycle is None and fact_memory_actor_ref is not None:
+            raise ValueError("Fact memory actor requires the memory lifecycle")
         self._fact_memory_lifecycle = fact_memory_lifecycle
-        if (private_impression_adapter is None) != (private_impression_owner is None):
-            raise ValueError(
-                "private impression adapter and worker owner must be configured together"
-            )
-        if private_impression_owner is not None and not private_impression_owner:
-            raise ValueError("private impression owner must not be empty")
-        self._private_impression_owner = private_impression_owner
-        self._private_impression_adapter = private_impression_adapter
-        self._private_impression_runtime = (
-            PrivateImpressionTriggerRuntime(
-                ledger=self._ledger,
-                adapter=private_impression_adapter,
-                owner_id=private_impression_owner,
-            )
-            if private_impression_adapter is not None
-            and private_impression_owner is not None
-            else None
-        )
-        if affect_deliberation_owner is not None and not affect_deliberation_owner:
-            raise ValueError("affect deliberation owner must not be empty")
-        self._affect_deliberation_owner = affect_deliberation_owner
-        if affect_worker is not None and affect_worker.ledger is not self._ledger:
-            raise ValueError("affect worker must own this exact ledger")
-        if affect_worker is not None and affect_deliberation_owner is None:
-            raise ValueError("affect worker requires affect deliberation triggers")
-        self._affect_worker = affect_worker
-        if relationship_deliberation_owner is not None and not relationship_deliberation_owner:
-            raise ValueError("relationship deliberation owner must not be empty")
-        self._relationship_deliberation_owner = relationship_deliberation_owner
-        if relationship_worker is not None and relationship_worker.ledger is not self._ledger:
-            raise ValueError("relationship worker must own this exact ledger")
-        if relationship_worker is not None and relationship_deliberation_owner is None:
-            raise ValueError("relationship worker requires relationship deliberation triggers")
-        self._relationship_worker = relationship_worker
+        self._fact_memory_actor_ref = fact_memory_actor_ref
+        if character_interior is not None and not character_interior._is_bound_to(  # noqa: SLF001
+            self._ledger
+        ):
+            raise ValueError("CharacterInterior must own this exact ledger")
+        self._character_interior = character_interior
+        self._reflection_scheduler = reflection_scheduler
         if relationship_adjustment_owner is not None and not relationship_adjustment_owner:
             raise ValueError("relationship adjustment owner must not be empty")
         self._relationship_adjustment_owner = relationship_adjustment_owner
@@ -484,46 +368,15 @@ class WorldRuntime:
             raise ValueError("affect acceptance runtime must own this exact ledger")
         self._affect_acceptance = affect_acceptance
         self._affect_acceptance_actor = affect_acceptance_actor
-        if expression_reconsideration_owner is not None and not expression_reconsideration_owner:
-            raise ValueError("expression reconsideration owner must not be empty")
-        if (
-            expression_reconsideration_reviewer is not None
-            and expression_reconsideration_owner is None
-        ):
-            raise ValueError("expression reconsideration reviewer requires a worker owner")
-        self._expression_reconsideration_owner = expression_reconsideration_owner
-        self._expression_reconsideration_reviewer = expression_reconsideration_reviewer
         if social_action_worker is not None and social_action_worker.ledger is not self._ledger:
             raise ValueError("social action worker must own this exact ledger")
         self._social_action_worker = social_action_worker
-        if quick_reaction_worker is not None and quick_reaction_worker.ledger is not self._ledger:
-            raise ValueError("quick reaction worker must own this exact ledger")
-        self._quick_reaction_worker = quick_reaction_worker
-        if (
-            proactive_action_runtime is not None
-            and proactive_action_runtime.ledger is not self._ledger
-        ):
-            raise ValueError("proactive action runtime must own this exact ledger")
-        self._proactive_action_runtime = proactive_action_runtime
         if (
             memory_withdrawal_review is not None
             and memory_withdrawal_review.ledger is not self._ledger
         ):
             raise ValueError("memory withdrawal review must own this exact ledger")
         self._memory_withdrawal_review = memory_withdrawal_review
-        if (external_result_owner is None) != (external_result_deliberator is None):
-            raise ValueError("external result owner and deliberator must be configured together")
-        self._external_result_owner = external_result_owner
-        self._external_result_deliberator = external_result_deliberator
-        if (read_only_tool_owner is None) != (read_only_tool_trigger_runtime is None):
-            raise ValueError("read-only tool owner and trigger runtime must be configured together")
-        if (
-            read_only_tool_trigger_runtime is not None
-            and read_only_tool_trigger_runtime.ledger is not self._ledger
-        ):
-            raise ValueError("read-only tool trigger runtime must own this exact ledger")
-        self._read_only_tool_owner = read_only_tool_owner
-        self._read_only_tool_trigger_runtime = read_only_tool_trigger_runtime
         if (perception_owner is None) != (perception_trigger_runtime is None):
             raise ValueError("perception owner and trigger runtime must be configured together")
         if (
@@ -533,10 +386,6 @@ class WorldRuntime:
             raise ValueError("perception trigger runtime must own this exact ledger")
         self._perception_owner = perception_owner
         self._perception_trigger_runtime = perception_trigger_runtime
-        if (perception_result_owner is None) != (perception_result_deliberator is None):
-            raise ValueError("perception result owner and deliberator must be configured together")
-        self._perception_result_owner = perception_result_owner
-        self._perception_result_deliberator = perception_result_deliberator
         self._latency = latency_recorder
         self._lock = asyncio.Lock()
         # A durable expression claim may be observed concurrently by ingress
@@ -547,10 +396,6 @@ class WorldRuntime:
         self._expression_attempt_task_lock = asyncio.Lock()
         self._expression_attempt_tasks: dict[
             str, asyncio.Task[ProposalAuditCommit]
-        ] = {}
-        self._interaction_appraisal_task_lock = asyncio.Lock()
-        self._interaction_appraisal_tasks: dict[
-            str, asyncio.Task[AppraisalTriggerRunResult]
         ] = {}
         # Background cognition is serialized with itself, but must not hold
         # the world mutation lock while an external model is thinking.  The
@@ -576,7 +421,6 @@ class WorldRuntime:
         observation_event: WorldEvent,
         cursor: ProjectionCursor,
         expression_attempt_id: str,
-        skip_advisories: bool = False,
         turn_budget: InteractiveTurnBudget | None = None,
         recorded_cadence_draws: tuple[CadenceDraw, ...] = (),
     ) -> ProposalAuditCommit:
@@ -600,7 +444,6 @@ class WorldRuntime:
                         observation=observation,
                         observation_event=observation_event,
                         cursor=cursor,
-                        skip_advisories=skip_advisories,
                         turn_budget=turn_budget,
                         recorded_cadence_draws=recorded_cadence_draws,
                         expression_attempt_id=expression_attempt_id,
@@ -682,76 +525,6 @@ class WorldRuntime:
         # visible turn.
         await asyncio.wait(tasks, timeout=0.05)
 
-    async def _run_interaction_appraisal_task(
-        self,
-        *,
-        trigger_id: str,
-        observation_id: str,
-        runtime: InteractionAppraisalTriggerRuntime,
-    ) -> AppraisalTriggerRunResult:
-        """Publish one cancellable local task for a durable appraisal trigger."""
-
-        async with self._interaction_appraisal_task_lock:
-            task = self._interaction_appraisal_tasks.get(trigger_id)
-            if task is None:
-                task = asyncio.create_task(
-                    runtime.run_observation(observation_id),
-                    name=f"interaction-appraisal:{trigger_id}",
-                )
-                self._interaction_appraisal_tasks[trigger_id] = task
-        try:
-            return await task
-        except asyncio.CancelledError:
-            current = asyncio.current_task()
-            if current is not None and current.cancelling():
-                raise
-            projection = await self._project_for_write()
-            process = next(
-                (
-                    item
-                    for item in projection.trigger_processes
-                    if item.trigger_id == trigger_id
-                ),
-                None,
-            )
-            if (
-                process is not None
-                and process.state == "terminal"
-                and process.runtime_outcome_ref
-                == "interaction-appraisal:folded-into-newer-inbound"
-            ):
-                return AppraisalTriggerRunResult(
-                    trigger_id=trigger_id,
-                    status="completed_existing",
-                )
-            raise
-        finally:
-            async with self._interaction_appraisal_task_lock:
-                if self._interaction_appraisal_tasks.get(trigger_id) is task:
-                    self._interaction_appraisal_tasks.pop(trigger_id, None)
-
-    async def _cancel_folded_interaction_appraisal_tasks(
-        self,
-        trigger_ids: tuple[str, ...],
-    ) -> None:
-        """Release only provider work already made obsolete by ledger fact."""
-
-        if not trigger_ids:
-            return
-        async with self._interaction_appraisal_task_lock:
-            tasks = tuple(
-                task
-                for trigger_id in trigger_ids
-                if (
-                    task := self._interaction_appraisal_tasks.get(trigger_id)
-                ) is not None
-                and not task.done()
-            )
-            for task in tasks:
-                task.cancel()
-        if tasks:
-            await asyncio.wait(tasks, timeout=0.05)
-
     async def drain_background_once(self):
         """Run one background job and turn an expected cursor race into a retry."""
 
@@ -769,20 +542,11 @@ class WorldRuntime:
     async def _drain_background_once_impl(
         self,
     ) -> (
-        AppraisalTriggerRunResult
-        | OutcomeTriggerRunResult
-        | InteractionBidTriggerRunResult
-        | AffectTriggerRunResult
+        OutcomeTriggerRunResult
         | FactTriggerRunResult
-        | PrivateImpressionRunResult
-        | ExpressionReconsiderationRunResult
-        | ExternalResultTriggerRunResult
-        | ReadOnlyToolTriggerRunResult
         | PerceptionTriggerRunResult
-        | PerceptionResultTriggerRunResult
         | SocialActionRunResult
         | MemoryWithdrawalReviewRunResult
-        | ProactiveActionRunResult
         | AnchoredRunResult
         | RuntimeOutcome
         | None
@@ -806,39 +570,16 @@ class WorldRuntime:
             expression_retry = await self._drain_expression_retry_once()
             if expression_retry is not None:
                 return expression_retry
-            if self._perception_result_owner is not None:
-                assert self._perception_result_deliberator is not None
-                perception_result = await PerceptionResultTriggerRuntime(
-                    ledger=self._ledger,
-                    deliberator=self._perception_result_deliberator,
-                    owner_id=self._perception_result_owner,
-                ).drain_one()
-                if perception_result.status != "idle":
-                    return perception_result
+            inbound_state = await self._drain_inbound_state_settlement_once()
+            if inbound_state is not None:
+                return inbound_state
             if self._perception_trigger_runtime is not None:
                 perception = await self._perception_trigger_runtime.drain_one()
                 if perception.status != "idle":
                     return perception
-            if self._read_only_tool_trigger_runtime is not None:
-                tool = await self._read_only_tool_trigger_runtime.drain_one()
-                if tool.status != "idle":
-                    return tool
-            if self._external_result_owner is not None:
-                assert self._external_result_deliberator is not None
-                external_result = await ExternalResultTriggerRuntime(
-                    ledger=self._ledger,
-                    deliberator=self._external_result_deliberator,
-                    owner_id=self._external_result_owner,
-                ).drain_one()
-                if external_result.status != "idle":
-                    return external_result
-            if self._expression_reconsideration_owner is not None:
-                reconsideration = await ExpressionReconsiderationRuntime(
-                    ledger=self._ledger,
-                    owner_id=self._expression_reconsideration_owner,
-                    reviewer=self._expression_reconsideration_reviewer,
-                ).drain_one()
-                if reconsideration.status != "idle":
+            if self._character_interior is not None:
+                reconsideration = await self._character_interior._drain_reconsideration_once()  # noqa: SLF001
+                if reconsideration is not None:
                     return reconsideration
             # Initiative is time-sensitive: an eligible silence or explicit
             # response gap should not sit behind an arbitrarily large backlog
@@ -846,16 +587,9 @@ class WorldRuntime:
             # evidence-bound opportunity; the model still owns now/later/
             # silent.  Before its opening window this check is idle and costs
             # no authority, so ordinary appraisal/fact work keeps its order.
-            if self._proactive_action_runtime is not None:
-                proactive = await self._proactive_action_runtime.drain_one()
-                # ``retry_wait`` is a durable timer state, not work performed
-                # by this pass. Returning it here makes a bounded host worker
-                # spend every slot rediscovering the same future deadline and
-                # permanently starves appraisal, fact, Affect, relationship,
-                # and memory lanes below. The exact retry wake is already
-                # derived from the ledger projection, so keep scanning for one
-                # ready background job without changing initiative authority.
-                if proactive.status not in {"idle", "retry_wait"}:
+            if self._character_interior is not None:
+                proactive = await self._character_interior._drain_proactive_once()  # noqa: SLF001
+                if proactive is not None:
                     return proactive
             if self._outcome_deliberation_turn is not None:
                 assert self._outcome_worker is not None
@@ -868,17 +602,6 @@ class WorldRuntime:
                 ).drain_one()
                 if outcome.status != "idle":
                     return outcome
-            if self._interaction_bid_turn is not None:
-                assert self._interaction_bid_worker is not None
-                assert self._interaction_bid_owner is not None
-                interaction_bid = await InteractionBidTriggerRuntime(
-                    ledger=self._ledger,
-                    turn=self._interaction_bid_turn,
-                    worker=self._interaction_bid_worker,
-                    owner_id=self._interaction_bid_owner,
-                ).drain_one()
-                if interaction_bid.status != "idle":
-                    return interaction_bid
             # Settle source-bound user Facts before the larger appraisal/NPC
             # backlog can consume a bounded scheduler pass. This keeps names
             # and preferences available to the next recall turn without
@@ -890,136 +613,27 @@ class WorldRuntime:
                     ledger=self._fact_acceptance.ledger,
                     acceptance=self._fact_acceptance,
                     adapter=self._fact_adapter,
-                    memory_adapter=self._fact_memory_adapter,
+                    character_interior=self._character_interior,
                     memory_lifecycle=self._fact_memory_lifecycle,
+                    memory_actor_ref=self._fact_memory_actor_ref,
                     owner_id=self._interaction_fact_owner,
                 ).drain_one()
                 if fact.status not in {"idle", "owned_elsewhere"}:
                     return fact
-            appraisal_result: AppraisalTriggerRunResult | None = None
-            if self._npc_world_appraisal_turn is not None:
-                assert self._appraisal_worker is not None
-                assert self._interaction_appraisal_owner is not None
-                appraisal = await NpcWorldAppraisalTriggerRuntime(
-                    ledger=self._ledger,
-                    turn=self._npc_world_appraisal_turn,
-                    worker=self._appraisal_worker,
-                    owner_id=self._interaction_appraisal_owner,
-                    affect_owner_id=self._affect_deliberation_owner,
-                    relationship_owner_id=self._relationship_deliberation_owner,
-                ).drain_one()
-                if appraisal.status not in {"idle", "owned_elsewhere"}:
-                    return appraisal
-                appraisal_result = appraisal
-            if self._interaction_appraisal_turn is not None:
-                assert self._appraisal_worker is not None
-                assert self._interaction_appraisal_owner is not None
-                appraisal_runtime = InteractionAppraisalTriggerRuntime(
-                    ledger=self._ledger,
-                    pinned_turn=self._interaction_appraisal_turn,
-                    worker=self._appraisal_worker,
-                    owner_id=self._interaction_appraisal_owner,
-                    affect_owner_id=self._affect_deliberation_owner,
-                    relationship_owner_id=self._relationship_deliberation_owner,
-                    immediate_emotion_worker=self._immediate_emotion_worker,
+            if self._reflection_scheduler is not None:
+                reflection = self._reflection_scheduler.open_once(
+                    trace_id="trace:reflection-scheduler",
+                    correlation_id="correlation:reflection-scheduler",
                 )
-                appraisal_projection = await self._project_for_write()
-                appraisal_process = next(
-                    (
-                        item
-                        for item in appraisal_projection.trigger_processes
-                        if item.process_kind == "interaction_appraisal"
-                        and item.state != "terminal"
-                    ),
-                    None,
-                )
-                if (
-                    appraisal_process is not None
-                    and appraisal_process.source_evidence_ref is None
-                ):
-                    raise ValueError(
-                        "interaction appraisal trigger has no source observation"
-                    )
-                appraisal = (
-                    await self._run_interaction_appraisal_task(
-                        trigger_id=appraisal_process.trigger_id,
-                        observation_id=appraisal_process.source_evidence_ref,
-                        runtime=appraisal_runtime,
-                    )
-                    if appraisal_process is not None
-                    else await appraisal_runtime.drain_one()
-                )
-                if appraisal.status not in {"idle", "owned_elsewhere"}:
-                    return appraisal
-                appraisal_result = appraisal
-            if self._silence_appraisal_turn is not None:
-                assert self._appraisal_worker is not None
-                assert self._interaction_appraisal_owner is not None
-                # The opener is a cheap deterministic check; running it on
-                # every background pass keeps the per-silence trigger current
-                # without a dedicated scheduler, while its identity keeps
-                # repeated passes idempotent.
-                if self._silence_appraisal_idle_seconds is not None:
-                    try:
-                        await SilenceAppraisalTriggerOpener(
-                            ledger=self._ledger,
-                            owner_id=self._interaction_appraisal_owner,
-                            idle_seconds_threshold=self._silence_appraisal_idle_seconds,
-                        ).open_once()
-                    except (ConcurrencyConflict, IdempotencyConflict):
-                        # A concurrent ingress won the cursor between the
-                        # opener's read and its commit.  The next background
-                        # pass re-derives the same deterministic opportunity,
-                        # so losing this race must not fail the whole pass.
-                        pass
-                appraisal = await SilenceAppraisalTriggerRuntime(
-                    ledger=self._ledger,
-                    turn=self._silence_appraisal_turn,
-                    worker=self._appraisal_worker,
-                    owner_id=self._interaction_appraisal_owner,
-                    affect_owner_id=self._affect_deliberation_owner,
-                    relationship_owner_id=self._relationship_deliberation_owner,
-                ).drain_one()
-                if appraisal.status not in {"idle", "owned_elsewhere"}:
-                    return appraisal
-                appraisal_result = appraisal
-            if self._plan_disruption_appraisal_turn is not None:
-                assert self._appraisal_worker is not None
-                assert self._interaction_appraisal_owner is not None
-                # Like the silence lane: the opener is a cheap deterministic
-                # projection check on every background pass, and its per-
-                # abandonment identity keeps repeated passes idempotent.
-                if self._plan_disruption_appraisal_enabled:
-                    try:
-                        await PlanDisruptionAppraisalTriggerOpener(
-                            ledger=self._ledger,
-                            owner_id=self._interaction_appraisal_owner,
-                        ).open_once()
-                    except (ConcurrencyConflict, IdempotencyConflict):
-                        # A concurrent ingress won the cursor between the
-                        # opener's read and its commit.  The next background
-                        # pass re-derives the same deterministic opportunity,
-                        # so losing this race must not fail the whole pass.
-                        pass
-                appraisal = await PlanDisruptionAppraisalTriggerRuntime(
-                    ledger=self._ledger,
-                    turn=self._plan_disruption_appraisal_turn,
-                    worker=self._appraisal_worker,
-                    owner_id=self._interaction_appraisal_owner,
-                    affect_owner_id=self._affect_deliberation_owner,
-                    relationship_owner_id=self._relationship_deliberation_owner,
-                ).drain_one()
-                if appraisal.status not in {"idle", "owned_elsewhere"}:
-                    return appraisal
-                appraisal_result = appraisal
-            if self._relationship_worker is not None:
-                assert self._relationship_deliberation_owner is not None
-                relationship = await RelationshipTriggerRuntime(
-                    ledger=self._ledger,
-                    worker=self._relationship_worker,
-                    owner_id=self._relationship_deliberation_owner,
-                ).drain_one()
-                if relationship.status not in {"idle", "owned_elsewhere"}:
+                if reflection.opened:
+                    return None
+            if self._character_interior is not None:
+                stimulus = await self._character_interior._drain_world_stimulus_once()  # noqa: SLF001
+                if stimulus is not None:
+                    return stimulus
+            if self._inbound_relationship_worker is not None:
+                relationship = await self._inbound_relationship_worker.drain_one()
+                if relationship is not None and relationship.status != "owned_elsewhere":
                     return relationship
             if self._relationship_adjustment_worker is not None:
                 assert self._relationship_adjustment_owner is not None
@@ -1030,35 +644,9 @@ class WorldRuntime:
                 ).drain_one()
                 if adjustment.status != "idle":
                     return adjustment
-            affect_result = None
-            if self._affect_worker is not None:
-                assert self._affect_deliberation_owner is not None
-                affect_result = await AffectTriggerRuntime(
-                    ledger=self._ledger,
-                    worker=self._affect_worker,
-                    owner_id=self._affect_deliberation_owner,
-                ).drain_one()
-                if affect_result.status not in {"idle", "owned_elsewhere"}:
-                    return affect_result
-            # Private impressions consolidate already-accepted appraisals into
-            # her internal-only reading of the user/relationship.  The opener
-            # is a cheap deterministic projection check; the identity of each
-            # per-appraisal trigger keeps repeated passes idempotent.
-            if self._private_impression_adapter is not None:
-                assert self._private_impression_owner is not None
-                try:
-                    await PrivateImpressionTriggerOpener(
-                        ledger=self._ledger,
-                        owner_id=self._private_impression_owner,
-                    ).open_once()
-                except (ConcurrencyConflict, IdempotencyConflict):
-                    # A concurrent ingress won the cursor between the opener's
-                    # read and its commit; the next pass re-derives the same
-                    # deterministic opportunity.
-                    pass
-                assert self._private_impression_runtime is not None
-                impression = await self._private_impression_runtime.drain_one()
-                if impression.status not in {"idle", "owned_elsewhere"}:
+            if self._character_interior is not None:
+                impression = await self._character_interior._drain_private_impression_once()  # noqa: SLF001
+                if impression is not None:
                     return impression
             if self._memory_withdrawal_review is not None:
                 memory_review = await self._memory_withdrawal_review.drain_one()
@@ -1072,7 +660,7 @@ class WorldRuntime:
                 social_action = await self._social_action_worker.drain_one()
                 if social_action.status != "idle":
                     return social_action
-            return affect_result or appraisal_result
+            return None
 
     async def drain_actions_once(
         self,
@@ -1468,6 +1056,411 @@ class WorldRuntime:
             await self._forget_expression_attempt_task(audit.attempt_id)
         return status
 
+    async def _settle_unified_inbound_state(
+        self,
+        *,
+        observation: Observation,
+        observation_event: WorldEvent,
+        audit_cursor: ProjectionCursor,
+        proposal_id: str,
+    ) -> tuple[str, ...]:
+        """Settle every inner-state facet from one audited inbound decision.
+
+        Expression acceptance may advance World revision first.  The typed
+        compilers authenticate the same role bytes at the immutable audit
+        cursor and deterministically rebase their candidates to the current
+        prefix.  No second role call or local semantic inference is introduced.
+        """
+
+        projection = await self._project_for_write()
+        audit = next(
+            (item for item in projection.proposal_audits if item.proposal_id == proposal_id),
+            None,
+        )
+        if audit is None or audit.proposal_kind != "decision":
+            return ()
+        await self._renew_inline_appraisal_claim_for_retry(
+            observation=observation,
+            observation_event=observation_event,
+            proposal_event_ref=audit.event_ref,
+        )
+        projection = await self._project_for_write()
+        proposal = validate_proposal_envelope(json.loads(audit.proposal_json))
+        if not isinstance(proposal, DecisionProposal):
+            return ()
+        shape = inspect_unified_inbound_decision(proposal)
+        deferred: list[str] = []
+
+        if shape.appraisal is None:
+            await self._finish_inline_appraisal_trigger(
+                observation=observation,
+                observation_event=observation_event,
+                proposal_event_ref=audit.event_ref,
+                outcome_ref=f"outcome:{proposal_id}:no-appraisal",
+                rejection=None,
+            )
+        elif self._immediate_emotion_worker is None:
+            deferred.append("character_interior.inbound_state_authority_unavailable")
+        else:
+            current = ProjectionCursor(
+                world_revision=projection.world_revision,
+                deliberation_revision=projection.deliberation_revision,
+                ledger_sequence=projection.ledger_sequence,
+            )
+            try:
+                if self._ledger.blocks_event_loop:
+                    emotion = await asyncio.to_thread(
+                        self._immediate_emotion_worker.process,
+                        world_id=self._world_id,
+                        audit_cursor=audit_cursor,
+                        current_cursor=current,
+                        proposal_id=proposal_id,
+                    )
+                else:
+                    emotion = self._immediate_emotion_worker.process(
+                        world_id=self._world_id,
+                        audit_cursor=audit_cursor,
+                        current_cursor=current,
+                        proposal_id=proposal_id,
+                    )
+            except ConcurrencyConflict:
+                # The claimed trigger remains durable and retryable. A cursor
+                # race is technical failure, never authority to invent or erase
+                # the role-authored appraisal or Affect.
+                deferred.append("character_interior.inbound_state_cursor_conflict")
+            except ValueError as exc:
+                failure_code = str(
+                    getattr(exc, "code", "advisory_validation_rejected")
+                )
+                await self._finish_inline_appraisal_trigger(
+                    observation=observation,
+                    observation_event=observation_event,
+                    proposal_event_ref=audit.event_ref,
+                    outcome_ref=f"outcome:{proposal_id}:advisory-rejected",
+                    rejection=(proposal_id, failure_code, exc),
+                )
+                deferred.append(failure_code)
+            else:
+                if emotion.appraisal.status == "no_change":
+                    await self._finish_inline_appraisal_trigger(
+                        observation=observation,
+                        observation_event=observation_event,
+                        proposal_event_ref=audit.event_ref,
+                        outcome_ref=f"outcome:{proposal_id}:no-appraisal",
+                        rejection=None,
+                    )
+
+        # Relationship is optional and independent of whether this turn also
+        # changed Affect. It is still authored by the exact same CharacterInterior
+        # proposal and settled only through typed relationship authorities.
+        if shape.relationship is not None:
+            if self._inbound_relationship_worker is None:
+                deferred.append(
+                    "character_interior.inbound_relationship.authority_unavailable"
+                )
+            else:
+                relationship_head = await self._project_for_write()
+                relationship_cursor = ProjectionCursor(
+                    world_revision=relationship_head.world_revision,
+                    deliberation_revision=relationship_head.deliberation_revision,
+                    ledger_sequence=relationship_head.ledger_sequence,
+                )
+                try:
+                    relationship = await self._inbound_relationship_worker.process(
+                        world_id=self._world_id,
+                        audit_cursor=audit_cursor,
+                        current_cursor=relationship_cursor,
+                        proposal_id=proposal_id,
+                        source_event=observation_event,
+                    )
+                except ConcurrencyConflict:
+                    deferred.append(
+                        "character_interior.inbound_relationship.cursor_conflict"
+                    )
+                except ValueError as exc:
+                    deferred.append(
+                        str(
+                            getattr(
+                                exc,
+                                "code",
+                                "character_interior.inbound_relationship.validation_failure",
+                            )
+                        )
+                    )
+                except Exception:  # pragma: no cover - defensive provider-free boundary
+                    _LOG.exception(
+                        "unified inbound relationship settlement failed proposal=%s",
+                        proposal_id,
+                    )
+                    deferred.append(
+                        "character_interior.inbound_relationship.runtime_failure"
+                    )
+                else:
+                    if relationship.status == "owned_elsewhere":
+                        deferred.append(
+                            "character_interior.inbound_relationship.owned_elsewhere"
+                        )
+        return tuple(dict.fromkeys(deferred))
+
+    async def _renew_inline_appraisal_claim_for_retry(
+        self,
+        *,
+        observation: Observation,
+        observation_event: WorldEvent,
+        proposal_event_ref: str,
+    ) -> None:
+        """Reclaim the same inner-state lifecycle after a durable reply retry.
+
+        The inbound Observation opens both the visible-expression lifecycle and
+        the same-turn inner-state lifecycle.  A technical expression failure
+        may be retried ten minutes later, well after the original two-minute
+        inner-state lease.  The successful retry still owns one unified role
+        result, so it must append a new claim attempt before settling that
+        result; completing the expired attempt would violate the ledger's
+        effect-once proof.
+
+        This method only renews deterministic execution authority.  It neither
+        asks another model nor makes a semantic decision.
+        """
+
+        trigger_id = interaction_appraisal_trigger_identity(
+            self._world_id, observation.observation_id
+        )
+        for _ in range(3):
+            projection = await self._project_for_write()
+            process = next(
+                (
+                    item
+                    for item in projection.trigger_processes
+                    if item.trigger_id == trigger_id
+                ),
+                None,
+            )
+            if process is None or process.state == "terminal":
+                return
+            lease = process.claim_lease
+            if lease is None:
+                raise RuntimeError("unified inbound state trigger is not claimed")
+            at = projection.logical_time or observation.logical_time
+            if at <= lease.expires_at:
+                return
+            if self._inbound_state_owner is None:
+                raise RuntimeError("unified inbound state owner is unavailable")
+
+            attempt_ordinal = len(process.attempt_ids) + 1
+            attempt_id = CHARACTER_INTERIOR_INBOUND_ATTEMPT_PREFIX + hashlib.sha256(
+                json.dumps(
+                    [
+                        self._world_id,
+                        process.trigger_id,
+                        proposal_event_ref,
+                        attempt_ordinal,
+                    ],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            reclaimed = process.model_copy(
+                update={
+                    "state": "claimed",
+                    "claim_lease": ClaimLease(
+                        owner_id=self._inbound_state_owner,
+                        attempt_id=attempt_id,
+                        acquired_at=at,
+                        expires_at=at
+                        + timedelta(
+                            seconds=DEFAULT_INTERACTION_APPRAISAL_LEASE_SECONDS
+                        ),
+                    ),
+                    "attempt_ids": (*process.attempt_ids, attempt_id),
+                }
+            )
+            payload = {"process": reclaimed.model_dump(mode="json")}
+            identity = domain_idempotency_key(
+                event_type="TriggerProcessReclaimed",
+                world_id=self._world_id,
+                payload=payload,
+            )
+            if identity is None:
+                raise RuntimeError("unified inbound state reclaim has no identity")
+            event = WorldEvent.from_payload(
+                schema_version="world-v2.1",
+                event_id="event:character-interior-inbound-state:reclaimed:"
+                + hashlib.sha256(
+                    json.dumps(
+                        [process.trigger_id, attempt_id],
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest(),
+                world_id=self._world_id,
+                event_type="TriggerProcessReclaimed",
+                logical_time=at,
+                created_at=observation.created_at,
+                actor=self._inbound_state_owner,
+                source="world-runtime:character-interior-state",
+                trace_id=observation.trace_id,
+                causation_id=proposal_event_ref,
+                correlation_id=observation.correlation_id,
+                idempotency_key=identity,
+                payload=payload,
+            )
+            try:
+                await self._commit(
+                    [event],
+                    world_revision=projection.world_revision,
+                    deliberation_revision=projection.deliberation_revision,
+                    commit_id="commit:character-interior-inbound-state:reclaim:"
+                    + hashlib.sha256(attempt_id.encode()).hexdigest(),
+                )
+                return
+            except (ConcurrencyConflict, IdempotencyConflict):
+                await asyncio.sleep(0)
+        raise ConcurrencyConflict("unified inbound state reclaim remained contended")
+
+    async def _finish_inline_appraisal_trigger(
+        self,
+        *,
+        observation: Observation,
+        observation_event: WorldEvent,
+        proposal_event_ref: str,
+        outcome_ref: str,
+        rejection: tuple[str, str, Exception] | None,
+    ) -> None:
+        """Audit advisory rejection and terminalize an unmutated trigger once."""
+
+        trigger_id = interaction_appraisal_trigger_identity(
+            self._world_id, observation.observation_id
+        )
+        for _ in range(3):
+            projection = await self._project_for_write()
+            process = next(
+                (item for item in projection.trigger_processes if item.trigger_id == trigger_id),
+                None,
+            )
+            if process is None:
+                raise RuntimeError("unified inbound state trigger is unavailable")
+            events: list[WorldEvent] = []
+            at = projection.logical_time or observation.logical_time
+            if rejection is not None:
+                rejected_proposal_id, failure_code, exc = rejection
+                failure_fingerprint = hashlib.sha256(
+                    json.dumps(
+                        {
+                            "exception_type": type(exc).__name__,
+                            "message": str(exc)[:240],
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()
+                payload = {
+                    "proposal_id": rejected_proposal_id,
+                    "source_event_ref": proposal_event_ref,
+                    "advisory_kind": "appraisal_affect",
+                    "stage": "immediate_emotion_acceptance",
+                    "reason_code": "advisory_validation_rejected",
+                    "failure_fingerprint": failure_fingerprint,
+                }
+                rejection_event_id = "event:advisory-acceptance-rejected:" + hashlib.sha256(
+                    json.dumps(
+                        [
+                            rejected_proposal_id,
+                            "immediate_emotion_acceptance",
+                            failure_fingerprint,
+                        ],
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()
+                if await self._lookup_event_commit(rejection_event_id) is None:
+                    identity = domain_idempotency_key(
+                        event_type="AdvisoryAcceptanceRejected",
+                        world_id=self._world_id,
+                        payload=payload,
+                    )
+                    if identity is None:
+                        raise RuntimeError("advisory rejection has no identity")
+                    events.append(
+                        WorldEvent.from_payload(
+                            schema_version="world-v2.1",
+                            event_id=rejection_event_id,
+                            world_id=self._world_id,
+                            event_type="AdvisoryAcceptanceRejected",
+                            logical_time=at,
+                            created_at=observation.created_at,
+                            actor=self._inbound_state_owner
+                            or "worker:character-interior-state",
+                            source="world-runtime:character-interior-state",
+                            trace_id=observation.trace_id,
+                            causation_id=proposal_event_ref,
+                            correlation_id=observation.correlation_id,
+                            idempotency_key=identity,
+                            payload=payload,
+                        )
+                    )
+            if process.state != "terminal":
+                lease = process.claim_lease
+                if lease is None:
+                    raise RuntimeError("unified inbound state trigger is not claimed")
+                completion_payload = {
+                    "trigger_id": process.trigger_id,
+                    "owner_id": lease.owner_id,
+                    "attempt_id": lease.attempt_id,
+                    "completed_at": at.isoformat(),
+                    "runtime_outcome_ref": outcome_ref,
+                }
+                completion_identity = (
+                    "world-v2:character-interior-inbound-state:completion:"
+                    + hashlib.sha256(
+                        json.dumps(
+                            [self._world_id, process.trigger_id, lease.attempt_id],
+                            separators=(",", ":"),
+                        ).encode()
+                    ).hexdigest()
+                )
+                events.append(
+                    WorldEvent.from_payload(
+                        schema_version="world-v2.1",
+                        event_id="event:character-interior-inbound-state:completed:"
+                        + hashlib.sha256(
+                            json.dumps(
+                                [process.trigger_id, lease.attempt_id],
+                                separators=(",", ":"),
+                            ).encode()
+                        ).hexdigest(),
+                        world_id=self._world_id,
+                        event_type="TriggerProcessCompleted",
+                        logical_time=at,
+                        created_at=observation.created_at,
+                        actor=lease.owner_id,
+                        source="world-runtime:character-interior-state",
+                        trace_id=observation.trace_id,
+                        causation_id=observation_event.event_id,
+                        correlation_id=observation.correlation_id,
+                        idempotency_key=completion_identity,
+                        payload=completion_payload,
+                    )
+                )
+            if not events:
+                return
+            try:
+                await self._commit(
+                    events,
+                    world_revision=projection.world_revision,
+                    deliberation_revision=projection.deliberation_revision,
+                    commit_id="commit:character-interior-inbound-state:"
+                    + hashlib.sha256(
+                        json.dumps(
+                            [event.event_id for event in events],
+                            separators=(",", ":"),
+                        ).encode()
+                    ).hexdigest(),
+                )
+                return
+            except (ConcurrencyConflict, IdempotencyConflict):
+                await asyncio.sleep(0)
+        raise ConcurrencyConflict("unified inbound state terminalization remained contended")
+
     async def evaluate_replay(
         self, *, evaluator: ReplayEvaluator | None = None
     ) -> ReplayEvaluation:
@@ -1663,6 +1656,170 @@ class WorldRuntime:
             return None
         return observation, persisted[0], persisted[1], source.world_revision
 
+    async def _drain_inbound_state_settlement_once(self) -> RuntimeOutcome | None:
+        """Resume typed settlement from one already-audited InnerTurn.
+
+        Appraisal/Affect acceptance follows visible expression authorization so
+        both consume the same CharacterInterior result. Appraisal Acceptance
+        may terminalize its narrow typed trigger before Affect or Relationship
+        wins a later CAS. The immutable generic proposal is therefore the
+        settlement journal: this worker finds an incomplete facet from that
+        exact audit and retries only typed authority writes. It never re-enters
+        PinnedTurn, opens the retired Affect author, or asks a second character
+        for a fresh interpretation.
+        """
+
+        if (
+            self._appraisal_worker is None
+            or self._immediate_emotion_worker is None
+            or self._lock.locked()
+        ):
+            return None
+        projection = await self._project_for_write()
+        terminal_proposal_ids = {
+            item.proposal_id
+            for item in projection.acceptance_decisions
+            if item.status in {"rejected", "stale"}
+        }
+        for selected in reversed(projection.proposal_audits):
+            if (
+                selected.proposal_kind != "decision"
+                or selected.proposal_id in terminal_proposal_ids
+                or selected.proposal_id.startswith(
+                    _HISTORICAL_QUICK_REACTION_PROPOSAL_PREFIX
+                )
+            ):
+                continue
+            try:
+                proposal = validate_proposal_envelope(
+                    json.loads(selected.proposal_json)
+                )
+                if not isinstance(proposal, DecisionProposal):
+                    continue
+                shape = inspect_unified_inbound_decision(proposal)
+            except (TypeError, ValueError):
+                continue
+            located_observation = await self._lookup_event_commit(
+                selected.trigger_ref
+            )
+            if (
+                located_observation is None
+                or located_observation[0].event_type != "ObservationRecorded"
+            ):
+                # World-stimulus and proactive decisions have their own
+                # source-bound settlement workers.  This recovery seam owns
+                # inbound CharacterInterior turns only.
+                continue
+            try:
+                observation = Observation.model_validate_json(
+                    located_observation[0].payload_json
+                )
+            except ValueError:
+                continue
+            observation_event = located_observation[0]
+            appraisal_process = next(
+                (
+                    item
+                    for item in projection.trigger_processes
+                    if item.process_kind == "interaction_appraisal"
+                    and item.source_evidence_ref == observation.observation_id
+                ),
+                None,
+            )
+            appraisal_accepted = shape.appraisal is None or any(
+                item.origin.change_id == shape.appraisal.change_id
+                for item in projection.appraisals
+            )
+            if (
+                shape.appraisal is not None
+                and not appraisal_accepted
+                and appraisal_process is not None
+                and appraisal_process.state == "terminal"
+            ):
+                # A terminal source without its mutation is a durable
+                # rejection/fold, not retry authority.
+                continue
+            # Affect/relationship proposals vanish from their pending
+            # projections once accepted, so acceptance must be judged from
+            # the settled state (components reference the appraisal change;
+            # signals keep their semantic identity), never from the pending
+            # proposal list.
+            affect_accepted = shape.affect is None or (
+                shape.appraisal is not None
+                and any(
+                    ref.accepted_change_id == shape.appraisal.change_id
+                    for episode in projection.affect_episodes
+                    for component in episode.components
+                    for ref in component.appraisal_refs
+                )
+            )
+            relationship_accepted = True
+            if shape.relationship is not None:
+                relationship_payload = shape.relationship.payload.value()
+                relationship_accepted = any(
+                    signal.subject_ref == relationship_payload["subject_ref"]
+                    and signal.signal_code == relationship_payload["signal_code"]
+                    and signal.persistence == relationship_payload["persistence"]
+                    and signal.rationale_code == relationship_payload["rationale_code"]
+                    for signal in projection.relationship_signals
+                )
+            if appraisal_accepted and affect_accepted and relationship_accepted:
+                continue
+            located = await self._lookup_event_commit(selected.event_ref)
+            if located is None or located[0].event_type != "ProposalRecorded":
+                continue
+            audit_commit = located[1]
+            try:
+                deferred = await self._settle_unified_inbound_state(
+                    observation=observation,
+                    observation_event=observation_event,
+                    audit_cursor=ProjectionCursor(
+                        world_revision=audit_commit.world_revision,
+                        deliberation_revision=audit_commit.deliberation_revision,
+                        ledger_sequence=audit_commit.ledger_sequence,
+                    ),
+                    proposal_id=selected.proposal_id,
+                )
+            except ConcurrencyConflict:
+                deferred = (
+                    "character_interior.inbound_state_cursor_conflict",
+                )
+            current = await self._project_for_write()
+            current_process = next(
+                (
+                    item
+                    for item in current.trigger_processes
+                    if item.process_kind == "interaction_appraisal"
+                    and item.source_evidence_ref == observation.observation_id
+                ),
+                None,
+            )
+            trigger_id = (
+                current_process.trigger_id
+                if current_process is not None
+                else f"character-interior-settlement:{selected.proposal_id}"
+            )
+            terminal = current_process is not None and current_process.state == "terminal"
+            return RuntimeOutcome(
+                outcome_id=f"outcome:character-interior-settlement:{selected.proposal_id}",
+                trigger_id=trigger_id,
+                observation_ref=observation.observation_id,
+                committed_world_revision=current.world_revision,
+                ledger_sequence=current.ledger_sequence,
+                status="observed_only" if terminal and not deferred else "deferred",
+                deferred_refs=(
+                    deferred
+                    if deferred
+                    else (
+                        ()
+                        if terminal
+                        else ("character_interior.inbound_state_pending",)
+                    )
+                ),
+                projection_hint=f"world-revision:{current.world_revision}",
+            )
+        return None
+
     async def _drain_expression_retry_once(self) -> RuntimeOutcome | None:
         """Reconsider one technically failed reply after its durable backoff."""
 
@@ -1702,20 +1859,6 @@ class WorldRuntime:
         if source is None:
             return None
         observation, observation_event, original_commit, source_world_revision = source
-        if self._interaction_appraisal_turn is not None and any(
-            item.process_kind == "interaction_appraisal"
-            and item.source_evidence_ref == observation.observation_id
-            and item.state == "claimed"
-            and item.claim_lease is not None
-            and item.claim_lease.owner_id != self._interaction_appraisal_owner
-            for item in projection.trigger_processes
-        ):
-            # If the same-turn emotion lane was selected but temporarily owned
-            # elsewhere, its accepted/no-change result must land before reply
-            # cognition is pinned.  Leaving the expression lifecycle active
-            # lets the ordinary appraisal lane finish it later in this
-            # background pass without losing the user's message.
-            return None
         work_due = expression_episode_work_due(
             projection,
             process,
@@ -2294,98 +2437,18 @@ class WorldRuntime:
             outcome_ref=f"expression-episode:{disposition}:{result.status}",
         )
 
-    async def _resolve_expression_episode_before_dispatch(
-        self,
-        *,
-        observation: Observation,
-        observation_event: WorldEvent,
-        process: TriggerProcess | None,
-    ) -> str | None:
-        if (
-            process is None
-            or self._pinned_turn is None
-            or self._pinned_turn.expression_episode_mode != "on"
-        ):
-            return None
-        tail = await self._pinned_turn.await_expression_episode_tail(
-            observation_event.event_id
-        )
-        if tail is None:
-            # A restart loses the in-memory full-tail task, but the winning
-            # model Proposal already carries its model-authored disposition.
-            # Recover that exact choice so cancel/supersede cannot be bypassed
-            # merely because Action Acceptance committed just before a crash.
-            projection = await self._project_for_write()
-            decided = {
-                item.proposal_id for item in projection.acceptance_decisions
-            }
-            durable_disposition = None
-            for audit in reversed(projection.proposal_audits):
-                if (
-                    audit.trigger_ref != observation_event.event_id
-                    or audit.proposal_id in decided
-                    or not audit.proposal_id.startswith(
-                        ("proposal:expression:", "proposal:chat-reply:")
-                    )
-                    or (
-                        process.claim_lease is not None
-                        and audit.attempt_id not in process.attempt_ids
-                    )
-                ):
-                    continue
-                try:
-                    proposal = validate_proposal_envelope(
-                        json.loads(audit.proposal_json)
-                    )
-                except (TypeError, ValueError):
-                    continue
-                if isinstance(proposal, DecisionProposal):
-                    durable_disposition = proposal.episode_disposition
-                    break
-            if durable_disposition is None:
-                return None
-            disposition = durable_disposition
-        else:
-            disposition = tail.disposition
-        if disposition == "append":
-            return disposition
-        if disposition in {"cancel_pending", "supersede_pending"}:
-            projection = await self._project_for_write()
-            events = expression_episode_cancel_events(
-                world_id=self._world_id,
-                projection=projection,
-                process=process,
-                observation=observation,
-                observation_event_ref=observation_event.event_id,
-                superseded=disposition == "supersede_pending",
-            )
-            if events:
-                await self._commit(
-                    list(events),
-                    world_revision=projection.world_revision,
-                    deliberation_revision=projection.deliberation_revision,
-                    commit_id=f"commit:{process.trigger_id}:{disposition}",
-                )
-        await self._complete_expression_episode(
-            observation=observation,
-            process=process,
-            outcome_ref=f"expression-episode:{disposition}",
-        )
-        return disposition
-
     def _expression_episode_tail_is_runtime_owned(self, trigger_ref: str) -> bool:
         """Whether this runtime can still settle a visible Episode tail.
 
-        Legacy ``on`` episodes have a durable recovery path. A streamed tail
-        is deliberately process-local: after restart the already-sent head is
-        immutable and the missing tail must complete without regeneration.
+        A streamed tail is deliberately process-local: after restart the
+        already-sent head is immutable and the missing tail must complete
+        without regeneration.
         """
 
         if self._pinned_turn is None:
             return False
-        mode = self._pinned_turn.expression_episode_mode
-        return mode == "on" or (
-            mode == "stream"
+        return (
+            self._pinned_turn.expression_episode_mode == "stream"
             and self._pinned_turn.has_expression_episode_tail(trigger_ref)
         )
 
@@ -2982,24 +3045,17 @@ class WorldRuntime:
                     technical_failure_count=0,
                 )
                 ingress_events.extend((opened_event, claimed_event))
-            if self._interaction_appraisal_owner is not None:
+            if self._inbound_state_owner is not None:
                 ingress_events.extend(
                     interaction_appraisal_trigger_events(
                         observation=observation,
                         observation_event=event,
-                        owner_id=self._interaction_appraisal_owner,
+                        owner_id=self._inbound_state_owner,
                     )
                 )
             if self._interaction_fact_owner is not None:
                 ingress_events.append(
                     interaction_fact_trigger_event(
-                        observation=observation,
-                        observation_event=event,
-                    )
-                )
-            if self._read_only_tool_owner is not None:
-                ingress_events.append(
-                    read_only_tool_trigger_event(
                         observation=observation,
                         observation_event=event,
                     )
@@ -3091,7 +3147,7 @@ class WorldRuntime:
             episode_process,
             existing_observation,
             superseded_expression_attempt_ids,
-            folded_appraisal_trigger_ids,
+            _folded_appraisal_trigger_ids,
         ) = await self._commit_ingress_observation(
             observation=observation,
             event=event,
@@ -3102,9 +3158,6 @@ class WorldRuntime:
             )
         await self._cancel_superseded_expression_attempt_tasks(
             superseded_expression_attempt_ids
-        )
-        await self._cancel_folded_interaction_appraisal_tasks(
-            folded_appraisal_trigger_ids
         )
         if existing_observation:
             return await self._existing_observation_outcome(
@@ -3120,53 +3173,14 @@ class WorldRuntime:
                 observation.trace_id,
                 (time.perf_counter() - started) * 1000,
             )
-            # Fast tail of the human response distribution: while the main
-            # deliberation below is still being prepared, a bounded worker may
-            # place one QQ reaction on the message that just committed. It is
-            # awaited *before* any reply cursor is pinned: its world-revision
-            # writes must land before reply deliberation evaluates the world,
-            # otherwise the reply Acceptance would become legitimately stale.
-            quick_reaction_task: (
-                asyncio.Task[QuickReactionRunResult]
-                | asyncio.Task[InlineOnceRunResult]
-                | None
-            ) = None
-            if self._quick_reaction_worker is not None:
-                quick_reaction_task = asyncio.create_task(
-                    self._quick_reaction_worker.run_observation(
-                        observation=observation,
-                        observation_event=event,
-                        source_world_revision=committed.world_revision,
-                    )
-                )
-            quick_reaction: QuickReactionRunResult | InlineOnceRunResult | None = None
-            if quick_reaction_task is not None:
-                # The worker owns hard internal budgets and never raises.
-                quick_reaction = await quick_reaction_task
-                _LOG.warning(
-                    "world v2 ingest phase trace=%s phase=quick_reaction_ms value=%.1f "
-                    "status=%s reaction=%s user_perceived_quick_reaction_ms=%s",
-                    observation.trace_id,
-                    quick_reaction.total_ms or 0.0,
-                    quick_reaction.status,
-                    quick_reaction.reaction_id,
-                    _user_perceived_ms(observation),
-                )
-            if quick_reaction is not None and quick_reaction.ledger_advanced:
-                # The quick lane committed after the ingress batch; the reply
-                # must be pinned at the true head, not the stale ingress cursor.
-                head = await self._project_for_write()
-                reply_cursor = ProjectionCursor(
-                    world_revision=head.world_revision,
-                    deliberation_revision=head.deliberation_revision,
-                    ledger_sequence=head.ledger_sequence,
-                )
-            else:
-                reply_cursor = ProjectionCursor(
-                    world_revision=committed.world_revision,
-                    deliberation_revision=committed.deliberation_revision,
-                    ledger_sequence=committed.ledger_sequence,
-                )
+            # The sole CharacterInterior ordinary-inbound turn owns every
+            # visible expression beat.  Nothing may author or commit a side
+            # reaction between ingress and this cursor pin.
+            reply_cursor = ProjectionCursor(
+                world_revision=committed.world_revision,
+                deliberation_revision=committed.deliberation_revision,
+                ledger_sequence=committed.ledger_sequence,
+            )
             if self._pinned_turn is not None:
                 episode_process, episode_cursor = await self._claim_expression_episode(
                     observation
@@ -3353,75 +3367,21 @@ class WorldRuntime:
                     observation.trace_id,
                     (time.perf_counter() - started) * 1000,
                 )
-            # Compatibility for existing composition roots that provide only
-            # the old inline worker. New production composition provides a
-            # dedicated interaction turn, whose durable trigger is drained
-            # outside this latency-critical lock.
-            if (
+            # CharacterInterior's one audited inbound decision is consumed by
+            # specialized authorities in strict order.  Appraisal/Affect wait
+            # until the visible Expression has crossed its own acceptance so
+            # no sibling authority makes that cursor stale.  This is the
+            # canonical inbound path, not a compatibility worker or a second
+            # semantic author lane.
+            inline_inbound_state = (
+                (audited.cursor, audited.proposal_id)
+                if (
                 self._appraisal_worker is not None
-                and self._interaction_appraisal_turn is None
                 and audited is not None
                 and audited.proposal_id
-            ):
-                after_audit = await self._project_for_write()
-                audit = next(
-                    (
-                        item
-                        for item in after_audit.proposal_audits
-                        if item.proposal_id == audited.proposal_id
-                    ),
-                    None,
                 )
-                if audit is not None and audit.proposal_kind == "decision":
-                    try:
-                        cursor = audited.cursor
-                        if self._ledger.blocks_event_loop:
-                            work = await asyncio.to_thread(
-                                self._appraisal_worker.process,
-                                world_id=self._world_id,
-                                cursor=cursor,
-                                proposal_id=audited.proposal_id,
-                            )
-                        else:
-                            work = self._appraisal_worker.process(
-                                world_id=self._world_id,
-                                cursor=cursor,
-                                proposal_id=audited.proposal_id,
-                            )
-                        if (
-                            self._affect_deliberation_owner is not None
-                            and work.status == "accepted"
-                            and work.acceptance_commit is not None
-                        ):
-                            appraisal_event = next(
-                                (
-                                    located[0]
-                                    for event_id in work.acceptance_commit.event_ids
-                                    if (located := self._ledger.lookup_event_commit(event_id))
-                                    is not None
-                                    and located[0].event_type == "AppraisalAccepted"
-                                ),
-                                None,
-                            )
-                            if appraisal_event is None:
-                                raise RuntimeError(
-                                    "accepted appraisal has no durable mutation event"
-                                )
-                            trigger_head = await self._project_for_write()
-                            committed = await self._commit(
-                                list(
-                                    affect_deliberation_trigger_events(
-                                        appraisal_event=appraisal_event,
-                                        owner_id=self._affect_deliberation_owner,
-                                        claimed_at=trigger_head.logical_time,
-                                    )
-                                ),
-                                world_revision=trigger_head.world_revision,
-                                deliberation_revision=trigger_head.deliberation_revision,
-                            )
-                    except (AppraisalAcceptanceError, ConcurrencyConflict, ValueError) as exc:
-                        code = getattr(exc, "code", "appraisal.worker_failed")
-                        reply_deferred_refs = (*reply_deferred_refs, str(code))
+                else None
+            )
             if audited is not None and audited.proposal_id is not None:
                 assessment_head = await self._project_for_write()
                 assessment_audit = next(
@@ -3637,21 +3597,15 @@ class WorldRuntime:
                                     authorized_action_ids = tuple(
                                         item.action.action_id for item in material.beats
                                     )
-        pre_dispatch_disposition = None
-        if reply_authorized:
-            pre_dispatch_disposition = (
-                await self._resolve_expression_episode_before_dispatch(
-                    observation=observation,
-                    observation_event=event,
-                    process=episode_process,
-                )
+        if inline_inbound_state is not None:
+            advisory_deferred = await self._settle_unified_inbound_state(
+                observation=observation,
+                observation_event=event,
+                audit_cursor=inline_inbound_state[0],
+                proposal_id=inline_inbound_state[1],
             )
-            if pre_dispatch_disposition in {
-                "cancel_pending",
-                "supersede_pending",
-            }:
-                reply_authorized = False
-                authorized_action_ids = ()
+            reply_deferred_refs = (*reply_deferred_refs, *advisory_deferred)
+
         if reply_authorized:
             status = "action_authorized"
         elif reply_terminal_errors:
@@ -3763,7 +3717,9 @@ class WorldRuntime:
             for candidate in reversed(current_projection.proposal_audits):
                 if (
                     candidate.trigger_ref != observation_event.event_id
-                    or candidate.proposal_id.startswith(QUICK_REACTION_PROPOSAL_PREFIX)
+                    or candidate.proposal_id.startswith(
+                        _HISTORICAL_QUICK_REACTION_PROPOSAL_PREFIX
+                    )
                     or candidate.proposal_id in decided_proposal_ids
                 ):
                     continue
@@ -3806,6 +3762,27 @@ class WorldRuntime:
                     f"expression_acceptance.{decision_status}",
                 ),
                 projection_hint=f"world-revision:{current.world_revision}",
+            )
+
+        async def settle_recovered_inbound_state(audit) -> None:
+            if (
+                self._appraisal_worker is None
+                or audit.proposal_kind != "decision"
+            ):
+                return
+            located = await self._lookup_event_commit(audit.event_ref)
+            if located is None:
+                raise RuntimeError("recovered inbound proposal audit event is unavailable")
+            audit_commit = located[1]
+            await self._settle_unified_inbound_state(
+                observation=observation,
+                observation_event=observation_event,
+                audit_cursor=ProjectionCursor(
+                    world_revision=audit_commit.world_revision,
+                    deliberation_revision=audit_commit.deliberation_revision,
+                    ledger_sequence=audit_commit.ledger_sequence,
+                ),
+                proposal_id=audit.proposal_id,
             )
 
         reply_audit = reply_audit_from(projection)
@@ -3905,7 +3882,9 @@ class WorldRuntime:
                     audit.proposal_id == item.proposal_id
                     and audit.event_ref == item.proposal_event_ref
                     and audit.trigger_ref == observation_event.event_id
-                    and not audit.proposal_id.startswith(QUICK_REACTION_PROPOSAL_PREFIX)
+                    and not audit.proposal_id.startswith(
+                        _HISTORICAL_QUICK_REACTION_PROPOSAL_PREFIX
+                    )
                     for audit in projection.proposal_audits
                 )
             ),
@@ -3919,13 +3898,23 @@ class WorldRuntime:
                     audit.proposal_id == item.proposal_id
                     and audit.event_ref == item.proposal_event_ref
                     and audit.trigger_ref == observation_event.event_id
-                    and not audit.proposal_id.startswith(QUICK_REACTION_PROPOSAL_PREFIX)
+                    and not audit.proposal_id.startswith(
+                        _HISTORICAL_QUICK_REACTION_PROPOSAL_PREFIX
+                    )
                     for audit in projection.proposal_audits
                 )
             ),
             None,
         )
         if generic_manifest is not None:
+            generic_audit = next(
+                item
+                for item in projection.proposal_audits
+                if item.proposal_id == generic_manifest.proposal_id
+                and item.event_ref == generic_manifest.proposal_event_ref
+            )
+            await settle_recovered_inbound_state(generic_audit)
+            projection = await self._project_for_write()
             committed = original_commit
             for beat in generic_manifest.beats:
                 persisted = await self._lookup_event_commit(
@@ -3957,15 +3946,6 @@ class WorldRuntime:
                     raise RuntimeError("expression plan manifest has no durable action event")
                 committed = persisted[1]
             deferred = all(item.action.kind == "followup" for item in generic_manifest.beats)
-            recovered_disposition = None
-            if not deferred:
-                recovered_disposition = (
-                    await self._resolve_expression_episode_before_dispatch(
-                        observation=observation,
-                        observation_event=observation_event,
-                        process=episode,
-                    )
-                )
             if (
                 deferred
                 or not self._expression_episode_tail_is_runtime_owned(
@@ -3982,12 +3962,6 @@ class WorldRuntime:
                     ),
                 )
                 projection = await self._project_for_write()
-            cancelled = recovered_disposition in {
-                "cancel_pending",
-                "supersede_pending",
-            }
-            if cancelled:
-                projection = await self._project_for_write()
             return RuntimeOutcome(
                 outcome_id=f"outcome:{trigger_id}",
                 trigger_id=trigger_id,
@@ -3997,13 +3971,11 @@ class WorldRuntime:
                 status=(
                     "deferred"
                     if deferred
-                    else "observed_only"
-                    if cancelled
                     else "action_authorized"
                 ),
                 authorized_action_ids=(
                     ()
-                    if deferred or cancelled
+                    if deferred
                     else tuple(item.action.action_id for item in generic_manifest.beats)
                 ),
                 deferred_refs=(
@@ -4061,6 +4033,7 @@ class WorldRuntime:
                 else "now"
             )
             if timing_choice == "silent":
+                await settle_recovered_inbound_state(audit)
                 await self._complete_expression_episode(
                     observation=observation,
                     process=episode,
@@ -4091,6 +4064,7 @@ class WorldRuntime:
                 social = await self._social_action_worker.run_observation(
                     observation.observation_id
                 )
+                await settle_recovered_inbound_state(audit)
                 if social.status in {"deferred", "duplicate"}:
                     await self._complete_expression_episode(
                         observation=observation,
@@ -4258,24 +4232,10 @@ class WorldRuntime:
                 )
                 action_ids = tuple(item.action.action_id for item in material.beats)
 
-            recovered_disposition = (
-                await self._resolve_expression_episode_before_dispatch(
-                    observation=observation,
-                    observation_event=observation_event,
-                    process=episode,
-                )
-            )
-            cancelled = recovered_disposition in {
-                "cancel_pending",
-                "supersede_pending",
-            }
-            if (
-                not cancelled
-                and (
-                    not self._expression_episode_tail_is_runtime_owned(
-                        observation_event.event_id
-                    )
-                )
+            await settle_recovered_inbound_state(audit)
+
+            if not self._expression_episode_tail_is_runtime_owned(
+                observation_event.event_id
             ):
                 await self._complete_expression_episode(
                     observation=observation,
@@ -4289,8 +4249,8 @@ class WorldRuntime:
                 observation_ref=observation.observation_id,
                 committed_world_revision=projection.world_revision,
                 ledger_sequence=projection.ledger_sequence,
-                status="observed_only" if cancelled else "action_authorized",
-                authorized_action_ids=() if cancelled else action_ids,
+                status="action_authorized",
+                authorized_action_ids=action_ids,
                 projection_hint=f"world-revision:{committed.world_revision}",
             )
         if manifest is None:
@@ -4307,7 +4267,7 @@ class WorldRuntime:
                     *projection.proposal_audits,
                 )
             )
-            has_appraisal_trigger = self._interaction_appraisal_owner is not None and any(
+            has_appraisal_trigger = self._inbound_state_owner is not None and any(
                 item.trigger_id
                 == interaction_appraisal_trigger_identity(
                     self._world_id, observation.observation_id

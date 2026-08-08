@@ -19,6 +19,9 @@ from companion_daemon.world_v2.schemas import WorldEvent
 
 
 NOW = datetime(2026, 7, 17, 14, 0, tzinfo=UTC)
+COMPANION_EXPERIENCE_STIMULUS = {
+    "experience": {"values": {"participant_refs": ["actor:companion"]}}
+}
 
 
 def test_context_changes_relationship_aware_consideration_band_without_deciding_speech() -> None:
@@ -183,6 +186,7 @@ def _compiler_fixture(*, receptive: bool):
     )
     return SocialInitiativeCompiler(
         ledger=ledger,
+        actor_ref="actor:companion",
         policy=SocialInitiativePolicy(
             spontaneous_idle_seconds=1_800,
             spontaneous_expiry_seconds=43_200,
@@ -206,7 +210,7 @@ async def test_open_situation_consideration_recovers_before_contact_cooldown() -
         causation_id="cause:persisted-open",
         correlation_id="conversation:persisted-open",
         idempotency_key="experience:persisted-open",
-        payload={},
+        payload=COMPANION_EXPERIENCE_STIMULUS,
     )
     compiler._ledger.lookup_event_commit = lambda event_id: (  # type: ignore[attr-defined]  # noqa: SLF001
         (source, SimpleNamespace(world_revision=2))
@@ -412,7 +416,7 @@ async def test_semantic_situation_change_gets_one_recorded_jittered_consideratio
         causation_id="cause:situation-change",
         correlation_id="conversation:situation-change",
         idempotency_key="experience:shared",
-        payload={},
+        payload=COMPANION_EXPERIENCE_STIMULUS,
     )
     original_lookup = compiler._ledger.lookup_event_commit  # noqa: SLF001
     compiler._ledger.lookup_event_commit = lambda event_id: (  # type: ignore[attr-defined]
@@ -449,6 +453,186 @@ async def test_semantic_situation_change_gets_one_recorded_jittered_consideratio
     assert draws[0]["candidate_refs"] == ("delay:120", "delay:900", "delay:2700")
 
 
+@pytest.mark.parametrize("visibility", ["private", "public", "shareable"])
+@pytest.mark.asyncio
+async def test_npc_only_occurrence_never_becomes_protagonist_stimulus_or_recovery(
+    visibility: str,
+) -> None:
+    compiler, projection, _committed = _compiler_fixture(receptive=True)
+    occurred_at = NOW + timedelta(minutes=10)
+    stimulus = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id=f"event:occurrence:npc-only:{visibility}",
+        world_id=projection.world_id,
+        event_type="WorldOccurrenceSettled",
+        logical_time=occurred_at,
+        created_at=occurred_at,
+        actor="worker:world-v2:npc-ecology",
+        source="test",
+        trace_id="trace:npc-only-stimulus",
+        causation_id="cause:npc-only-stimulus",
+        correlation_id="conversation:npc-only-stimulus",
+        idempotency_key=f"occurrence:npc-only:{visibility}",
+        payload={"occurrence_id": f"occurrence:npc-only:{visibility}"},
+    )
+    stimulus_ref = SimpleNamespace(
+        event_id=stimulus.event_id,
+        event_type=stimulus.event_type,
+        logical_time=stimulus.logical_time,
+        world_revision=2,
+    )
+    projection.committed_world_event_refs = (stimulus_ref,)
+    projection.world_occurrences = (
+        SimpleNamespace(
+            occurrence_id=f"occurrence:npc-only:{visibility}",
+            participant_refs=("npc:roommate",),
+            visibility=visibility,
+            status="settled",
+            settlement_event_ref=stimulus.event_id,
+        ),
+    )
+    projection.logical_time = occurred_at + timedelta(minutes=3)
+    compiler._ledger.lookup_event_commit = lambda event_id: (  # type: ignore[attr-defined]  # noqa: SLF001
+        (stimulus, SimpleNamespace(world_revision=2))
+        if event_id == stimulus.event_id
+        else None
+    )
+    compiler._random = SimpleNamespace(  # noqa: SLF001
+        draw=lambda **_kwargs: SimpleNamespace(
+            selected_candidate_ref="delay:120",
+            draw_id="draw:npc-only-stimulus",
+        )
+    )
+
+    assert await compiler.next_opportunity(projection) is None
+
+    # Historical open processes remain in replay, but recovery cannot turn an
+    # NPC-private source into protagonist capability authority.
+    projection.trigger_processes = (
+        SimpleNamespace(
+            trigger_id="trigger:proactive:npc-only",
+            trigger_ref=(
+                "proactive-consideration:consideration:social-initiative:"
+                + "a" * 64
+            ),
+            process_kind="proactive_action_deliberation",
+            source_evidence_ref=stimulus.event_id,
+            state="open",
+            runtime_outcome_ref=None,
+        ),
+    )
+
+    assert await compiler.next_opportunity(projection) is None
+
+
+@pytest.mark.asyncio
+async def test_protagonist_participation_authorizes_occurrence_stimulus() -> None:
+    compiler, projection, _committed = _compiler_fixture(receptive=True)
+    occurred_at = NOW + timedelta(minutes=10)
+    stimulus = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event:occurrence:shared-with-protagonist",
+        world_id=projection.world_id,
+        event_type="WorldOccurrenceSettled",
+        logical_time=occurred_at,
+        created_at=occurred_at,
+        actor="worker:world-v2:life-aftermath",
+        source="test",
+        trace_id="trace:shared-stimulus",
+        causation_id="cause:shared-stimulus",
+        correlation_id="conversation:shared-stimulus",
+        idempotency_key="occurrence:shared-with-protagonist",
+        payload={"occurrence_id": "occurrence:shared-with-protagonist"},
+    )
+    projection.committed_world_event_refs = (
+        SimpleNamespace(
+            event_id=stimulus.event_id,
+            event_type=stimulus.event_type,
+            logical_time=stimulus.logical_time,
+            world_revision=2,
+        ),
+    )
+    projection.world_occurrences = (
+        SimpleNamespace(
+            occurrence_id="occurrence:shared-with-protagonist",
+            participant_refs=("actor:companion", "npc:roommate"),
+            visibility="private",
+            status="settled",
+            settlement_event_ref=stimulus.event_id,
+        ),
+    )
+    projection.logical_time = occurred_at + timedelta(minutes=3)
+    compiler._ledger.lookup_event_commit = lambda event_id: (  # type: ignore[attr-defined]  # noqa: SLF001
+        (stimulus, SimpleNamespace(world_revision=2))
+        if event_id == stimulus.event_id
+        else None
+    )
+    compiler._random = SimpleNamespace(  # noqa: SLF001
+        draw=lambda **_kwargs: SimpleNamespace(
+            selected_candidate_ref="delay:120",
+            draw_id="draw:shared-stimulus",
+        )
+    )
+
+    opportunity = await compiler.next_opportunity(projection)
+
+    assert opportunity is not None
+    assert opportunity.source_kind == "situation_change"
+    assert opportunity.stimulus_event_refs == (stimulus.event_id,)
+
+
+@pytest.mark.asyncio
+async def test_explicit_perception_is_observable_only_to_its_bound_actor() -> None:
+    compiler, projection, _committed = _compiler_fixture(receptive=True)
+    occurred_at = NOW + timedelta(minutes=10)
+    perceptions = tuple(
+        WorldEvent.from_payload(
+            schema_version="world-v2.1",
+            event_id=f"event:perception:{actor_ref}",
+            world_id=projection.world_id,
+            event_type="ExternalPerceptionRecorded",
+            logical_time=occurred_at + timedelta(seconds=offset),
+            created_at=occurred_at + timedelta(seconds=offset),
+            actor="worker:world-v2:external-perception",
+            source="test",
+            trace_id="trace:perception-stimulus",
+            causation_id="cause:perception-stimulus",
+            correlation_id="conversation:perception-stimulus",
+            idempotency_key=f"perception:{actor_ref}",
+            payload={"actor_ref": actor_ref},
+        )
+        for offset, actor_ref in enumerate(("npc:roommate", "actor:companion"))
+    )
+    projection.committed_world_event_refs = tuple(
+        SimpleNamespace(
+            event_id=item.event_id,
+            event_type=item.event_type,
+            logical_time=item.logical_time,
+            world_revision=index,
+        )
+        for index, item in enumerate(perceptions, start=2)
+    )
+    projection.logical_time = occurred_at + timedelta(minutes=3)
+    stored = {item.event_id: item for item in perceptions}
+    compiler._ledger.lookup_event_commit = lambda event_id: (  # type: ignore[attr-defined]  # noqa: SLF001
+        (stored[event_id], SimpleNamespace(world_revision=2))
+        if event_id in stored
+        else None
+    )
+    compiler._random = SimpleNamespace(  # noqa: SLF001
+        draw=lambda **_kwargs: SimpleNamespace(
+            selected_candidate_ref="delay:120",
+            draw_id="draw:perception-stimulus",
+        )
+    )
+
+    opportunity = await compiler.next_opportunity(projection)
+
+    assert opportunity is not None
+    assert opportunity.source_event_ref == perceptions[1].event_id
+    assert opportunity.stimulus_event_refs == (perceptions[1].event_id,)
+
+
 @pytest.mark.asyncio
 async def test_failed_situation_consideration_retains_its_stimulus_on_retry() -> None:
     compiler, projection, _committed = _compiler_fixture(receptive=True)
@@ -466,7 +650,7 @@ async def test_failed_situation_consideration_retains_its_stimulus_on_retry() ->
         causation_id="cause:situation-retry",
         correlation_id="conversation:situation-retry",
         idempotency_key="experience:retry",
-        payload={},
+        payload=COMPANION_EXPERIENCE_STIMULUS,
     )
     compiler._ledger.lookup_event_commit = lambda event_id: (  # type: ignore[attr-defined]  # noqa: SLF001
         (stimulus, SimpleNamespace(world_revision=2))
@@ -576,7 +760,7 @@ async def test_technical_retry_precedes_cooldown_from_another_successful_contact
         causation_id="cause:retry-before-contact-cooldown",
         correlation_id="conversation:retry-before-contact-cooldown",
         idempotency_key="experience:retry-before-contact-cooldown",
-        payload={},
+        payload=COMPANION_EXPERIENCE_STIMULUS,
     )
     compiler._ledger.lookup_event_commit = lambda event_id: (  # type: ignore[attr-defined]  # noqa: SLF001
         (stimulus, SimpleNamespace(world_revision=2))
@@ -676,7 +860,7 @@ async def test_not_due_retry_does_not_starve_an_independent_due_situation() -> N
         causation_id="cause:retry-independent-situation",
         correlation_id="conversation:retry-independent-situation",
         idempotency_key="experience:failed-situation",
-        payload={},
+        payload=COMPANION_EXPERIENCE_STIMULUS,
     )
     second_event = WorldEvent.from_payload(
         schema_version="world-v2.1",
@@ -691,7 +875,7 @@ async def test_not_due_retry_does_not_starve_an_independent_due_situation() -> N
         causation_id=first_event.event_id,
         correlation_id="conversation:retry-independent-situation",
         idempotency_key="experience:independent-situation",
-        payload={},
+        payload=COMPANION_EXPERIENCE_STIMULUS,
     )
     stored = {item.event_id: item for item in (first_event, second_event)}
     compiler._ledger.lookup_event_commit = lambda event_id: (  # type: ignore[attr-defined]  # noqa: SLF001
@@ -856,7 +1040,7 @@ async def test_successful_retry_terminally_settles_the_failed_consideration() ->
         causation_id="cause:settled-retry",
         correlation_id="conversation:settled-retry",
         idempotency_key="experience:settled-retry",
-        payload={},
+        payload=COMPANION_EXPERIENCE_STIMULUS,
     )
     stimulus_ref = SimpleNamespace(
         event_id=stimulus.event_id,
@@ -933,7 +1117,7 @@ async def test_each_situation_window_survives_a_newer_window_until_considered() 
             causation_id="cause:situation-windows",
             correlation_id="conversation:situation-windows",
             idempotency_key=event_id,
-            payload={},
+            payload=COMPANION_EXPERIENCE_STIMULUS,
         )
         for event_id, at in (
             ("event:experience:first-window", first_at),
@@ -1008,7 +1192,7 @@ async def test_new_stimulus_in_a_settled_window_reuses_draw_but_gets_a_new_epoch
             causation_id="cause:same-window",
             correlation_id="conversation:same-window",
             idempotency_key=event_id,
-            payload={},
+            payload=COMPANION_EXPERIENCE_STIMULUS,
         )
         for event_id, at in (
             ("event:experience:window-anchor", anchor_at),
@@ -1147,6 +1331,7 @@ async def test_response_expectation_never_opens_a_standalone_proactive_opportuni
     )
     compiler = SocialInitiativeCompiler(
         ledger=ledger,
+        actor_ref="actor:companion",
         policy=SocialInitiativePolicy(
             spontaneous_idle_seconds=1_800,
             spontaneous_expiry_seconds=43_200,

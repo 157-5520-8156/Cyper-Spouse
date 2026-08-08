@@ -78,6 +78,52 @@ class RecordedModelDecisionContext(FrozenModel):
     ledger_sequence: int = Field(ge=0)
 
 
+class RecordedCharacterInteriorTurnLineage(FrozenModel):
+    """Durable identity of the one CharacterInterior turn behind a result.
+
+    This is audit evidence only.  It cannot authorize a TypedChange or an
+    Action, but it makes the canonical snapshot, private author and final
+    decision identity recoverable after process restart instead of leaving
+    them solely in CharacterInterior's bounded in-memory cache.
+    """
+
+    lineage_contract: Literal["character-interior-turn-lineage.1"] = (
+        "character-interior-turn-lineage.1"
+    )
+    inner_turn_id: str = Field(min_length=1, max_length=256)
+    purpose: str = Field(min_length=1, max_length=128)
+    opportunity_ref: str = Field(min_length=1, max_length=512)
+    snapshot_id: str = Field(min_length=1, max_length=128)
+    snapshot_hash: str = Field(pattern=_HASH)
+    capability_ref: str = Field(min_length=1, max_length=512)
+    author_model_id: str = Field(min_length=1, max_length=256)
+    author_model_version: str = Field(min_length=1, max_length=256)
+    author_model_call_id: str = Field(min_length=1, max_length=256)
+    author_request_hash: str = Field(pattern=_PROPOSAL_HASH)
+    author_response_hash: str = Field(pattern=_PROPOSAL_HASH)
+    author_attempt_ordinal: int = Field(ge=0, le=8)
+    author_parent_model_call_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        exclude_if=lambda value: value is None,
+    )
+    private_self_lineage_hash: str = Field(pattern=_PROPOSAL_HASH)
+    decision_hash: str = Field(pattern=_PROPOSAL_HASH)
+
+    @model_validator(mode="after")
+    def identities_are_complete_and_bound(self) -> Self:
+        expected_snapshot_id = f"inner-life-snapshot:sha256:{self.snapshot_hash}"
+        if self.snapshot_id != expected_snapshot_id:
+            raise ValueError("CharacterInterior snapshot id/hash lineage is inconsistent")
+        corrected = self.author_attempt_ordinal > 0
+        if corrected != (self.author_parent_model_call_id is not None):
+            raise ValueError("CharacterInterior correction parent lineage is incomplete")
+        if self.author_parent_model_call_id == self.author_model_call_id:
+            raise ValueError("CharacterInterior author cannot be its own correction parent")
+        return self
+
+
 class RecordedModelResponseStorage(FrozenModel):
     """Bound one model response to bounded internal diagnostic persistence."""
 
@@ -159,6 +205,10 @@ class RecordedModelResultAudit(FrozenModel):
     request_hash: str = Field(pattern=_HASH)
     response_hash: str | None = Field(default=None, pattern=_HASH)
     decision_context: RecordedModelDecisionContext | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    character_interior_lineage: RecordedCharacterInteriorTurnLineage | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
     )
@@ -256,6 +306,17 @@ class RecordedModelResultAudit(FrozenModel):
             not has_output or self.response_storage.original_response_hash != self.response_hash
         ):
             raise ValueError("model response storage changed the audited response")
+        lineage = self.character_interior_lineage
+        if lineage is not None:
+            if not has_output:
+                raise ValueError("CharacterInterior lineage requires a successful model output")
+            if (
+                lineage.author_model_id != self.model_id
+                or lineage.author_model_version != self.model_version
+                or lineage.author_model_call_id != self.model_call_id
+                or lineage.author_request_hash != f"sha256:{self.request_hash}"
+            ):
+                raise ValueError("CharacterInterior lineage changed recorded author identity")
         attempted_identity = (self.attempted_model_id, self.attempted_model_version)
         has_attempted_identity = all(value is not None for value in attempted_identity)
         if not has_attempted_identity and any(value is not None for value in attempted_identity):
@@ -348,8 +409,8 @@ class RecordedModelResultAudit(FrozenModel):
             },
         }.get(self.status)
         provider_failure_type, separator, provider_failure_detail = (
-            (self.failure_code or "").partition(":")
-        )
+            self.failure_code or ""
+        ).partition(":")
         typed_provider_subcall_failure = (
             self.route.router_version == "provider-subcall-audit.1"
             and self.outcome in {"timeout", "exception"}
@@ -367,23 +428,22 @@ class RecordedModelResultAudit(FrozenModel):
                             separator == ":"
                             and provider_failure_detail.startswith("http_")
                             and provider_failure_detail.removeprefix("http_").isdigit()
-                            and 100
-                            <= int(provider_failure_detail.removeprefix("http_"))
-                            <= 599
+                            and 100 <= int(provider_failure_detail.removeprefix("http_")) <= 599
                         )
                     )
                 )
             )
         )
+        typed_character_interior_failure = (
+            self.route.router_version == "character-interior.1"
+            and bool(self.failure_code)
+            and self.failure_code.replace("_", "").isalnum()
+        )
         if self.status == "proposal_validated":
             if not has_output or self.failure_code is not None:
                 raise ValueError("validated audit requires output and no failure")
         elif self.status == "candidate_returned":
-            if (
-                not has_output
-                or self.failure_code is not None
-                or self.outcome != "returned"
-            ):
+            if not has_output or self.failure_code is not None or self.outcome != "returned":
                 raise ValueError(
                     "returned candidate audit requires output without semantic acceptance"
                 )
@@ -391,10 +451,14 @@ class RecordedModelResultAudit(FrozenModel):
             if has_output or (
                 self.failure_code not in (required or set())
                 and not typed_provider_subcall_failure
+                and not typed_character_interior_failure
             ):
                 raise ValueError("terminal main audit has invalid lineage")
         elif self.status == "main_invalid":
-            if self.failure_code not in (required or set()):
+            if (
+                self.failure_code not in (required or set())
+                and not typed_character_interior_failure
+            ):
                 raise ValueError("invalid main audit has invalid lineage")
         elif self.status == "recovery_failed":
             if not (
@@ -465,17 +529,18 @@ class LifeDevelopmentRecallResultRecordedPayload(FrozenModel):
         default=None,
         exclude_if=lambda value: value is None,
     )
-    failure_code: Literal[
-        "recall_timeout",
-        "recall_exception",
-        "recall_context_unavailable",
-    ] | None = Field(default=None, exclude_if=lambda value: value is None)
+    failure_code: (
+        Literal[
+            "recall_timeout",
+            "recall_exception",
+            "recall_context_unavailable",
+        ]
+        | None
+    ) = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def result_is_request_and_context_bound(self) -> Self:
-        expected_request_hash = sha256(
-            canonical_json(self.recall_request.model_dump(mode="json"))
-        )
+        expected_request_hash = sha256(canonical_json(self.recall_request.model_dump(mode="json")))
         if self.recall_request_hash != expected_request_hash:
             raise ValueError("life recall result changed the Character request")
         expected_result_id = "life-recall-result:" + sha256(
@@ -519,6 +584,7 @@ class ModelResultRecordedPayload(FrozenModel):
         "model-result-audit.4",
         "model-result-audit.5",
         "model-result-audit.6",
+        "model-result-audit.7",
     ] = "model-result-audit.1"
     model_result_ref: str = Field(min_length=1, max_length=256)
     deliberation_result_id: str = Field(min_length=1, max_length=256)
@@ -569,6 +635,7 @@ class ModelResultRecordedPayload(FrozenModel):
                 "model-result-audit.4",
                 "model-result-audit.5",
                 "model-result-audit.6",
+                "model-result-audit.7",
             }
             and audit.slot is not None
         ):
@@ -593,21 +660,29 @@ class ModelResultRecordedPayload(FrozenModel):
                 "model-result-audit.4",
                 "model-result-audit.5",
                 "model-result-audit.6",
+                "model-result-audit.7",
             }
             and has_recall_audit
         ):
             raise ValueError("recall trace requires model-result-audit.4")
-        if self.audit_contract != "model-result-audit.6" and (
-            (self.audit_contract == "model-result-audit.5")
-            != bool(audit.presented_prefetch_traces)
+        if self.audit_contract not in {"model-result-audit.6", "model-result-audit.7"} and (
+            (self.audit_contract == "model-result-audit.5") != bool(audit.presented_prefetch_traces)
         ):
             raise ValueError("prefetch presentation sequence requires model-result-audit.5")
-        is_stream_audit = (
-            audit.semantic_stream_part is not None
-            or audit.status.startswith("provider_")
+        is_stream_audit = audit.semantic_stream_part is not None or audit.status.startswith(
+            "provider_"
         )
-        if (self.audit_contract == "model-result-audit.6") != is_stream_audit:
+        if self.audit_contract == "model-result-audit.6" and not is_stream_audit:
             raise ValueError("stream lineage requires model-result-audit.6")
+        if (
+            self.audit_contract not in {"model-result-audit.6", "model-result-audit.7"}
+            and is_stream_audit
+        ):
+            raise ValueError("stream lineage requires model-result-audit.6")
+        if (self.audit_contract == "model-result-audit.7") != (
+            audit.character_interior_lineage is not None
+        ):
+            raise ValueError("CharacterInterior lineage requires model-result-audit.7")
         if (
             audit.route.router_version == "life-development-router.2"
             and audit.recall_trace is not None
@@ -634,9 +709,7 @@ class ModelResultRecordedPayload(FrozenModel):
                 or trace.index_cursor != expected_cursor
                 or evaluated_cursor != expected_cursor
             ):
-                raise ValueError(
-                    "life recall trace does not match its outer trigger and cursor"
-                )
+                raise ValueError("life recall trace does not match its outer trigger and cursor")
         return self
 
 
@@ -652,16 +725,13 @@ def validate_recorded_attempt_lineage(
     if len({audit.model_call_id for audit in audits}) != len(audits):
         raise ValueError("model attempts require distinct call identities")
     provider_subcall = (
-        len(audits) == 1
-        and audits[0].route.router_version == "provider-subcall-audit.1"
+        len(audits) == 1 and audits[0].route.router_version == "provider-subcall-audit.1"
     )
     authored_candidate = (
-        len(audits) == 1
-        and audits[0].route.router_version == "authored-candidate-audit.1"
+        len(audits) == 1 and audits[0].route.router_version == "authored-candidate-audit.1"
     )
     physical_provider = (
-        len(audits) == 1
-        and audits[0].route.router_version == "physical-provider-audit.1"
+        len(audits) == 1 and audits[0].route.router_version == "physical-provider-audit.1"
     )
     if len(audits) == 1:
         if physical_provider:
@@ -791,9 +861,8 @@ def validate_recorded_attempt_lineage(
             or proposal_hash is None
         ):
             raise ValueError("successful recovery lineage is invalid")
-        if (
-            not character_recall_followup
-            and (main.attempt_id != quick.attempt_id or main.route != quick.route)
+        if not character_recall_followup and (
+            main.attempt_id != quick.attempt_id or main.route != quick.route
         ):
             raise ValueError("model attempt lineage changed identity or route")
     identity = {
@@ -858,6 +927,7 @@ class ProposalAuditProjection(ProposalRecordedV2Payload):
 __all__ = [
     "LifeDevelopmentRecallResultRecordedPayload",
     "ModelResultAuditProjection",
+    "RecordedCharacterInteriorTurnLineage",
     "RecordedModelUsage",
     "ModelResultRecordedPayload",
     "ProposalAuditProjection",

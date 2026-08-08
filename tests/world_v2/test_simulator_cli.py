@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from companion_daemon import cli
+from companion_daemon.config import Settings
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 
 
@@ -16,13 +17,11 @@ async def test_simulator_cli_uses_persistent_v2_turn_application_not_legacy_engi
     monkeypatch.setattr(
         cli,
         "get_settings",
-        lambda: SimpleNamespace(
+        lambda: Settings(
+            _env_file=None,
             database_path=database_path,
-            primary_user_id="sim-user",
-            deepseek_api_key=None,
-            deepseek_base_url="https://example.invalid",
-            deepseek_model="deepseek-v4-thinking",
-            deepseek_reasoning_effort="high",
+            PRIMARY_USER_ID="sim-user",
+            DEEPSEEK_API_KEY=None,
         ),
     )
 
@@ -51,13 +50,11 @@ async def test_simulator_cli_can_exercise_the_configured_thinking_lane(
     monkeypatch.setattr(
         cli,
         "get_settings",
-        lambda: SimpleNamespace(
+        lambda: Settings(
+            _env_file=None,
             database_path=tmp_path / "companion.sqlite",
-            primary_user_id="sim-user",
-            deepseek_api_key=None,
-            deepseek_base_url="https://example.invalid",
-            deepseek_model="deepseek-v4-thinking",
-            deepseek_reasoning_effort="high",
+            PRIMARY_USER_ID="sim-user",
+            DEEPSEEK_API_KEY=None,
         ),
     )
 
@@ -70,10 +67,13 @@ async def test_simulator_cli_can_exercise_the_configured_thinking_lane(
 async def test_simulator_cli_wires_an_independent_life_source_reviewer_when_configured(
     tmp_path, monkeypatch
 ) -> None:
-    author = SimpleNamespace(model="deepseek-world-author")
-    reviewer = SimpleNamespace(model="openai-independent-source-reviewer")
+    author = SimpleNamespace(
+        model="deepseek-world-author",
+        semantic_authority_id="simulator:character-author",
+    )
     built: dict[str, object] = {}
-    reviewer_kwargs: dict[str, object] = {}
+    reviewer_kwargs: list[dict[str, object]] = []
+    reviewers: list[SimpleNamespace] = []
 
     class _Application:
         async def respond(self, _turn):  # type: ignore[no-untyped-def]
@@ -91,27 +91,37 @@ async def test_simulator_cli_wires_an_independent_life_source_reviewer_when_conf
     async def _close() -> None:
         return None
 
+    async def _complete(_messages, *, temperature=0.0):  # type: ignore[no-untyped-def]
+        return "{}"
+
     author.aclose = _close
-    reviewer.aclose = _close
+    author.complete = _complete
     monkeypatch.setattr(
         cli,
         "get_settings",
-        lambda: SimpleNamespace(
+        lambda: Settings(
+            _env_file=None,
             database_path=tmp_path / "companion.sqlite",
-            primary_user_id="sim-user",
-            deepseek_api_key="deepseek-test-key",
-            deepseek_base_url="https://deepseek.example.invalid",
-            deepseek_model="deepseek-v4-thinking",
-            deepseek_reasoning_effort="high",
-            openai_api_key="openai-test-key",
-            openai_base_url="https://openai.example.invalid",
-            openai_proxy_url=None,
-            world_v2_source_review_fallback_model="gpt-test-source-reviewer",
+            PRIMARY_USER_ID="sim-user",
+            DEEPSEEK_API_KEY="deepseek-test-key",
+            DEEPSEEK_BASE_URL="https://deepseek.example.invalid",
+            DEEPSEEK_MODEL="deepseek-v4-flash",
+            OPENAI_API_KEY="openai-test-key",
+            OPENAI_BASE_URL="https://openai.example.invalid",
+            WORLD_V2_SOURCE_REVIEW_FALLBACK_MODEL="gpt-test-source-reviewer",
         ),
     )
     monkeypatch.setattr(cli, "DeepSeekChatModel", lambda **_kwargs: author)
+
     def _reviewer(**kwargs):  # type: ignore[no-untyped-def]
-        reviewer_kwargs.update(kwargs)
+        reviewer_kwargs.append(kwargs)
+        reviewer = SimpleNamespace(
+            model=f"openai-independent-source-reviewer-{len(reviewers) + 1}",
+            semantic_authority_id=f"simulator:source-reviewer:{len(reviewers) + 1}",
+            aclose=_close,
+            complete=_complete,
+        )
+        reviewers.append(reviewer)
         return reviewer
 
     monkeypatch.setattr(cli, "OpenAICompatibleChatModel", _reviewer)
@@ -129,5 +139,7 @@ async def test_simulator_cli_wires_an_independent_life_source_reviewer_when_conf
     source_reviewer = built["life_source_closure_reviewer"]
     assert world_author.authority_origin is author
     assert source_rewriter.authority_origin is author
-    assert source_reviewer.authority_origin is reviewer
-    assert reviewer_kwargs["reasoning_effort"] == ""
+    assert len(reviewers) == 2
+    assert reviewers[0] is not reviewers[1]
+    assert source_reviewer.authority_origin is reviewers[1]
+    assert all(options["reasoning_effort"] == "" for options in reviewer_kwargs)

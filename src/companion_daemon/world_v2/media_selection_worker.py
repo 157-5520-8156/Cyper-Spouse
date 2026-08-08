@@ -1,19 +1,16 @@
-"""Orchestrate one bounded P1 candidate choice into a persisted Proposal."""
+"""Orchestrate one bounded media capability into a persisted Proposal."""
 
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime
 from typing import Literal
 
+from .character_interior import CharacterInterior, InteriorOpportunity
+from .character_interior.audit import recorded_character_interior_model_result
 from .media_selection import MediaSelection
 from .media_selection_acceptance_runtime import MediaSelectionProposalRecorder
-from .media_selection_draft import (
-    MediaCandidateChoice,
-    MediaSelectionCapsule,
-    MediaSelectionDraftAdapter,
-    MediaSelectionDraftError,
-)
 from .media_selection_proposal import (
     MediaSelectionProposalCompiler,
     MediaSelectionProposalRecordedPayload,
@@ -43,10 +40,29 @@ class MediaSelectionRunResult(FrozenModel):
 
 
 class MediaSelectionWorker:
-    """Persist a model's bounded selection; Acceptance remains a separate seam."""
+    """Offer bounded candidates to CharacterInterior, then persist its choice.
 
-    def __init__(self, *, ledger, draft_adapter: MediaSelectionDraftAdapter, proposal_recorder: MediaSelectionProposalRecorder, catalog_version: str, source: str = "world-v2:media-selection") -> None:  # type: ignore[no-untyped-def]
-        self._ledger, self._draft, self._recorder = ledger, draft_adapter, proposal_recorder
+    Candidate discovery, privacy derivation, random recording and Acceptance
+    remain objective authority seams.  Whether to share anything, and which
+    offered opaque token to choose, is one cursor-pinned character decision.
+    """
+
+    def __init__(
+        self,
+        *,
+        ledger,
+        character_interior: CharacterInterior,
+        character_actor_ref: str,
+        proposal_recorder: MediaSelectionProposalRecorder,
+        catalog_version: str,
+        source: str = "world-v2:media-selection",
+    ) -> None:  # type: ignore[no-untyped-def]
+        if not character_actor_ref:
+            raise ValueError("media selection requires a character actor")
+        self._ledger = ledger
+        self._interior = character_interior
+        self._character_actor_ref = character_actor_ref
+        self._recorder = proposal_recorder
         self._compiler, self._source = MediaSelectionProposalCompiler(catalog_version=catalog_version), source
         self._advisory = MediaCandidateAdvisoryCompiler()
         self._random = RandomAuthority(ledger=ledger)
@@ -148,9 +164,17 @@ class MediaSelectionWorker:
         # no longer be accepted at the current cursor, so Phase 4's fresh-only
         # rule permits a new deliberation.  Proposal identity includes the new
         # complete cursor and therefore cannot collide with the stale record.
-        candidates = tuple(
-            item for item in sorted(selectable, key=lambda value: value.candidate_id)
-        )[:32]
+        bounded_candidates = []
+        bounded_source_refs: set[str] = set()
+        for item in sorted(selectable, key=lambda value: value.candidate_id):
+            candidate_sources = {source.event_ref for source in item.source_events}
+            if len(bounded_source_refs | candidate_sources) > 64:
+                continue
+            bounded_candidates.append(item)
+            bounded_source_refs.update(candidate_sources)
+            if len(bounded_candidates) == 32:
+                break
+        candidates = tuple(bounded_candidates)
         if not candidates:
             return MediaSelectionRunResult(
                 status="no_op",
@@ -221,7 +245,7 @@ class MediaSelectionWorker:
         # The token is deliberately distinct from the candidate id: model text
         # cannot become an authority-bearing identifier by coincidence.
         tokens = {"media-candidate:" + hashlib.sha256(item.candidate_id.encode()).hexdigest(): item for item in candidates}
-        draw_suggestion = None
+        ordered_tokens = sorted(tokens)
         attempt_causation_id: str | None = None
         # Production ledgers persist the draw before Deliberation.  Narrow
         # embedded test adapters without durable lookup retain a no-draw path;
@@ -238,8 +262,19 @@ class MediaSelectionWorker:
                 return MediaSelectionRunResult(
                     status="blocked", reason_code="media_selection.cursor_stale"
                 )
-            suggested_token = next(token for token, item in tokens.items() if item.candidate_id == draw.selected_candidate_ref)
-            draw_suggestion = {"selected_token": suggested_token, "sampler_version": draw.sampler_version}
+            attention_token = next(
+                token
+                for token, item in tokens.items()
+                if item.candidate_id == draw.selected_candidate_ref
+            )
+            # Recorded randomness may shape which candidate reaches attention
+            # first, but it must not tell the character which semantic choice
+            # to make. The model sees an ordered candidate environment and is
+            # still free to choose any candidate or no_op.
+            ordered_tokens = [
+                attention_token,
+                *(token for token in ordered_tokens if token != attention_token),
+            ]
             attempt_causation_id = "event:random-draw:" + draw.draw_id
             projection = self._ledger.project()
             cursor = ProjectionCursor(
@@ -247,62 +282,205 @@ class MediaSelectionWorker:
                 deliberation_revision=projection.deliberation_revision,
                 ledger_sequence=projection.ledger_sequence,
             )
+        manifest_payload = {
+            "contract": "media-selection-capability.1",
+            "candidates": [
+                {
+                    "token": token,
+                    "entity_revision": tokens[token].entity_revision,
+                    "safe_summary": "一件已确认、可选择但不必分享的生活事件",
+                    "advisory": self._advisory.compile(
+                        projection=projection,
+                        candidate=tokens[token],
+                    ).model_material(),
+                    "source_refs": [
+                        source.event_ref for source in tokens[token].source_events
+                    ],
+                }
+                for token in ordered_tokens
+            ],
+        }
+        payload_json = json.dumps(
+            manifest_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        source_refs = tuple(
+            dict.fromkeys(
+                source.event_ref
+                for item in candidates
+                for source in item.source_events
+            )
+        )
+        opportunity = InteriorOpportunity(
+            inner_turn_ref=attempt_id,
+            world_id=world_id or "embedded-nondurable",
+            actor_ref=self._character_actor_ref,
+            trigger_ref=attempt_causation_id or source_refs[0],
+            cursor=cursor,
+            logical_time=logical_time,
+            purpose="media_selection",
+            source_refs=source_refs[:32],
+            capability_manifest={
+                "contract": "character-interior-capability-manifest.1",
+                "capability_ref": "capability:" + attempt_id,
+                "capability_kind": "media_selection",
+                "payload_json": payload_json,
+                "payload_hash": "sha256:"
+                + hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+                "source_refs": source_refs,
+            },
+            opportunity_ref="opportunity:" + attempt_id,
+        )
         try:
-            draft = await self._draft.deliberate(capsule=MediaSelectionCapsule(candidates=tuple(
-                MediaCandidateChoice(
-                    token=token,
-                    safe_summary="一件已确认、可选择但不必分享的生活事件",
-                    advisory=self._advisory.compile(projection=projection, candidate=tokens[token]).model_material(),
-                )
-                for token in sorted(tokens)
-            ), draw_suggestion=draw_suggestion))
-        except MediaSelectionDraftError as exc:
-            if not durable_lookup or not callable(getattr(self._ledger, "commit_at_cursor", None)):
-                return MediaSelectionRunResult(status="blocked", reason_code=exc.code)
-            assert attempt_causation_id is not None
-            return self._record_terminal_attempt(
-                cursor=cursor, candidates=candidates, attempt_id=attempt_id,
-                event_id=attempt_event_id, logical_time=logical_time,
-                actor=actor, trace_id=trace_id, correlation_id=correlation_id,
-                outcome="invalid", model=exc.model,
-                raw_output_hash=exc.raw_output_hash,
-                normalized_output_hash=None, failure_code=exc.code,
-                causation_id=attempt_causation_id,
-            )
+            interior_decision = await self._interior.consider(opportunity)
         except Exception:
-            # Provider timeouts/outages are retryable and therefore are not
-            # written as semantic declines.  They still become a structured
-            # scheduler result so an independent result/background queue can
-            # continue in the same bounded drain.
+            # The Module is expected to structure provider/runtime failures,
+            # but this final isolation keeps ecology drains alive if its own
+            # process boundary fails unexpectedly.
             return MediaSelectionRunResult(
-                status="blocked", reason_code="media_selection.model_unavailable"
+                status="blocked",
+                reason_code="media_selection.character_interior_unavailable",
             )
-        if draft.decision == "no_op":
+        if (
+            interior_decision.cursor != cursor
+            or interior_decision.actor_ref != self._character_actor_ref
+            or interior_decision.opportunity_ref != opportunity.opportunity_ref
+        ):
+            return MediaSelectionRunResult(
+                status="blocked",
+                reason_code="media_selection.character_decision_binding_mismatch",
+            )
+        if interior_decision.status == "technical_failure":
+            return MediaSelectionRunResult(
+                status="blocked",
+                reason_code=(
+                    "media_selection.character_interior."
+                    + (interior_decision.failure_code or "technical_failure")
+                ),
+            )
+        if interior_decision.status != "decided" or interior_decision.decision is None:
+            return MediaSelectionRunResult(
+                status="blocked",
+                reason_code="media_selection.invalid_character_decision",
+            )
+        value = interior_decision.decision
+        lineage = interior_decision.author_lineage
+        if lineage is None:
+            return MediaSelectionRunResult(
+                status="blocked",
+                reason_code="media_selection.character_lineage_unavailable",
+            )
+        manifest = opportunity.capability_manifest
+        assert manifest is not None
+        if (
+            set(value)
+            != {
+                "contract",
+                "purpose",
+                "source_refs",
+                "capability_ref",
+                "capability_payload_hash",
+                "payload",
+            }
+            or value.get("contract") != "character-interior-purpose-decision.1"
+            or value.get("purpose") != "media_selection"
+            or value.get("capability_ref") != manifest.capability_ref
+            or value.get("capability_payload_hash") != manifest.payload_hash
+        ):
+            return MediaSelectionRunResult(
+                status="blocked",
+                reason_code="media_selection.invalid_character_decision",
+            )
+        decision_source_refs = value.get("source_refs")
+        if (
+            not isinstance(decision_source_refs, list)
+            or not decision_source_refs
+            or any(not isinstance(ref, str) or not ref for ref in decision_source_refs)
+            or len(decision_source_refs) != len(set(decision_source_refs))
+        ):
+            return MediaSelectionRunResult(
+                status="blocked",
+                reason_code="media_selection.character_source_closure_invalid",
+            )
+        payload = value.get("payload")
+        if not isinstance(payload, dict):
+            return MediaSelectionRunResult(
+                status="blocked",
+                reason_code="media_selection.invalid_character_decision",
+            )
+        model_result_audit = recorded_character_interior_model_result(
+            interior_decision,
+            purpose="media_selection",
+            subject_ref=interior_decision.opportunity_ref,
+            trigger_ref=opportunity.trigger_ref,
+            capability_ref=manifest.capability_ref,
+            route_tier="flash",
+            route_reason_code="media_selection.character_choice",
+            router_version="character-interior-media-selection.1",
+            proposal_hash=self._decision_hash(value),
+        )
+        if payload == {
+            "contract": "character-interior-media-selection-decision.1",
+            "decision": "no_op",
+        }:
+            normalized_output_hash = self._decision_hash(value)
             if durable_lookup and callable(getattr(self._ledger, "commit_at_cursor", None)):
-                assert draft.model and draft.raw_output_hash and draft.normalized_output_hash
                 assert attempt_causation_id is not None
                 return self._record_terminal_attempt(
                     cursor=cursor, candidates=candidates, attempt_id=attempt_id,
                     event_id=attempt_event_id, logical_time=logical_time,
                     actor=actor, trace_id=trace_id, correlation_id=correlation_id,
-                    outcome="declined", model=draft.model,
-                    raw_output_hash=draft.raw_output_hash,
-                    normalized_output_hash=draft.normalized_output_hash,
+                    outcome="declined", model=lineage.model_id,
+                    raw_output_hash=lineage.response_hash,
+                    normalized_output_hash=normalized_output_hash,
                     failure_code=None,
                     causation_id=attempt_causation_id,
+                    character_interior_model_result=model_result_audit,
                 )
             return MediaSelectionRunResult(status="no_op", reason_code="media_selection.model_declined")
-        assert draft.token is not None and draft.model and draft.raw_output_hash and draft.normalized_output_hash
-        candidate = tokens[draft.token]
+        token = payload.get("selected_token")
+        if (
+            set(payload) != {"contract", "decision", "selected_token"}
+            or payload.get("contract")
+            != "character-interior-media-selection-decision.1"
+            or payload.get("decision") != "select"
+            or not isinstance(token, str)
+            or token not in tokens
+        ):
+            return MediaSelectionRunResult(
+                status="blocked",
+                reason_code="media_selection.invalid_character_decision",
+            )
+        candidate = tokens[token]
+        if set(source.event_ref for source in candidate.source_events) - set(
+            decision_source_refs
+        ):
+            return MediaSelectionRunResult(
+                status="blocked",
+                reason_code="media_selection.character_source_closure_invalid",
+            )
         proposal = self._compiler.compile(
             projection=projection,
             selection=selections[candidate.candidate_id],
-            model=draft.model,
-            raw_output_hash=draft.raw_output_hash,
-            normalized_output_hash=draft.normalized_output_hash,
+            model=lineage.model_id,
+            raw_output_hash=lineage.response_hash,
+            normalized_output_hash=self._decision_hash(value),
+            character_interior_model_result=model_result_audit,
         )
         recorded = self._recorder.record(cursor=cursor, proposal=proposal, actor=actor, source=self._source, created_at=logical_time, trace_id=trace_id, correlation_id=correlation_id)
         return MediaSelectionRunResult(status="proposed", proposal_event_ref=recorded.proposal_event_ref)
+
+    @staticmethod
+    def _decision_hash(value: dict[str, object]) -> str:
+        normalized = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return "sha256:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
     def _record_terminal_attempt(
         self, *, cursor: ProjectionCursor, candidates, attempt_id: str,
@@ -310,6 +488,7 @@ class MediaSelectionWorker:
         correlation_id: str, outcome: Literal["declined", "invalid"], model: str,
         raw_output_hash: str, normalized_output_hash: str | None,
         failure_code: str | None, causation_id: str,
+        character_interior_model_result,
     ) -> MediaSelectionRunResult:  # type: ignore[no-untyped-def]
         payload = MediaSelectionAttemptRecordedPayload(
             attempt_id=attempt_id,
@@ -322,6 +501,7 @@ class MediaSelectionWorker:
             ),
             outcome=outcome, model=model, raw_output_hash=raw_output_hash,
             normalized_output_hash=normalized_output_hash, failure_code=failure_code,
+            character_interior_model_result=character_interior_model_result,
         )
         event_payload = payload.model_dump(mode="json")
         event = WorldEvent.from_payload(

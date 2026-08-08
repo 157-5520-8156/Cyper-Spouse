@@ -65,25 +65,6 @@ from .schemas import (
 
 
 _POLICY = "policy:npc-ecology.2"
-_RELEVANT_EVENT_TYPES = frozenset(
-    {
-        "ObservationRecorded",
-        "WorldOccurrenceSettled",
-        "ExperienceCommitted",
-        "AppraisalAccepted",
-        "AppraisalContradicted",
-        "AppraisalSuperseded",
-        "AffectEpisodeOpened",
-        "AffectEpisodeUpdated",
-        "RelationshipSlowVariableAdjusted",
-        "LifeArcChanged",
-        "ActivityCompleted",
-        "ActivityAbandoned",
-        "ExternalPerceptionRecorded",
-    }
-)
-
-
 @dataclass(frozen=True, slots=True)
 class _ModelAttempt:
     request_json: str
@@ -167,8 +148,6 @@ class NpcSocialWorldSnapshot(FrozenModel):
     available_npc_refs: tuple[str, ...]
     available_location_refs: tuple[str, ...]
     recent_occurrence_refs: tuple[str, ...]
-    protagonist_affect_source_refs: tuple[str, ...]
-    protagonist_affect_context_json: str = "[]"
 
 
 class NpcActorDecision(FrozenModel):
@@ -291,7 +270,10 @@ class NpcEcology:
         identities = npc_identity_views(
             projection,
             content_store=self._store,
-            relationships=npc_relationship_readings(projection),
+            relationships=npc_relationship_readings(
+                projection,
+                protagonist_actor_ref=self._protagonist,
+            ),
             reviewed_identity_summaries=(
                 {
                     item.stable_identity_ref: item.identity_summary
@@ -345,31 +327,6 @@ class NpcEcology:
                 reverse=True,
             )[:16]
         )
-        affect_refs = tuple(
-            sorted(
-                item.origin.accepted_event_ref
-                for item in projection.affect_episodes
-                if item.status == "active"
-            )
-        )
-        affect_context_json = _canonical(
-            [
-                {
-                    "episode_id": item.episode_id,
-                    "source_ref": item.origin.accepted_event_ref,
-                    "components": [
-                        {
-                            "dimension": component.dimension,
-                            "intensity_bp": component.intensity_bp,
-                            "residue_bp": component.residue_bp,
-                        }
-                        for component in item.components
-                    ],
-                }
-                for item in projection.affect_episodes
-                if item.status == "active"
-            ][:8]
-        )
         return NpcSocialWorldSnapshot(
             cursor=cursor,
             logical_time=projection.logical_time,
@@ -377,8 +334,6 @@ class NpcEcology:
             available_npc_refs=available_npcs,
             available_location_refs=tuple(sorted(locations)),
             recent_occurrence_refs=recent_occurrences,
-            protagonist_affect_source_refs=affect_refs,
-            protagonist_affect_context_json=affect_context_json,
         )
 
     def has_due_work(self, *, projection: object) -> bool:
@@ -579,13 +534,10 @@ class NpcEcology:
             ),
             default=None,
         )
-        recent = tuple(
-            item.event_id
-            for item in projection.committed_world_event_refs
-            if item.event_type in _RELEVANT_EVENT_TYPES
-            and (last_considered_at is None or item.logical_time > last_considered_at)
-            and item.logical_time <= projection.logical_time
-        )[-31:]
+        recent = self._npc_observable_recent_event_refs(
+            projection=projection,
+            after=last_considered_at,
+        )
         if due_plan is not None:
             if due_plan.authority_origin is None:
                 return NpcEcologyResult(
@@ -597,14 +549,17 @@ class NpcEcology:
                     {
                         wake_event_ref,
                         due_plan.authority_origin.accepted_event_ref,
-                        *recent,
                     }
                 )
             )
             epoch = f"due-plan:{due_plan.plan_id}:{due_plan.entity_revision}"
         elif recent:
-            refs = tuple(sorted({wake_event_ref, *recent}))
-            epoch = "stimulus:" + _digest(refs)
+            # Recent material change opens an opportunity, but the actor gets
+            # only the exact clock plus its own source-closed identity capsule.
+            # The digest preserves effect-once scheduling without disclosing
+            # another NPC's or the protagonist's private event refs.
+            refs = (wake_event_ref,)
+            epoch = "stimulus:" + _digest(recent)
         else:
             # LifeEcology already owns the durable, recorded 45m-8h cadence.
             # The exact wake is therefore this ambient opportunity's identity;
@@ -620,6 +575,43 @@ class NpcEcology:
                 focus_npc_ref=(due_plan.owner_actor_ref if due_plan is not None else None),
                 focus_plan_ref=(due_plan.plan_id if due_plan is not None else None),
             )
+        )
+
+    @staticmethod
+    def _npc_observable_recent_event_refs(*, projection, after) -> tuple[str, ...]:
+        """Return only settled material evidence involving a registered NPC.
+
+        Protagonist Appraisal/Affect, direct observations, perceptions and
+        private life transitions are deliberately absent.  They may affect
+        the protagonist only through CharacterInterior; they are not NPC
+        knowledge or NPC scheduling stimuli.
+        """
+
+        authority = {
+            item.event_id: item
+            for item in projection.committed_world_event_refs
+            if item.logical_time <= projection.logical_time
+            and (after is None or item.logical_time > after)
+        }
+        registered_npc_refs = {f"npc:{item.npc_id}" for item in projection.npcs}
+        refs = {
+            item.settlement_event_ref
+            for item in projection.world_occurrences
+            if item.status == "settled"
+            and item.settlement_event_ref in authority
+            and registered_npc_refs.intersection(item.participant_refs)
+        }
+        refs.update(
+            item.origin.accepted_event_ref
+            for item in projection.experiences
+            if item.origin.accepted_event_ref in authority
+            and registered_npc_refs.intersection(item.values.participant_refs)
+        )
+        return tuple(
+            sorted(
+                refs,
+                key=lambda ref: (authority[ref].logical_time, ref),
+            )[-31:]
         )
 
     async def _actor_decide(
@@ -674,8 +666,8 @@ class NpcEcology:
             "Act as the exact selected NPC in this source-bound social world. Freely decide "
             "what they currently feel and want, and whether they propose doing anything. "
             "No motive catalogue or preferred social behavior exists. A no_op is valid. "
-            "Do not use the protagonist's private affect as NPC knowledge. Return JSON matching "
-            "NpcActorDecision: decision, npc_ref, impulse_summary, inner_state_summary, "
+            "Return JSON matching NpcActorDecision: decision, npc_ref, impulse_summary, "
+            "inner_state_summary, "
             "source_refs, relationship_to_protagonist (eight 0..10000 fields), "
             "current_goal_summaries and proposal. If proposing, the proposal must contain "
             "the NPC's own concrete timing (now/later), premise, participants, location, "
@@ -729,8 +721,6 @@ class NpcEcology:
                     ),
                 ),
                 "location_refs": snapshot.available_location_refs,
-                "protagonist_affect_source_refs": snapshot.protagonist_affect_source_refs,
-                "protagonist_affect_context": json.loads(snapshot.protagonist_affect_context_json),
             },
         }
         output_contract = {
@@ -1586,6 +1576,10 @@ class NpcEcology:
                 privacy_class=item.privacy,
                 content_ref=f"content:npc-ecology:candidate:{identity}:{index}",
                 text=item.text,
+                # These branches describe what the World Author says may
+                # objectively happen to the NPC.  They are not choices owned
+                # by the protagonist (who may not even be present).
+                causal_authority="world_contingency",
             )
             for index, item in enumerate(world_decision.outcomes, start=1)
         )

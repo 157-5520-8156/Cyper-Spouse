@@ -10,9 +10,6 @@ import json
 import pytest
 
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
-from companion_daemon.world_v2.appraisal_acceptance_runtime import AppraisalAcceptanceRuntime
-from companion_daemon.world_v2.appraisal_proposal_compiler import AppraisalProposalCompiler
-from companion_daemon.world_v2.appraisal_proposal_worker import AppraisalProposalWorker
 from companion_daemon.world_v2.batch_invariants import silence_appraisal_trigger_identity
 from companion_daemon.world_v2.deliberation import (
     Deliberation,
@@ -35,7 +32,6 @@ from companion_daemon.world_v2.platform_action_executor import (
 )
 from companion_daemon.world_v2.proposal_envelope import (
     CanonicalTypedPayload,
-    DecisionProposal,
     MinimalProposal,
     ProposalActionIntent,
     TypedChange,
@@ -50,10 +46,6 @@ from companion_daemon.world_v2.schemas import (
 from companion_daemon.world_v2.silence_appraisal_trigger import (
     SilenceAppraisalTriggerOpener,
     silence_appraisal_opportunity,
-)
-from companion_daemon.world_v2.silence_appraisal_trigger_runtime import (
-    SilenceAppraisalTriggerRuntime,
-    SilenceAppraisalTurn,
 )
 from companion_daemon.world_v2.world_turn_runtime import InboundTurn, WorldTurnRuntime
 
@@ -152,98 +144,6 @@ class _ReplyModel:
         return await self.propose(request)
 
 
-class _NoChangeAppraisalModel:
-    def __init__(self) -> None:
-        self.requests: list[ModelInput] = []
-
-    async def propose(self, request: ModelInput) -> ModelOutput:
-        self.requests.append(request)
-        proposal = DecisionProposal(
-            proposal_id="proposal:silence:no-change",
-            trigger_ref=request.trigger_ref,
-            evaluated_world_revision=request.evaluated_world_revision,
-            evidence_refs=(),
-            proposed_changes=(),
-            action_intents=(),
-            confidence=4_000,
-            brief_rationale="The quiet feels ordinary; nothing worth keeping.",
-            affect_decision="no_change",
-            behavior_tendency="observe",
-            stance="wait",
-            display_strategy="withhold",
-        )
-        return ModelOutput(
-            model_id="test-silence-no-change",
-            model_version="v1",
-            raw_proposal=proposal.model_dump(mode="json"),
-        )
-
-    async def recover(self, request: ModelInput, _failure: str) -> ModelOutput:
-        return await self.propose(request)
-
-
-class _SilenceAppraisalModel(_NoChangeAppraisalModel):
-    async def propose(self, request: ModelInput) -> ModelOutput:
-        self.requests.append(request)
-        source = request.trigger_evidence[0]
-        proposal = DecisionProposal(
-            proposal_id="proposal:silence:appraisal",
-            trigger_ref=request.trigger_ref,
-            evaluated_world_revision=request.evaluated_world_revision,
-            evidence_refs=(source,),
-            proposed_changes=(
-                TypedChange(
-                    change_id="change:silence:appraisal",
-                    kind="appraisal_transition",
-                    target_id="appraisal:silence:model-hint",
-                    transition="activate",
-                    expected_entity_revision=0,
-                    evidence_refs=(source.ref_id,),
-                    payload=CanonicalTypedPayload.from_value(
-                        payload_schema="appraisal_transition.v1",
-                        value={
-                            "appraisal_id": "appraisal:silence:model-hint",
-                            "meaning_candidates": [
-                                {"meaning": "user_withdrawing", "confidence": 6000},
-                                {"meaning": "uncertainty", "confidence": 4000},
-                            ],
-                            "attribution": "situation",
-                            "severity": 3500,
-                            "confidence": 6000,
-                            "expiry": None,
-                        },
-                    ),
-                ),
-            ),
-            action_intents=(),
-            confidence=6_000,
-            brief_rationale="No answer for a while; she may be pulling back, or just busy.",
-            behavior_tendency="reflect",
-            stance="attend",
-            display_strategy="withhold",
-        )
-        return ModelOutput(
-            model_id="test-silence-appraisal",
-            model_version="v1",
-            raw_proposal=proposal.model_dump(mode="json"),
-        )
-
-
-class _UnavailableAppraisalModel:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def propose(self, request: ModelInput) -> ModelOutput:
-        del request
-        self.calls += 1
-        raise ConnectionError("provider unavailable")
-
-    async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput:
-        del request, failure_code
-        self.calls += 1
-        raise ConnectionError("provider unavailable")
-
-
 class _Transport:
     provider = "platform:test"
 
@@ -285,10 +185,6 @@ def _seed_event(event_type: str, payload: dict[str, object], suffix: str) -> Wor
 
 
 def _delivered_reply_world(
-    *,
-    appraisal_model=None,
-    silence_idle_seconds: int | None = None,
-    affect_owner: str | None = None,
 ):
     """One in-memory world where the companion's reply is already delivered."""
 
@@ -310,29 +206,6 @@ def _delivered_reply_world(
     capsules = context_capsule_compiler_from_ledger(ledger=ledger)
     reply_model = _ReplyModel()
     transport = _Transport()
-    worker = (
-        AppraisalProposalWorker(
-            compiler=AppraisalProposalCompiler(
-                ledger=ledger, world_appraisal_subject_ref="agent:companion"
-            ),
-            acceptance=AppraisalAcceptanceRuntime(ledger=ledger, batch_issuer=issuer),
-            actor="worker:appraisal",
-        )
-        if appraisal_model is not None
-        else None
-    )
-    silence_turn = (
-        SilenceAppraisalTurn(
-            ledger=ledger,
-            capsule_compiler=capsules,
-            deliberation=Deliberation(
-                router=_Router(), main_model=appraisal_model, quick_recovery=appraisal_model
-            ),
-            companion_actor_ref="agent:companion",
-        )
-        if appraisal_model is not None
-        else None
-    )
     runtime = WorldRuntime(
         world_id=WORLD_ID,
         ledger=ledger,
@@ -344,6 +217,10 @@ def _delivered_reply_world(
             ),
             companion_actor_ref="agent:companion",
         ),
+        # The .52 cutover folds every expression episode without a
+        # CharacterInterior inbound attempt.  Claiming the unified inbound
+        # state trigger keeps this fixture's reply on the production path.
+        inbound_state_owner="worker:silence:inbound-state",
         reply_policy=ReplyBudgetPolicy(
             account_id=account.account_id,
             amount_limit=10,
@@ -352,17 +229,12 @@ def _delivered_reply_world(
             recovery_policy="effect_once",
         ),
         reply_recorder=MinimalReplyAtomicRecorder(batch_issuer=issuer),
-        interaction_appraisal_owner="worker:appraisal" if worker is not None else None,
-        appraisal_worker=worker,
-        silence_appraisal_turn=silence_turn,
-        silence_appraisal_idle_seconds=silence_idle_seconds,
-        affect_deliberation_owner=affect_owner,
         action_executor=PlatformActionExecutor(
             payloads=LedgerAuthorizedPayloadReader(ledger=ledger), transport=transport
         ),
         action_pump_owner="pump:silence",
     )
-    return runtime, ledger, worker, silence_turn
+    return runtime, ledger, None, None
 
 
 async def _deliver_reply(runtime: WorldRuntime, *, message_id: str = "message:1") -> None:
@@ -553,7 +425,6 @@ async def test_reducer_rejects_a_silence_trigger_bound_to_a_non_receipt_event() 
             expected_deliberation_revision=projection.deliberation_revision,
         )
 
-
 @pytest.mark.asyncio
 async def test_reducer_rejects_a_silence_trigger_with_a_forged_identity() -> None:
     runtime, ledger, _worker, _turn = _delivered_reply_world()
@@ -574,131 +445,3 @@ async def test_reducer_rejects_a_silence_trigger_with_a_forged_identity() -> Non
             expected_world_revision=projection.world_revision,
             expected_deliberation_revision=projection.deliberation_revision,
         )
-
-
-# --- end to end -------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_silence_appraisal_end_to_end_accepts_and_opens_affect_trigger() -> None:
-    model = _SilenceAppraisalModel()
-    runtime, ledger, _worker, _turn = _delivered_reply_world(
-        appraisal_model=model,
-        silence_idle_seconds=IDLE_THRESHOLD,
-        affect_owner="worker:affect",
-    )
-    await _deliver_reply(runtime)
-    await _advance(runtime, ledger, seconds=IDLE_THRESHOLD * 2, tick_id="tick-idle")
-    receipt_ref = _receipt_event_id(ledger)
-
-    result = await runtime.drain_background_once()
-
-    assert result is not None
-    assert result.status == "processed"
-    assert result.work_status == "accepted"
-    assert model.requests and model.requests[0].trigger_ref == receipt_ref
-    assert model.requests[0].trigger_message is None
-    assert model.requests[0].trigger_evidence[0].evidence_kind == "committed_world_event"
-    assert '"unanswered_silence"' in model.requests[0].model_content_json
-    assert receipt_ref in model.requests[0].model_content_json
-    assert "no newer user message" in model.requests[0].model_content_json
-    assert "120 minutes" in model.requests[0].model_content_json
-    projection = ledger.project()
-    appraisal = projection.appraisals[0]
-    assert appraisal.subject_ref == "agent:companion"
-    assert appraisal.evidence_refs[0].ref_id == receipt_ref
-    assert appraisal.evidence_refs[0].evidence_type == "committed_world_event"
-    silence = next(
-        item
-        for item in projection.trigger_processes
-        if item.process_kind == "silence_appraisal"
-    )
-    assert silence.state == "terminal"
-    # The downstream affect trigger events open and claim for their owner in
-    # one commit, so the fresh trigger is non-terminal rather than bare open.
-    assert any(
-        item.process_kind == "affect_deliberation" and item.state != "terminal"
-        for item in projection.trigger_processes
-    )
-    # The anchor is consumed: another pass may not reopen the same silence.
-    assert await runtime.drain_background_once() is None or not any(
-        item.process_kind == "silence_appraisal" and item.state != "terminal"
-        for item in ledger.project().trigger_processes
-    )
-
-
-@pytest.mark.asyncio
-async def test_silence_appraisal_no_change_still_completes_the_trigger() -> None:
-    model = _NoChangeAppraisalModel()
-    runtime, ledger, worker, turn = _delivered_reply_world(
-        appraisal_model=model, silence_idle_seconds=IDLE_THRESHOLD
-    )
-    await _deliver_reply(runtime)
-    await _advance(runtime, ledger, seconds=IDLE_THRESHOLD * 2, tick_id="tick-idle")
-    opener = SilenceAppraisalTriggerOpener(
-        ledger=ledger, owner_id="worker:appraisal", idle_seconds_threshold=IDLE_THRESHOLD
-    )
-    assert await opener.open_once() is not None
-
-    result = await SilenceAppraisalTriggerRuntime(
-        ledger=ledger,
-        turn=turn,
-        worker=worker,
-        owner_id="worker:appraisal",
-    ).drain_one()
-
-    assert result.status == "processed"
-    assert result.work_status == "no_change"
-    projection = ledger.project()
-    assert not projection.appraisals
-    silence = next(
-        item
-        for item in projection.trigger_processes
-        if item.process_kind == "silence_appraisal"
-    )
-    assert silence.state == "terminal"
-
-
-@pytest.mark.asyncio
-async def test_silence_appraisal_provider_failure_remains_retryable() -> None:
-    model = _UnavailableAppraisalModel()
-    runtime, ledger, worker, turn = _delivered_reply_world(
-        appraisal_model=model,
-        silence_idle_seconds=IDLE_THRESHOLD,
-    )
-    assert worker is not None and turn is not None
-    await _deliver_reply(runtime)
-    await _advance(runtime, ledger, seconds=IDLE_THRESHOLD * 2, tick_id="tick-idle")
-    opener = SilenceAppraisalTriggerOpener(
-        ledger=ledger,
-        owner_id="worker:appraisal",
-        idle_seconds_threshold=IDLE_THRESHOLD,
-    )
-    assert await opener.open_once() is not None
-    trigger = SilenceAppraisalTriggerRuntime(
-        ledger=ledger,
-        turn=turn,
-        worker=worker,
-        owner_id="worker:appraisal",
-        lease_seconds=120,
-    )
-
-    failed = await trigger.drain_one()
-    duplicate = await trigger.drain_one()
-
-    assert failed.work_status == "technical_failure"
-    assert duplicate.status == "owned_elsewhere"
-    process = next(
-        item for item in ledger.project().trigger_processes if item.process_kind == "silence_appraisal"
-    )
-    assert process.state == "claimed"
-    first_attempt_ids = process.attempt_ids
-
-    await _advance(runtime, ledger, seconds=121, tick_id="tick-retry")
-    retried = await trigger.drain_one()
-
-    assert retried.work_status == "technical_failure"
-    process = next(
-        item for item in ledger.project().trigger_processes if item.process_kind == "silence_appraisal"
-    )
-    assert len(process.attempt_ids) == len(first_attempt_ids) + 1

@@ -10,9 +10,10 @@ from datetime import datetime
 import hashlib
 import json
 import re
+import unicodedata
 from typing import Annotated, Any, ClassVar, Literal, Self
 
-from pydantic import BaseModel, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, Field, TypeAdapter, field_validator, model_validator
 
 from .private_turn_state import PrivateTurnState
 from .schema_core import FrozenModel, PrivacyClass
@@ -60,6 +61,23 @@ CHANGE_TRANSITION_REGISTRY: dict[str, frozenset[str]] = {
             "compensate",
         }
     ),
+    # Live GoalAuthority writes use the V2 identity end to end.  The
+    # historical ``goal_transition`` entry remains replay-only for immutable
+    # proposal envelopes that predate the typed V2 authority family.
+    "v2_goal_transition": frozenset(
+        {
+            "open",
+            "revise",
+            "progress",
+            "pause",
+            "resume",
+            "block",
+            "unblock",
+            "complete",
+            "abandon",
+            "compensate",
+        }
+    ),
     "resource_transition": frozenset({"adjust", "clock_adjust", "compensate"}),
     "attention_transition": frozenset({"change", "expire", "compensate"}),
     "activity_transition": frozenset({"plan", "start", "pause", "resume", "complete", "abandon"}),
@@ -73,6 +91,7 @@ CHANGE_TRANSITION_REGISTRY: dict[str, frozenset[str]] = {
     "private_impression_transition": frozenset(
         {"open", "support", "contradict", "expire", "revise"}
     ),
+    "aspiration_transition": frozenset({"plant", "reinforce", "revise", "abandon"}),
     # A relationship-signal suggestion is deliberately not a relationship
     # mutation.  The later relationship compiler alone may bind it to an
     # accepted appraisal, derive identities, and decide whether it becomes a
@@ -173,6 +192,21 @@ PAYLOAD_CONTRACTS: dict[str, _PayloadContract] = {
             "completion_contract": dict,
         }
     ),
+    "v2_goal_transition": _PayloadContract(
+        {
+            "before_image": dict,
+            "after_image": dict,
+            "goal_id": str,
+            "outcome_ref": str,
+            "importance": int,
+            "progress": int,
+            "due": (str, type(None)),
+            "blockers": list,
+            "completion_contract": dict,
+            "reason_kind": str,
+            "reason_summary": str,
+        }
+    ),
     "resource_transition": _PayloadContract(
         {"resource_kind": str, "before": int, "delta": int, "after": int, "cause": str},
         {"clock_binding": dict},
@@ -238,12 +272,13 @@ PAYLOAD_CONTRACTS: dict[str, _PayloadContract] = {
         {
             "episode_id": str,
             "appraisal_change_refs": list,
-            "decay_config": dict,
-            "residue_config": dict,
         },
         {
             "component_deltas": list,
             "component_targets": list,
+            "decay_config": dict,
+            "residue_config": dict,
+            "resolution_summary": str,
         },
     ),
     "private_impression_transition": _PayloadContract(
@@ -253,6 +288,18 @@ PAYLOAD_CONTRACTS: dict[str, _PayloadContract] = {
             "confidence": int,
             "expiry": (str, type(None)),
             "contradiction": (dict, type(None)),
+        }
+    ),
+    "aspiration_transition": _PayloadContract(
+        {
+            "operation": str,
+            "aspiration_id": (str, type(None)),
+            "text": (str, type(None)),
+            "privacy_class": (str, type(None)),
+            "tension_summary": (str, type(None)),
+            "tension_source_refs": list,
+            "source_refs": list,
+            "reason_summary": str,
         }
     ),
     "relationship_signal": _PayloadContract(
@@ -278,7 +325,13 @@ PAYLOAD_CONTRACTS: dict[str, _PayloadContract] = {
     ),
     "thread_transition": _PayloadContract(
         {"thread_id": str, "thread_kind": str, "importance": int, "due": (str, type(None))},
-        {"resolution_ref": (str, type(None))},
+        {
+            "resolution_ref": (str, type(None)),
+            "expires_at": (str, type(None)),
+            "resolution_kind": (str, type(None)),
+            "cancellation_reason_code": (str, type(None)),
+            "reason_summary": str,
+        },
     ),
     "interaction_bid_transition": _PayloadContract(
         {
@@ -309,7 +362,11 @@ PAYLOAD_CONTRACTS: dict[str, _PayloadContract] = {
             "importance": int,
             "due": (str, type(None)),
             "persistence": str,
-        }
+        },
+        {
+            "release_reason_code": (str, type(None)),
+            "reason_summary": str,
+        },
     ),
     "memory_candidate_transition": _PayloadContract(
         {
@@ -320,7 +377,14 @@ PAYLOAD_CONTRACTS: dict[str, _PayloadContract] = {
             "retention_rationale": str,
             "privacy_ceiling": str,
             "retrieval_strength": int,
-        }
+        },
+        {
+            "source_descriptors": list,
+            "cue_kind": str,
+            "retention_rationales": list,
+            "salience": dict,
+            "reason_summary": str,
+        },
     ),
     "expression_plan_transition": _PayloadContract(
         {
@@ -550,6 +614,10 @@ class NamedFixedPoint(FrozenModel):
 
 
 class AffectComponentTarget(FrozenModel):
+    # Present only when the character is revising one exact component of an
+    # existing episode.  Opening and superseding transitions author a new
+    # component identity at the typed compiler seam instead.
+    component_id: BoundedRef | None = None
     dimension: BoundedLabel
     target_intensity_bp: int = Field(ge=1, le=10_000)
 
@@ -617,6 +685,27 @@ class GoalPayload(FrozenModel):
     due: datetime | None
     blockers: list[BoundedRef] = Field(max_length=32)
     completion_contract: TypedObjectBinding
+
+
+class V2GoalIntentPayload(GoalPayload):
+    """Character-authored lifecycle intent for the installed V2 GoalAuthority."""
+
+    before_image: TypedObjectBinding
+    after_image: TypedObjectBinding
+    outcome_ref: BoundedRef
+    reason_kind: BoundedLabel
+    reason_summary: str = Field(min_length=1, max_length=480)
+
+    @field_validator("reason_summary")
+    @classmethod
+    def reason_is_canonical_private_text(cls, value: str) -> str:
+        if (
+            value != value.strip()
+            or value != unicodedata.normalize("NFC", value)
+            or any(unicodedata.category(character) == "Cc" for character in value)
+        ):
+            raise ValueError("V2 Goal reason must be trimmed NFC text")
+        return value
 
 
 class ResourcePayload(FrozenModel):
@@ -711,15 +800,16 @@ class AffectPayload(FrozenModel):
     component_targets: list[AffectComponentTarget] | None = Field(
         default=None, min_length=1, max_length=32
     )
-    decay_config: TypedObjectBinding
-    residue_config: TypedObjectBinding
+    decay_config: TypedObjectBinding | None = None
+    residue_config: TypedObjectBinding | None = None
+    resolution_summary: str | None = Field(default=None, min_length=1, max_length=1_200)
 
     @model_validator(mode="after")
     def has_one_unambiguous_component_contract(self) -> Self:
-        if (self.component_deltas is None) == (self.component_targets is None):
-            raise ValueError(
-                "affect payload requires exactly one of component_deltas or component_targets"
-            )
+        if self.component_deltas is not None and self.component_targets is not None:
+            raise ValueError("affect payload cannot mix component deltas and targets")
+        if (self.decay_config is None) != (self.residue_config is None):
+            raise ValueError("affect payload decay and residue selectors must be paired")
         return self
 
 
@@ -734,6 +824,45 @@ class PrivateImpressionPayload(FrozenModel):
     confidence: int = Field(ge=0, le=10_000)
     expiry: datetime | None
     contradiction: SourceBinding | None
+
+
+class AspirationTransitionPayload(FrozenModel):
+    """Open-text direction change; shape only, never a motive taxonomy."""
+
+    operation: Literal["plant", "reinforce", "revise", "abandon"]
+    aspiration_id: BoundedRef | None = None
+    text: str | None = Field(default=None, min_length=1, max_length=240)
+    privacy_class: PrivacyClass | None = None
+    tension_summary: str | None = Field(default=None, min_length=1, max_length=480)
+    tension_source_refs: list[BoundedRef] = Field(default_factory=list, max_length=16)
+    source_refs: list[BoundedRef] = Field(min_length=1, max_length=16)
+    reason_summary: str = Field(min_length=1, max_length=480)
+
+    @model_validator(mode="after")
+    def operation_shape_is_closed(self) -> "AspirationTransitionPayload":
+        if len(self.source_refs) != len(set(self.source_refs)):
+            raise ValueError("aspiration source refs must be unique")
+        if len(self.tension_source_refs) != len(set(self.tension_source_refs)):
+            raise ValueError("aspiration tension source refs must be unique")
+        if not set(self.tension_source_refs).issubset(self.source_refs):
+            raise ValueError("aspiration tension refs must be selected source refs")
+        if (self.tension_summary is None) != (not self.tension_source_refs):
+            raise ValueError("aspiration tension needs both summary and source refs")
+        if self.operation == "plant":
+            if self.aspiration_id is not None or self.text is None or self.privacy_class is None:
+                raise ValueError("plant needs free text and privacy without an existing id")
+        elif self.operation == "revise":
+            if self.aspiration_id is None or self.text is None or self.privacy_class is None:
+                raise ValueError("revise needs an existing id and complete revised direction")
+        elif (
+            self.aspiration_id is None
+            or self.text is not None
+            or self.privacy_class is not None
+            or self.tension_summary is not None
+            or self.tension_source_refs
+        ):
+            raise ValueError("reinforce/abandon may not rewrite aspiration material")
+        return self
 
 
 class RelationshipSuggestedDeltasPayload(FrozenModel):
@@ -778,6 +907,12 @@ class ThreadPayload(FrozenModel):
     importance: int = Field(ge=0, le=10_000)
     due: datetime | None
     resolution_ref: BoundedRef | None = None
+    expires_at: datetime | None = None
+    resolution_kind: Literal["answered", "skipped"] | None = None
+    cancellation_reason_code: (
+        Literal["user_withdrew", "obsolete", "invalid", "duplicate"] | None
+    ) = None
+    reason_summary: str | None = Field(default=None, min_length=1, max_length=480)
 
 
 class InteractionBidPayload(FrozenModel):
@@ -806,6 +941,38 @@ class CommitmentPayload(FrozenModel):
     importance: int = Field(ge=0, le=10_000)
     due: datetime | None
     persistence: BoundedLabel
+    release_reason_code: (
+        Literal[
+            "user_withdrew",
+            "obsolete",
+            "precondition_failed",
+            "boundary_or_safety_conflict",
+            "operator_correction",
+        ]
+        | None
+    ) = None
+    reason_summary: str | None = Field(default=None, min_length=1, max_length=480)
+
+
+class MemorySourceDescriptorPayload(FrozenModel):
+    source_kind: Literal["fact", "experience", "terminal_thread"]
+    source_id: BoundedRef
+    source_entity_revision: int = Field(ge=1)
+    authority_event_ref: BoundedRef
+    authority_world_revision: int = Field(ge=1)
+    authority_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_values_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class MemorySaliencePayload(FrozenModel):
+    autobiographical_relevance_bp: int = Field(ge=0, le=10_000)
+    relationship_relevance_bp: int = Field(ge=0, le=10_000)
+    emotional_residue_bp: int = Field(ge=0, le=10_000)
+    unfinished_business_bp: int = Field(ge=0, le=10_000)
+    recurrence_bp: int = Field(ge=0, le=10_000)
+    novelty_bp: int = Field(ge=0, le=10_000)
+    future_utility_bp: int = Field(ge=0, le=10_000)
+    world_continuity_bp: int = Field(ge=0, le=10_000)
 
 
 class MemoryCandidatePayload(FrozenModel):
@@ -816,6 +983,28 @@ class MemoryCandidatePayload(FrozenModel):
     retention_rationale: str = Field(min_length=1, max_length=240)
     privacy_ceiling: PrivacyClass
     retrieval_strength: int = Field(ge=0, le=10_000)
+    # Optional only for immutable legacy envelope replay.  New
+    # CharacterInterior proposals populate the complete source-closed body and
+    # settlement refuses to infer missing semantic choices.
+    source_descriptors: list[MemorySourceDescriptorPayload] = Field(
+        default_factory=list, max_length=64
+    )
+    cue_kind: (
+        Literal[
+            "identity",
+            "relationship",
+            "boundary",
+            "unfinished_business",
+            "repeated_pattern",
+            "future_utility",
+            "emotional_residue",
+            "world_continuity",
+        ]
+        | None
+    ) = None
+    retention_rationales: list[BoundedLabel] = Field(default_factory=list, max_length=8)
+    salience: MemorySaliencePayload | None = None
+    reason_summary: str | None = Field(default=None, min_length=1, max_length=480)
 
 
 class EncryptedInlinePayload(FrozenModel):
@@ -832,9 +1021,9 @@ class ExpressionBeatDraft(FrozenModel):
     materialized_payload_ref: BoundedRef | None = None
     payload_hash: str = Field(pattern=_HASH_PATTERN)
     content_type: BoundedLabel
-    semantic_role: Literal[
-        "opening", "substantive", "challenge", "self_correction", "afterthought"
-    ] | None = None
+    semantic_role: (
+        Literal["opening", "substantive", "challenge", "self_correction", "afterthought"] | None
+    ) = None
     dependency_beat_ids: list[BoundedRef] = Field(max_length=32)
     delay_window: DueWindow | None
     shadow_delay_window: DueWindow | None = None
@@ -987,9 +1176,7 @@ class ExpressionPlanPayload(FrozenModel):
     beat_drafts: list[ExpressionBeatDraft] = Field(min_length=1, max_length=32)
     ordering_policy: BoundedLabel
     terminal_policy: BoundedLabel
-    cadence_profile: Literal[
-        "rapid", "conversational", "hesitant", "escalating"
-    ] | None = None
+    cadence_profile: Literal["rapid", "conversational", "hesitant", "escalating"] | None = None
     cadence_policy_version: Literal["expression-cadence.1"] | None = None
     recorded_cadence_mode: Literal["off", "shadow", "on"] | None = None
     recorded_draw_refs: list[BoundedRef] = Field(default_factory=list, max_length=7)
@@ -1063,6 +1250,7 @@ PAYLOAD_MODEL_REGISTRY: dict[str, type[FrozenModel]] = {
     "experience_transition": ExperiencePayload,
     "character_core_revision": CharacterCorePayload,
     "goal_transition": GoalPayload,
+    "v2_goal_transition": V2GoalIntentPayload,
     "resource_transition": ResourcePayload,
     "attention_transition": AttentionPayload,
     "activity_transition": ActivityPayload,
@@ -1074,6 +1262,7 @@ PAYLOAD_MODEL_REGISTRY: dict[str, type[FrozenModel]] = {
     "appraisal_transition": AppraisalPayload,
     "affect_transition": AffectPayload,
     "private_impression_transition": PrivateImpressionPayload,
+    "aspiration_transition": AspirationTransitionPayload,
     "relationship_signal": RelationshipSignalPayload,
     "relationship_adjustment": RelationshipAdjustmentPayload,
     "boundary_transition": BoundaryPayload,
@@ -1453,9 +1642,9 @@ class DecisionProposal(ProposalEnvelope):
     impulse_summary: str | None = Field(
         default=None, min_length=1, max_length=240, exclude_if=lambda value: value is None
     )
-    proactive_grounding_outcome: Literal[
-        "not_required", "accepted", "corrected", "rejected"
-    ] | None = Field(default=None, exclude_if=lambda value: value is None)
+    proactive_grounding_outcome: (
+        Literal["not_required", "accepted", "corrected", "rejected"] | None
+    ) = Field(default=None, exclude_if=lambda value: value is None)
     response_expectation_assessment: ResponseExpectationAssessmentDraft | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -1468,12 +1657,15 @@ class DecisionProposal(ProposalEnvelope):
     turn_posture: Literal["yield", "continue", "interject", "supersede"] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
-    episode_disposition: Literal[
-        "complete_without_more",
-        "append",
-        "cancel_pending",
-        "supersede_pending",
-    ] | None = Field(default=None, exclude_if=lambda value: value is None)
+    episode_disposition: (
+        Literal[
+            "complete_without_more",
+            "append",
+            "cancel_pending",
+            "supersede_pending",
+        ]
+        | None
+    ) = Field(default=None, exclude_if=lambda value: value is None)
     conversation_thread_changes: tuple[ReferencedSummary, ...] = Field(default=(), max_length=32)
 
     @model_validator(mode="after")

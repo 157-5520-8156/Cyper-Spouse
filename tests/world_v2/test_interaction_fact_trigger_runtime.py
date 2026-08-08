@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 import hashlib
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,7 +18,6 @@ from companion_daemon.world_v2.fact_memory_decision import (
     fact_memory_decision_hash,
 )
 from companion_daemon.world_v2.fact_memory_draft import FactMemoryRetentionDraft
-from companion_daemon.world_v2.fact_memory_draft import FactMemoryDraftAdapter
 from companion_daemon.world_v2.fact_trigger import (
     fact_memory_decision_event_id,
     interaction_fact_decision_event_id,
@@ -44,6 +44,7 @@ from companion_daemon.world_v2.interaction_fact_decision import (
 from companion_daemon.world_v2.schemas import Observation, WorldEvent
 from companion_daemon.world_v2.schemas import MEMORY_SALIENCE_MATRIX_DIGEST, MemorySalienceVector
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
+from character_interior import canonical_inner_decision
 
 
 NOW = datetime(2026, 7, 15, 19, 0, tzinfo=UTC)
@@ -294,6 +295,49 @@ class _ChangingMemoryChat:
                     "world_continuity_bp": 8000,
                 },
             }
+        )
+
+
+class _MemoryInterior:
+    """Test CharacterInterior seam with the same one-correction contract."""
+
+    def __init__(self, chat) -> None:  # type: ignore[no-untyped-def]
+        self.chat = chat
+        self.opportunities = []
+
+    async def consider(self, opportunity):  # type: ignore[no-untyped-def]
+        self.opportunities.append(opportunity)
+        raw = await self.chat.complete([], temperature=0.15)
+        try:
+            payload = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            raw = await self.chat.complete([], temperature=0.15)
+            try:
+                payload = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                return SimpleNamespace(
+                    status="technical_failure",
+                    failure_code="invalid_output",
+                    decision=None,
+                    author_lineage=None,
+                    inner_turn_id="inner-turn:test:technical-failure",
+                )
+        manifest = opportunity.capability_manifest
+        assert manifest is not None
+        return canonical_inner_decision(
+            opportunity,
+            decision={
+                "contract": "character-interior-purpose-decision.1",
+                "purpose": opportunity.purpose,
+                "source_refs": list(opportunity.source_refs),
+                "capability_ref": manifest.capability_ref,
+                "capability_payload_hash": manifest.payload_hash,
+                "payload": {
+                    "contract": "character-interior-fact-memory-retention.1",
+                    **payload,
+                },
+            },
+            identity=f"fact-memory:{len(self.opportunities)}:{self.chat.model}",
         )
 
 
@@ -1084,7 +1128,8 @@ async def test_conflicting_single_slot_fact_completes_instead_of_poisoning(tmp_p
         ledger=ledger,
         acceptance=FactV2AcceptanceRuntime.compose(ledger=ledger, batch_issuer=issuer),
         adapter=FactObservationProposalAdapter(model=_SingleSlotChat()),
-        memory_adapter=FactMemoryDraftAdapter(model=_RetainingMemoryChat()),
+        character_interior=_MemoryInterior(_RetainingMemoryChat()),
+        memory_actor_ref="character:zhizhi",
         memory_lifecycle=FactMemoryCandidateLifecycle(
             ledger=ledger,
             actor="worker:interaction-memory",
@@ -1740,6 +1785,7 @@ async def test_accepted_fact_memory_resumes_a_pending_candidate_after_crash(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("supersede_fact", [False, True])
+@pytest.mark.asyncio
 async def test_fact_memory_settles_proposal_only_crash_window(
     tmp_path,
     monkeypatch,
@@ -1925,6 +1971,7 @@ async def test_fact_memory_retain_decision_is_rejoined_after_crash(
         expected_deliberation_revision=0,
     )
     memory_chat = _ChangingMemoryChat()
+    interior = _MemoryInterior(memory_chat)
     lifecycle = FactMemoryCandidateLifecycle(
         ledger=ledger,
         actor="worker:interaction-memory",
@@ -1934,7 +1981,8 @@ async def test_fact_memory_retain_decision_is_rejoined_after_crash(
         ledger=ledger,
         acceptance=FactV2AcceptanceRuntime.compose(ledger=ledger, batch_issuer=issuer),
         adapter=FactObservationProposalAdapter(model=_FactChat()),
-        memory_adapter=FactMemoryDraftAdapter(model=memory_chat),
+        character_interior=interior,
+        memory_actor_ref="character:zhizhi",
         memory_lifecycle=lifecycle,
         owner_id="worker:interaction-fact",
     )
@@ -1949,23 +1997,40 @@ async def test_fact_memory_retain_decision_is_rejoined_after_crash(
     interrupted = ledger.project()
     fact = interrupted.facts[0]
     trigger_id = interrupted.trigger_processes[0].trigger_id
-    assert ledger.lookup_event_commit(
+    stored_decision = ledger.lookup_event_commit(
         fact_memory_decision_event_id(
             trigger_id=trigger_id,
             fact_authority_event_ref=fact.origin.accepted_event_ref,
         )
-    ) is not None
+    )
+    assert stored_decision is not None
+    durable_decision = FactMemoryDecisionRecordedPayload.model_validate_json(
+        stored_decision[0].payload_json
+    )
+    assert durable_decision.character_interior_model_result is not None
+    assert (
+        durable_decision.character_interior_model_result.audit_contract
+        == "model-result-audit.7"
+    )
     assert memory_chat.calls == 1
+    assert len(interior.opportunities) == 1
+    assert interior.opportunities[0].purpose == "fact_memory_retention"
+    assert (
+        interior.opportunities[0].capability_manifest.payload["source_kind"]
+        == "verified_user_fact"
+    )
 
     monkeypatch.setattr(lifecycle, "accept", original_accept)
     assert (await runtime.drain_one()).work_status == "no_change"
     assert memory_chat.calls == 1
+    assert len(interior.opportunities) == 1
     assert ledger.project().memory_candidates[0].values.status == "active"
     ledger.close()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("local_retain", [True, False])
+@pytest.mark.asyncio
 async def test_fact_memory_decision_cas_loser_uses_ledger_winner(
     tmp_path,
     monkeypatch,
@@ -1994,7 +2059,8 @@ async def test_fact_memory_decision_cas_loser_uses_ledger_winner(
         ledger=ledger,
         acceptance=FactV2AcceptanceRuntime.compose(ledger=ledger, batch_issuer=issuer),
         adapter=FactObservationProposalAdapter(model=_FactChat()),
-        memory_adapter=FactMemoryDraftAdapter(model=memory_chat),
+        character_interior=_MemoryInterior(memory_chat),
+        memory_actor_ref="character:zhizhi",
         memory_lifecycle=FactMemoryCandidateLifecycle(
             ledger=ledger,
             actor="worker:interaction-memory",
@@ -2111,7 +2177,8 @@ async def test_fact_memory_no_change_decision_is_rejoined_after_crash(
         ledger=ledger,
         acceptance=FactV2AcceptanceRuntime.compose(ledger=ledger, batch_issuer=issuer),
         adapter=FactObservationProposalAdapter(model=_FactChat()),
-        memory_adapter=FactMemoryDraftAdapter(model=memory_chat),
+        character_interior=_MemoryInterior(memory_chat),
+        memory_actor_ref="character:zhizhi",
         memory_lifecycle=FactMemoryCandidateLifecycle(
             ledger=ledger,
             actor="worker:interaction-memory",
@@ -2156,7 +2223,8 @@ async def test_corrected_fact_not_retained_does_not_let_system_forget_old_memory
         ledger=ledger,
         acceptance=FactV2AcceptanceRuntime.compose(ledger=ledger, batch_issuer=issuer),
         adapter=FactObservationProposalAdapter(model=_SingleSlotChat()),
-        memory_adapter=FactMemoryDraftAdapter(model=memory_chat),
+        character_interior=_MemoryInterior(memory_chat),
+        memory_actor_ref="character:zhizhi",
         memory_lifecycle=lifecycle,
         owner_id="worker:interaction-fact",
     )
@@ -2264,7 +2332,8 @@ async def test_memory_technical_failure_preserves_fact_trigger_for_retry(tmp_pat
         ledger=ledger,
         acceptance=FactV2AcceptanceRuntime.compose(ledger=ledger, batch_issuer=issuer),
         adapter=FactObservationProposalAdapter(model=_FactChat()),
-        memory_adapter=FactMemoryDraftAdapter(model=memory_chat),
+        character_interior=_MemoryInterior(memory_chat),
+        memory_actor_ref="character:zhizhi",
         memory_lifecycle=FactMemoryCandidateLifecycle(
             ledger=ledger,
             actor="worker:interaction-memory",

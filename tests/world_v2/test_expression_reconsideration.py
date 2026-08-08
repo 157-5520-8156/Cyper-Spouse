@@ -3,14 +3,10 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 import json
-from types import SimpleNamespace
 
 import pytest
 
 from companion_daemon.world_v2.action_pump import ActionPump
-from companion_daemon.world_v2.chat_model_deliberation_adapter import (
-    CompanionIdentityFrame,
-)
 from companion_daemon.world_v2.expression_reconsideration import (
     expression_beat_is_gated,
     expression_reconsideration_events_for_observation,
@@ -21,13 +17,7 @@ from companion_daemon.world_v2.expression_reconsideration_runtime import (
     ExpressionReconsiderationDecision,
     ExpressionReconsiderationRuntime,
 )
-from companion_daemon.world_v2.expression_reconsideration_model_adapter import (
-    AuditedReplacementReconsiderationReviewer,
-    ExpressionReconsiderationChatModelAdapter,
-)
 from companion_daemon.world_v2.errors import ConcurrencyConflict
-from companion_daemon.world_v2.private_turn_state import PrivateTurnState
-from companion_daemon.world_v2.proposal_envelope import MinimalProposal
 from companion_daemon.world_v2.reducers import ReducerState, make_projection, reduce_event
 from companion_daemon.world_v2.runtime import WorldRuntime
 from companion_daemon.world_v2.schemas import (
@@ -973,221 +963,6 @@ async def test_gate_on_already_dispatched_action_completes_moot_without_a_model_
     assert not expression_beat_is_gated(
         projection=projection, plan_id="plan:expression:1", beat_id="beat:expression:2"
     )
-
-
-class _DecisionModel:
-    model = "test-decision"
-
-    def __init__(self, raw: str) -> None:
-        self.raw = raw
-        self.calls: list[list[dict[str, str]]] = []
-
-    async def complete(self, messages, *, temperature: float):
-        assert temperature == 0.25
-        self.calls.append(messages)
-        return self.raw
-
-
-@pytest.mark.asyncio
-async def test_chat_model_adapter_cannot_inject_new_payload_or_unbound_replacement() -> None:
-    observation, source_event = _observation()
-    trigger = expression_reconsideration_trigger_event(
-        world_id=WORLD_ID, source_event=source_event, observation=observation,
-        plan_id="plan:expression:1", beat_id="beat:expression:2",
-    ).payload()["process"]
-    process = TriggerProcess.model_validate_json(json.dumps(trigger))
-    accepted = await ExpressionReconsiderationChatModelAdapter(
-        model=_DecisionModel('{"disposition":"cancel"}')
-    ).review(
-        process=process,
-        observation_event=source_event,
-        cursor=ProjectionCursor(world_revision=1, deliberation_revision=1, ledger_sequence=2),
-    )
-
-    assert accepted.disposition == "cancel"
-    assert accepted.rationale_ref and accepted.rationale_ref.startswith("model-decision:")
-
-
-@pytest.mark.asyncio
-async def test_replacement_lookup_uses_the_same_pinned_cursor_as_the_role_decision() -> None:
-    observation, source_event = _observation()
-    trigger = expression_reconsideration_trigger_event(
-        world_id=WORLD_ID,
-        source_event=source_event,
-        observation=observation,
-        plan_id="plan:expression:1",
-        beat_id="beat:expression:2",
-    ).payload()["process"]
-    process = TriggerProcess.model_validate_json(json.dumps(trigger))
-    cursor = ProjectionCursor(world_revision=1, deliberation_revision=1, ledger_sequence=2)
-    projected_at: list[ProjectionCursor] = []
-    old_private_turn_state = PrivateTurnState(
-        inner_state_summary="刚才本来想把自己的近况说完，但新消息让我重新衡量是否还合适。",
-        attended_source_refs=(
-            "dialogue:expression:previous",
-            "experience:self:shift-1",
-        ),
-    )
-    old_proposal = MinimalProposal(
-        proposal_id="proposal:1",
-        trigger_ref="event:observation:previous",
-        evaluated_world_revision=1,
-        confidence=7000,
-        brief_rationale="保留先前表达选择的同轮审计。",
-        private_turn_state=old_private_turn_state,
-        source_model_result="model-result:previous",
-        response_text="这条是尚未发出的旧表达。",
-        stance="defer",
-    )
-
-    def project_at(requested: ProjectionCursor):
-        projected_at.append(requested)
-        return SimpleNamespace(
-            proposal_audits=(
-                SimpleNamespace(
-                    event_ref="event:proposal:old-expression",
-                    trigger_ref=old_proposal.trigger_ref,
-                    proposal_id=old_proposal.proposal_id,
-                    proposal_json=old_proposal.model_dump_json(),
-                ),
-                SimpleNamespace(
-                    event_ref="event:proposal:new-observation",
-                    trigger_ref=source_event.event_id,
-                    proposal_id="proposal:new-observation",
-                ),
-            ),
-            expression_plan_manifests=(
-                SimpleNamespace(proposal_id="proposal:new-observation"),
-            ),
-            expression_beats=(
-                SimpleNamespace(
-                    beat_id="beat:expression:2",
-                    proposal_id=old_proposal.proposal_id,
-                    payload_ref="payload:expression:pending",
-                    event_ref="event:beat:2",
-                ),
-            ),
-            stored_message_payloads=(
-                SimpleNamespace(
-                    payload_ref="payload:expression:previous",
-                    text="上一条已经发出的消息。",
-                ),
-                SimpleNamespace(
-                    payload_ref="payload:expression:pending",
-                    text="这条是尚未发出的旧表达。",
-                ),
-            ),
-        )
-
-    model = _DecisionModel('{"disposition":"merge"}')
-
-    async def role_context_at(
-        requested: ProjectionCursor,
-        requested_event: WorldEvent,
-        requested_projection: object,
-    ) -> dict[str, object]:
-        assert requested == cursor
-        assert requested_event == source_event
-        assert requested_projection is not None
-        return {
-            "current_self_state": {
-                "contract": "current-self-state.1",
-                "affect": [
-                    {
-                        "components": [{"dimension": "warmth", "intensity_bp": 6400}],
-                        "source_ref": "affect-episode:accepted:1",
-                    }
-                ],
-                "relationship": [
-                    {
-                        "stage": "close_friend",
-                        "source_ref": "relationship:user:test",
-                    }
-                ],
-                "recent_self_experiences": {
-                    "availability": "available",
-                    "items": [
-                        {
-                            "summary": "下午刚从实习下班。",
-                            "source_ref": "experience:self:shift-1",
-                        }
-                    ],
-                },
-                "source_refs": [
-                    "affect-episode:accepted:1",
-                    "experience:self:shift-1",
-                    "relationship:user:test",
-                ],
-            },
-            "recent_dialogue": {
-                "availability": "available",
-                "items": [
-                    {
-                        "value": {
-                            "speaker_ref": "user:test",
-                            "text": "等等，我刚刚还有话想说。",
-                        },
-                        "source_ref": "dialogue:observation:user-interjection:1",
-                    },
-                    {
-                        "value": {
-                            "speaker_ref": "companion:test",
-                            "text": "上一条已经发出的消息。",
-                        },
-                        "source_ref": "dialogue:expression:previous",
-                    },
-                ],
-            },
-        }
-
-    decision = await AuditedReplacementReconsiderationReviewer(
-        reviewer=ExpressionReconsiderationChatModelAdapter(
-            model=model
-        ),
-        project_at=project_at,
-        identity_frame=CompanionIdentityFrame(
-            companion_name="枝枝",
-            counterpart_name="geoff",
-            personality_frame="有自己的生活和判断。",
-        ),
-        role_context_at=role_context_at,
-    ).review(process=process, observation_event=source_event, cursor=cursor)
-
-    assert projected_at == [cursor]
-    assert decision.replacement_plan_ref == "event:proposal:new-observation"
-    supplied = json.loads(model.calls[0][1]["content"])
-    context = supplied["conversation_context"]
-    assert context["identity_frame"]["value"]["companion_name"] == "枝枝"
-    assert context["identity_frame"]["source_refs"]["stable_identity"].startswith(
-        "identity-frame:sha256:"
-    )
-    assert context["current_self_state"]["affect"][0]["source_ref"] == (
-        "affect-episode:accepted:1"
-    )
-    assert context["current_self_state"]["relationship"][0]["stage"] == "close_friend"
-    assert context["current_self_state"]["recent_self_experiences"]["items"][0][
-        "source_ref"
-    ] == "experience:self:shift-1"
-    assert {
-        item["value"]["speaker_ref"] for item in context["recent_dialogue"]["items"]
-    } == {"user:test", "companion:test"}
-    assert context["old_pending_expression"] == {
-        "beat_id": "beat:expression:2",
-        "payload_ref": "payload:expression:pending",
-        "source_ref": "event:beat:2",
-        "text": "这条是尚未发出的旧表达。",
-    }
-    assert context["old_private_turn_state"] == {
-        "value": old_private_turn_state.model_dump(mode="json"),
-        "proposal_id": old_proposal.proposal_id,
-        "proposal_ref": "event:proposal:old-expression",
-        "authority": "turn_local_audit_only",
-        "fact_authority": False,
-    }
-    with pytest.raises(ValueError, match="unsupported"):
-        ExpressionReconsiderationChatModelAdapter._decision(
-            '{"disposition":"new_beat","inline_text":"you should not see this"}'
-        )
 
 
 @pytest.mark.asyncio

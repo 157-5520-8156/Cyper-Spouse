@@ -7,7 +7,7 @@ does not accept a proposal, interpret an uncommitted message, or call a model.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 import hashlib
 import json
 from typing import Literal
@@ -19,6 +19,7 @@ from .decision_proposal_authority import DecisionProposalAuthorityReader
 from .event_identity import domain_idempotency_key
 from .ledger import LedgerPort
 from .life_events import WorldOccurrenceSettledPayload
+from .perception import PerceptionResultAcceptedPayload, perception_result_trigger_id
 from .schema_core import EvidenceRef, FrozenModel
 from .schemas import (
     AppraisalHypothesis,
@@ -34,9 +35,8 @@ from .schemas import (
 
 _CONTRACT = "appraisal-proposal-compiler.1"
 _POLICY_REFS = ("policy:appraisal-v1",)
-_MATRIX_VERSION = "appraisal-matrix.1"
+_MATRIX_VERSION = "appraisal-matrix.2"
 _CLUSTERING_POLICY_VERSION = "source-clustering.1"
-_ALLOWED_MEANINGS = set(AppraisalHypothesis.model_fields["meaning"].annotation.__args__)
 _ALLOWED_ATTRIBUTIONS = set(AppraisalHypothesis.model_fields["attribution"].annotation.__args__)
 _EVIDENCE_TYPE_BY_KIND = {
     "committed_fact": "committed_fact",
@@ -69,6 +69,7 @@ class AppraisalProposalCompilation(FrozenModel):
     source_proposal_event_ref: str
     typed_proposal_id: str | None = None
     commit: CommitResult | None = None
+    acceptance_cursor: ProjectionCursor | None = None
 
 
 class AppraisalProposalCompiler:
@@ -99,6 +100,75 @@ class AppraisalProposalCompiler:
         authority = self._reader.read(
             self._reader.pin(world_id=world_id, cursor=cursor, proposal_id=proposal_id)
         )
+        return self._record_authority(
+            authority=authority,
+            commit_cursor=cursor,
+            identity_world_revision=None,
+        )
+
+    def record_rebased(
+        self,
+        *,
+        world_id: str,
+        audit_cursor: ProjectionCursor,
+        current_cursor: ProjectionCursor,
+        proposal_id: str,
+    ) -> AppraisalProposalCompilation:
+        """Compile the same audited Appraisal after its Expression settled.
+
+        The generic role decision is authenticated only at ``audit_cursor``.
+        The current cursor is authority solely for deterministic compilation,
+        and the source interaction trigger must still be claimed there.
+        """
+
+        if (
+            current_cursor.ledger_sequence < audit_cursor.ledger_sequence
+            or current_cursor.world_revision < audit_cursor.world_revision
+            or current_cursor.deliberation_revision < audit_cursor.deliberation_revision
+        ):
+            raise AppraisalProposalCompilerError("rebase_cursor_precedes_audit")
+        authority = self._reader.read(
+            self._reader.pin(
+                world_id=world_id,
+                cursor=audit_cursor,
+                proposal_id=proposal_id,
+            )
+        )
+        projection = self._ledger.project_at(current_cursor)
+        source_change_ids = {
+            item.change_id
+            for item in authority.proposal.proposed_changes
+            if item.kind == "appraisal_transition"
+        }
+        existing = self._existing_rebased_candidate(
+            projection=projection,
+            source_proposal_event_ref=authority.audit.event_ref,
+            source_change_ids=source_change_ids,
+            current_cursor=current_cursor,
+        )
+        if existing is not None:
+            candidate, commit, acceptance_cursor = existing
+            return AppraisalProposalCompilation(
+                status="candidate_recorded",
+                source_proposal_id=authority.proposal.proposal_id,
+                source_proposal_event_ref=authority.audit.event_ref,
+                typed_proposal_id=candidate.proposal_id,
+                commit=commit,
+                acceptance_cursor=acceptance_cursor,
+            )
+        return self._record_authority(
+            authority=authority,
+            commit_cursor=current_cursor,
+            identity_world_revision=current_cursor.world_revision,
+        )
+
+    def _record_authority(
+        self,
+        *,
+        authority,
+        commit_cursor: ProjectionCursor,
+        identity_world_revision: int | None,
+    ) -> AppraisalProposalCompilation:
         changes = tuple(
             item for item in authority.proposal.proposed_changes if item.kind == "appraisal_transition"
         )
@@ -113,13 +183,14 @@ class AppraisalProposalCompiler:
         change = changes[0]
         if change.transition != "activate":
             raise AppraisalProposalCompilerError("transition_not_implemented")
-        projection = self._ledger.project_at(cursor)
+        projection = self._ledger.project_at(commit_cursor)
         source_event = self._event(authority.audit.trigger_ref)
         typed = self._compile_activate(
             authority=authority,
             change=change,
             projection=projection,
             source_event=source_event,
+            identity_world_revision=identity_world_revision,
         )
         event = self._proposal_event(
             typed=typed,
@@ -129,11 +200,11 @@ class AppraisalProposalCompiler:
         )
         commit = self._ledger.commit_at_cursor(
             [event],
-            expected_cursor=cursor,
+            expected_cursor=commit_cursor,
             commit_id="commit:appraisal-proposal-compiler:"
             + _digest(
                 {
-                    "cursor": cursor.model_dump(mode="json"),
+                    "cursor": commit_cursor.model_dump(mode="json"),
                     "source": authority.audit.event_ref,
                     "typed_proposal_id": typed.proposal_id,
                 }
@@ -145,10 +216,88 @@ class AppraisalProposalCompiler:
             source_proposal_event_ref=authority.audit.event_ref,
             typed_proposal_id=typed.proposal_id,
             commit=commit,
+            acceptance_cursor=ProjectionCursor(
+                world_revision=commit.world_revision,
+                deliberation_revision=commit.deliberation_revision,
+                ledger_sequence=commit.ledger_sequence,
+            ),
         )
 
-    def _compile_activate(self, *, authority, change, projection, source_event: WorldEvent):
-        """Bind one appraisal candidate to its claimed message, settlement, silence, or disruption trigger."""
+    def _existing_rebased_candidate(
+        self,
+        *,
+        projection,
+        source_proposal_event_ref: str,
+        source_change_ids: set[str],
+        current_cursor: ProjectionCursor,
+    ) -> tuple[AppraisalProposalProjection, CommitResult, ProjectionCursor] | None:
+        matches: list[tuple[AppraisalProposalProjection, CommitResult, bool]] = []
+        for candidate in projection.appraisal_proposals:
+            if candidate.change_id not in source_change_ids:
+                continue
+            event_id = "event:appraisal-proposal-compiled:" + _digest(
+                {
+                    "world_id": self._ledger.world_id,
+                    "proposal_id": candidate.proposal_id,
+                }
+            )
+            located = self._ledger.lookup_event_commit(event_id)
+            if (
+                located is None
+                or located[0].event_type != "ProposalRecorded"
+                or located[0].causation_id != source_proposal_event_ref
+            ):
+                continue
+            mutation = json.loads(candidate.proposed_mutation.payload_json)
+            appraisal = mutation.get("appraisal")
+            origin = appraisal.get("origin") if isinstance(appraisal, dict) else None
+            accepted_event_ref = (
+                origin.get("accepted_event_ref") if isinstance(origin, dict) else None
+            )
+            accepted = (
+                isinstance(accepted_event_ref, str)
+                and self._ledger.lookup_event_commit(accepted_event_ref) is not None
+            )
+            matches.append((candidate, located[1], accepted))
+        accepted_matches = tuple(item for item in matches if item[2])
+        if len(accepted_matches) > 1:
+            raise AppraisalProposalCompilerError("rebased_candidate_accepted_ambiguous")
+        selected = (
+            accepted_matches[0]
+            if accepted_matches
+            else next(
+                (
+                    item
+                    for item in matches
+                    if item[0].evaluated_world_revision == current_cursor.world_revision
+                ),
+                None,
+            )
+        )
+        if selected is None:
+            return None
+        candidate, commit, accepted = selected
+        acceptance_cursor = (
+            ProjectionCursor(
+                world_revision=commit.world_revision,
+                deliberation_revision=commit.deliberation_revision,
+                ledger_sequence=commit.ledger_sequence,
+            )
+            if accepted
+            else current_cursor
+        )
+        return candidate, commit, acceptance_cursor
+
+    def _compile_activate(
+        self,
+        *,
+        authority,
+        change,
+        projection,
+        source_event: WorldEvent,
+        identity_world_revision: int | None = None,
+    ):
+        """Bind one appraisal candidate to its exact claimed stimulus trigger."""
 
         if source_event.event_type == "ObservationRecorded":
             observation = self._observation(source_event)
@@ -233,6 +382,47 @@ class AppraisalProposalCompiler:
             # is the appraised subject, mirroring the silence lane.
             subject_ref = self._companion_subject(projection)
             source_cluster_ref = "plan-disruption:" + _digest({"event": source_event.event_id})
+        elif source_event.event_type == "PerceptionResultAccepted":
+            result = PerceptionResultAcceptedPayload.model_validate_json(
+                source_event.payload_json
+            ).result
+            trigger = next(
+                (
+                    item
+                    for item in projection.trigger_processes
+                    if item.process_kind == "perception_result_deliberation"
+                    and item.source_evidence_ref == source_event.event_id
+                ),
+                None,
+            )
+            if (
+                trigger is None
+                or trigger.state != "claimed"
+                or trigger.trigger_id
+                != perception_result_trigger_id(
+                    world_id=self._ledger.world_id,
+                    result_id=result.result_id,
+                )
+                or trigger.trigger_ref != f"perception-result:{result.result_id}"
+            ):
+                raise AppraisalProposalCompilerError("source_trigger_not_claimed")
+            request = next(
+                (
+                    item
+                    for item in projection.perception_requests
+                    if item.request_id == result.request_id
+                ),
+                None,
+            )
+            if request is None:
+                raise AppraisalProposalCompilerError("perception_request_missing")
+            observation = self._observation(self._event(request.source_event_ref))
+            source_evidence_ref = source_event.event_id
+            source_evidence_type = "committed_world_event"
+            subject_ref = observation.actor
+            source_cluster_ref = "perception-result:" + _digest(
+                {"event": source_event.event_id, "request": request.request_id}
+            )
         else:
             raise AppraisalProposalCompilerError("trigger_source_unsupported")
         return self._compile_bound_activate(
@@ -244,6 +434,7 @@ class AppraisalProposalCompiler:
             source_evidence_type=source_evidence_type,
             subject_ref=subject_ref,
             source_cluster_ref=source_cluster_ref,
+            identity_world_revision=identity_world_revision,
         )
 
     def _compile_bound_activate(
@@ -257,6 +448,7 @@ class AppraisalProposalCompiler:
         source_evidence_type: str,
         subject_ref: str,
         source_cluster_ref: str,
+        identity_world_revision: int | None,
     ):
         if change.expected_entity_revision != 0:
             raise AppraisalProposalCompilerError("activate_requires_new_entity")
@@ -269,13 +461,14 @@ class AppraisalProposalCompiler:
             raise AppraisalProposalCompilerError("source_evidence_missing")
         if source_evidence.evidence_type != source_evidence_type:
             raise AppraisalProposalCompilerError("source_evidence_kind_invalid")
-        identity = _digest(
-            {
-                "source_proposal_event": authority.audit.event_ref,
-                "source_change": change.change_id,
-                "contract": _CONTRACT,
-            }
-        )
+        identity_material: dict[str, object] = {
+            "source_proposal_event": authority.audit.event_ref,
+            "source_change": change.change_id,
+            "contract": _CONTRACT,
+        }
+        if identity_world_revision is not None:
+            identity_material["rebase_world_revision"] = identity_world_revision
+        identity = _digest(identity_material)
         proposal_id = f"proposal:appraisal-compiled:{identity}"
         transition_id = f"transition:appraisal-compiled:{identity}"
         mutation_event_id = appraisal_mutation_event_id(
@@ -386,8 +579,17 @@ class AppraisalProposalCompiler:
         expiry = raw["expiry"]
         if expiry is None:
             return at + timedelta(hours=2)
+        if isinstance(expiry, str):
+            try:
+                expiry = datetime.fromisoformat(expiry)
+            except ValueError as exc:
+                raise AppraisalProposalCompilerError("expiry_invalid") from exc
         if expiry <= at:
-            raise AppraisalProposalCompilerError("expiry_not_future")
+            # Models frequently emit a stale/current-moment expiry despite the
+            # future-only contract; treat it as the default window instead of
+            # failing the whole appraisal (a technical failure is never a
+            # character no-change).
+            return at + timedelta(hours=2)
         return expiry
 
     @staticmethod
@@ -407,7 +609,13 @@ class AppraisalProposalCompiler:
         candidates = raw["meaning_candidates"]
         if not candidates:
             raise AppraisalProposalCompilerError("meanings_missing")
-        if any(item["meaning"] not in _ALLOWED_MEANINGS for item in candidates):
+        if any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("meaning"), str)
+            or not 1 <= len(item["meaning"]) <= 128
+            or item["meaning"] != item["meaning"].strip()
+            for item in candidates
+        ):
             raise AppraisalProposalCompilerError("meaning_invalid")
         if len({item["meaning"] for item in candidates}) != len(candidates):
             raise AppraisalProposalCompilerError("meanings_duplicate")

@@ -24,11 +24,9 @@ from companion_daemon.config import Settings
 from companion_daemon.qq_delivery import QQDelivery
 
 from .action_due_wake import ActionDueWake
-from .affect_chat_model_adapter import AffectDraftDeliberationAdapter
 from .errors import ConcurrencyConflict
-from .relationship_draft_deliberation_adapter import RelationshipDraftDeliberationAdapter
-from .chat_model_deliberation_adapter import ChatCompletionModel
-from .deliberation import DeliberationModelAdapter
+from .model_completion import ChatCompletionModel
+from .model_usage_budget import WorldV2UsageStore
 from .perception_executor import PerceptionTransport
 from .perception_input_source import PerceptionInputSource
 from .platform_host import PlatformClockTick, PlatformInbound, WorldV2PlatformHost
@@ -252,6 +250,9 @@ class QQC2CHost:
         recipient_id: str,
         canonical_user_id: str,
         semantic_chat: SemanticChatComposition | None = None,
+        usage_store: WorldV2UsageStore | None = None,
+        monthly_budget_cny: float | None = None,
+        daily_budget_cny: float | None = None,
         ingress_store: QQIngressStore | None = None,
         ingress_now: Callable[[], datetime] | None = None,
         ingress_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -279,6 +280,9 @@ class QQC2CHost:
         self._recipient_id = recipient_id
         self._canonical_user_id = canonical_user_id
         self._semantic_chat = semantic_chat
+        self._usage_store = usage_store
+        self._monthly_budget_cny = monthly_budget_cny
+        self._daily_budget_cny = daily_budget_cny
         self._external_world_perception_hub = external_world_perception_hub
         self._external_world_perception_disabled_reason = external_world_perception_disabled_reason
         self._external_world_perception_registry_health = (
@@ -785,14 +789,14 @@ class QQC2CHost:
     # The durable coalescing floor already absorbs 100ms of adjacent bubbles.
     # Sender-rhythm courtesy remains subsecond; only the bounded semantic
     # endpoint controller may extend the opportunity beyond it.
-    _DEFAULT_QUIET_GAP_SECONDS = 0.15
-    _MIN_QUIET_GAP_SECONDS = 0.10
-    _MAX_QUIET_GAP_SECONDS = 0.42
+    _DEFAULT_QUIET_GAP_SECONDS = 0.10
+    _MIN_QUIET_GAP_SECONDS = 0.08
+    _MAX_QUIET_GAP_SECONDS = 0.30
     # Only observed continuation earns the wider rolling window.  This keeps
     # a single bubble fast while retaining multi-bubble turns at real typing
     # cadences; the wider value is never charged speculatively.
-    _BURST_MAX_QUIET_GAP_SECONDS = 0.8
-    _BURST_CONTINUATION_QUIET_GAP_SECONDS = 0.65
+    _BURST_MAX_QUIET_GAP_SECONDS = 0.6
+    _BURST_CONTINUATION_QUIET_GAP_SECONDS = 0.5
     # Absolute per-fragment bound on burst absorption.  A person being
     # flooded keeps reading as long as bubbles keep landing, but after about
     # half a minute they interject anyway — so the hold keeps rolling while
@@ -920,9 +924,11 @@ class QQC2CHost:
         schedule = schedules[-1]
         probability = schedule.semantic_continuation_probability_bp
         confidence = schedule.semantic_confidence_bp
+        compact_hint = schedule.semantic_compact_reply_hint_bp
         return {
             "continuation_probability_bp": (probability if probability is not None else 0),
             "confidence_bp": confidence if confidence is not None else 0,
+            "compact_reply_hint_bp": compact_hint if compact_hint is not None else 5_000,
             "typing_active": "typing_active" in schedule.reason_codes,
             "status": "predicted" if schedule.status == "predicted" else "fallback",
             "model_id": schedule.model_id,
@@ -2129,6 +2135,16 @@ class QQC2CHost:
             return {"enabled": False, "status": "disabled"}
         return {"enabled": True, **capacity.health_snapshot()}
 
+    def usage_budget_health(self) -> dict[str, object]:
+        """Expose World V2 model cost aggregates and budget state."""
+
+        if self._usage_store is None:
+            return {"status": "disabled"}
+        return self._usage_store.budget_state(
+            monthly_budget_cny=self._monthly_budget_cny,
+            daily_budget_cny=self._daily_budget_cny,
+        )
+
     def text_endpoint_health(self) -> dict[str, object]:
         """Expose endpoint timing evidence without reading or changing the World."""
 
@@ -2392,14 +2408,13 @@ def build_qq_c2c_host(
     bootstrap_at: datetime | None = None,
     model: ChatCompletionModel | None = None,
     thinking_model: ChatCompletionModel | None = None,
-    advisory_model: ChatCompletionModel | None = None,
+    world_support_model: ChatCompletionModel | None = None,
     source_closure_model: ChatCompletionModel | None = None,
     life_source_closure_model: ChatCompletionModel | None = None,
     candidate_external_proposition_inventory_model: ChatCompletionModel | None = None,
     delivery: QQC2CDelivery | None = None,
     media_transport: MediaProviderTransport | None = None,
     media_preview: MediaPreviewDeployment | None = None,
-    perception_model: DeliberationModelAdapter | None = None,
     perception_input_source: PerceptionInputSource | None = None,
     perception_transport: PerceptionTransport | None = None,
     perception_budget_limit: int = 0,
@@ -2415,7 +2430,6 @@ def build_qq_c2c_host(
     external_perception_channel_port: LiveAttentionChannelPort | None = None,
     external_perception_authorized_search_profile: SourceProfile | None = None,
     scheduler_interval_seconds: float | None = None,
-    _test_only_expression_episode_mode: Literal["on"] | None = None,
 ) -> QQC2CHost:
     """Compose the C2C lane without importing legacy chat/runtime code.
 
@@ -2441,23 +2455,20 @@ def build_qq_c2c_host(
     configured_expression_episode_mode = settings.world_v2_expression_episode_mode
     if configured_expression_episode_mode not in {"off", "shadow", "stream"}:
         raise ValueError("production QQ expression episode mode must be off, shadow, or stream")
-    # The provisional Expression Episode remains useful for exercising its
-    # dormant recovery lifecycle, but ADR 0014 forbids exposing that one-beat
-    # candidate through production Settings.  Tests must opt in at this
-    # conspicuous composition seam instead of smuggling ``on`` through env.
-    expression_episode_mode: Literal["off", "shadow", "on", "stream"] = (
-        _test_only_expression_episode_mode or configured_expression_episode_mode
+    expression_episode_mode: Literal["off", "shadow", "stream"] = (
+        configured_expression_episode_mode
     )
     expression_capabilities = qq_expression_capabilities(
         settings.qq_adapter,
         recorded_cadence_mode=getattr(settings, "world_v2_recorded_cadence_mode", "off"),
     )
     interactive_turn_budget_policy = interactive_turn_budget_policy or InteractiveTurnBudgetPolicy()
+    usage_store = WorldV2UsageStore(path=str(settings.database_path))
     semantic_chat = build_semantic_chat_composition(
         settings=settings,
         flash_model=model,
         thinking_model=thinking_model,
-        advisory_model=advisory_model,
+        world_support_model=world_support_model,
         source_closure_model=source_closure_model,
         life_source_closure_model=life_source_closure_model,
         candidate_external_proposition_inventory_model=(
@@ -2465,9 +2476,9 @@ def build_qq_c2c_host(
         ),
         model_id_prefix="qq-c2c-v2",
         expression_capabilities=expression_capabilities,
+        usage_observer=usage_store.record,
     )
-    model = semantic_chat.flash_model
-    background_model = semantic_chat.background_model
+    background_model = semantic_chat.world_support_model
     life_world_author = RoleBoundLifeDevelopmentModelAdapter(
         model=background_model,
         role="world_author",
@@ -2478,10 +2489,6 @@ def build_qq_c2c_host(
         # never become the author of the replacement life draft.
         model=background_model,
         role="world_author",
-    )
-    life_character = RoleBoundLifeDevelopmentModelAdapter(
-        model=background_model,
-        role="character_model",
     )
     life_source_closure_reviewer = (
         RoleBoundLifeDevelopmentModelAdapter(
@@ -2514,11 +2521,6 @@ def build_qq_c2c_host(
             expression_action_kinds=expression_capabilities.action_kinds,
             expression_capabilities=expression_capabilities,
             life_ecology=LifeEcologyComposition.production_v1(),
-            # Visible QQ reactions must be ordinary role-model Expression
-            # beats.  The retired local quick-reaction worker is still
-            # available to offline/replay composition, but is not an option in
-            # this production C2C builder.
-            quick_reaction_enabled=False,
             media_selection_acceptance=(
                 media_preview.acceptance if media_preview is not None else None
             ),
@@ -2535,41 +2537,25 @@ def build_qq_c2c_host(
             recipient_id=recipient_id, canonical_user_id=settings.primary_user_id
         ),
         router=semantic_chat.router,
-        main_model=semantic_chat.main_model,
-        quick_recovery=semantic_chat.main_model,
+        character_interior=semantic_chat.character_interior,
         transport=transport,
         media_transport=media_transport,
         media_planner=(media_preview.planner if media_preview is not None else None),
-        advisory_compiler=semantic_chat.advisory_compiler,
-        appraisal_model=semantic_chat.appraisal_model,
-        affect_model=AffectDraftDeliberationAdapter(model=background_model),
-        perception_model=perception_model,
         perception_input_source=perception_input_source,
         perception_transport=perception_transport,
-        relationship_model=RelationshipDraftDeliberationAdapter(model=background_model),
-        outcome_draft_model=background_model,
         # This is background-only cognitive work; it never extends the QQ
         # interactive reply path, but makes accepted facts available next turn.
         fact_model=background_model,
         # Private impressions consolidate accepted appraisals on the same
         # background channel; they never touch the interactive reply path.
-        private_impression_model=background_model,
-        private_impression_identity_frame=semantic_chat.identity_frame,
-        proactive_model=background_model,
-        proactive_identity_frame=semantic_chat.identity_frame,
         proactive_source_closure_model=semantic_chat.proactive_source_closure_model,
         proactive_candidate_external_proposition_inventory_model=(
             semantic_chat.candidate_external_proposition_inventory_model
         ),
-        memory_model=background_model,
-        activity_lifecycle_model=background_model,
+        npc_actor_model=background_model,
         life_world_author_model=life_world_author,
         life_world_author_source_rewriter=life_world_author_source_rewriter,
-        life_character_model=life_character,
         life_source_closure_reviewer=life_source_closure_reviewer,
-        media_selection_model=(
-            media_preview.selection_model if media_preview is not None else None
-        ),
         semantic_recall_embedding=resolved_recall_embedding,
         now=bootstrap_at or datetime.now(UTC),
     )
@@ -2580,7 +2566,7 @@ def build_qq_c2c_host(
             settings=settings,
             world_id=qq_c2c_world_id(settings.primary_user_id),
             actor_ref="agent:companion",
-            model=background_model,
+            character_interior=semantic_chat.character_interior,
             life=application,
             channel_port=external_perception_channel_port,
             authorized_search_profile=external_perception_authorized_search_profile,
@@ -2594,6 +2580,9 @@ def build_qq_c2c_host(
         recipient_id=recipient_id,
         canonical_user_id=settings.primary_user_id,
         semantic_chat=semantic_chat,
+        usage_store=usage_store,
+        monthly_budget_cny=settings.monthly_budget_cny,
+        daily_budget_cny=settings.daily_budget_cny,
         ingress_store=SQLiteQQIngressStore(
             Path(settings.database_path),
             catalog=QQIngressPolicyCatalog(default_window_ms=settings.qq_c2c_transport_coalesce_ms),

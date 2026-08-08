@@ -398,14 +398,16 @@ def evaluate_deterministic_invariants(
             failures.append("causal.private_turn_state_missing")
         accepted_request_hashes = _strings(causal.get("accepted_character_choice_request_hashes"))
         correlated_request_hashes = set(
-            _strings(causal.get("current_self_correlated_character_choice_request_hashes"))
+            _strings(
+                causal.get("inner_life_snapshot_correlated_character_choice_request_hashes")
+            )
         )
         if (
             accepted_choice_count is None
             or len(accepted_request_hashes) != accepted_choice_count
             or not set(accepted_request_hashes).issubset(correlated_request_hashes)
         ):
-            failures.append("causal.current_self_not_correlated")
+            failures.append("causal.inner_life_snapshot_not_correlated")
 
     source_authority = _mapping(report.get("source_authority_acceptance"))
     if source_authority.get("requested") is True:

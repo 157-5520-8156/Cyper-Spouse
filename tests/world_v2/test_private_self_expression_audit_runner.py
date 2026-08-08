@@ -13,6 +13,7 @@ import pytest
 
 from companion_daemon.config import Settings
 from companion_daemon.llm import FailoverChatModel, FakeCompanionModel
+from companion_daemon.world_v2.deliberation import ModelUsageProvenance
 from companion_daemon.world_v2.errors import ConcurrencyConflict
 from companion_daemon.world_v2.interactive_turn_budget import InteractiveTurnBudgetPolicy
 from companion_daemon.world_v2.isolated_source_closure_trace import (
@@ -271,11 +272,17 @@ class _DelayedSupersessionModel:
         )
 
 
-class _MultiBeatAuditModel:
-    model = "fixture:private-self-audit-multi-beat"
+class _InterruptibleMultiBeatAuditModel:
+    """Emit one role-authored stream whose unsent tail can lose attention."""
+
+    model = "fixture:private-self-audit-interruptible-stream"
+    reports_exact_request_emission = True
 
     def __init__(self) -> None:
         self._fallback = FakeCompanionModel()
+        self.stream_calls = 0
+        self.first_tail_release = asyncio.Event()
+        self.cancelled_stream_ordinals: list[int] = []
 
     async def complete(
         self,
@@ -283,80 +290,72 @@ class _MultiBeatAuditModel:
         *,
         temperature: float = 0.8,
     ) -> str:
-        joined = "\n".join(message["content"] for message in messages)
-        combined = (
-            "appraisal_draft and expression_draft" in joined
-            and "COMBINED OUTPUT ENVELOPE" in joined
-        )
-        expression_call = (
-            combined
-            or "Return one raw JSON ExpressionDraft" in joined
-            or "raw JSON ExpressionDraft only" in joined
-        )
-        if not expression_call:
-            return await self._fallback.complete(messages, temperature=temperature)
+        return await self._fallback.complete(messages, temperature=temperature)
+
+    async def complete_json_stream_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        on_text_delta=None,  # type: ignore[no-untyped-def]
+    ) -> tuple[str, ModelUsageProvenance]:
+        del temperature
+        self.stream_calls += 1
+        ordinal = self.stream_calls
         material = _DelayedSupersessionModel._material(messages)
         trigger = material.get("current_trigger_message", {})
         trigger_text = trigger.get("text") if isinstance(trigger, dict) else None
         observation_ref = trigger.get("observation_ref") if isinstance(trigger, dict) else None
         first_turn = trigger_text == ("我刚到家\n路上被雨淋了一截\n鞋子现在还是湿的")
-        provisional = "provisional first beat" in joined
-        if first_turn and provisional:
-            beats = [{"modality": "text", "text": "第一条先接住。"}]
-            episode_disposition = None
-        elif first_turn:
-            await asyncio.sleep(0.25)
-            beats = [
-                {"modality": "text", "text": "这是不该机械补发的旧尾巴二。"},
-                {"modality": "text", "text": "这是不该机械补发的旧尾巴三。"},
-            ]
-            episode_disposition = "append"
-        elif provisional:
-            beats = [
-                {
-                    "modality": "text",
-                    "text": "新消息到了，我就先接这句。",
-                }
-            ]
-            episode_disposition = None
-        else:
-            await asyncio.sleep(0.25)
-            beats = [
-                {
-                    "modality": "text",
-                    "text": "新消息到了，我就先接这句。",
-                }
-            ]
-            episode_disposition = "complete_without_more"
-        expression = {
-            "private_turn_state": {
-                "contract": "private-turn-state.1",
-                "inner_state_summary": (
-                    "我先分三条说，但后两条仍应接受新消息打断。"
-                    if first_turn
-                    else "新消息改变了当下节奏，我只接这次的新内容。"
-                ),
-                "attended_source_refs": (
-                    [observation_ref] if isinstance(observation_ref, str) else []
-                ),
-            },
-            "timing_choice": "now",
-            "cadence": "rapid",
-            "beats": beats,
-            "stance": "present",
-            "brief_rationale": "Use a model-owned multi-beat expression.",
-            "confidence": 8_000,
-            "world_claims": [],
-            **(
-                {"episode_disposition": episode_disposition}
-                if episode_disposition is not None
-                else {}
-            ),
-        }
-        if provisional or not combined:
-            return json.dumps(expression, ensure_ascii=False)
-        return json.dumps(
+        head_text = "第一条先接住。" if first_turn else "新消息到了，我就先接这句。"
+        events: list[dict[str, object]] = [
             {
+                "type": "head",
+                "private_turn_state": {
+                    "contract": "private-turn-state.1",
+                    "inner_state_summary": (
+                        "我想分三条说，但后两条仍应接受新消息打断。"
+                        if first_turn
+                        else "新消息改变了当下节奏，我只接这次的新内容。"
+                    ),
+                    "attended_source_refs": (
+                        [observation_ref] if isinstance(observation_ref, str) else []
+                    ),
+                },
+                "timing_choice": "now",
+                "beat": {"modality": "text", "text": head_text},
+                "cadence": "rapid",
+                "stance": "present",
+                "brief_rationale": "Use one role-authored interruptible stream.",
+                "confidence": 8_000,
+                "world_claims": [],
+            }
+        ]
+        if first_turn:
+            events.extend(
+                [
+                    {
+                        "type": "beat",
+                        "beat": {
+                            "modality": "text",
+                            "text": "这是不该机械补发的旧尾巴二。",
+                        },
+                        "world_claims": [],
+                    },
+                    {
+                        "type": "beat",
+                        "beat": {
+                            "modality": "text",
+                            "text": "这是不该机械补发的旧尾巴三。",
+                        },
+                        "world_claims": [],
+                    },
+                ]
+            )
+        events.append({"type": "end"})
+        raw = json.dumps(
+            {
+                "protocol": "character-interior-events.1",
                 "appraisal_draft": {
                     "appraise": False,
                     "affect": "no_change",
@@ -366,30 +365,38 @@ class _MultiBeatAuditModel:
                     "display_strategy": "model_owned",
                     "confidence": 7_000,
                 },
-                "expression_draft": expression,
+                "events": events,
             },
             ensure_ascii=False,
+            separators=(",", ":"),
         )
-
-
-class _CancelTailAdvisoryModel:
-    model = "fixture:private-self-audit-cancel-tail"
-
-    def __init__(self) -> None:
-        self.reconsideration_calls = 0
-        self._fallback = FakeCompanionModel()
-
-    async def complete(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        temperature: float = 0.8,
-    ) -> str:
-        joined = "\n".join(message["content"] for message in messages)
-        if "You review one not-yet-dispatched companion expression" in joined:
-            self.reconsideration_calls += 1
-            return '{"disposition":"cancel"}'
-        return await self._fallback.complete(messages, temperature=temperature)
+        if on_text_delta is not None:
+            if first_turn:
+                boundary = raw.index(',{"type":"beat"')
+                on_text_delta(raw[:boundary])
+                try:
+                    await self.first_tail_release.wait()
+                except asyncio.CancelledError:
+                    self.cancelled_stream_ordinals.append(ordinal)
+                    raise
+                on_text_delta(raw[boundary:])
+            else:
+                on_text_delta(raw)
+        usage = {
+            "usage_contract": "model-usage.1",
+            "route_class": "chat",
+            "input_tokens": 10,
+            "output_tokens": 10,
+            "thinking_tokens": 0,
+            "token_provenance": "provider_reported",
+            "transport": "provider_api",
+            "provider": "fixture",
+            "provider_usage_ref": f"usage:fixture:audit-stream:{ordinal}",
+        }
+        usage_hash = hashlib.sha256(
+            json.dumps(usage, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return raw, ModelUsageProvenance(**usage, provider_usage_hash=usage_hash)
 
 
 @pytest.mark.asyncio
@@ -416,7 +423,7 @@ async def test_overlapped_inbound_supersedes_unanswered_generation_and_keeps_con
         settings=Settings(
             database_path=tmp_path / "interrupt-audit.sqlite",
             PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
             WORLD_V2_EXPRESSION_EPISODE_MODE="off",
         ),
         recipient_id="10001",
@@ -426,7 +433,7 @@ async def test_overlapped_inbound_supersedes_unanswered_generation_and_keeps_con
             fallback=recovery,
             implicit_failover=False,
         ),
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=delivery,
         ingress_now=clock.now,
         ingress_sleep=clock.sleep,
@@ -508,7 +515,7 @@ async def test_new_inbound_cancels_unsent_multi_beat_tail_without_repeating_it(
     interjection = scenario.turns[-1]
     clock = _RUNNER._VirtualPacingClock(NOW)
     delivery = _RUNNER.IsolatedAuditDelivery(run_namespace="tail")
-    advisory = _CancelTailAdvisoryModel()
+    model = _InterruptibleMultiBeatAuditModel()
 
     async def dormant_action_due_sleep(_seconds: float) -> None:
         await asyncio.Event().wait()
@@ -517,18 +524,14 @@ async def test_new_inbound_cancels_unsent_multi_beat_tail_without_repeating_it(
         settings=Settings(
             database_path=tmp_path / "tail-audit.sqlite",
             PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
+            WORLD_V2_EXPRESSION_EPISODE_MODE="stream",
             WORLD_V2_RECORDED_CADENCE_MODE="shadow",
         ),
-        _test_only_expression_episode_mode="on",
         recipient_id="10001",
         bootstrap_at=NOW,
-        model=FailoverChatModel(
-            primary=_MultiBeatAuditModel(),
-            fallback=_MultiBeatAuditModel(),
-            implicit_failover=False,
-        ),
-        advisory_model=advisory,
+        model=model,
+        world_support_model=FakeCompanionModel(),
         delivery=delivery,
         ingress_now=clock.now,
         ingress_sleep=clock.sleep,
@@ -539,27 +542,28 @@ async def test_new_inbound_cancels_unsent_multi_beat_tail_without_repeating_it(
         ),
         use_configured_recall_embedding=False,
     )
+    first_task: asyncio.Task[dict[str, object]] | None = None
     try:
-        first = await _RUNNER._submit_scenario_turn(
-            host=host,
-            scenario=scenario,
-            turn=opening,
-            recipient_id="10001",
-            conversation_started_at=NOW,
-            clock=clock,
-            fast_pacing=True,
+        first_task = asyncio.create_task(
+            _RUNNER._submit_scenario_turn(
+                host=host,
+                scenario=scenario,
+                turn=opening,
+                recipient_id="10001",
+                conversation_started_at=NOW,
+                clock=clock,
+                fast_pacing=True,
+            )
         )
         async with asyncio.timeout(5):
             while True:
                 before_interjection = host.export_replay_evidence()
-                if (
-                    len(before_interjection.projection.expression_plan_manifests) >= 2
-                    and sum(
-                        action.state == "authorized"
-                        for action in before_interjection.projection.actions
-                    )
-                    >= 2
-                ):
+                visible = [
+                    item["content"]
+                    for item in delivery.sent
+                    if item["modality"] == "text"
+                ]
+                if visible == ["第一条先接住。"]:
                     break
                 await asyncio.sleep(0)
         second = await _RUNNER._submit_scenario_turn(
@@ -571,49 +575,75 @@ async def test_new_inbound_cancels_unsent_multi_beat_tail_without_repeating_it(
             clock=clock,
             fast_pacing=True,
         )
-        await host.drain(max_action_units=0, max_background_units=1)
-        after_reconsideration = host.export_replay_evidence()
+        first = await asyncio.wait_for(first_task, timeout=5)
         await host.drain(max_action_units=16, max_background_units=0)
         final = host.export_replay_evidence()
     finally:
+        model.first_tail_release.set()
+        if first_task is not None and not first_task.done():
+            first_task.cancel()
+            await asyncio.gather(first_task, return_exceptions=True)
         await host.aclose()
 
     assert first["status"] == second["status"] == "action_authorized"
     first_plan = next(
         plan
         for plan in before_interjection.projection.expression_plans
-        if sum(
-            action.expression_plan_id == plan.plan_id and action.state == "authorized"
+        if any(
+            action.expression_plan_id == plan.plan_id
             for action in before_interjection.projection.actions
         )
-        == 2
     )
     first_actions_before = [
         action
         for action in before_interjection.projection.actions
         if action.expression_plan_id == first_plan.plan_id
     ]
-    assert [action.state for action in first_actions_before].count("authorized") == 2
-    first_actions_after = [
-        action
-        for action in after_reconsideration.projection.actions
-        if action.expression_plan_id == first_plan.plan_id
-    ]
-    assert [action.state for action in first_actions_after].count("cancelled") == 2
-    assert advisory.reconsideration_calls >= 1
+    # Only the already-visible head becomes a durable Action. The unobserved
+    # tail is cancelled at the one-author stream boundary, so there is no old
+    # provisional/full plan to reconsider and no stale Action to clean up.
+    assert len(first_actions_before) == 1
+    assert model.stream_calls == 2
+    assert model.cancelled_stream_ordinals == [1]
+    first_observation = before_interjection.projection.message_observations[0]
+    first_episode = next(
+        item
+        for item in final.projection.trigger_processes
+        if item.process_kind == "expression_episode"
+        and item.source_evidence_ref == first_observation.observation_id
+    )
+    assert first_episode.state == "terminal"
+    assert "append" not in (first_episode.runtime_outcome_ref or "")
     visible = [item["content"] for item in delivery.sent if item["modality"] == "text"]
     assert visible == [
         "第一条先接住。",
         "新消息到了，我就先接这句。",
     ]
     assert all("旧尾巴" not in text for text in visible)
-    assert {
-        action.action_id for action in final.projection.actions if action.state == "cancelled"
-    } == {
-        action.action_id
-        for action in after_reconsideration.projection.actions
-        if action.state == "cancelled"
-    }
+    assert all(
+        "旧尾巴" not in (beat.text or "")
+        for manifest in final.projection.expression_plan_manifests
+        for beat in manifest.beats
+    )
+    first_actions_final = tuple(
+        action
+        for action in final.projection.actions
+        if action.expression_plan_id == first_plan.plan_id
+    )
+    first_manifests_final = tuple(
+        manifest
+        for manifest in final.projection.expression_plan_manifests
+        if manifest.plan_id == first_plan.plan_id
+    )
+    assert tuple(action.action_id for action in first_actions_final) == tuple(
+        action.action_id for action in first_actions_before
+    )
+    assert first_manifests_final
+    assert all(len(manifest.beats) == 1 for manifest in first_manifests_final)
+    assert all(
+        action.expression_plan_id != first_plan.plan_id or action.state != "cancelled"
+        for action in final.projection.actions
+    )
 
 
 @pytest.mark.asyncio
@@ -629,13 +659,13 @@ async def test_runner_burst_uses_real_host_coalescing_and_one_world_turn(
         settings=Settings(
             database_path=tmp_path / "burst-audit.sqlite",
             PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
             WORLD_V2_EXPRESSION_EPISODE_MODE="off",
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
         model=model,
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=delivery,
         ingress_now=clock.now,
         ingress_sleep=clock.sleep,
@@ -2298,13 +2328,13 @@ async def test_final_fast_audit_drain_persists_clock_and_completes_expression_pl
         settings=Settings(
             database_path=tmp_path / "terminal-expression.sqlite",
             PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
             WORLD_V2_EXPRESSION_EPISODE_MODE="off",
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
         model=_ImmediateReplyModel(),
-        advisory_model=FakeCompanionModel(),
+        world_support_model=FakeCompanionModel(),
         delivery=delivery,
         ingress_now=clock.now,
         ingress_sleep=clock.sleep,
@@ -2356,13 +2386,13 @@ async def test_explicit_trace_captures_qq_single_call_post_appraisal_delegate(
         settings=Settings(
             database_path=tmp_path / "delegated-source-trace.sqlite",
             PRIMARY_USER_ID="geoff",
-            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
             WORLD_V2_EXPRESSION_EPISODE_MODE="off",
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
         model=role_model,
-        advisory_model=_NamedAdvisoryFake(),
+        world_support_model=_NamedAdvisoryFake(),
         source_closure_model=reviewer,
         candidate_external_proposition_inventory_model=inventory,
         delivery=delivery,

@@ -19,7 +19,10 @@ from companion_daemon.world_v2.relationship_events import (
     RelationshipSlowVariableAdjustedPayload,
     relationship_mutation_hash,
 )
-from companion_daemon.world_v2.relationship_reducers import RELATIONSHIP_POLICY_DIGEST
+from companion_daemon.world_v2.relationship_reducers import (
+    RELATIONSHIP_POLICY_DIGEST,
+    relationship_primary_id,
+)
 from companion_daemon.world_v2.reducers import ReducerState
 from companion_daemon.world_v2.schemas import (
     BoundaryProjection,
@@ -210,6 +213,136 @@ def new_signal_payload(*, event_ref: str = "event:test-signal") -> RelationshipS
         evaluated_world_revision=1,
         signal=signal,
     )
+
+
+def append_subject_signal(
+    ledger: WorldLedger,
+    *,
+    subject_ref: str,
+    suffix: str,
+) -> RelationshipSignalProjection:
+    """Accept one subject-bound signal through the public ledger seam."""
+
+    refs = (evidence(),)
+    policy_refs = ("policy:relationship-signal-v1",)
+    signal = RelationshipSignalProjection(
+        signal_id=f"signal:{suffix}",
+        semantic_fingerprint=relationship_signal_fingerprint(
+            subject_ref=subject_ref,
+            signal_code=f"continuity_{suffix}",
+            evidence_refs=refs,
+            policy_refs=policy_refs,
+        ),
+        entity_revision=1,
+        subject_ref=subject_ref,
+        signal_code=f"continuity_{suffix}",
+        confidence_bp=8_000,
+        persistence="durable",
+        contradiction_group_ref=None,
+        rationale_code="subject_bound_continuity",
+        evidence_refs=refs,
+        origin=RelationshipSignalOrigin(
+            change_id=f"change:signal:{suffix}",
+            transition_id=f"transition:signal:{suffix}",
+            policy_refs=policy_refs,
+            accepted_event_ref=f"event:signal:{suffix}",
+        ),
+        accepted_at=NOW,
+    )
+    payload = authorized(
+        RelationshipSignalAcceptedPayload,
+        change_id=signal.origin.change_id,
+        transition_id=signal.origin.transition_id,
+        expected_entity_revision=0,
+        policy_refs=policy_refs,
+        acceptance_id=f"acceptance:signal:{suffix}",
+        proposal_id=f"proposal:signal:{suffix}",
+        evaluated_world_revision=ledger.project().world_revision,
+        signal=signal,
+    )
+    record_proposal(ledger, proposal(payload, transition_kind="signal"))
+    decide_and_mutate(ledger, payload, "RelationshipSignalAccepted")
+    return signal
+
+
+def subject_adjustment_payload(
+    ledger: WorldLedger,
+    *,
+    subject_ref: str,
+    signal: RelationshipSignalProjection,
+    suffix: str,
+    accepted_delta: int,
+    relationship_id: str | None = None,
+) -> RelationshipSlowVariableAdjustedPayload:
+    states = tuple(
+        item for item in ledger.project().relationship_states if item.subject_ref == subject_ref
+    )
+    assert len(states) <= 1
+    current = states[0] if states else None
+    before = current.variables if current is not None else RelationshipVariablesProjection()
+    after = before.model_copy(update={"trust_bp": before.trust_bp + accepted_delta})
+    return authorized(
+        RelationshipSlowVariableAdjustedPayload,
+        change_id=f"change:adjustment:{suffix}",
+        transition_id=f"transition:adjustment:{suffix}",
+        expected_entity_revision=current.entity_revision if current is not None else 0,
+        policy_refs=("policy:relationship-v1",),
+        acceptance_id=f"acceptance:adjustment:{suffix}",
+        proposal_id=f"proposal:adjustment:{suffix}",
+        evaluated_world_revision=ledger.project().world_revision,
+        relationship_id=(
+            relationship_id
+            or (
+                current.relationship_id
+                if current is not None
+                else relationship_primary_id(subject_ref=subject_ref)
+            )
+        ),
+        subject_ref=subject_ref,
+        adjustment_id=f"adjustment:{suffix}",
+        operation="adjust",
+        signal_refs=(signal.signal_id,),
+        proposed_deltas=RelationshipVariableDeltas(trust_bp=accepted_delta),
+        accepted_deltas=RelationshipVariableDeltas(trust_bp=accepted_delta),
+        variables_before=before,
+        variables_after=after,
+        stage_before=current.stage if current is not None else "stranger",
+        stage_after=current.stage if current is not None else "stranger",
+        hysteresis_before=(
+            current.hysteresis if current is not None else RelationshipHysteresisProjection()
+        ),
+        hysteresis_after=(
+            current.hysteresis if current is not None else RelationshipHysteresisProjection()
+        ),
+        commitment_refs=current.commitment_refs if current is not None else (),
+        confidence_bp=8_000,
+        persistence="durable",
+        contradiction_group_ref=None,
+        rationale_code="subject_bound_continuity",
+        policy_version="relationship-policy.1",
+        policy_digest=RELATIONSHIP_POLICY_DIGEST,
+        adjusted_at=NOW,
+    )
+
+
+def append_subject_adjustment(
+    ledger: WorldLedger,
+    *,
+    subject_ref: str,
+    signal: RelationshipSignalProjection,
+    suffix: str,
+    accepted_delta: int,
+) -> RelationshipSlowVariableAdjustedPayload:
+    payload = subject_adjustment_payload(
+        ledger,
+        subject_ref=subject_ref,
+        signal=signal,
+        suffix=suffix,
+        accepted_delta=accepted_delta,
+    )
+    record_proposal(ledger, proposal(payload, transition_kind="adjust"))
+    decide_and_mutate(ledger, payload, "RelationshipSlowVariableAdjusted")
+    return payload
 
 
 def accepted_decision(payload) -> dict[str, object]:
@@ -618,6 +751,176 @@ def test_sqlite_relationship_authority_survives_restart(tmp_path) -> None:
     reopened.close()
 
 
+def test_sqlite_relationship_heads_evolve_independently_per_subject(tmp_path) -> None:
+    path = tmp_path / "relationship-per-subject.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    ledger.commit(
+        [
+            event("event:per-subject-init", "ObservationRecorded", {"observation_id": "obs:init"}),
+            event(
+                "event:per-subject-operator",
+                "OperatorObservationRecorded",
+                {"observation_id": "operator:relationship", "observation_hash": EVIDENCE_HASH},
+            ),
+        ],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+
+    user_signal = append_subject_signal(
+        ledger, subject_ref="user:geoff", suffix="per-subject-user-1"
+    )
+    append_subject_adjustment(
+        ledger,
+        subject_ref="user:geoff",
+        signal=user_signal,
+        suffix="per-subject-user-1",
+        accepted_delta=300,
+    )
+    user_before = next(
+        item for item in ledger.project().relationship_states if item.subject_ref == "user:geoff"
+    )
+
+    npc_signal = append_subject_signal(
+        ledger, subject_ref="npc:lin", suffix="per-subject-npc-1"
+    )
+    append_subject_adjustment(
+        ledger,
+        subject_ref="npc:lin",
+        signal=npc_signal,
+        suffix="per-subject-npc-1",
+        accepted_delta=180,
+    )
+    npc_signal_2 = append_subject_signal(
+        ledger, subject_ref="npc:lin", suffix="per-subject-npc-2"
+    )
+    append_subject_adjustment(
+        ledger,
+        subject_ref="npc:lin",
+        signal=npc_signal_2,
+        suffix="per-subject-npc-2",
+        accepted_delta=120,
+    )
+
+    expected = ledger.project()
+    states = {item.subject_ref: item for item in expected.relationship_states}
+    assert set(states) == {"user:geoff", "npc:lin"}
+    assert states["user:geoff"] == user_before
+    assert states["npc:lin"].entity_revision == 2
+    assert states["npc:lin"].variables.trust_bp == 300
+    assert ledger.rebuild() == expected
+    expected_semantic_hash = expected.semantic_hash
+    ledger.close()
+
+    reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
+    assert reopened.project() == expected
+    assert reopened.project().semantic_hash == expected_semantic_hash
+    assert reopened.rebuild() == expected
+    reopened.close()
+
+
+def test_sqlite_relationship_authority_rejects_cross_subject_identity_and_acceptance(
+    tmp_path,
+) -> None:
+    path = tmp_path / "relationship-cross-subject.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    ledger.commit(
+        [
+            event("event:cross-subject-init", "ObservationRecorded", {"observation_id": "obs:init"}),
+            event(
+                "event:cross-subject-operator",
+                "OperatorObservationRecorded",
+                {"observation_id": "operator:relationship", "observation_hash": EVIDENCE_HASH},
+            ),
+        ],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    user_signal = append_subject_signal(
+        ledger, subject_ref="user:geoff", suffix="cross-subject-user"
+    )
+    append_subject_adjustment(
+        ledger,
+        subject_ref="user:geoff",
+        signal=user_signal,
+        suffix="cross-subject-user",
+        accepted_delta=300,
+    )
+    npc_signal = append_subject_signal(
+        ledger, subject_ref="npc:lin", suffix="cross-subject-npc"
+    )
+    append_subject_adjustment(
+        ledger,
+        subject_ref="npc:lin",
+        signal=npc_signal,
+        suffix="cross-subject-npc",
+        accepted_delta=180,
+    )
+    states = {item.subject_ref: item for item in ledger.project().relationship_states}
+
+    alias_signal = append_subject_signal(
+        ledger, subject_ref="user:geoff", suffix="cross-subject-user-alias"
+    )
+    alias = subject_adjustment_payload(
+        ledger,
+        subject_ref="user:geoff",
+        signal=alias_signal,
+        suffix="cross-subject-user-alias",
+        accepted_delta=40,
+        relationship_id="relationship:forged-second-user-head",
+    )
+    with pytest.raises(ValueError, match="identity"):
+        record_proposal(ledger, proposal(alias, transition_kind="adjust"))
+
+    acceptance_signal = append_subject_signal(
+        ledger, subject_ref="npc:lin", suffix="cross-subject-acceptance"
+    )
+    accepted_npc = subject_adjustment_payload(
+        ledger,
+        subject_ref="npc:lin",
+        signal=acceptance_signal,
+        suffix="cross-subject-acceptance",
+        accepted_delta=50,
+    )
+    record_proposal(ledger, proposal(accepted_npc, transition_kind="adjust"))
+
+    forged_raw = accepted_npc.model_dump()
+    forged_raw.update(
+        {
+            "subject_ref": "user:geoff",
+            "relationship_id": states["user:geoff"].relationship_id,
+            "expected_entity_revision": states["user:geoff"].entity_revision,
+            "variables_before": states["user:geoff"].variables,
+            "variables_after": states["user:geoff"].variables.model_copy(
+                update={"trust_bp": states["user:geoff"].variables.trust_bp + 50}
+            ),
+            "accepted_change_hash": "0" * 64,
+        }
+    )
+    forged_raw["accepted_change_hash"] = relationship_mutation_hash(forged_raw)
+    forged = RelationshipSlowVariableAdjustedPayload.model_validate(forged_raw)
+    before = ledger.project()
+    with pytest.raises(ValueError, match="accepted decision|accepted relationship transition"):
+        ledger.commit(
+            [
+                event(
+                    f"event:{accepted_npc.acceptance_id}",
+                    "AcceptanceRecorded",
+                    accepted_decision(accepted_npc),
+                ),
+                event(
+                    "event:cross-subject-forged-mutation",
+                    "RelationshipSlowVariableAdjusted",
+                    forged.model_dump(mode="json"),
+                ),
+            ],
+            expected_world_revision=before.world_revision,
+            expected_deliberation_revision=before.deliberation_revision,
+        )
+    assert ledger.project() == before
+    ledger.close()
+
+
 def test_sqlite_migrates_verified_v6_head_to_relationship_bundle(tmp_path) -> None:
     path = tmp_path / "relationship-v6-migration.sqlite3"
     ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
@@ -664,7 +967,7 @@ def test_sqlite_migrates_verified_v6_head_to_relationship_bundle(tmp_path) -> No
         )
 
     reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert reopened.project().reducer_bundle_version == "world-v2-reducers.51"
+    assert reopened.project().reducer_bundle_version == "world-v2-reducers.52"
     assert reopened.project() == expected
     reopened.close()
 

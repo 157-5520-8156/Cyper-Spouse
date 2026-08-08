@@ -9,6 +9,7 @@ from typing import Literal
 from .affect_acceptance_runtime import AffectAcceptanceRuntime
 from .affect_proposal_compiler import AffectProposalCompiler
 from .appraisal_proposal_worker import AppraisalProposalWorkResult, AppraisalProposalWorker
+from .decision_proposal_authority import DecisionProposalAuthorityReader
 from .errors import ConcurrencyConflict
 from .schema_core import FrozenModel
 from .schemas import CommitResult, ProjectionCursor
@@ -70,6 +71,7 @@ class ImmediateEmotionProposalWorker:
         self._appraisal = appraisal_worker
         self._affect_compiler = affect_compiler
         self._affect_acceptance = affect_acceptance
+        self._decision_reader = DecisionProposalAuthorityReader(ledger=ledger)
         self._actor = actor
         self._source = source
 
@@ -83,16 +85,33 @@ class ImmediateEmotionProposalWorker:
         world_id: str,
         audit_cursor: ProjectionCursor,
         proposal_id: str,
+        current_cursor: ProjectionCursor | None = None,
     ) -> ImmediateEmotionProposalWorkResult:
         if world_id != self._ledger.world_id:
             raise ValueError("immediate emotion worker world mismatch")
         started = time.perf_counter()
+        appraisal = self._accepted_appraisal(
+            world_id=world_id,
+            audit_cursor=audit_cursor,
+            current_cursor=current_cursor,
+            proposal_id=proposal_id,
+        )
         try:
-            appraisal = self._appraisal.process(
-                world_id=world_id,
-                cursor=audit_cursor,
-                proposal_id=proposal_id,
-            )
+            if appraisal is None:
+                appraisal = (
+                    self._appraisal.process_rebased(
+                        world_id=world_id,
+                        audit_cursor=audit_cursor,
+                        current_cursor=current_cursor,
+                        proposal_id=proposal_id,
+                    )
+                    if current_cursor is not None and current_cursor != audit_cursor
+                    else self._appraisal.process(
+                        world_id=world_id,
+                        cursor=audit_cursor,
+                        proposal_id=proposal_id,
+                    )
+                )
         except ConcurrencyConflict as exc:
             raise ImmediateEmotionConcurrencyConflict(stage="appraisal") from exc
         appraisal_ms = (time.perf_counter() - started) * 1000
@@ -160,6 +179,68 @@ class ImmediateEmotionProposalWorker:
             typed_affect_proposal_id=affect.typed_proposal_id,
             affect_compile_commit=affect.commit,
             affect_acceptance_commit=accepted,
+        )
+
+    def _accepted_appraisal(
+        self,
+        *,
+        world_id: str,
+        audit_cursor: ProjectionCursor,
+        current_cursor: ProjectionCursor | None,
+        proposal_id: str,
+    ) -> AppraisalProposalWorkResult | None:
+        """Rejoin Appraisal after its atomic batch terminalized the source trigger."""
+
+        authority = self._decision_reader.read(
+            self._decision_reader.pin(
+                world_id=world_id,
+                cursor=audit_cursor,
+                proposal_id=proposal_id,
+            )
+        )
+        appraisal_changes = tuple(
+            item
+            for item in authority.proposal.proposed_changes
+            if item.kind == "appraisal_transition"
+        )
+        if not appraisal_changes:
+            return None
+        if len(appraisal_changes) != 1:
+            raise ValueError("immediate emotion Appraisal change is ambiguous")
+        projection = (
+            self._ledger.project_at(current_cursor)
+            if current_cursor is not None
+            else self._ledger.project()
+        )
+        accepted = tuple(
+            item
+            for item in projection.acceptance_decisions
+            if item.status == "accepted"
+            and item.manifest_version == "appraisal-acceptance.1"
+            and item.accepted_change_id == appraisal_changes[0].change_id
+            and item.acceptance_event_ref is not None
+        )
+        if not accepted:
+            return None
+        if len(accepted) != 1:
+            raise ValueError("immediate emotion accepted Appraisal is ambiguous")
+        accepted_appraisals = tuple(
+            item
+            for item in projection.appraisals
+            if item.origin.change_id == appraisal_changes[0].change_id
+        )
+        if len(accepted_appraisals) != 1:
+            raise ValueError("immediate emotion accepted Appraisal state is ambiguous")
+        located = self._ledger.lookup_event_commit(
+            accepted_appraisals[0].origin.accepted_event_ref
+        )
+        if located is None or located[0].event_type != "AppraisalAccepted":
+            raise ValueError("immediate emotion accepted Appraisal event is missing")
+        return AppraisalProposalWorkResult(
+            status="accepted",
+            source_proposal_id=proposal_id,
+            typed_proposal_id=accepted[0].proposal_id,
+            acceptance_commit=located[1],
         )
 
 

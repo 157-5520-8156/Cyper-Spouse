@@ -835,14 +835,23 @@ def configured_recall_embedding(
         return None
     return OpenAICompatibleRecallEmbedding(
         api_key=settings.openai_api_key,
-        base_url=settings.openai_base_url,
+        base_url=(
+            settings.world_v2_recall_embedding_base_url
+            or settings.openai_base_url
+        ),
         model=settings.world_v2_recall_embedding_model,
         dimensions=settings.world_v2_recall_embedding_dimensions,
         timeout_seconds=settings.world_v2_recall_embedding_timeout_seconds,
         failure_cooldown_seconds=(
             settings.world_v2_recall_embedding_failure_cooldown_seconds
         ),
-        proxy_url=settings.openai_proxy_url,
+        # Local endpoints are reached directly; the OpenAI proxy is only used
+        # when the endpoint still points at the remote OpenAI lane.
+        proxy_url=(
+            settings.openai_proxy_url
+            if settings.world_v2_recall_embedding_base_url is None
+            else None
+        ),
         daily_token_budget=settings.world_v2_recall_embedding_daily_token_budget,
         monthly_token_budget=settings.world_v2_recall_embedding_monthly_token_budget,
         daily_budget_cny=settings.world_v2_recall_embedding_daily_budget_cny,

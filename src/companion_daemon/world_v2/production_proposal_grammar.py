@@ -49,6 +49,10 @@ from .proposal_envelope import (
     MinimalProposal,
     ProposalInput,
 )
+from .unified_inbound_decision import (
+    UnifiedInboundDecisionError,
+    inspect_unified_inbound_decision,
+)
 
 
 ProductionProposalLaneId = Literal[
@@ -62,7 +66,6 @@ ProductionProposalLaneId = Literal[
     "outcome",
     "interaction_bid",
     "proactive",
-    "quick_reaction",
 ]
 
 
@@ -122,6 +125,9 @@ class ProductionProposalGrammar:
             if not self.allows_no_change_decision or proposal.action_intents:
                 raise ProductionProposalGrammarError("no_change_not_reachable")
             return
+        if self.lane_id == "chat_reply":
+            self._validate_chat_reply(proposal)
+            return
         if self.lane_id == "interaction_appraisal":
             self._validate_interaction_appraisal(proposal)
             return
@@ -151,6 +157,44 @@ class ProductionProposalGrammar:
         elif proposal.action_intents:
             raise ProductionProposalGrammarError("action_not_reachable")
 
+    def _validate_chat_reply(self, proposal: DecisionProposal) -> None:
+        """Close the unified inbound result to its three installed authorities.
+
+        CharacterInterior authors one result for an inbound opportunity.  The
+        envelope may therefore contain the visible ExpressionPlan together
+        with the same-call Appraisal and its optional, exactly-bound Affect.
+        This is not generic multi-change authority: each change must still be
+        consumed by its specialized compiler/manifest/runtime seam below the
+        audit, and every Action must be caused by the sole expression change.
+        """
+
+        try:
+            shape = inspect_unified_inbound_decision(proposal)
+        except UnifiedInboundDecisionError as exc:
+            raise ProductionProposalGrammarError(f"chat_{exc.code}") from exc
+
+        if shape.expression is None:
+            return
+        expression_capability = next(
+            (
+                item
+                for item in self.capabilities
+                if item.change_kind == shape.expression.kind
+                and item.transition == shape.expression.transition
+            ),
+            None,
+        )
+        if expression_capability is None or not expression_capability.allows_actions:
+            raise ProductionProposalGrammarError("chat_expression_not_reachable")
+        if not proposal.action_intents:
+            raise ProductionProposalGrammarError("action_required")
+        if any(
+            intent.kind not in expression_capability.action_kinds
+            or intent.causal_change_id != shape.expression.change_id
+            for intent in proposal.action_intents
+        ):
+            raise ProductionProposalGrammarError("action_not_reachable")
+
     @staticmethod
     def _validate_interaction_appraisal(proposal: DecisionProposal) -> None:
         """Close the only production composite to appraisal plus its derived affect."""
@@ -160,7 +204,12 @@ class ProductionProposalGrammar:
         for change in proposal.proposed_changes:
             if change.kind == "appraisal_transition" and change.transition == "activate":
                 appraisals.append(change)
-            elif change.kind == "affect_transition" and change.transition == "open":
+            elif change.kind == "affect_transition" and change.transition in {
+                "open",
+                "update",
+                "resolve",
+                "supersede",
+            }:
                 affects.append(change)
             else:
                 raise ProductionProposalGrammarError("interaction_change_not_reachable")
@@ -326,7 +375,7 @@ _EXPECTED_PRODUCTION_PROPOSAL_GRAMMARS: Mapping[
     {
         "chat_reply": ProductionProposalGrammar(
             lane_id="chat_reply",
-            capabilities=(_EXPRESSION,),
+            capabilities=(_EXPRESSION, _APPRAISAL, _AFFECT, _RELATIONSHIP_SIGNAL),
             allows_no_change_decision=False,
             allows_minimal_reply=True,
         ),
@@ -394,25 +443,6 @@ _EXPECTED_PRODUCTION_PROPOSAL_GRAMMARS: Mapping[
             ),
             allows_no_change_decision=True,
         ),
-        # The same-turn quick reaction lane may authorize exactly one platform
-        # ``reaction`` on the triggering message and nothing else.  Its
-        # no-change form is the ordinary outcome: the recorded act/hold draw
-        # or the local semantic gate declining leaves the lane inert.
-        "quick_reaction": ProductionProposalGrammar(
-            lane_id="quick_reaction",
-            capabilities=(
-                SpecializedProposalCapability(
-                    change_kind=_EXPRESSION.change_kind,
-                    transition=_EXPRESSION.transition,
-                    compiler_ref=_EXPRESSION.compiler_ref,
-                    manifest_ref=_EXPRESSION.manifest_ref,
-                    reverse_verifier_ref=_EXPRESSION.reverse_verifier_ref,
-                    allows_actions=True,
-                    action_kinds=frozenset({"reaction"}),
-                ),
-            ),
-            allows_no_change_decision=True,
-        ),
     }
 )
 # A public read-only view is useful to architecture tests and diagnostics, but
@@ -443,7 +473,6 @@ def assert_production_proposal_grammar_coverage() -> None:
         "outcome",
         "interaction_bid",
         "proactive",
-        "quick_reaction",
     }:
         raise RuntimeError("production proposal grammar lane coverage changed")
     for lane_id, grammar in expected.items():
@@ -502,7 +531,7 @@ def production_proposal_grammar(
     )
     return ProductionProposalGrammar(
         lane_id="chat_reply",
-        capabilities=(capability,),
+        capabilities=(capability, _APPRAISAL, _AFFECT, _RELATIONSHIP_SIGNAL),
         allows_no_change_decision=True,
         allows_minimal_reply=True,
     )
@@ -513,12 +542,10 @@ def compose_production_deliberation(
     lane_id: ProductionProposalLaneId,
     router: object,
     main_model: object,
-    quick_recovery: object,
     expression_action_kinds: frozenset[str] | None = None,
     main_timeout_seconds: float = 6.0,
     quick_timeout_seconds: float = 2.5,
-    technical_recovery_enabled: bool = True,
-    expression_episode_mode: Literal["off", "shadow", "on", "stream"] = "off",
+    expression_episode_mode: Literal["off", "shadow", "stream"] = "off",
     expression_episode_diagnostics: ExpressionEpisodeDiagnostics | None = None,
 ):
     """Create the only Deliberation shape permitted by production composition.
@@ -530,13 +557,21 @@ def compose_production_deliberation(
 
     from .deliberation import Deliberation
 
+    if expression_episode_mode not in {"off", "shadow", "stream"}:
+        raise ValueError(
+            "production expression episode mode must be off, shadow, or stream"
+        )
+
     return Deliberation(
         router=router,  # type: ignore[arg-type]
         main_model=main_model,  # type: ignore[arg-type]
-        quick_recovery=quick_recovery,  # type: ignore[arg-type]
+        quick_recovery=None,
         main_timeout_seconds=main_timeout_seconds,
         quick_timeout_seconds=quick_timeout_seconds,
-        technical_recovery_enabled=technical_recovery_enabled,
+        # CharacterInterior owns same-author correction and every production
+        # business trigger owns later retry. Generic Deliberation's historical
+        # recovery-author port is deliberately absent from this composition.
+        technical_recovery_enabled=False,
         expression_episode_mode=expression_episode_mode,
         expression_episode_diagnostics=expression_episode_diagnostics,
         expression_episode_grammar=(
@@ -549,12 +584,8 @@ def compose_production_deliberation(
         proposal_grammar=production_proposal_grammar(
             lane_id, expression_action_kinds=expression_action_kinds
         ),
-        # Every production recovery is interpreted under the same typed lane
-        # grammar as its primary candidate. Chat may legitimately return a
-        # MinimalProposal or a typed ``silent`` DecisionProposal; background
-        # lanes normally return an inert typed no-change DecisionProposal.
-        # A global ``minimal_only`` check incorrectly rejected those honest
-        # background recoveries solely because they were not chat replies.
+        # Retained only as inert generic-Deliberation configuration; no
+        # production recovery author is installed above.
         recovery_mode="proposal_grammar",
     )
 

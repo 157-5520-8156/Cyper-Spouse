@@ -10,7 +10,6 @@ from .event_identity import domain_idempotency_key
 from .expression_lifecycle_runtime import ExpressionReceiptLifecycle
 from .minimal_reply_events import ExpressionBeatTerminatedPayload
 from .media_delivery_runtime import MediaDeliveryReceiptLifecycle
-from .media_delivery_interaction import media_delivery_interaction_trigger_event
 from .read_only_tool import accepted_tool_result_events
 from .perception import accepted_perception_result_events
 from .schemas import (
@@ -431,14 +430,9 @@ class SettlementPlanner:
             )
         )
         events.extend(media_events)
-        # A viewer-facing continuation cannot be inferred from an artifact,
-        # preview, provider ack, or even a generic receipt.  It is opened in
-        # the same atomic settlement batch as the sole durable share claim.
-        events.extend(
-            media_delivery_interaction_trigger_event(source_event=event)
-            for event in media_events
-            if event.event_type == "MediaDeliveryShared"
-        )
+        # The character's communicative intent is already part of the
+        # accepted, source-bound media plan.  Settlement owns transport facts
+        # only; it must not open the retired independent post-delivery author.
         if receipt.is_terminal:
             budget = BudgetSettlement(
                 settlement_id=f"budget-settlement:{result.source}:{result.source_event_id}",

@@ -24,7 +24,12 @@ def _digest(value: object) -> str:
 class PerceptionTriggerRunResult(FrozenModel):
     trigger_id: str
     status: Literal["idle", "owned_elsewhere", "processed"]
-    work_status: Literal["no_change", "accepted", "rejected"] | None = None
+    work_status: Literal[
+        "no_change",
+        "accepted",
+        "rejected",
+        "technical_failure",
+    ] | None = None
 
 
 class PerceptionTriggerRuntime:
@@ -80,9 +85,14 @@ class PerceptionTriggerRuntime:
             observation=observation, observation_event=source_event, cursor=cursor
         )
         if audit.proposal_id is None:
-            self._complete(active, source_event, "no-change")
+            # A CharacterInterior model/projection/schema failure is not a
+            # decision to ignore the attachment. Keep the claim non-terminal;
+            # its finite lease makes the exact source retryable after recovery
+            # while the immutable ModelResult audit preserves this attempt.
             return PerceptionTriggerRunResult(
-                trigger_id=process.trigger_id, status="processed", work_status="no_change"
+                trigger_id=process.trigger_id,
+                status="processed",
+                work_status="technical_failure",
             )
         try:
             compiled = self._compiler.accept(

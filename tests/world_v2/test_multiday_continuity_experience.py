@@ -1,25 +1,24 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from world_v2_application import (
+    build_sqlite_world_v2_test_application,
+    compose_fixture_character_interior,
+)
 
-from companion_daemon.world_v2.affect_chat_model_adapter import AffectDraftDeliberationAdapter
-from companion_daemon.world_v2.appraisal_chat_model_adapter import AppraisalDraftDeliberationAdapter
-from companion_daemon.world_v2.chat_model_deliberation_adapter import ChatModelDeliberationAdapter
 from companion_daemon.world_v2.deliberation import ModelRoute, RouteRequest
 from companion_daemon.world_v2.platform_action_executor import PlatformDispatchReceipt
 from companion_daemon.world_v2.production_turn_application import (
     WorldV2TurnApplicationConfig,
-    build_sqlite_world_v2_turn_application,
 )
-from companion_daemon.world_v2.relationship_draft_deliberation_adapter import (
-    RelationshipDraftDeliberationAdapter,
+from companion_daemon.world_v2.character_interior.inbound_author import (
+    _InboundCharacterAuthor as InboundCharacterAuthor,
 )
 from companion_daemon.world_v2.world_turn_runtime import InboundTurn
-
 
 NOW = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
 
@@ -55,24 +54,36 @@ class _ReplyChat:
             response_text = "我还在想这件事，你慢慢说。"
             stance = "acknowledge_briefly"
         self.responses.append((response_text, stance))
-        return json.dumps(
-            {
-                "response_text": response_text,
-                "stance": stance,
-                "brief_rationale": "Keep the ongoing emotional context present without inventing a fact.",
-                "confidence": 7_200,
+        expression = {
+            "private_turn_state": {
+                "contract": "private-turn-state.1",
+                "inner_state_summary": (
+                    "那点受伤还在，但已经没有最初那么强；我想带着这份余波慢一点继续。"
+                    if context_consumed
+                    else "她说失望时我确实被刺了一下；我想先承认这份不舒服，再听她往下说。"
+                ),
+                "attended_source_refs": [],
             },
-            ensure_ascii=False,
-        )
-
-
-class _AppraisalChat:
-    model = "test-multiday-appraisal"
-
-    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
-        del temperature
-        return json.dumps(
+            "timing_choice": "now",
+            "beats": [{"modality": "text", "text": response_text}],
+            "stance": stance,
+            "brief_rationale": (
+                "Keep the ongoing emotional context present without inventing a fact."
+            ),
+            "confidence": 7_200,
+            "world_claims": [],
+        }
+        appraisal = (
             {
+                "appraise": False,
+                "brief_rationale": "No new emotional shift on the later turn.",
+                "behavior_tendency": "hold_space",
+                "stance": "attend_with_distance",
+                "display_strategy": "restrained_boundary",
+                "confidence": 6_000,
+            }
+            if context_consumed
+            else {
                 "appraise": True,
                 "affect": "open",
                 "brief_rationale": "The user explicitly described disappointment.",
@@ -80,35 +91,20 @@ class _AppraisalChat:
                 "stance": "attend_with_distance",
                 "display_strategy": "restrained_boundary",
                 "confidence": 8_400,
-                "meanings": [{"meaning": "boundary_violation", "confidence": 8_200}],
+                "meanings": [
+                    {"meaning": "她觉得我没有认真对待她，因此这句话也让我感到关系里的受伤", "confidence": 8_200}
+                ],
                 "attribution": "user",
                 "severity": 7_800,
-                "components": [{"dimension": "hurt", "target_intensity_bp": 6_200}],
-            },
-            ensure_ascii=False,
+                "components": [
+                    {"dimension": "hurt", "target_intensity_bp": 6_200}
+                ],
+            }
         )
-
-
-class _RelationshipChat:
-    model = "test-multiday-relationship"
-
-    async def complete(self, _messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
-        del temperature
         return json.dumps(
             {
-                "decision": "signal",
-                "signal_code": "reliability_follow_through",
-                "confidence_bp": 7_400,
-                "persistence": "durable",
-                "rationale_code": "accepted_reliability_evidence",
-                "suggested_deltas": {
-                    "trust_bp": 240,
-                    "closeness_bp": 40,
-                    "respect_bp": 160,
-                    "reliability_bp": 260,
-                    "mutuality_bp": 20,
-                    "repair_confidence_bp": 0,
-                },
+                "appraisal_draft": appraisal,
+                "expression_draft": expression,
             },
             ensure_ascii=False,
         )
@@ -133,26 +129,26 @@ class _Transport:
 
 
 @pytest.mark.asyncio
-async def test_three_day_affect_decay_and_relationship_memory_change_the_next_turn(
+async def test_three_day_affect_decay_changes_the_next_unified_interior_turn(
     tmp_path: Path,
 ) -> None:
     reply = _ReplyChat()
+    cognition = InboundCharacterAuthor(flash_model=reply)
     config = WorldV2TurnApplicationConfig(
         world_id="world:multiday-continuity",
         companion_actor_ref="agent:companion",
         reply_target="user:user.1",
         action_pump_owner="pump:multiday-continuity",
+        character_memory_enabled=False,
     )
-    app = build_sqlite_world_v2_turn_application(
+    app = build_sqlite_world_v2_test_application(
         path=tmp_path / "multiday-continuity.sqlite",
         config=config,
         identities=_Identities(),
         router=_Router(),
-        main_model=ChatModelDeliberationAdapter(model=reply),
-        quick_recovery=ChatModelDeliberationAdapter(model=reply),
-        appraisal_model=AppraisalDraftDeliberationAdapter(model=_AppraisalChat()),
-        affect_model=AffectDraftDeliberationAdapter(model=_AppraisalChat()),
-        relationship_model=RelationshipDraftDeliberationAdapter(model=_RelationshipChat()),
+        character_interior=compose_fixture_character_interior(
+            inbound_author=cognition,
+        ),
         transport=_Transport(),
         now=NOW,
     )
@@ -174,7 +170,6 @@ async def test_three_day_affect_decay_and_relationship_memory_change_the_next_tu
                 break
         initial = app._ledger.project()  # noqa: SLF001 - experience replay evidence
         initial_hurt = initial.affect_episodes[0].components[0].intensity_bp
-        initial_trust = initial.relationship_states[0].variables.trust_bp
 
         previous = NOW
         for day in range(1, 4):
@@ -193,7 +188,6 @@ async def test_three_day_affect_decay_and_relationship_memory_change_the_next_tu
 
         final = app._ledger.project()  # noqa: SLF001 - experience replay evidence
         assert final.affect_episodes[0].components[0].intensity_bp < initial_hurt
-        assert final.relationship_states[0].variables.trust_bp == initial_trust
 
         second = await app.respond(
             InboundTurn(
@@ -206,15 +200,13 @@ async def test_three_day_affect_decay_and_relationship_memory_change_the_next_tu
             )
         )
         assert second.status == "action_authorized"
-        context = json.loads(reply.requests[-1][-1]["content"])["request"]
-        payload = json.loads(context["model_content_json"])
+        provider_request = json.loads(reply.requests[-1][-1]["content"])
+        affect_material = provider_request["inner_life_snapshot"]["materials"][
+            "affect"
+        ]
         assert any(
-            item["value"]["components"][0]["dimension"] == "hurt"
-            for item in payload["slices"]["affect_episodes"]["items"]
-        )
-        assert any(
-            item["value"]["variables"]["trust_bp"] == initial_trust
-            for item in payload["slices"]["relationship_slice"]["items"]
+            item["components"][0]["dimension"] == "hurt"
+            for item in affect_material
         )
         assert len(reply.responses) >= 2
         assert reply.responses[-1][1] == "acknowledge_briefly"

@@ -1,35 +1,38 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from world_v2_application import (
+    build_sqlite_world_v2_test_application,
+    compose_fixture_character_interior,
+    compose_fixture_character_purpose,
+)
 
 from companion_daemon.world_v2.life_author_seed import ReviewedLifeSeedCatalog
-from companion_daemon.world_v2.life_development_capability import (
-    ProjectionLifeCapabilityManifestCompiler,
-)
 from companion_daemon.world_v2.life_content_store import (
     InMemoryImmutableLifeContentStore,
     StoredLifeContent,
     life_content_payload_hash,
 )
+from companion_daemon.world_v2.life_development_capability import (
+    ProjectionLifeCapabilityManifestCompiler,
+)
 from companion_daemon.world_v2.local_chronology import LocalChronology
 from companion_daemon.world_v2.production_turn_application import (
     LifeEcologyComposition,
     WorldV2TurnApplicationConfig,
-    build_sqlite_world_v2_turn_application,
 )
 from companion_daemon.world_v2.schemas import (
     CommittedWorldEventRef,
     DueWindow,
     ProjectionCursor,
-    WorldPlaceProjection,
     WorldEvent,
+    WorldPlaceProjection,
 )
-
 
 NOW = datetime(2026, 7, 29, 10, 0, tzinfo=UTC)
 
@@ -46,11 +49,6 @@ class _Router:
 
 class _MainModel:
     async def propose(self, _request):  # type: ignore[no-untyped-def]
-        raise AssertionError("life development ecology does not deliberate a reply")
-
-
-class _QuickRecovery:
-    async def recover(self, _request, _failure):  # type: ignore[no-untyped-def]
         raise AssertionError("life development ecology does not deliberate a reply")
 
 
@@ -270,10 +268,22 @@ class _SelectFirstLifecycle:
     ) -> str:
         del temperature
         material = json.loads(messages[1]["content"])
+        capability = material["capability_manifest"]
+        token = capability["payload"]["openings"][0]["opening_token"]
         return json.dumps(
             {
-                "decision": "select",
-                "opening_token": material["openings"][0]["opening_token"],
+                "status": "decision",
+                "summary": "我现在想开始这项已经安排好的活动。",
+                "attended_source_refs": [],
+                "decision": {
+                    "source_refs": capability["source_refs"],
+                    "payload": {
+                        "decision": "select",
+                        "selected_token": token,
+                    },
+                },
+                "recall_query": None,
+                "proposals": [],
             },
             ensure_ascii=False,
         )
@@ -480,20 +490,27 @@ async def test_production_open_life_no_op_is_effect_once_across_cold_restart(
         companion_actor_ref="actor:companion",
         reply_target="user:user.1",
         action_pump_owner="pump:open-life-production",
+        character_memory_enabled=False,
         life_ecology=LifeEcologyComposition.production_v1(seed_catalog_path=seed),
     )
     world_author = _NoOpWorldAuthor()
     character_model = _NeverCharacterModel()
-    app = build_sqlite_world_v2_turn_application(
+    app = build_sqlite_world_v2_test_application(
         path=database,
         config=config,
         identities=_Identities(),
         router=_Router(),
-        main_model=_MainModel(),
-        quick_recovery=_QuickRecovery(),
+        character_interior=compose_fixture_character_interior(
+            inbound_author=_MainModel(),
+            purpose_faculties=(
+                compose_fixture_character_purpose(
+                    purpose="life_development_choice",
+                    provider=character_model,
+                ),
+            ),
+        ),
         transport=_Transport(),
         life_world_author_model=world_author,
-        life_character_model=character_model,
         now=NOW,
     )
     wake_event_ref = "event:trigger:clock:open-life-production"
@@ -523,16 +540,22 @@ async def test_production_open_life_no_op_is_effect_once_across_cold_restart(
 
     recovered_world_author = _NoOpWorldAuthor(forbidden=True)
     recovered_character_model = _NeverCharacterModel()
-    reopened = build_sqlite_world_v2_turn_application(
+    reopened = build_sqlite_world_v2_test_application(
         path=database,
         config=config,
         identities=_Identities(),
         router=_Router(),
-        main_model=_MainModel(),
-        quick_recovery=_QuickRecovery(),
+        character_interior=compose_fixture_character_interior(
+            inbound_author=_MainModel(),
+            purpose_faculties=(
+                compose_fixture_character_purpose(
+                    purpose="life_development_choice",
+                    provider=recovered_character_model,
+                ),
+            ),
+        ),
         transport=_Transport(),
         life_world_author_model=recovered_world_author,
-        life_character_model=recovered_character_model,
         now=NOW.replace(minute=10),
     )
     try:
@@ -559,20 +582,27 @@ def test_production_open_life_refuses_an_unmarked_legacy_story_catalog(
         companion_actor_ref="actor:companion",
         reply_target="user:user.1",
         action_pump_owner="pump:open-life-production",
+        character_memory_enabled=False,
         life_ecology=LifeEcologyComposition.production_v1(seed_catalog_path=seed),
     )
 
     with pytest.raises(ValueError, match="legacy_replay_and_fixture"):
-        build_sqlite_world_v2_turn_application(
+        build_sqlite_world_v2_test_application(
             path=tmp_path / "unmarked.sqlite",
             config=config,
             identities=_Identities(),
             router=_Router(),
-            main_model=_MainModel(),
-            quick_recovery=_QuickRecovery(),
+            character_interior=compose_fixture_character_interior(
+                inbound_author=_MainModel(),
+                purpose_faculties=(
+                    compose_fixture_character_purpose(
+                        purpose="life_development_choice",
+                        provider=_NeverCharacterModel(),
+                    ),
+                ),
+            ),
             transport=_Transport(),
             life_world_author_model=_NoOpWorldAuthor(),
-            life_character_model=_NeverCharacterModel(),
             now=NOW,
         )
 
@@ -588,19 +618,26 @@ async def test_production_open_life_failure_retries_at_ten_minutes_without_early
         companion_actor_ref="actor:companion",
         reply_target="user:user.1",
         action_pump_owner="pump:open-life-production",
+        character_memory_enabled=False,
         life_ecology=LifeEcologyComposition.production_v1(seed_catalog_path=seed),
     )
     world_author = _UnavailableWorldAuthor()
-    app = build_sqlite_world_v2_turn_application(
+    app = build_sqlite_world_v2_test_application(
         path=database,
         config=config,
         identities=_Identities(),
         router=_Router(),
-        main_model=_MainModel(),
-        quick_recovery=_QuickRecovery(),
+        character_interior=compose_fixture_character_interior(
+            inbound_author=_MainModel(),
+            purpose_faculties=(
+                compose_fixture_character_purpose(
+                    purpose="life_development_choice",
+                    provider=_NeverCharacterModel(),
+                ),
+            ),
+        ),
         transport=_Transport(),
         life_world_author_model=world_author,
-        life_character_model=_NeverCharacterModel(),
         now=NOW,
     )
     try:
@@ -710,22 +747,32 @@ async def test_production_dynamic_character_plan_opens_aftermath_from_frozen_out
         companion_actor_ref="actor:companion",
         reply_target="user:user.1",
         action_pump_owner="pump:open-life-production",
+        character_memory_enabled=False,
         life_ecology=LifeEcologyComposition.production_v1(seed_catalog_path=seed),
     )
     first_wake = "event:trigger:clock:open-life-plan"
     world_author = _PlanWorldAuthor(wake_event_ref=first_wake)
     character_model = _AcceptCharacterModel()
-    app = build_sqlite_world_v2_turn_application(
+    app = build_sqlite_world_v2_test_application(
         path=database,
         config=config,
         identities=_Identities(),
         router=_Router(),
-        main_model=_MainModel(),
-        quick_recovery=_QuickRecovery(),
+        character_interior=compose_fixture_character_interior(
+            inbound_author=_MainModel(),
+            purpose_faculties=(
+                compose_fixture_character_purpose(
+                    purpose="life_development_choice",
+                    provider=character_model,
+                ),
+                compose_fixture_character_purpose(
+                    purpose="activity_lifecycle_choice",
+                    provider=_SelectFirstLifecycle(),
+                ),
+            ),
+        ),
         transport=_Transport(),
-        activity_lifecycle_model=_SelectFirstLifecycle(),
         life_world_author_model=world_author,
-        life_character_model=character_model,
         life_source_closure_reviewer=_SupportingSourceReviewer(),
         now=NOW,
     )

@@ -26,7 +26,7 @@ from companion_daemon.onebot_adapter import (
 )
 
 from .platform_action_executor import MediaProviderTransport
-from .chat_model_deliberation_adapter import ChatCompletionModel
+from .model_completion import ChatCompletionModel
 from .production_latency_health import production_latency_health_snapshot
 from .production_reliability_metrics import reliability_snapshot
 from .durable_reliability import durable_reliability_snapshot
@@ -198,6 +198,19 @@ class QQC2CSchedulerDiagnostics:
             },
             "expression_episode": world.get("expression_episode", {}),
             "expression_retry": world.get("expression_retry", {}),
+            "character_interior": world.get(
+                "character_interior",
+                {
+                    "status": "unavailable",
+                    "installed": False,
+                    "semantic_author_count": 0,
+                    "primary_author_model": None,
+                    "primary_author_route": None,
+                    "parallel_character_author_conflicts": 0,
+                    "legacy_interface_invocations": 0,
+                    "dual_write_conflicts": 0,
+                },
+            ),
             # Keep the legacy ``world_activity`` contract stable while
             # exposing the per-mechanism evidence needed to diagnose a live
             # companion.  These values are read-only projection counts; they
@@ -216,7 +229,7 @@ def create_qq_c2c_onebot_app(
     settings: Settings,
     use_fake_model: bool = False,
     _test_only_model: ChatCompletionModel | None = None,
-    _test_only_advisory_model: ChatCompletionModel | None = None,
+    _test_only_world_support_model: ChatCompletionModel | None = None,
     _test_only_source_closure_model: ChatCompletionModel | None = None,
     _test_only_life_source_closure_model: ChatCompletionModel | None = None,
     scheduler_interval_seconds: float = 15.0,
@@ -250,7 +263,7 @@ def create_qq_c2c_onebot_app(
         model is not None
         for model in (
             _test_only_model,
-            _test_only_advisory_model,
+            _test_only_world_support_model,
             _test_only_source_closure_model,
             _test_only_life_source_closure_model,
         )
@@ -316,12 +329,11 @@ def create_qq_c2c_onebot_app(
         settings=settings,
         recipient_id=recipient_id,
         model=FakeCompanionModel() if use_fake_model else _test_only_model,
-        advisory_model=_test_only_advisory_model,
+        world_support_model=_test_only_world_support_model,
         source_closure_model=_test_only_source_closure_model,
         life_source_closure_model=_test_only_life_source_closure_model,
         media_preview=media_preview,
         media_transport=media_transport,
-        perception_model=(perception_bundle.model if perception_bundle is not None else None),
         perception_input_source=(
             perception_bundle.input_source if perception_bundle is not None else None
         ),
@@ -458,6 +470,7 @@ def create_qq_c2c_onebot_app(
         scheduler_view["text_turn_endpoint"] = host.text_endpoint_health()
         scheduler_view["proactive_source_authority"] = host.proactive_source_authority_health()
         scheduler_view["life_source_authority"] = host.life_source_authority_health()
+        scheduler_view["budget"] = host.usage_budget_health()
         external_perception_health = host.external_world_perception_health()
         downstream = world.get("external_perception_downstream")
         if isinstance(downstream, dict):

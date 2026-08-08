@@ -273,22 +273,21 @@ class CharacterAttentionContext(FrozenModel):
     world_id: str = Field(min_length=1, max_length=512)
     actor_ref: str = Field(min_length=1, max_length=512)
     pinned_world_cursor: str = Field(min_length=1, max_length=1_024)
-    current_self_state: tuple[SourceBoundAttentionContextItem, ...] = Field(max_length=32)
+    world_logical_time: datetime
     situation: tuple[SourceBoundAttentionContextItem, ...] = Field(max_length=32)
     relevant_context: tuple[SourceBoundAttentionContextItem, ...] = Field(max_length=64)
     available_channels: tuple[PerceptionChannelProof, ...] = Field(max_length=32)
 
     @model_validator(mode="after")
     def refs_are_unambiguous(self) -> CharacterAttentionContext:
-        context_refs = tuple(
-            item.context_ref
-            for item in (*self.current_self_state, *self.situation, *self.relevant_context)
-        )
+        context_refs = tuple(item.context_ref for item in (*self.situation, *self.relevant_context))
         channel_refs = tuple(item.channel_ref for item in self.available_channels)
         if len(context_refs) != len(set(context_refs)):
             raise ValueError("attention context refs must be unique")
         if len(channel_refs) != len(set(channel_refs)):
             raise ValueError("perception channel refs must be unique")
+        if self.world_logical_time.tzinfo is None or self.world_logical_time.utcoffset() is None:
+            raise ValueError("attention context logical time must be timezone-aware")
         return self
 
 
@@ -491,7 +490,6 @@ class LiveCharacterAttentionContext(FrozenModel):
     actor_ref: str = Field(min_length=1, max_length=512)
     pinned_world_cursor: ProjectionCursor
     world_logical_time: datetime
-    current_self_state: tuple[SourceBoundAttentionContextItem, ...] = Field(max_length=32)
     situation: tuple[SourceBoundAttentionContextItem, ...] = Field(max_length=32)
     relevant_context: tuple[SourceBoundAttentionContextItem, ...] = Field(max_length=64)
     available_channels: tuple[PerceptionChannelProof, ...] = Field(max_length=32)
@@ -500,10 +498,7 @@ class LiveCharacterAttentionContext(FrozenModel):
     def refs_and_time_are_closed(self) -> LiveCharacterAttentionContext:
         if self.world_logical_time.tzinfo is None or self.world_logical_time.utcoffset() is None:
             raise ValueError("live attention logical time must be timezone-aware")
-        context_refs = tuple(
-            item.context_ref
-            for item in (*self.current_self_state, *self.situation, *self.relevant_context)
-        )
+        context_refs = tuple(item.context_ref for item in (*self.situation, *self.relevant_context))
         channel_refs = tuple(item.channel_ref for item in self.available_channels)
         if len(context_refs) != len(set(context_refs)):
             raise ValueError("attention context refs must be unique")

@@ -1,23 +1,20 @@
-"""Bounded model deliberation for a frozen activity-lifecycle opening set.
+"""Pure contracts for a frozen activity-lifecycle opening set.
 
-This adapter is deliberately not an activity authority.  It receives only
-safe prose and opaque tokens compiled by the activity catalog, calls an
-injected text model, and returns either ``no_op`` or one token that was
-already offered.  It cannot inspect a plan, manufacture an operation, or
-write a ledger.  The later proposal-audit/acceptance vertical can persist the
-raw and canonical bytes exposed by :class:`ActivityLifecycleModelDraft`.
+Character choice belongs to the unified :mod:`character_interior` purpose.
+This historical domain module only validates its opaque capability tokens and
+materializes already-authored bytes; it cannot call a character model.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from typing import Literal, Protocol
+from typing import Literal
 
 from pydantic import Field, model_validator
 
+from .proposal_audit_schemas import ModelResultRecordedPayload
 from .schema_core import FrozenModel
-from .structured_completion import complete_json_object
 
 
 def _sha256(value: str) -> str:
@@ -42,18 +39,6 @@ def _parse_json_object(raw: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError("ActivityLifecycleDraft model did not return one valid JSON object")
     return value
-
-
-class ActivityLifecycleDraftModel(Protocol):
-    """Minimal injected seam for Flash, Thinking, or deterministic test models.
-
-    The protocol intentionally has no tool, action, ledger, or callback
-    capability.  Composition may choose any text model that meets it.
-    """
-
-    model: str
-
-    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.2) -> str: ...
 
 
 class ActivityLifecycleOpening(FrozenModel):
@@ -96,6 +81,7 @@ class ActivityLifecycleModelDraft(FrozenModel):
     raw_output_hash: str | None = None
     normalized_json: str | None = None
     normalized_output_hash: str | None = None
+    character_interior_model_result: ModelResultRecordedPayload | None = None
 
     @model_validator(mode="after")
     def choice_and_audit_shape_are_closed(self) -> "ActivityLifecycleModelDraft":
@@ -160,63 +146,8 @@ def materialize_activity_lifecycle_draft(
     )
 
 
-class ActivityLifecycleDraftAdapter:
-    """Call one injected text model without granting any world-write capability."""
-
-    VERSION = "activity-lifecycle-draft.1"
-
-    def __init__(self, *, model: ActivityLifecycleDraftModel, temperature: float = 0.2) -> None:
-        if not 0 <= temperature <= 2:
-            raise ValueError("ActivityLifecycleDraft temperature must be between 0 and 2")
-        self._model = model
-        self._model_id = (str(getattr(model, "model", "")).strip() or type(model).__name__)[:256]
-        self._temperature = temperature
-
-    async def deliberate(self, *, capsule: ActivityLifecycleDraftCapsule) -> ActivityLifecycleModelDraft:
-        if not capsule.openings:
-            return ActivityLifecycleModelDraft(decision="no_op")
-        raw = await complete_json_object(
-            self._model,
-            self._messages(capsule),
-            temperature=self._temperature,
-        )
-        return materialize_activity_lifecycle_draft(raw=raw, capsule=capsule, model=self._model_id)
-
-    @staticmethod
-    def _messages(capsule: ActivityLifecycleDraftCapsule) -> list[dict[str, str]]:
-        return [
-            {
-                "role": "system",
-                "content": (
-                    "Choose at most one offered opaque opening token, or decline. Every opening has already "
-                    "passed plan-state, time-relation, capability, and authority checks. Prefer one coherent "
-                    "transition so an accepted life plan can actually progress; use no_op only when none of "
-                    "the supplied summaries fits the current situation, not merely because details are abstract. "
-                    "Return exactly one JSON "
-                    'object: {"decision":"no_op"} or '
-                    '{"decision":"select","opening_token":"one offered token"}. '
-                    "Do not return operations, plan ids, world ids, evidence, revisions, event ids, hashes, "
-                    "actions, or extra fields. The token is only a choice label; it is not permission to act."
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "situation_summary": capsule.situation_summary,
-                        "openings": [item.model_dump(mode="json") for item in capsule.openings],
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-            },
-        ]
-
-
 __all__ = [
-    "ActivityLifecycleDraftAdapter",
     "ActivityLifecycleDraftCapsule",
-    "ActivityLifecycleDraftModel",
     "ActivityLifecycleModelDraft",
     "ActivityLifecycleOpening",
     "materialize_activity_lifecycle_draft",

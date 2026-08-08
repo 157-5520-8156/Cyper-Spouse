@@ -234,6 +234,7 @@ class OutcomeProposalRecordedPayload(FrozenModel):
             "life-aftermath-context.1",
             "life-aftermath-context.2",
             "life-aftermath-context.3",
+            "life-aftermath-context.4",
         ]
         | None
     ) = None
@@ -284,7 +285,10 @@ class OutcomeProposalRecordedPayload(FrozenModel):
                     "Context v2 character outcome requires a durable model audit "
                     "and an explicit direction-adoption decision"
                 )
-            if self.context_identity_version == "life-aftermath-context.3" and (
+            if self.context_identity_version in {
+                "life-aftermath-context.3",
+                "life-aftermath-context.4",
+            } and (
                 any(item is None for item in durable_audit_identity)
                 or self.adopt_proposed_life_direction is not None
             ):
@@ -361,7 +365,11 @@ class WorldOccurrenceSettledPayload(DomainMutationPayload):
     result_payload_ref: str = Field(min_length=1)
     result_payload_hash: str = Field(min_length=1)
     settled_at: datetime
-    appraisal_trigger_ref: str = Field(min_length=1)
+    # A settlement opens protagonist appraisal only when the protagonist
+    # participated. NPC-private settlements retain objective ledger history
+    # without manufacturing a first-person experience. A later explicit
+    # perception has its own source-bound appraisal lane.
+    appraisal_trigger_ref: str | None = Field(default=None, min_length=1)
     adopt_proposed_life_direction: bool | None = None
     character_life_direction: BiographicalCoordinateReplacement | None = None
 

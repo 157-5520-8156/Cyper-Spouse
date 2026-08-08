@@ -76,7 +76,12 @@ class AffectEpisodeOpenedPayload(AffectAuthorizedMutationPayload):
 
 class AffectComponentUpdate(FrozenModel):
     component_id: str = Field(min_length=1)
-    operation: Literal["stimulus", "materialize", "open_component"] = "stimulus"
+    operation: Literal[
+        "stimulus",
+        "reinterpret",
+        "materialize",
+        "open_component",
+    ] = "stimulus"
     before_intensity_bp: int = Field(ge=0, le=10_000)
     proposed_delta_bp: int = Field(ge=-10_000, le=10_000)
     accepted_delta_bp: int = Field(ge=-10_000, le=10_000)
@@ -86,7 +91,7 @@ class AffectComponentUpdate(FrozenModel):
 
     @model_validator(mode="after")
     def delta_matches_updated_component(self) -> AffectComponentUpdate:
-        if self.operation in {"stimulus", "open_component"} and not self.appraisal_refs:
+        if self.operation in {"stimulus", "reinterpret", "open_component"} and not self.appraisal_refs:
             raise ValueError("stimulus affect update requires appraisal refs")
         if self.operation == "open_component" and self.before_intensity_bp != 0:
             raise ValueError("new affect component must start from zero")
@@ -102,11 +107,11 @@ class AffectComponentUpdate(FrozenModel):
         if self.updated_component.intensity_bp != self.after_intensity_bp:
             raise ValueError("updated component must carry the accepted intensity")
         if (
-            self.operation in {"stimulus", "open_component"}
+            self.operation in {"stimulus", "reinterpret", "open_component"}
             and self.updated_component.decay_anchor_intensity_bp != self.after_intensity_bp
         ):
             raise ValueError("stimulus update must anchor the accepted intensity")
-        if any(
+        if self.operation != "reinterpret" and any(
             item.source_cluster_ref != self.updated_component.source_cluster_ref
             for item in self.appraisal_refs
         ):
@@ -131,7 +136,7 @@ class AffectEpisodeUpdatedPayload(AffectAuthorizedMutationPayload):
             raise ValueError("payload appraisal refs must equal update appraisal refs")
         for update in self.component_updates:
             component = update.updated_component
-            if update.operation in {"stimulus", "open_component"} and not (
+            if update.operation in {"stimulus", "reinterpret", "open_component"} and not (
                 component.decay_anchor_at
                 == component.last_stimulus_at
                 == component.last_updated_at

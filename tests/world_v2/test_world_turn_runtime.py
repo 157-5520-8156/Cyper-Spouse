@@ -204,6 +204,9 @@ def _configured_runtime(
             world_id="world:turn-runtime",
             ledger=ledger,
             pinned_turn=turn,
+            # Claim the unified inbound state trigger so the .52 fold keeps
+            # this fixture's expression episode on the production path.
+            inbound_state_owner="worker:turn-runtime:inbound-state",
             reply_policy=ReplyBudgetPolicy(
                 account_id=account.account_id,
                 amount_limit=10,

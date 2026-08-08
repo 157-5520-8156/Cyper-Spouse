@@ -17,7 +17,8 @@ from .event_identity import domain_idempotency_key
 from .schemas import ClaimLease, Observation, TriggerProcess, WorldEvent
 
 
-INTERACTION_APPRAISAL_TRIGGER_VERSION = "interaction-appraisal-trigger.1"
+INTERACTION_APPRAISAL_TRIGGER_VERSION = "interaction-appraisal-trigger.2"
+CHARACTER_INTERIOR_INBOUND_ATTEMPT_PREFIX = "attempt:character-interior-inbound:"
 DEFAULT_INTERACTION_APPRAISAL_LEASE_SECONDS = 120
 INTERACTION_APPRAISAL_PROPOSAL_ID_PREFIXES = (
     "proposal:appraisal-draft:",
@@ -60,7 +61,7 @@ def _event_id(*, role: str, world_id: str, trigger_id: str, attempt_id: str) -> 
 
 
 def _attempt_id(*, world_id: str, trigger_id: str, observation_event: WorldEvent) -> str:
-    return "attempt:interaction-appraisal:" + _digest(
+    return CHARACTER_INTERIOR_INBOUND_ATTEMPT_PREFIX + _digest(
         {
             "version": INTERACTION_APPRAISAL_TRIGGER_VERSION,
             "world_id": world_id,
@@ -237,6 +238,7 @@ __all__ = [
     "INTERACTION_APPRAISAL_FOLDED_OUTCOME",
     "INTERACTION_APPRAISAL_PROPOSAL_ID_PREFIXES",
     "INTERACTION_APPRAISAL_TRIGGER_VERSION",
+    "CHARACTER_INTERIOR_INBOUND_ATTEMPT_PREFIX",
     "InteractionAppraisalTriggerError",
     "interaction_appraisal_folded_event",
     "interaction_appraisal_trigger_events",

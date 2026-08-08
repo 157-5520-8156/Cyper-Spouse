@@ -867,15 +867,19 @@ class StructuredExpressionReselectionModel(StructuredSourceReviewModel):
 
     def request_payload(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, object]],
         *,
         temperature: float,
         json_object: bool = False,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
     ) -> dict[str, object]:
         payload = super().request_payload(
             messages,
             temperature=temperature,
             json_object=json_object,
+            tools=tools,
+            tool_choice=tool_choice,
         )
         if not json_object:
             return payload

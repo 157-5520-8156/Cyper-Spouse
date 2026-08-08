@@ -1814,10 +1814,15 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         after_domains = time.perf_counter()
 
         domains: dict[SliceName, tuple[BaseModel, ...] | None] = {
+            # ``agent:companion`` is the canonical companion actor reference.
+            # Early character-core provisioning committed ``actor:companion``
+            # (legacy alias of the same companion core); accept both so an
+            # already-committed core remains consumable by the companion.
             "character_core": (
                 (projection.character_core,)
                 if projection.character_core is not None
-                and projection.character_core.actor_ref == query.actor_ref
+                and projection.character_core.actor_ref
+                in (query.actor_ref, "actor:companion")
                 else None
             ),
             "recent_dialogue": recent_dialogue,

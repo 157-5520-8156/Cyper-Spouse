@@ -46,7 +46,7 @@ from .appearance_state import APPEARANCE_STATE_PAYLOAD_MODELS
 from .visible_physical_state import VISIBLE_PHYSICAL_STATE_PAYLOAD_MODELS
 from .visual_fact import VISUAL_FACT_PAYLOAD_MODELS
 from .random_authority import RandomDrawRecordedPayload
-from .life_author_runtime import (
+from .legacy_life_author_events import (
     LifeAuthorDecisionRecordedPayload,
     LifeAvailabilitySnapshotRecordedPayload,
 )
@@ -162,7 +162,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.51"
+    reducer_bundle: str = "world-v2-reducers.52"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -414,6 +414,10 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
                 "cadence_draw_event_ref": (str | None, None),
                 "cadence_delay_seconds": (int | None, None),
                 "cadence_reused": (bool, False),
+                "character_interior_model_result": (
+                    ModelResultRecordedPayload | None,
+                    None,
+                ),
             },
         ),
         "InteractionFactTechnicalFailureRecorded": InteractionFactTechnicalFailurePayload,
@@ -657,6 +661,8 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "BiographicalTimelineConfigured": "world_id+timeline_id+document_hash+timezone_name",
         "AspirationPlanted": "world_id+aspiration_id+transition_id",
         "AspirationReinforced": "world_id+aspiration_id+expected_entity_revision+transition_id",
+        "AspirationRevised": "world_id+aspiration_id+expected_entity_revision+transition_id",
+        "AspirationAbandoned": "world_id+aspiration_id+expected_entity_revision+transition_id",
         "AspirationFaded": "world_id+aspiration_id+expected_entity_revision+transition_id",
         "AspirationCrystallized": "world_id+aspiration_id+expected_entity_revision+transition_id",
         "ActivityPlanned": "plan_id+transition_id",
@@ -1864,44 +1870,99 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
             ),
             _contract(
                 "AspirationPlanted",
-                "aspiration_runtime",
+                "character_interior_typed_authority",
                 "world",
                 "AspirationPlantedPayload",
-                allowed_predecessors=("ClockAdvanced",),
-                evidence_types=("committed_world_event",),
+                allowed_predecessors=(
+                    "ClockAdvanced",
+                    "ProposalRecorded",
+                    "WorldOccurrenceSettled",
+                    "ExecutionReceiptRecorded",
+                    "ActivityAbandoned",
+                ),
+                evidence_types=("committed_world_event", "settled_world_event"),
                 successors=(
                     "AspirationReinforced",
+                    "AspirationRevised",
+                    "AspirationAbandoned",
                     "AspirationFaded",
                     "AspirationCrystallized",
                 ),
             ),
             _contract(
                 "AspirationReinforced",
-                "aspiration_runtime",
+                "character_interior_typed_authority",
                 "world",
                 "AspirationReinforcedPayload",
-                allowed_predecessors=("AspirationPlanted", "AspirationReinforced"),
+                allowed_predecessors=(
+                    "ProposalRecorded",
+                    "AspirationPlanted",
+                    "AspirationReinforced",
+                ),
                 evidence_types=("committed_world_event",),
                 successors=(
                     "AspirationReinforced",
+                    "AspirationRevised",
+                    "AspirationAbandoned",
                     "AspirationFaded",
                     "AspirationCrystallized",
                 ),
             ),
             _contract(
+                "AspirationRevised",
+                "character_interior_typed_authority",
+                "world",
+                "AspirationRevisedPayload",
+                allowed_predecessors=(
+                    "ProposalRecorded",
+                    "AspirationPlanted",
+                    "AspirationReinforced",
+                    "AspirationRevised",
+                ),
+                evidence_types=("committed_world_event", "settled_world_event"),
+                successors=(
+                    "AspirationReinforced",
+                    "AspirationRevised",
+                    "AspirationAbandoned",
+                    "AspirationFaded",
+                    "AspirationCrystallized",
+                ),
+            ),
+            _contract(
+                "AspirationAbandoned",
+                "character_interior_typed_authority",
+                "world",
+                "AspirationAbandonedPayload",
+                allowed_predecessors=(
+                    "ProposalRecorded",
+                    "AspirationPlanted",
+                    "AspirationReinforced",
+                    "AspirationRevised",
+                ),
+                evidence_types=("committed_world_event", "settled_world_event"),
+            ),
+            _contract(
                 "AspirationFaded",
-                "aspiration_runtime",
+                "historical_replay",
                 "world",
                 "AspirationFadedPayload",
-                allowed_predecessors=("AspirationPlanted", "AspirationReinforced"),
+                allowed_predecessors=(
+                    "AspirationPlanted",
+                    "AspirationReinforced",
+                    "AspirationRevised",
+                ),
                 evidence_types=("committed_world_event",),
             ),
             _contract(
                 "AspirationCrystallized",
-                "aspiration_runtime",
+                "life_development_acceptance",
                 "world",
                 "AspirationCrystallizedPayload",
-                allowed_predecessors=("AspirationPlanted", "AspirationReinforced"),
+                allowed_predecessors=(
+                    "AspirationPlanted",
+                    "AspirationReinforced",
+                    "AspirationRevised",
+                ),
                 evidence_types=("committed_world_event", "active_plan"),
                 successors=("ActivityPlanned",),
             ),

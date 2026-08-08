@@ -80,6 +80,12 @@ class QQIngressPolicyCatalog:
                 # another bubble actually arrives, QQC2CHost's sender-rhythm
                 # hold rolls from that newer evidence; a hypothetical second
                 # bubble must not tax every ordinary turn by 600–800ms.
+                # Every production fragment carries the unknown signal (no
+                # caller sets continuation signals), so the window itself must
+                # keep the multi-bubble join width: shrinking it to 160ms
+                # split rapid volleys (200ms cadence) into mechanical
+                # one-answer-per-bubble replies. 280ms retains coalescing;
+                # the quiet-gap constants carry the latency win instead.
                 "unknown": default_window_ms,
                 "complete_thought": default_window_ms,
                 "possible_continuation": default_window_ms,

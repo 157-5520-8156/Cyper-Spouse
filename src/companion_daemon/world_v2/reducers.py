@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from functools import partial
 import hashlib
@@ -136,7 +136,7 @@ from .visible_physical_state import (
     VisiblePhysicalStateRecordedPayload,
 )
 from .random_authority import RandomDrawRecordedPayload
-from .life_author_runtime import (
+from .legacy_life_author_events import (
     LifeAuthorDecisionRecordedPayload,
     LifeAvailabilitySnapshotRecordedPayload,
 )
@@ -246,6 +246,11 @@ from .expression_plan_manifest import (
     ExpressionPlanAcceptanceManifest,
     canonical_expression_plan_value_hash,
 )
+from .unified_inbound_decision import (
+    UnifiedInboundDecisionError,
+    inspect_unified_inbound_decision,
+)
+from .appraisal_trigger import CHARACTER_INTERIOR_INBOUND_ATTEMPT_PREFIX
 from .social_action_acceptance import (
     LegacySocialDeferredAcceptanceManifest,
     SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS,
@@ -254,6 +259,7 @@ from .social_action_acceptance import (
     social_deferred_authority_event_types,
 )
 from .proposal_envelope import (
+    AspirationTransitionPayload,
     ContinuationProposal,
     DecisionProposal,
     MinimalProposal,
@@ -308,16 +314,20 @@ from .experience_events import (
     LegacyExperienceCommittedPayload,
 )
 from .aspiration_events import (
+    AspirationAbandonedPayload,
     AspirationCrystallizedPayload,
     AspirationFadedPayload,
     AspirationPlantedPayload,
     AspirationReinforcedPayload,
+    AspirationRevisedPayload,
 )
 from .aspiration_reducers import (
+    abandon_aspiration,
     crystallize_aspiration,
     fade_aspiration,
     plant_aspiration,
     reinforce_aspiration,
+    revise_aspiration,
 )
 from .biographical_lifecycle import LifeArcChangedPayload, reduce_life_arc
 from .biographical_timeline_authority import BiographicalTimelineConfiguredPayload
@@ -337,7 +347,7 @@ from .life_events import (
     WorldOccurrenceSettledPayload,
     WorldOccurrenceTerminalPayload,
 )
-from .outcome_selection_draft import outcome_selection_audit_text
+from .character_outcome_contract import outcome_selection_audit_text
 from .media_selection_proposal import (
     MediaSelectionProposalRecordedPayload,
     media_candidate_authority_hash,
@@ -368,6 +378,7 @@ from .life_reducers import (
     transition_activity,
 )
 from .life_development_draft import LifeDevelopmentCapabilityManifest
+from .character_interior.contracts import InnerDecision
 from .plan_evidence import canonical_plan_evidence_hash
 from .media_provider_grants import (
     ProviderMediaGrantRecordedPayload,
@@ -429,6 +440,7 @@ from .read_only_tool import (
 from .perception import (
     PerceptionRequestAcceptedPayload,
     PerceptionResultAcceptedPayload,
+    perception_result_trigger_id,
 )
 from .typed_proposal_families import INSTALLED_TYPED_PROPOSAL_FAMILIES
 from .typed_proposals import (
@@ -552,8 +564,9 @@ _V46_REDUCER_BUNDLE_VERSION = "world-v2-reducers.46"
 _V47_REDUCER_BUNDLE_VERSION = "world-v2-reducers.47"
 V48_REDUCER_BUNDLE_VERSION = "world-v2-reducers.48"
 _V49_REDUCER_BUNDLE_VERSION = "world-v2-reducers.49"
-PREVIOUS_REDUCER_BUNDLE_VERSION = "world-v2-reducers.50"
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.51"
+V50_REDUCER_BUNDLE_VERSION = "world-v2-reducers.50"
+PREVIOUS_REDUCER_BUNDLE_VERSION = "world-v2-reducers.51"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.52"
 _CONTEXTUAL_LIFE_SOURCE_EVENT_TYPES = frozenset(
     {
         "ObservationRecorded",
@@ -568,7 +581,11 @@ _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}" for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
 )
 INSTALLED_APPRAISAL_POLICY_REFS = ("policy:appraisal-v1",)
-INSTALLED_APPRAISAL_MATRIX_VERSION = "appraisal-matrix.1"
+# `.1` is retained for immutable historical Appraisal events; `.2` is the
+# free-text meaning contract used by new writes.
+INSTALLED_APPRAISAL_MATRIX_VERSIONS = frozenset(
+    {"appraisal-matrix.1", "appraisal-matrix.2"}
+)
 INSTALLED_SOURCE_CLUSTERING_VERSION = "source-clustering.1"
 INSTALLED_AFFECT_POLICY_REFS = ("policy:affect-v1",)
 INSTALLED_AFFECT_BASELINE_POLICY_REFS = ("policy:affect-baseline-v1",)
@@ -606,6 +623,7 @@ def _experience_semantic_dump(
         _V47_REDUCER_BUNDLE_VERSION,
         V48_REDUCER_BUNDLE_VERSION,
         _V49_REDUCER_BUNDLE_VERSION,
+        V50_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     } and isinstance(experience, LegacyExperienceProjection):
@@ -633,6 +651,7 @@ def _actor_authority_transition_semantic_dump(
         _V47_REDUCER_BUNDLE_VERSION,
         V48_REDUCER_BUNDLE_VERSION,
         _V49_REDUCER_BUNDLE_VERSION,
+        V50_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -660,10 +679,41 @@ def _life_arc_semantic_dump(
         _V47_REDUCER_BUNDLE_VERSION,
         V48_REDUCER_BUNDLE_VERSION,
         _V49_REDUCER_BUNDLE_VERSION,
+        V50_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
         dumped.pop("accepted_event_ref", None)
+    return dumped
+
+
+def _aspiration_semantic_dump(
+    aspiration: AspirationProjection,
+    *,
+    reducer_bundle_version: str,
+) -> dict[str, Any]:
+    """Preserve the immutable .51 aspiration projection contract.
+
+    Reducer .52 adds character-authored origin, tension, revision and
+    abandonment coordinates.  Pydantic supplies defaults while decoding an
+    archived .51 head, so a plain ``model_dump`` would otherwise inject those
+    later fields and invalidate the already-persisted .51 semantic hash.
+    """
+
+    dumped = aspiration.model_dump(mode="json")
+    if reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+        for field in (
+            "origin_kind",
+            "tension_summary",
+            "tension_source_refs",
+            "last_revised_at",
+            "revision_event_ref",
+            "abandoned_at",
+            "abandonment_event_ref",
+            "abandonment_summary",
+            "abandonment_source_refs",
+        ):
+            dumped.pop(field, None)
     return dumped
 
 
@@ -673,7 +723,12 @@ def _npc_semantic_dump(
     reducer_bundle_version: str,
 ) -> dict[str, Any]:
     dumped = npc.model_dump(mode="json")
-    if reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+    if reducer_bundle_version not in {
+        # Promotion authority was introduced by .51, while .50 must retain
+        # its pre-promotion projection bytes.
+        PREVIOUS_REDUCER_BUNDLE_VERSION,
+        REDUCER_BUNDLE_VERSION,
+    }:
         # Promotion edges are a .51 projection addition.  Replaying an older
         # bundle may derive the edge for current reads, but it must not rewrite
         # that bundle's historical semantic hash.
@@ -686,6 +741,7 @@ def _npc_semantic_dump(
         _V47_REDUCER_BUNDLE_VERSION,
         V48_REDUCER_BUNDLE_VERSION,
         _V49_REDUCER_BUNDLE_VERSION,
+        V50_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -713,6 +769,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         _V47_REDUCER_BUNDLE_VERSION,
         V48_REDUCER_BUNDLE_VERSION,
         _V49_REDUCER_BUNDLE_VERSION,
+        V50_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -731,6 +788,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         _V47_REDUCER_BUNDLE_VERSION,
         V48_REDUCER_BUNDLE_VERSION,
         _V49_REDUCER_BUNDLE_VERSION,
+        V50_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -742,6 +800,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         _V47_REDUCER_BUNDLE_VERSION,
         V48_REDUCER_BUNDLE_VERSION,
         _V49_REDUCER_BUNDLE_VERSION,
+        V50_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -769,6 +828,7 @@ def _expression_plan_semantic_dump(
         _V47_REDUCER_BUNDLE_VERSION,
         V48_REDUCER_BUNDLE_VERSION,
         _V49_REDUCER_BUNDLE_VERSION,
+        V50_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -797,6 +857,7 @@ def _expression_beat_semantic_dump(
         _V47_REDUCER_BUNDLE_VERSION,
         V48_REDUCER_BUNDLE_VERSION,
         _V49_REDUCER_BUNDLE_VERSION,
+        V50_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -1045,8 +1106,12 @@ class ReducerState(FrozenModel):
         dimensions = tuple(item.dimension for item in self.affect_baselines)
         if len(dimensions) != len(set(dimensions)):
             raise ValueError("affect baseline dimensions must be unique")
-        if len(self.relationship_states) > 1:
-            raise ValueError("world v2.1 permits one primary relationship state")
+        relationship_subjects = tuple(item.subject_ref for item in self.relationship_states)
+        if len(relationship_subjects) != len(set(relationship_subjects)):
+            raise ValueError("relationship subject must have one current authority head")
+        relationship_ids = tuple(item.relationship_id for item in self.relationship_states)
+        if len(relationship_ids) != len(set(relationship_ids)):
+            raise ValueError("relationship authority identity must be unique across subjects")
         for subject_ref in {item.subject_ref for item in self.appearance_states}:
             history = tuple(
                 item for item in self.appearance_states if item.subject_ref == subject_ref
@@ -1586,6 +1651,7 @@ class ReducerState(FrozenModel):
             _V47_REDUCER_BUNDLE_VERSION,
             V48_REDUCER_BUNDLE_VERSION,
             _V49_REDUCER_BUNDLE_VERSION,
+            V50_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
         }:
             # .33-.36 only add current-generation conditional fields. Their
@@ -1737,6 +1803,7 @@ class ReducerState(FrozenModel):
                                 _V47_REDUCER_BUNDLE_VERSION,
                                 V48_REDUCER_BUNDLE_VERSION,
                                 _V49_REDUCER_BUNDLE_VERSION,
+                                V50_REDUCER_BUNDLE_VERSION,
                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                 REDUCER_BUNDLE_VERSION,
                             }
@@ -1784,7 +1851,15 @@ class ReducerState(FrozenModel):
             # Conditional like appearance_states: worlds without aspirations
             # keep byte-identical semantic hashes across this bundle change.
             **(
-                {"aspirations": tuple(item.model_dump(mode="json") for item in self.aspirations)}
+                {
+                    "aspirations": tuple(
+                        _aspiration_semantic_dump(
+                            item,
+                            reducer_bundle_version=declared_reducer_bundle_version,
+                        )
+                        for item in self.aspirations
+                    )
+                }
                 if self.aspirations
                 else {}
             ),
@@ -1815,6 +1890,7 @@ class ReducerState(FrozenModel):
                             None
                             if declared_reducer_bundle_version
                             in {
+                                V50_REDUCER_BUNDLE_VERSION,
                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                 REDUCER_BUNDLE_VERSION,
                             }
@@ -1829,6 +1905,7 @@ class ReducerState(FrozenModel):
                                         _V47_REDUCER_BUNDLE_VERSION,
                                         V48_REDUCER_BUNDLE_VERSION,
                                         _V49_REDUCER_BUNDLE_VERSION,
+                                        V50_REDUCER_BUNDLE_VERSION,
                                         PREVIOUS_REDUCER_BUNDLE_VERSION,
                                     }
                                     else {"settled_dynamic_life_direction_adopted": True}
@@ -1846,6 +1923,7 @@ class ReducerState(FrozenModel):
                                                 _V47_REDUCER_BUNDLE_VERSION,
                                                 V48_REDUCER_BUNDLE_VERSION,
                                                 _V49_REDUCER_BUNDLE_VERSION,
+                                                V50_REDUCER_BUNDLE_VERSION,
                                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                             }
                                             else (
@@ -1959,6 +2037,7 @@ class ReducerState(FrozenModel):
             _V47_REDUCER_BUNDLE_VERSION,
             V48_REDUCER_BUNDLE_VERSION,
             _V49_REDUCER_BUNDLE_VERSION,
+            V50_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -1989,6 +2068,7 @@ class ReducerState(FrozenModel):
                 _V47_REDUCER_BUNDLE_VERSION,
                 V48_REDUCER_BUNDLE_VERSION,
                 _V49_REDUCER_BUNDLE_VERSION,
+                V50_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2016,6 +2096,7 @@ class ReducerState(FrozenModel):
             _V47_REDUCER_BUNDLE_VERSION,
             V48_REDUCER_BUNDLE_VERSION,
             _V49_REDUCER_BUNDLE_VERSION,
+            V50_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -2042,6 +2123,7 @@ class ReducerState(FrozenModel):
                     _V47_REDUCER_BUNDLE_VERSION,
                     V48_REDUCER_BUNDLE_VERSION,
                     _V49_REDUCER_BUNDLE_VERSION,
+                    V50_REDUCER_BUNDLE_VERSION,
                     PREVIOUS_REDUCER_BUNDLE_VERSION,
                     REDUCER_BUNDLE_VERSION,
                 }
@@ -2070,6 +2152,7 @@ class ReducerState(FrozenModel):
             _V47_REDUCER_BUNDLE_VERSION,
             V48_REDUCER_BUNDLE_VERSION,
             _V49_REDUCER_BUNDLE_VERSION,
+            V50_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -2099,6 +2182,7 @@ class ReducerState(FrozenModel):
                 _V47_REDUCER_BUNDLE_VERSION,
                 V48_REDUCER_BUNDLE_VERSION,
                 _V49_REDUCER_BUNDLE_VERSION,
+                V50_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2290,6 +2374,7 @@ class ReducerState(FrozenModel):
                 _V47_REDUCER_BUNDLE_VERSION,
                 V48_REDUCER_BUNDLE_VERSION,
                 _V49_REDUCER_BUNDLE_VERSION,
+                V50_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2310,6 +2395,7 @@ class ReducerState(FrozenModel):
                 _V47_REDUCER_BUNDLE_VERSION,
                 V48_REDUCER_BUNDLE_VERSION,
                 _V49_REDUCER_BUNDLE_VERSION,
+                V50_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -3110,6 +3196,21 @@ def _validate_life_development_deliberation_binding(
     ):
         raise ValueError("life-development Proposal changed its audited capability manifest")
 
+    character_interior_value = proposal.get("character_interior_decision")
+    if character_interior_value is not None:
+        if (
+            proposal.get("character_deliberation") is not None
+            or proposal.get("character_model_role") is not None
+        ):
+            raise ValueError("life-development mixed old and new Character authority")
+        _validate_life_development_character_interior_binding(
+            state,
+            proposal=proposal,
+        )
+        return
+
+    # Historical events keep their exact former contract.  This is a replay
+    # decoder only; new production never emits these fields.
     character_value = proposal.get("character_deliberation")
     has_character_result = proposal.get("character_model_role") is not None
     if (character_value is None) != (not has_character_result):
@@ -3121,6 +3222,128 @@ def _validate_life_development_deliberation_binding(
             field="character_deliberation",
             expected_role="character_model",
         )
+
+
+def _validate_life_development_character_interior_binding(
+    state: ReducerState,
+    *,
+    proposal: dict[str, object],
+) -> None:
+    binding = proposal.get("character_interior_decision")
+    binding_hash = proposal.get("character_interior_decision_hash")
+    required = {
+        "contract",
+        "inner_turn_id",
+        "snapshot_id",
+        "snapshot_hash",
+        "author_lineage",
+        "decision",
+        "decision_hash",
+        "inner_decision",
+        "inner_decision_hash",
+        "inner_decision_content_ref",
+        "inner_decision_content_hash",
+        "decision_subject_hash",
+        "model_result_event_ref",
+        "model_result_event_hash",
+        "audit_proposal_event_ref",
+        "audit_proposal_event_hash",
+        "deliberation_result_id",
+        "final_model_result_ref",
+    }
+    if (
+        not isinstance(binding, dict)
+        or set(binding) != required
+        or binding.get("contract") != "life-development-character-inner-decision.1"
+        or binding_hash != sha256(canonical_json(binding))
+    ):
+        raise ValueError("life-development CharacterInterior binding is invalid")
+    try:
+        decision = InnerDecision.model_validate_json(canonical_json(binding.get("inner_decision")))
+    except ValueError as exc:
+        raise ValueError("life-development InnerDecision bytes are invalid") from exc
+    lineage = decision.author_lineage
+    if (
+        decision.status != "decided"
+        or decision.decision is None
+        or decision.snapshot_id is None
+        or decision.snapshot_hash is None
+        or lineage is None
+        or binding.get("inner_turn_id") != decision.inner_turn_id
+        or binding.get("snapshot_id") != decision.snapshot_id
+        or binding.get("snapshot_hash") != decision.snapshot_hash
+        or binding.get("author_lineage") != lineage.model_dump(mode="json")
+        or binding.get("decision") != decision.decision
+        or binding.get("decision_hash") != sha256(canonical_json(decision.decision))
+        or binding.get("inner_decision_hash")
+        != sha256(canonical_json(decision.model_dump(mode="json")))
+        or binding.get("inner_decision_content_hash") != binding.get("inner_decision_hash")
+        or not isinstance(binding.get("inner_decision_content_ref"), str)
+    ):
+        raise ValueError("life-development InnerDecision changed its lineage")
+    model_result = next(
+        (
+            item
+            for item in state.model_result_audits
+            if item.event_ref == binding.get("model_result_event_ref")
+        ),
+        None,
+    )
+    if model_result is None or (
+        model_result.event_payload_hash != binding.get("model_result_event_hash")
+        or model_result.deliberation_result_id != binding.get("deliberation_result_id")
+        or model_result.model_result_ref != binding.get("final_model_result_ref")
+        or model_result.capsule_id != decision.snapshot_hash
+        or model_result.evaluated_world_revision != proposal.get("evaluated_world_revision")
+    ):
+        raise ValueError("life-development CharacterInterior ModelResult is not exact")
+    audit = RecordedModelResultAudit.model_validate_json(model_result.audit_json)
+    context = audit.decision_context
+    if (
+        audit.route.reason_code != "life_development.character_interior"
+        or audit.route.router_version != "character-interior-router.1"
+        or audit.model_call_id != lineage.model_call_id
+        or audit.parent_model_call_id != lineage.parent_model_call_id
+        or audit.model_id != lineage.model_id
+        or audit.model_version != lineage.model_version
+        or audit.request_hash != lineage.request_hash.removeprefix("sha256:")
+        or audit.response_hash != lineage.response_hash.removeprefix("sha256:")
+        or context is None
+        or context.decision_subject_hash != binding.get("decision_subject_hash")
+        or decision.cursor
+        != ProjectionCursor(
+            world_revision=context.world_revision,
+            deliberation_revision=context.deliberation_revision,
+            ledger_sequence=context.ledger_sequence,
+        )
+    ):
+        raise ValueError("life-development CharacterInterior audit changed lineage")
+    audit_proposal = next(
+        (
+            item
+            for item in state.proposal_audits
+            if item.event_ref == binding.get("audit_proposal_event_ref")
+        ),
+        None,
+    )
+    if audit_proposal is None or (
+        audit_proposal.event_payload_hash != binding.get("audit_proposal_event_hash")
+        or audit_proposal.deliberation_result_id != binding.get("deliberation_result_id")
+        or audit_proposal.model_result_ref != binding.get("final_model_result_ref")
+    ):
+        raise ValueError("life-development CharacterInterior audit Proposal is not exact")
+    try:
+        envelope = json.loads(audit_proposal.proposal_json)
+        metadata = json.loads(envelope["response_text"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("life-development CharacterInterior audit metadata is invalid") from exc
+    if (
+        metadata.get("contract") != "character-interior-decision-audit.1"
+        or metadata.get("decision_subject_hash") != binding.get("decision_subject_hash")
+        or metadata.get("inner_decision_content_ref") != binding.get("inner_decision_content_ref")
+        or metadata.get("inner_decision_content_hash") != binding.get("inner_decision_content_hash")
+    ):
+        raise ValueError("life-development CharacterInterior decision bytes changed")
 
 
 def _validate_one_life_development_deliberation(
@@ -3416,6 +3639,7 @@ def _proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
             "interaction_appraisal",
             "silence_appraisal",
             "plan_disruption_appraisal",
+            "perception_result_deliberation",
         }
         or trigger.state != "claimed"
         or trigger.trigger_ref != proposal.trigger_ref
@@ -3436,6 +3660,7 @@ def _proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
         # A plan abandonment is likewise her own lived-world transition:
         # committed authority, not a settlement or a user message.
         "plan_disruption_appraisal": "committed_world_event",
+        "perception_result_deliberation": "committed_world_event",
     }[trigger.process_kind]
     if source_evidence is None or source_evidence.evidence_type != expected_source_kind:
         raise ValueError("appraisal proposal source evidence has the wrong authority kind")
@@ -4484,7 +4709,7 @@ def _validate_compiled_relationship_proposal_source(
         audit.event_payload_hash != source.proposal_event_payload_hash
         or audit.model_result_ref != source.model_result_ref
         or audit.capsule_id != source.capsule_id
-        or audit.evaluated_world_revision != proposal.evaluated_world_revision
+        or audit.evaluated_world_revision > proposal.evaluated_world_revision
     ):
         raise ValueError("compiled relationship proposal source audit does not resolve")
     try:
@@ -4493,6 +4718,39 @@ def _validate_compiled_relationship_proposal_source(
         raise ValueError("compiled relationship proposal source proposal is invalid") from exc
     if not isinstance(generic, DecisionProposal):
         raise ValueError("compiled relationship proposal source is not a decision")
+    if audit.evaluated_world_revision != proposal.evaluated_world_revision:
+        # Expression and immediate inner-state effects from this same inbound
+        # decision may become authoritative before its optional relationship
+        # signal.  Permit only a forward rebase while the exact Observation-
+        # bound relationship trigger is claimed; this does not authorize a
+        # fresh interpretation or a different source.
+        source_event = next(
+            (
+                item
+                for item in state.committed_world_event_refs
+                if item.event_id == audit.trigger_ref and item.event_type == "ObservationRecorded"
+            ),
+            None,
+        )
+        process = next(
+            (
+                item
+                for item in state.trigger_processes
+                if item.process_kind == "relationship_deliberation"
+                and item.source_evidence_ref == audit.trigger_ref
+                and item.trigger_ref == f"relationship-continuity:{audit.trigger_ref}"
+            ),
+            None,
+        )
+        if (
+            source_event is None
+            or process is None
+            or process.process_kind != "relationship_deliberation"
+            or process.state != "claimed"
+            or process.trigger_ref != f"relationship-continuity:{audit.trigger_ref}"
+            or process.source_evidence_ref != audit.trigger_ref
+        ):
+            raise ValueError("compiled relationship proposal source audit revision does not rebase")
     changes = tuple(
         item
         for item in generic.proposed_changes
@@ -5171,16 +5429,15 @@ def _expression_plan_manifest_recorded(
         proposal = validate_proposal_envelope(json.loads(audit.proposal_json))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("expression plan proposal audit is invalid") from exc
-    changes = tuple(
-        item
-        for item in proposal.proposed_changes
-        if item.change_id == manifest.expression_change_id
-        and item.kind == "expression_plan_transition"
-        and item.transition == "accept"
-    )
-    if len(changes) != 1 or len(proposal.proposed_changes) != 1:
+    if not isinstance(proposal, DecisionProposal):
+        raise ValueError("expression plan manifest proposal is not a decision")
+    try:
+        inbound_shape = inspect_unified_inbound_decision(proposal)
+    except UnifiedInboundDecisionError as exc:
+        raise ValueError("expression plan manifest proposal is not exact") from exc
+    change = inbound_shape.expression
+    if change is None or change.change_id != manifest.expression_change_id:
         raise ValueError("expression plan manifest proposal is not exact")
-    change = changes[0]
     payload = change.payload.value()
     drafts = payload.get("beat_drafts")
     if (
@@ -9624,6 +9881,7 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
         "interaction_appraisal",
         "silence_appraisal",
         "plan_disruption_appraisal",
+        "perception_result_deliberation",
         "interaction_fact",
         "private_impression_deliberation",
         "affect_deliberation",
@@ -9632,6 +9890,7 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
         "outcome_deliberation",
         "expression_reconsideration",
         "life_ecology",
+        "life_reflection",
         "memory_candidate_review",
         "expression_episode",
     }:
@@ -9674,6 +9933,7 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
         "interaction_appraisal",
         "silence_appraisal",
         "plan_disruption_appraisal",
+        "perception_result_deliberation",
         "interaction_fact",
         "private_impression_deliberation",
         "affect_deliberation",
@@ -9682,6 +9942,7 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
         "outcome_deliberation",
         "expression_reconsideration",
         "life_ecology",
+        "life_reflection",
         "memory_candidate_review",
         "expression_episode",
     }:
@@ -9715,6 +9976,20 @@ def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
         )
         if source is None or source.event_type != "FactWithdrawn":
             raise ValueError("memory candidate review requires an exact Fact withdrawal")
+    if process.process_kind == "life_reflection":
+        source = next(
+            (
+                item
+                for item in state.committed_world_event_refs
+                if item.event_id == process.source_evidence_ref
+            ),
+            None,
+        )
+        if source is None or source.event_type not in {
+            "AppraisalAccepted",
+            "ExpressionPlanAccepted",
+        }:
+            raise ValueError("life reflection requires an exact accepted appraisal")
     if process.process_kind == "interaction_appraisal":
         if not any(
             item.observation_id == process.source_evidence_ref
@@ -9806,6 +10081,35 @@ def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
             or process.trigger_ref != f"plan-disruption:{process.source_evidence_ref}"
         ):
             raise ValueError("plan disruption trigger identity is not deterministic")
+    if process.process_kind == "perception_result_deliberation":
+        source = next(
+            (
+                item
+                for item in state.committed_world_event_refs
+                if item.event_id == process.source_evidence_ref
+            ),
+            None,
+        )
+        result = next(
+            (
+                item
+                for item in state.perception_results
+                if source is not None and item.accepted_event_ref == source.event_id
+            ),
+            None,
+        )
+        if (
+            source is None
+            or source.event_type != "PerceptionResultAccepted"
+            or result is None
+            or process.trigger_id
+            != perception_result_trigger_id(
+                world_id=event.world_id,
+                result_id=result.result_id,
+            )
+            or process.trigger_ref != f"perception-result:{result.result_id}"
+        ):
+            raise ValueError("perception result trigger identity is not deterministic")
     if process.process_kind == "external_result_deliberation":
         source = next(
             (
@@ -10623,9 +10927,101 @@ def _biographical_timeline_configured(state: ReducerState, event: WorldEvent) ->
     return state
 
 
+def _validate_character_authored_aspiration_effect(
+    state: ReducerState,
+    event: WorldEvent,
+    *,
+    operation: str,
+    target_id: str,
+    expected_entity_revision: int,
+    evidence_refs: tuple[EvidenceRef, ...],
+    text: str | None = None,
+    privacy_class: str | None = None,
+    tension_summary: str | None = None,
+    tension_source_refs: tuple[str, ...] = (),
+    reason_summary: str | None = None,
+) -> None:
+    """Prove a new subjective effect descends from one audited InnerTurn."""
+
+    audit = next(
+        (
+            item
+            for item in state.proposal_audits
+            if item.event_ref == event.causation_id
+        ),
+        None,
+    )
+    if audit is None:
+        raise ValueError("character-authored aspiration needs its exact proposal audit")
+    proposal = validate_proposal_envelope(json.loads(audit.proposal_json))
+    if not isinstance(proposal, DecisionProposal):
+        raise ValueError("character-authored aspiration source is not a decision")
+    matches = tuple(
+        change
+        for change in proposal.proposed_changes
+        if change.kind == "aspiration_transition"
+        and change.change_id == event.payload().get("change_id")
+    )
+    if len(matches) != 1:
+        raise ValueError("character-authored aspiration change is not uniquely audited")
+    change = matches[0]
+    transition = AspirationTransitionPayload.model_validate(
+        change.payload.value(),
+        strict=True,
+    )
+    if (
+        change.transition != operation
+        or transition.operation != operation
+        or change.target_id != target_id
+        or change.expected_entity_revision != expected_entity_revision
+        or tuple(transition.source_refs) != change.evidence_refs
+        or tuple(item.ref_id for item in evidence_refs) != change.evidence_refs
+        or tuple(change.policy_refs) != tuple(event.payload().get("policy_refs", ()))
+    ):
+        raise ValueError("character-authored aspiration effect changed audited authority")
+    if operation == "plant":
+        if (
+            transition.aspiration_id is not None
+            or transition.text != text
+            or transition.privacy_class != privacy_class
+            or transition.tension_summary != tension_summary
+            or tuple(transition.tension_source_refs) != tension_source_refs
+        ):
+            raise ValueError("aspiration planting changed the character-authored direction")
+    elif operation == "revise":
+        if (
+            transition.aspiration_id != target_id
+            or transition.text != text
+            or transition.privacy_class != privacy_class
+            or transition.tension_summary != tension_summary
+            or tuple(transition.tension_source_refs) != tension_source_refs
+        ):
+            raise ValueError("aspiration revision changed the character-authored direction")
+    elif operation == "abandon" and (
+        transition.aspiration_id != target_id
+        or transition.reason_summary != reason_summary
+    ):
+        raise ValueError("aspiration abandonment changed the character-authored reason")
+    elif operation == "reinforce" and transition.aspiration_id != target_id:
+        raise ValueError("aspiration reinforcement changed its character-authored target")
+
+
 def _aspiration_planted(state: ReducerState, event: WorldEvent) -> ReducerState:
     logical_time = _require_life_time(state, event)
     payload = _validated_life_payload(state, event, AspirationPlantedPayload)
+    if payload.aspiration.origin_kind == "character_authored":
+        _validate_character_authored_aspiration_effect(
+            state,
+            event,
+            operation="plant",
+            target_id=payload.aspiration.aspiration_id,
+            expected_entity_revision=payload.expected_entity_revision,
+            evidence_refs=payload.evidence_refs,
+            text=payload.aspiration.text,
+            privacy_class=payload.aspiration.privacy_class,
+            tension_summary=payload.aspiration.tension_summary,
+            tension_source_refs=payload.aspiration.tension_source_refs,
+        )
     return state.model_copy(
         update={
             "aspirations": plant_aspiration(
@@ -10641,10 +11037,70 @@ def _aspiration_planted(state: ReducerState, event: WorldEvent) -> ReducerState:
 def _aspiration_reinforced(state: ReducerState, event: WorldEvent) -> ReducerState:
     logical_time = _require_life_time(state, event)
     payload = _validated_life_payload(state, event, AspirationReinforcedPayload)
+    if any(item.event_ref == event.causation_id for item in state.proposal_audits):
+        _validate_character_authored_aspiration_effect(
+            state,
+            event,
+            operation="reinforce",
+            target_id=payload.aspiration_id,
+            expected_entity_revision=payload.expected_entity_revision,
+            evidence_refs=payload.evidence_refs,
+        )
     return state.model_copy(
         update={
             "aspirations": reinforce_aspiration(
                 state.aspirations, payload, logical_time=logical_time
+            )
+        }
+    )
+
+
+def _aspiration_revised(state: ReducerState, event: WorldEvent) -> ReducerState:
+    logical_time = _require_life_time(state, event)
+    payload = _validated_life_payload(state, event, AspirationRevisedPayload)
+    _validate_character_authored_aspiration_effect(
+        state,
+        event,
+        operation="revise",
+        target_id=payload.aspiration_after.aspiration_id,
+        expected_entity_revision=payload.expected_entity_revision,
+        evidence_refs=payload.evidence_refs,
+        text=payload.aspiration_after.text,
+        privacy_class=payload.aspiration_after.privacy_class,
+        tension_summary=payload.aspiration_after.tension_summary,
+        tension_source_refs=payload.aspiration_after.tension_source_refs,
+    )
+    return state.model_copy(
+        update={
+            "aspirations": revise_aspiration(
+                state.aspirations,
+                payload,
+                event_ref=event.event_id,
+                logical_time=logical_time,
+            )
+        }
+    )
+
+
+def _aspiration_abandoned(state: ReducerState, event: WorldEvent) -> ReducerState:
+    logical_time = _require_life_time(state, event)
+    payload = _validated_life_payload(state, event, AspirationAbandonedPayload)
+    _validate_character_authored_aspiration_effect(
+        state,
+        event,
+        operation="abandon",
+        target_id=payload.aspiration_after.aspiration_id,
+        expected_entity_revision=payload.expected_entity_revision,
+        evidence_refs=payload.evidence_refs,
+        reason_summary=payload.aspiration_after.abandonment_summary,
+    )
+    return state.model_copy(
+        update={
+            "aspirations": abandon_aspiration(
+                state.aspirations,
+                payload,
+                event_ref=event.event_id,
+                logical_time=logical_time,
             )
         }
     )
@@ -11200,6 +11656,7 @@ def _outcome_proposal_recorded(state: ReducerState, event: WorldEvent) -> Reduce
         if payload.decision_authority == "character_model" and payload.context_identity_version in {
             "life-aftermath-context.2",
             "life-aftermath-context.3",
+            "life-aftermath-context.4",
         }:
             matrix_hash = sha256(
                 canonical_json(
@@ -12907,6 +13364,7 @@ def _require_authorized_appraisal(
             "interaction_appraisal",
             "silence_appraisal",
             "plan_disruption_appraisal",
+            "perception_result_deliberation",
         }
         or trigger.state != "claimed"
     ):
@@ -12994,7 +13452,7 @@ def _validate_private_impression_source_events(
 
 def _require_installed_appraisal_origin(appraisal: AppraisalProjection) -> None:
     if (
-        appraisal.origin.matrix_catalog_version != INSTALLED_APPRAISAL_MATRIX_VERSION
+        appraisal.origin.matrix_catalog_version not in INSTALLED_APPRAISAL_MATRIX_VERSIONS
         or appraisal.origin.clustering_policy_version != INSTALLED_SOURCE_CLUSTERING_VERSION
     ):
         raise ValueError("appraisal origin references an uninstalled matrix policy")
@@ -13302,6 +13760,8 @@ _EVENTS = {
         EventDefinition("LifeArcChanged", RevisionClass.WORLD, _life_arc_changed),
         EventDefinition("AspirationPlanted", RevisionClass.WORLD, _aspiration_planted),
         EventDefinition("AspirationReinforced", RevisionClass.WORLD, _aspiration_reinforced),
+        EventDefinition("AspirationRevised", RevisionClass.WORLD, _aspiration_revised),
+        EventDefinition("AspirationAbandoned", RevisionClass.WORLD, _aspiration_abandoned),
         EventDefinition("AspirationFaded", RevisionClass.WORLD, _aspiration_faded),
         EventDefinition("AspirationCrystallized", RevisionClass.WORLD, _aspiration_crystallized),
         EventDefinition("ActivityPlanned", RevisionClass.WORLD, _activity_planned),
@@ -13637,6 +14097,7 @@ def reduce_event(
                         continuation_refs=(
                             (str(event.payload()["appraisal_trigger_ref"]),)
                             if event.event_type == "WorldOccurrenceSettled"
+                            and event.payload().get("appraisal_trigger_ref") is not None
                             else ()
                         ),
                     ),
@@ -13653,6 +14114,305 @@ def require_reducer_bundle(version: str) -> None:
         raise ValueError(f"reducer bundle {version!r} is not installed")
 
 
+RETIRED_EXPRESSION_EPISODE_OUTCOME = (
+    "retired-technical:provisional-full-expression-author-removed"
+)
+_RETIRED_CHARACTER_PROCESS_OUTCOMES = {
+    "media_delivery_interaction": (
+        "retired-technical:media-delivery-interaction-author-removed"
+    ),
+    "read_only_tool_deliberation": (
+        "retired-technical:read-only-tool-independent-author-removed"
+    ),
+    "affect_deliberation": "retired-technical:independent-affect-author-removed",
+    "relationship_deliberation": (
+        "retired-technical:appraisal-sourced-relationship-author-removed"
+    ),
+    "interaction_appraisal": (
+        "retired-technical:pre-character-interior-appraisal-author-removed"
+    ),
+    "external_result_deliberation": (
+        "retired-technical:external-result-independent-author-removed"
+    ),
+    "afterthought_author": "retired-technical:independent-afterthought-author-removed",
+}
+
+
+def _derived_retirement_lease(state: ReducerState, process: TriggerProcess) -> ClaimLease:
+    at = state.logical_time or (
+        state.committed_world_event_refs[-1].logical_time
+        if state.committed_world_event_refs
+        else datetime(1970, 1, 1, tzinfo=UTC)
+    )
+    attempt_id = "attempt:derived-reducer52-retirement:" + hashlib.sha256(
+        json.dumps(
+            [process.trigger_id, len(process.attempt_ids) + 1],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return ClaimLease(
+        owner_id="worker:derived-reducer52-retirement",
+        attempt_id=attempt_id,
+        acquired_at=at,
+        expires_at=at + timedelta(minutes=1),
+    )
+
+
+def _source_event_ref_for_expression_episode(
+    state: ReducerState, process: TriggerProcess
+) -> str | None:
+    observation = next(
+        (
+            item
+            for item in state.message_observations
+            if item.observation_id == process.source_evidence_ref
+        ),
+        None,
+    )
+    if (
+        observation is None
+        or observation.world_revision < 1
+        or observation.world_revision > len(state.committed_world_event_refs)
+    ):
+        return None
+    authority = state.committed_world_event_refs[observation.world_revision - 1]
+    if (
+        authority.event_type != "ObservationRecorded"
+        or authority.payload_hash != observation.event_payload_hash
+    ):
+        return None
+    return authority.event_id
+
+
+def _has_character_interior_inbound_authority(
+    state: ReducerState, *, source_evidence_ref: str | None, source_event_ref: str | None
+) -> bool:
+    del source_event_ref
+    return source_evidence_ref is not None and any(
+        process.process_kind == "interaction_appraisal"
+        and process.source_evidence_ref == source_evidence_ref
+        and any(
+            attempt_id.startswith(CHARACTER_INTERIOR_INBOUND_ATTEMPT_PREFIX)
+            for attempt_id in process.attempt_ids
+        )
+        for process in state.trigger_processes
+    )
+
+
+def _retired_character_process_outcome(
+    state: ReducerState, process: TriggerProcess
+) -> str | None:
+    outcome = _RETIRED_CHARACTER_PROCESS_OUTCOMES.get(process.process_kind)
+    if outcome is None:
+        return None
+    source = next(
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == process.source_evidence_ref
+        ),
+        None,
+    )
+    if process.process_kind == "relationship_deliberation" and (
+        source is None or source.event_type != "AppraisalAccepted"
+    ):
+        return None
+    if process.process_kind == "interaction_appraisal":
+        source_event_ref = _source_event_ref_for_expression_episode(state, process)
+        if _has_character_interior_inbound_authority(
+            state,
+            source_evidence_ref=process.source_evidence_ref,
+            source_event_ref=source_event_ref,
+        ):
+            return None
+    return outcome
+
+
+def _recorded_expression_episode_disposition(
+    state: ReducerState, *, source_event_ref: str | None
+) -> str | None:
+    if source_event_ref is None:
+        return None
+    for audit in reversed(state.proposal_audits):
+        if audit.proposal_kind != "decision" or audit.trigger_ref != source_event_ref:
+            continue
+        try:
+            proposal = validate_proposal_envelope(json.loads(audit.proposal_json))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(proposal, DecisionProposal) and proposal.episode_disposition is not None:
+            return proposal.episode_disposition
+    return None
+
+
+def _derive_cancelled_expression_episode_state(
+    state: ReducerState, *, source_event_ref: str
+) -> ReducerState:
+    proposal_ids = {
+        audit.proposal_id
+        for audit in state.proposal_audits
+        if audit.trigger_ref == source_event_ref
+    }
+    plan_ids = {
+        manifest.plan_id
+        for manifest in state.expression_plan_manifests
+        if manifest.proposal_id in proposal_ids
+    }
+    cancellable_action_ids = {
+        action.action_id
+        for action in state.actions
+        if action.expression_plan_id in plan_ids
+        and action.state in {"authorized", "scheduled", "claimed"}
+    }
+    if not cancellable_action_ids:
+        return state
+    actions = tuple(
+        (
+            transition_action(action, "cancelled").model_copy(
+                update={"dispatch_pending": None}
+            )
+            if action.action_id in cancellable_action_ids
+            else action
+        )
+        for action in state.actions
+    )
+    released_reservation_ids = {
+        action.budget_reservation_id
+        for action in actions
+        if action.action_id in cancellable_action_ids
+    }
+    released_by_account: dict[str, int] = {}
+    reservations = []
+    for reservation in state.budget_reservations:
+        if (
+            reservation.reservation_id in released_reservation_ids
+            and reservation.state == "reserved"
+        ):
+            released_by_account[reservation.account_id] = (
+                released_by_account.get(reservation.account_id, 0)
+                + reservation.amount_limit
+            )
+            reservation = reservation.model_copy(update={"state": "released"})
+        reservations.append(reservation)
+    accounts = tuple(
+        account.model_copy(
+            update={
+                "reserved": account.reserved - released_by_account.get(account.account_id, 0)
+            }
+        )
+        if account.account_id in released_by_account
+        else account
+        for account in state.budget_accounts
+    )
+    if any(account.reserved < 0 for account in accounts):
+        raise ValueError("derived expression retirement would underflow budget")
+    beats = tuple(
+        beat.model_copy(update={"state": "terminated"})
+        if beat.action_id in cancellable_action_ids and beat.state == "authorized"
+        else beat
+        for beat in state.expression_beats
+    )
+    plans_with_cancelled_actions = {
+        action.expression_plan_id
+        for action in actions
+        if action.action_id in cancellable_action_ids
+        and action.expression_plan_id is not None
+    }
+    plans = tuple(
+        plan.model_copy(update={"state": "terminated"})
+        if plan.plan_id in plans_with_cancelled_actions and plan.state == "authorized"
+        else plan
+        for plan in state.expression_plans
+    )
+    return state.model_copy(
+        update={
+            "actions": actions,
+            "pending_actions": tuple(
+                action for action in actions if action.state not in TERMINAL_ACTION_STATES
+            ),
+            "budget_reservations": tuple(reservations),
+            "budget_accounts": accounts,
+            "expression_beats": beats,
+            "expression_plans": plans,
+        }
+    )
+
+
+def fold_retired_character_author_state(state: ReducerState) -> ReducerState:
+    """Derive the .52 cutover head without changing immutable history.
+
+    Current CharacterInterior ingress is identified by its source-bound
+    attempt namespace.  Every other physically removed character-author
+    process is terminalized in the derived head.  A historical two-author
+    expression disposition may additionally suppress only work that never
+    crossed dispatch; in-flight/provider-accepted Actions retain effect-once.
+    """
+
+    processes = list(state.trigger_processes)
+    completed = list(state.completed_trigger_ids)
+    derived = state
+    for index, process in enumerate(processes):
+        if process.state == "terminal":
+            continue
+        source_event_ref = (
+            _source_event_ref_for_expression_episode(derived, process)
+            if process.process_kind in {"expression_episode", "interaction_appraisal"}
+            else None
+        )
+        if process.process_kind == "expression_episode":
+            if _has_character_interior_inbound_authority(
+                derived,
+                source_evidence_ref=process.source_evidence_ref,
+                source_event_ref=source_event_ref,
+            ):
+                continue
+            disposition = _recorded_expression_episode_disposition(
+                derived,
+                source_event_ref=source_event_ref,
+            )
+            if disposition in {"cancel_pending", "supersede_pending"} and (
+                source_event_ref is not None
+            ):
+                derived = _derive_cancelled_expression_episode_state(
+                    derived,
+                    source_event_ref=source_event_ref,
+                )
+            outcome = RETIRED_EXPRESSION_EPISODE_OUTCOME + (
+                f":recorded-disposition:{disposition}"
+                if disposition is not None
+                else ":no-disposition"
+            )
+        else:
+            outcome = _retired_character_process_outcome(derived, process)
+            if outcome is None:
+                continue
+        lease = process.claim_lease or _derived_retirement_lease(derived, process)
+        attempts = (
+            process.attempt_ids
+            if process.claim_lease is not None
+            else (*process.attempt_ids, lease.attempt_id)
+        )
+        processes[index] = process.model_copy(
+            update={
+                "state": "terminal",
+                "claim_lease": lease,
+                "attempt_ids": attempts,
+                "runtime_outcome_ref": outcome,
+            }
+        )
+        if process.trigger_id not in completed:
+            completed.append(process.trigger_id)
+    if tuple(processes) == state.trigger_processes and derived is state:
+        return state
+    return derived.model_copy(
+        update={
+            "trigger_processes": tuple(processes),
+            "completed_trigger_ids": tuple(completed),
+        }
+    )
+
+
 def semantic_hash(
     *,
     world_id: str,
@@ -13661,6 +14421,7 @@ def semantic_hash(
     reducer_bundle_version: str = REDUCER_BUNDLE_VERSION,
 ) -> str:
     require_reducer_bundle(reducer_bundle_version)
+    state = fold_retired_character_author_state(state)
     semantic_projection = state.semantic_payload(
         world_id=world_id,
         world_revision=world_revision,
@@ -13684,6 +14445,8 @@ def make_projection(
     state: ReducerState,
     reducer_bundle_version: str = REDUCER_BUNDLE_VERSION,
 ) -> LedgerProjection:
+    if reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+        state = fold_retired_character_author_state(state)
     return LedgerProjection(
         reducer_bundle_version=reducer_bundle_version,
         world_id=world_id,

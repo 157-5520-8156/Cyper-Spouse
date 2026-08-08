@@ -60,3 +60,19 @@ def test_consideration_warning_recomputes_a_stale_platform_threshold() -> None:
         "technical_failure_not_scheduled",
         "consideration_overdue",
     ]
+
+
+def test_scheduler_health_exposes_the_single_character_interior_topology() -> None:
+    character_interior = {
+        "contract": "character-interior-runtime-health.2",
+        "status": "ready",
+        "parallel_character_author_conflicts": 0,
+        "legacy_interface_invocations": 0,
+    }
+
+    snapshot = QQC2CSchedulerDiagnostics(interval_seconds=30).snapshot(
+        now=DUE,
+        world={"character_interior": character_interior},
+    )
+
+    assert snapshot["character_interior"] == character_interior

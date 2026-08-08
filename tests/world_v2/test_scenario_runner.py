@@ -90,12 +90,14 @@ async def test_seeded_multiturn_mechanism_cases_use_the_public_app_and_assert_pr
         "AppraisalAccepted",
         "AffectEpisodeOpened",
     }.issubset(outcome.event_types)
-    assert {"outcome_deliberation", "npc_world_appraisal", "affect_deliberation"}.issubset(
+    assert {"outcome_deliberation", "npc_world_appraisal"}.issubset(
         outcome.trigger_kinds
     )
+    assert "affect_deliberation" not in outcome.trigger_kinds
+    assert "relationship_deliberation" not in outcome.trigger_kinds
     assert outcome.restarted_after_seed
-    assert outcome.background_work_statuses == ("accepted", "accepted", "accepted")
-    assert outcome.background_model_calls == 3
+    assert outcome.background_work_statuses == ("accepted", "accepted")
+    assert outcome.background_model_calls == 2
     assert "ActivityPlanned" in plan_change.event_types
     assert reply_later.observation_count == 2
     assert "ActionScheduled" in reply_later.event_types

@@ -16,7 +16,7 @@ from typing import Literal
 from .evaluation_artifacts import ScenarioCorpusEntry, corpus_digest
 
 
-SCENARIO_CORPUS_VERSION = "world-v2-scenario-corpus.3"
+SCENARIO_CORPUS_VERSION = "world-v2-scenario-corpus.4"
 TEST_ECONOMY_PROFILE_VERSION = "test-economy-v1"
 SCENARIO_CORPUS_SIZE = 120
 MINIMUM_EMOTION_GOLD_SIZE = 40
@@ -156,7 +156,7 @@ def _script_for(
                 "ActionAuthorized",
             ),
             (),
-            ("outcome_deliberation", "npc_world_appraisal", "affect_deliberation"),
+            ("outcome_deliberation", "npc_world_appraisal"),
         )
     if family == "plan_change":
         return (
@@ -318,8 +318,8 @@ SCENARIO_CASES = _build_cases()
 SCENARIO_CORPUS = tuple(case.entry for case in SCENARIO_CASES)
 # This is intentionally checked by ``verify_frozen_scenario_corpus``.  Update
 # it only with an explicit corpus-version bump and new evaluation baseline.
-FROZEN_SCENARIO_CORPUS_HASH = "c2f5e671e211d26a4854928ec165a5c58e0d5908e60979df669ed9d32fa9b9dc"
-FROZEN_SCENARIO_CASES_HASH = "9dd942e3e585275a044c8abdd5872ae1ea9d003152f3096e48915a4eebaa0192"
+FROZEN_SCENARIO_CORPUS_HASH = "509e5ee768820f7084baab45a6bef35db64365ec3cbae937eed522539bce18f5"
+FROZEN_SCENARIO_CASES_HASH = "73874d089ae7c7af6fd458d9c847ce3f0099ac0ea7e076c50d2f4fa289e4557a"
 
 
 def scenario_cases_digest(cases: tuple[ScenarioCase, ...]) -> str:

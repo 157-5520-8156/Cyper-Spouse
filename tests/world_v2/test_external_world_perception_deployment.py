@@ -7,6 +7,9 @@ from pathlib import Path
 import pytest
 
 from companion_daemon.config import Settings
+from companion_daemon.world_v2.character_interior.production import (
+    compose_fixture_character_interior,
+)
 from companion_daemon.world_v2.external_world_perception.contracts import (
     PerceptionChannelProof,
     SourcePolicyRevision,
@@ -16,6 +19,7 @@ from companion_daemon.world_v2.external_world_perception.authorized_search impor
     AcceptedWebSearchResultAdapter,
 )
 from companion_daemon.world_v2.external_world_perception.deployment import (
+    _policy_revision_suffix,
     build_external_world_perception_deployment,
 )
 from companion_daemon.world_v2.external_world_perception.production_attention import (
@@ -38,6 +42,10 @@ class Model:
     async def complete(self, messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
         del messages, temperature
         return '{"selections":[]}'
+
+
+def _interior():  # type: ignore[no-untyped-def]
+    return compose_fixture_character_interior(model=Model())
 
 
 class Life:
@@ -132,7 +140,7 @@ def test_off_and_missing_registry_are_fail_closed_without_opening_resources(tmp_
         ),
         world_id="world:test",
         actor_ref="agent:companion",
-        model=Model(),
+        character_interior=_interior(),
         life=Life(),
     )
     missing = build_external_world_perception_deployment(
@@ -143,7 +151,7 @@ def test_off_and_missing_registry_are_fail_closed_without_opening_resources(tmp_
         ),
         world_id="world:test",
         actor_ref="agent:companion",
-        model=Model(),
+        character_interior=_interior(),
         life=Life(),
     )
 
@@ -170,7 +178,7 @@ def test_live_requires_an_explicit_source_bound_character_channel(tmp_path: Path
         settings=settings,
         world_id="world:test",
         actor_ref="agent:companion",
-        model=Model(),
+        character_interior=_interior(),
         life=Life(),
     )
     channel_port = StaticLiveAttentionChannelPort(
@@ -188,7 +196,7 @@ def test_live_requires_an_explicit_source_bound_character_channel(tmp_path: Path
         settings=settings,
         world_id="world:test",
         actor_ref="agent:companion",
-        model=Model(),
+        character_interior=_interior(),
         life=Life(),
         channel_port=channel_port,
         wall_clock=lambda: NOW,
@@ -226,7 +234,7 @@ def test_live_freezable_source_raw_evidence_outlives_attention_merge(tmp_path: P
             ),
             world_id="world:test",
             actor_ref="agent:companion",
-            model=Model(),
+            character_interior=_interior(),
             life=Life(),
         )
 
@@ -255,7 +263,7 @@ def test_live_authorized_search_raw_evidence_outlives_attention_scheduler_handof
             ),
             world_id="world:test",
             actor_ref="agent:companion",
-            model=Model(),
+            character_interior=_interior(),
             life=Life(),
             authorized_search_profile=short_profile,
         )
@@ -284,7 +292,7 @@ def test_live_retention_uses_composed_scheduler_interval(tmp_path: Path) -> None
             ),
             world_id="world:test",
             actor_ref="agent:companion",
-            model=Model(),
+            character_interior=_interior(),
             life=Life(),
             scheduler_interval_seconds=60,
         )
@@ -340,7 +348,7 @@ async def test_live_auto_composes_channel_from_root_signed_public_information_ca
         ),
         world_id="world:test",
         actor_ref="agent:companion",
-        model=Model(),
+        character_interior=_interior(),
         life=Life(),
         wall_clock=lambda: NOW,
     )
@@ -366,7 +374,7 @@ def test_registry_without_enabled_sources_stays_disabled_before_runtime_allocati
         ),
         world_id="world:test",
         actor_ref="agent:companion",
-        model=Model(),
+        character_interior=_interior(),
         life=Life(),
     )
 
@@ -394,7 +402,7 @@ async def test_shadow_can_run_acquisition_without_gaining_v2_authority(tmp_path:
         ),
         world_id="world:test",
         actor_ref="agent:companion",
-        model=Model(),
+        character_interior=_interior(),
         life=Life(),
         wall_clock=lambda: NOW,
     )
@@ -434,7 +442,7 @@ async def test_shadow_to_live_rollout_uses_a_new_attention_policy_identity(
         ),
         world_id="world:test",
         actor_ref="agent:companion",
-        model=Model(),
+        character_interior=_interior(),
         life=Life(),
         channel_port=channel_port,
         wall_clock=lambda: NOW,
@@ -452,7 +460,7 @@ async def test_shadow_to_live_rollout_uses_a_new_attention_policy_identity(
         ),
         world_id="world:test",
         actor_ref="agent:companion",
-        model=Model(),
+        character_interior=_interior(),
         life=Life(),
         channel_port=channel_port,
         wall_clock=lambda: NOW,
@@ -476,7 +484,7 @@ async def test_settled_authorized_search_can_join_production_hub_without_externa
         ),
         world_id="world:test",
         actor_ref="agent:companion",
-        model=Model(),
+        character_interior=_interior(),
         life=Life(),
         authorized_search_profile=_authorized_search_profile(),
     )
@@ -485,3 +493,49 @@ async def test_settled_authorized_search_can_join_production_hub_without_externa
     assert deployment.registry_revision is None
     assert deployment.hub is not None
     await deployment.hub.aclose()
+
+
+def test_attention_policy_revision_tracks_every_content_relevant_field() -> None:
+    """The attention policy identity must move whenever the stored policy
+    content would change, not only when the source registry changes.
+
+    A revision that only hashes the registry keeps its identity across a
+    legitimate runtime-parameter change (model id, merge wait, lease,
+    retention, ...), which collides with the previously stored policy row and
+    fails every daemon restart with ``shadow attention policy revision
+    content changed``.  Each content-relevant field must therefore perturb the
+    revision, while identical input stays deterministic."""
+
+    base = dict(
+        mode="live",
+        registry_content_hash="sha256:" + "1" * 64,
+        registry_revision="registry-rev-1",
+        model_id="character-interior",
+        merge_wait_seconds=600,
+        window_ttl_seconds=21_600,
+        lease_seconds=300,
+        model_timeout_seconds=120,
+        max_candidate_dossiers=12,
+        attempt_retention_seconds=604_800,
+    )
+    baseline = _policy_revision_suffix(**base)
+    assert _policy_revision_suffix(**base) == baseline  # deterministic
+
+    perturbed_fields = {
+        "mode": ("shadow", None),
+        "registry_content_hash": ("sha256:" + "2" * 64, None),
+        "registry_revision": ("registry-rev-2", None),
+        "model_id": ("deepseek-v4-flash", None),
+        "merge_wait_seconds": (300, None),
+        "window_ttl_seconds": (10_800, None),
+        "lease_seconds": (150, None),
+        "model_timeout_seconds": (60, None),
+        "max_candidate_dossiers": (6, None),
+        "attempt_retention_seconds": (86_400, None),
+    }
+    for field, (value, _unused) in perturbed_fields.items():
+        altered = dict(base)
+        altered[field] = value
+        assert _policy_revision_suffix(**altered) != baseline, (
+            f"policy revision ignored content field {field!r}"
+        )

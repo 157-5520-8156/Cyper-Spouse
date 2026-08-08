@@ -997,7 +997,6 @@ class SQLiteShadowAttentionCoordinator:
         context_refs = {
             item.context_ref
             for item in (
-                *context.current_self_state,
                 *context.situation,
                 *context.relevant_context,
             )

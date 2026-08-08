@@ -9,18 +9,19 @@ from companion_daemon.world_v2.life_author_seed import (
     ReviewedLifeOutcome,
     ReviewedNpcInitiatedEvent,
 )
-from companion_daemon.world_v2.npc_initiative import NpcInitiativeWeightPolicy
+from companion_daemon.world_v2.life_development_draft import (
+    LifeDevelopmentNpcCapability,
+)
+from companion_daemon.world_v2.npc_initiative_weight_policy import (
+    NpcInitiativeWeightPolicy,
+)
 from companion_daemon.world_v2.npc_relationship_view import (
     RESTING_CLOSENESS_BP,
     npc_relationship_advisories,
     npc_relationship_readings,
 )
 from companion_daemon.world_v2.schemas import (
-    AppraisalHypothesis,
-    AppraisalOrigin,
-    AppraisalProjection,
     DueWindow,
-    EvidenceRef,
     NpcProjection,
     WorldOccurrenceProjection,
 )
@@ -40,13 +41,21 @@ def _npc(npc_id: str = "literature-fan") -> NpcProjection:
 
 
 def _settled_occurrence(
-    *, occurrence_id: str, npc_id: str = "literature-fan", settled_at: datetime
+    *,
+    occurrence_id: str,
+    npc_id: str = "literature-fan",
+    settled_at: datetime,
+    participant_refs: tuple[str, ...] | None = None,
 ) -> WorldOccurrenceProjection:
     return WorldOccurrenceProjection(
         occurrence_id=occurrence_id,
         entity_revision=3,
         trigger_ref=f"trigger:{occurrence_id}",
-        participant_refs=("agent:companion", f"npc:{npc_id}"),
+        participant_refs=(
+            participant_refs
+            if participant_refs is not None
+            else ("agent:companion", f"npc:{npc_id}")
+        ),
         location_ref="location:library",
         time_window=DueWindow(
             opens_at=settled_at - timedelta(hours=1), closes_at=settled_at
@@ -66,118 +75,90 @@ def _settled_occurrence(
     )
 
 
-def _conflict_appraisal(*, weight_bp: int = 8_000) -> AppraisalProjection:
-    return AppraisalProjection(
-        appraisal_id="appraisal:npc-conflict:1",
-        entity_revision=1,
-        subject_ref="npc:literature-fan",
-        source_cluster_ref="cluster:npc:1",
-        origin=AppraisalOrigin(
-            change_id="change:npc-appraisal:1",
-            transition_id="transition:npc-appraisal:1",
-            policy_refs=("policy:appraisal-v1",),
-            matrix_catalog_version="appraisal-matrix.1",
-            clustering_policy_version="source-clustering.1",
-            accepted_event_ref="event:npc-appraisal-accepted:1",
-        ),
-        hypotheses=(
-            AppraisalHypothesis(
-                hypothesis_id="meaning:npc-conflict",
-                meaning="npc_conflict",
-                attribution="npc",
-                controllability="partly_controllable",
-                severity="moderate",
-                weight_bp=weight_bp,
-            ),
-            AppraisalHypothesis(
-                hypothesis_id="meaning:ordinary",
-                meaning="ordinary",
-                attribution="situation",
-                controllability="uncontrollable",
-                severity="low",
-                weight_bp=10_000 - weight_bp,
-            ),
-        ),
-        evidence_refs=(
-            EvidenceRef(
-                ref_id="event:settled:friction",
-                evidence_type="committed_world_event",
-                claim_purpose="past_experience",
-                source_world_revision=6,
-                immutable_hash="0" * 64,
-            ),
-        ),
-        confidence_bp=7_500,
-        accepted_at=NOW - timedelta(hours=3),
-        expires_at=NOW + timedelta(days=3),
-    )
-
-
 class _Projection:
-    def __init__(self, *, npcs=(), world_occurrences=(), appraisals=(), logical_time=NOW):
+    def __init__(self, *, npcs=(), world_occurrences=(), logical_time=NOW):
         self.npcs = npcs
         self.world_occurrences = world_occurrences
-        self.appraisals = appraisals
         self.logical_time = logical_time
 
 
-def test_reading_warms_with_shared_history_and_cools_with_friction() -> None:
-    stranger = npc_relationship_readings(_Projection(npcs=(_npc(),)))
+class _ProjectionRejectingPrivateAppraisalReads(_Projection):
+    @property
+    def appraisals(self) -> object:
+        raise AssertionError("NPC relationship view cannot read protagonist Appraisal")
+
+
+def test_reading_warms_only_with_settled_shared_history() -> None:
+    stranger = npc_relationship_readings(
+        _Projection(npcs=(_npc(),)),
+        protagonist_actor_ref="agent:companion",
+    )
     assert stranger[0].closeness_bp == RESTING_CLOSENESS_BP
     assert stranger[0].settled_shared_count == 0
     assert stranger[0].source_event_refs == ()
 
-    shared = npc_relationship_readings(_Projection(
-        npcs=(_npc(),),
-        world_occurrences=(
-            _settled_occurrence(occurrence_id="o1", settled_at=NOW - timedelta(days=1)),
-            _settled_occurrence(occurrence_id="o2", settled_at=NOW - timedelta(days=2)),
-            _settled_occurrence(occurrence_id="o3", settled_at=NOW - timedelta(days=20)),
+    shared = npc_relationship_readings(
+        _Projection(
+            npcs=(_npc(),),
+            world_occurrences=(
+                _settled_occurrence(occurrence_id="o1", settled_at=NOW - timedelta(days=1)),
+                _settled_occurrence(occurrence_id="o2", settled_at=NOW - timedelta(days=2)),
+                _settled_occurrence(occurrence_id="o3", settled_at=NOW - timedelta(days=20)),
+            ),
         ),
-    ))
+        protagonist_actor_ref="agent:companion",
+    )
     assert shared[0].settled_shared_count == 3
     assert shared[0].closeness_bp > RESTING_CLOSENESS_BP
     assert shared[0].familiarity_bp > 0
     assert shared[0].last_shared_at == NOW - timedelta(days=1)
     assert "event:settled:o1" in shared[0].source_event_refs
+    assert "friction_bp" not in type(shared[0]).model_fields
+    assert "protagonist_friction_bp" not in LifeDevelopmentNpcCapability.model_fields
 
-    frictioned = npc_relationship_readings(_Projection(
-        npcs=(_npc(),),
-        world_occurrences=(
-            _settled_occurrence(occurrence_id="o1", settled_at=NOW - timedelta(days=1)),
+    private_appraisal_trap = npc_relationship_readings(
+        _ProjectionRejectingPrivateAppraisalReads(
+            npcs=(_npc(),),
+            world_occurrences=(
+                _settled_occurrence(
+                    occurrence_id="o1", settled_at=NOW - timedelta(days=1)
+                ),
+            ),
         ),
-        appraisals=(_conflict_appraisal(),),
-    ))
-    assert frictioned[0].friction_bp > 0
-    assert frictioned[0].closeness_bp < npc_relationship_readings(_Projection(
-        npcs=(_npc(),),
-        world_occurrences=(
-            _settled_occurrence(occurrence_id="o1", settled_at=NOW - timedelta(days=1)),
-        ),
-    ))[0].closeness_bp
-    # An expired conflict no longer counts as live friction.
-    expired = _conflict_appraisal().model_copy(
-        update={"expires_at": NOW - timedelta(minutes=1)}
+        protagonist_actor_ref="agent:companion",
     )
-    calm = npc_relationship_readings(_Projection(
-        npcs=(_npc(),), appraisals=(expired,),
-    ))
-    assert calm[0].friction_bp == 0
+    assert private_appraisal_trap == npc_relationship_readings(
+        _Projection(
+            npcs=(_npc(),),
+            world_occurrences=(
+                _settled_occurrence(
+                    occurrence_id="o1", settled_at=NOW - timedelta(days=1)
+                ),
+            ),
+        ),
+        protagonist_actor_ref="agent:companion",
+    )
 
 
-def test_conflict_appraisal_only_cools_the_exact_npc_subject() -> None:
-    fan = _npc("literature-fan")
-    classmate = _npc("classmate")
+def test_solo_npc_occurrence_is_not_shared_history_with_protagonist() -> None:
+    reading = npc_relationship_readings(
+        _Projection(
+            npcs=(_npc(),),
+            world_occurrences=(
+                _settled_occurrence(
+                    occurrence_id="solo",
+                    settled_at=NOW - timedelta(hours=1),
+                    participant_refs=("npc:literature-fan",),
+                ),
+            ),
+        ),
+        protagonist_actor_ref="agent:companion",
+    )[0]
 
-    readings = npc_relationship_readings(_Projection(
-        npcs=(fan, classmate),
-        appraisals=(_conflict_appraisal(),),
-    ))
-
-    by_ref = {item.npc_ref: item for item in readings}
-    assert by_ref["npc:literature-fan"].friction_bp > 0
-    assert by_ref["npc:classmate"].friction_bp == 0
-    assert by_ref["npc:classmate"].closeness_bp == RESTING_CLOSENESS_BP
+    assert reading.settled_shared_count == 0
+    assert reading.closeness_bp == RESTING_CLOSENESS_BP
+    assert reading.familiarity_bp == 0
+    assert reading.source_event_refs == ()
 
 
 def _candidate(kind: str) -> NpcInitiativeCandidate:
@@ -205,21 +186,24 @@ def _candidate(kind: str) -> NpcInitiativeCandidate:
     )
 
 
-def test_weight_policy_v2_tilts_by_this_npcs_own_reading() -> None:
+def test_weight_policy_v2_tilts_only_by_settled_relationship_reading() -> None:
     policy = NpcInitiativeWeightPolicy()
     assert policy.version == "npc-initiative-weight.2"
     shared_time = _candidate("shared_time")
     friction = _candidate("friction")
 
-    close = npc_relationship_readings(_Projection(
-        npcs=(_npc(),),
-        world_occurrences=tuple(
-            _settled_occurrence(
-                occurrence_id=f"o{index}", settled_at=NOW - timedelta(days=index + 1)
-            )
-            for index in range(4)
+    close = npc_relationship_readings(
+        _Projection(
+            npcs=(_npc(),),
+            world_occurrences=tuple(
+                _settled_occurrence(
+                    occurrence_id=f"o{index}", settled_at=NOW - timedelta(days=index + 1)
+                )
+                for index in range(4)
+            ),
         ),
-    ))
+        protagonist_actor_ref="agent:companion",
+    )
     distant_weights = policy.compile(candidates=(shared_time, friction))
     close_weights = policy.compile(
         candidates=(shared_time, friction), npc_relationships=close
@@ -227,24 +211,24 @@ def test_weight_policy_v2_tilts_by_this_npcs_own_reading() -> None:
     # Closeness invites shared time; it never becomes a gate.
     assert close_weights[shared_time.token] > distant_weights[shared_time.token]
 
-    frictioned = npc_relationship_readings(_Projection(
-        npcs=(_npc(),), appraisals=(_conflict_appraisal(),),
-    ))
-    friction_weights = policy.compile(
-        candidates=(shared_time, friction), npc_relationships=frictioned
-    )
-    assert friction_weights[friction.token] > distant_weights[friction.token]
+    assert close_weights[friction.token] < distant_weights[friction.token]
 
 
 def test_advisory_is_ledger_backed_and_silent_without_history() -> None:
-    assert npc_relationship_advisories(_Projection(npcs=(_npc(),))) == ()
-    advisories = npc_relationship_advisories(_Projection(
-        npcs=(_npc(),),
-        world_occurrences=(
-            _settled_occurrence(occurrence_id="o1", settled_at=NOW - timedelta(days=1)),
-            _settled_occurrence(occurrence_id="o2", settled_at=NOW - timedelta(days=3)),
+    assert npc_relationship_advisories(
+        _Projection(npcs=(_npc(),)),
+        protagonist_actor_ref="agent:companion",
+    ) == ()
+    advisories = npc_relationship_advisories(
+        _Projection(
+            npcs=(_npc(),),
+            world_occurrences=(
+                _settled_occurrence(occurrence_id="o1", settled_at=NOW - timedelta(days=1)),
+                _settled_occurrence(occurrence_id="o2", settled_at=NOW - timedelta(days=3)),
+            ),
         ),
-    ))
+        protagonist_actor_ref="agent:companion",
+    )
     assert len(advisories) == 1
     advisory = advisories[0]
     assert advisory.kind == "npc_relationships"

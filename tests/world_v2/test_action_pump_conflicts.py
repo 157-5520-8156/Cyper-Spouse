@@ -43,6 +43,7 @@ def _entrypoint(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("targeted", [False, True])
+@pytest.mark.asyncio
 async def test_idempotency_conflict_is_permanent_and_propagated_without_retry(
     targeted: bool,
 ) -> None:
@@ -58,6 +59,7 @@ async def test_idempotency_conflict_is_permanent_and_propagated_without_retry(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("targeted", [False, True])
+@pytest.mark.asyncio
 async def test_concurrency_conflict_remains_a_bounded_retry(
     targeted: bool,
 ) -> None:
@@ -74,6 +76,7 @@ async def test_concurrency_conflict_remains_a_bounded_retry(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("targeted", [False, True])
+@pytest.mark.asyncio
 async def test_persistent_concurrency_conflict_stops_after_three_attempts(
     targeted: bool,
 ) -> None:

@@ -46,6 +46,14 @@ class _RoutedModel(_JsonCapableModel):
         return self.routed
 
 
+def test_role_bound_life_adapter_rejects_retired_character_role() -> None:
+    with pytest.raises(ValueError, match="world-author role"):
+        RoleBoundLifeDevelopmentModelAdapter(
+            model=_JsonCapableModel(),
+            role="character_model",  # type: ignore[arg-type]
+        )
+
+
 @pytest.mark.asyncio
 async def test_role_bound_life_adapter_prefers_json_completion_without_rewriting_messages() -> None:
     provider = _JsonCapableModel()
