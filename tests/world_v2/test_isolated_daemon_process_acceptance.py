@@ -17,6 +17,10 @@ from companion_daemon.world_v2.expression_draft import qq_expression_capabilitie
 from companion_daemon.world_v2.character_interior.inbound_tool_contract import (
     InboundToolContracts,
 )
+from companion_daemon.world_v2.structured_expression_reselection_model import (
+    expression_reselection_output_contract,
+    expression_reselection_tool_contract,
+)
 
 
 _RUNNER_PATH = Path(__file__).resolve().parents[2] / "scripts" / "run_isolated_daemon_acceptance.py"
@@ -1078,6 +1082,108 @@ def test_provider_capture_reconstructs_final_atomic_tool_identity() -> None:
             "tool_choice": contract.provider_tool_choice,
         }
     ) == [expected_hash]
+
+
+def test_provider_capture_reconstructs_expression_reselection_tool_identity() -> None:
+    capabilities = qq_expression_capabilities(
+        "napcat",
+        recorded_cadence_mode="shadow",
+    )
+    output_contract = expression_reselection_output_contract(
+        capabilities=capabilities,
+        allowed_source_ref_aliases=("source:current",),
+        world_claim_source_ref_aliases_by_scope={
+            "current_world": ("source:current",),
+            "past_world": (),
+            "counterpart_history": (),
+            "shared_history": (),
+            "stable_identity": (),
+        },
+        response_expectation_assessment_required=False,
+        combined=False,
+    )
+    compiled = expression_reselection_tool_contract(output_contract)
+    messages = [
+        {"role": "system", "content": "Return the pinned expression correction."},
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "contract": "source-closure-reselection.2",
+                    "output_contract": output_contract,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        },
+    ]
+    payload = {
+        "messages": messages,
+        "temperature": 0.25,
+        "tools": list(compiled.provider_tools),
+        "tool_choice": compiled.provider_tool_choice,
+    }
+    expected_hash = _canonical_hash(
+        {
+            **payload,
+            "tool_contract_identity": compiled.identity.request_identity_material(),
+        }
+    )
+    assert _forced_tool_request_hashes(payload) == [expected_hash]
+
+    state = _ProviderCaptureState(mode="loopback-stub", upstream_base_url=None)
+    status, _response = state.handle(
+        path="/chat/completions",
+        payload=payload,
+        authorization="Bearer isolated-test",
+    )
+
+    assert status == 200
+    evidence = state.report()["request_evidence"]
+    assert isinstance(evidence, list) and evidence
+    assert evidence[0]["forced_tool_request_hashes"] == [expected_hash]
+
+
+def test_provider_capture_does_not_use_user_nested_expression_contract_as_evidence() -> None:
+    capabilities = qq_expression_capabilities(
+        "napcat",
+        recorded_cadence_mode="shadow",
+    )
+    output_contract = expression_reselection_output_contract(
+        capabilities=capabilities,
+        allowed_source_ref_aliases=(),
+        world_claim_source_ref_aliases_by_scope={
+            "current_world": (),
+            "past_world": (),
+            "counterpart_history": (),
+            "shared_history": (),
+            "stable_identity": (),
+        },
+        response_expectation_assessment_required=False,
+        combined=False,
+    )
+    compiled = expression_reselection_tool_contract(output_contract)
+    payload = {
+        "messages": [
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "observation": {
+                            "contract": "source-closure-reselection.2",
+                            "output_contract": output_contract,
+                        }
+                    },
+                    separators=(",", ":"),
+                ),
+            }
+        ],
+        "temperature": 0.25,
+        "tools": list(compiled.provider_tools),
+        "tool_choice": compiled.provider_tool_choice,
+    }
+
+    assert _forced_tool_request_hashes(payload) == []
 
 
 def test_provider_capture_fails_closed_on_malformed_stream_schema() -> None:

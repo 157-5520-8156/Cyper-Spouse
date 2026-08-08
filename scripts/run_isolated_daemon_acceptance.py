@@ -65,6 +65,9 @@ from companion_daemon.world_v2.structured_source_review_model import (
     StrictOutputCapabilityEvidence,
     StructuredSourceReviewModel,
 )
+from companion_daemon.world_v2.structured_expression_reselection_model import (
+    expression_reselection_tool_contract,
+)
 
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -321,6 +324,57 @@ def _forced_tool_request_hashes(payload: dict[str, object]) -> list[str]:
     description = function.get("description")
     if not isinstance(tool_name, str) or not isinstance(description, str):
         return []
+    messages = payload.get("messages")
+    temperature = payload.get("temperature")
+    if not isinstance(messages, list) or not isinstance(temperature, (int, float)):
+        return []
+
+    if tool_name == "character_expression_reselection_v1":
+        # Expression-only correction carries the exact canonical output
+        # contract in the source-closure reselection envelope.  Recompile it
+        # through the production factory instead of mirroring its schema or
+        # guessing capability/source fields from provider JSON.
+        output_contracts: list[dict[str, object]] = []
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            decoded = _decoded_json_material(content)
+            if not isinstance(decoded, dict):
+                continue
+            if decoded.get("contract") != "source-closure-reselection.2":
+                continue
+            candidate = decoded.get("output_contract")
+            if (
+                isinstance(candidate, dict)
+                and candidate.get("contract") == "expression-source-reselection-direct.1"
+            ):
+                output_contracts.append(candidate)
+        hashes: list[str] = []
+        for output_contract in output_contracts:
+            try:
+                contract = expression_reselection_tool_contract(output_contract)
+            except (TypeError, ValueError, KeyError):
+                continue
+            if list(contract.provider_tools) != raw_tools:
+                continue
+            if contract.provider_tool_choice != payload.get("tool_choice"):
+                continue
+            hashes.append(
+                _canonical_hash(
+                    {
+                        "messages": messages,
+                        "temperature": temperature,
+                        "tools": raw_tools,
+                        "tool_choice": payload.get("tool_choice"),
+                        "tool_contract_identity": contract.identity.request_identity_material(),
+                    }
+                )
+            )
+        return list(dict.fromkeys(hashes))
+
     name_match = re.fullmatch(
         r"character_inbound_(initial|after_recall|final)(?:_(atomic|stream))?_v1",
         tool_name,
@@ -384,10 +438,6 @@ def _forced_tool_request_hashes(payload: dict[str, object]) -> list[str]:
         return []
     require_turn_posture = "turn_posture" in required
     contracts = InboundToolContracts()
-    messages = payload.get("messages")
-    temperature = payload.get("temperature")
-    if not isinstance(messages, list) or not isinstance(temperature, (int, float)):
-        return []
     hashes: list[str] = []
     # The isolated daemon environment fixes cadence to shadow.  Do not report
     # indistinguishable off/shadow schema candidates as if both were evidence.

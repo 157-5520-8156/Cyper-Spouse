@@ -1152,3 +1152,14 @@ commit：hash
   Git revision、tracked worktree dirty 状态，以及验收脚本、Inbound tool contract、StructuredRole
   tool contract、Delayed Trigger catalog 的 SHA-256。这样旧时间戳报告不能被误读为当前工作树证据；
   真实 provider 资格仍需在固定 revision 上重新执行，不能用旧 artifact 越过人工发布门。
+
+### 2026-08-09：表达式校正验收身份关联
+
+- 隔离 provider capture 现在也能处理 `character_expression_reselection_v1`。它只接受生产
+  source-closure reselection envelope 顶层携带的 canonical `output_contract`，再调用
+  `expression_reselection_tool_contract` 重新编译并比较完整 provider tool/choice；不复制表达式字段表，
+  不从用户任意嵌套 JSON 猜测 capability 或来源。
+- 表达式校正的本地 contract identity 因而可以进入 `forced_tool_request_hashes`，与持久化 provider
+  request hash 做同样的因果关联；缺少、嵌套伪造或不匹配的 contract 会安全地不计入证据，而不是冒充成功。
+- 这只闭合隔离验收的证据采集缺口，不等于真实 DeepSeek 首次成功率、QQ 回执、自由多轮对聊或 24 小时
+  soak 已资格化；发布状态继续保持 `manual_only`/`qualification_incomplete`。
