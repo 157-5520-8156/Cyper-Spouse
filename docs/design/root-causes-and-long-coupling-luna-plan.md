@@ -1148,3 +1148,7 @@ commit：hash
 - 新增嵌套伪造、观察字段伪造和合法 envelope 回归；隔离验收相关套件为 `45 passed`，完整回归为
   `4871 passed, 1 warning`。这仍只改证据采集边界，不提升真实 provider、QQ、自主性或 24 小时
   soak 资格；发布状态继续保持 `qualification_incomplete`。
+- 验收产物契约从 `isolated-daemon-process-acceptance.2` 升为 `.3`，新增 `provenance`：生成时的
+  Git revision、tracked worktree dirty 状态，以及验收脚本、Inbound tool contract、StructuredRole
+  tool contract、Delayed Trigger catalog 的 SHA-256。这样旧时间戳报告不能被误读为当前工作树证据；
+  真实 provider 资格仍需在固定 revision 上重新执行，不能用旧 artifact 越过人工发布门。

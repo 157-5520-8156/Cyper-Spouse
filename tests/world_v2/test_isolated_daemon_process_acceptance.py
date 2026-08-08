@@ -1770,7 +1770,18 @@ def test_real_daemon_process_recovers_conversation_without_real_qq(
 
     assert completed.returncode == 0, completed.stderr or completed.stdout
     report = json.loads(output.read_text(encoding="utf-8"))
-    assert report["contract"] == "isolated-daemon-process-acceptance.1"
+    assert report["contract"] == "isolated-daemon-process-acceptance.3"
+    provenance = report["provenance"]
+    assert isinstance(provenance, dict)
+    assert isinstance(provenance["git_revision"], str)
+    assert len(provenance["git_revision"]) == 40
+    assert isinstance(provenance["source_file_sha256"], dict)
+    assert set(provenance["source_file_sha256"]) == {
+        "acceptance_script",
+        "inbound_tool_contract",
+        "structured_role_tool_contract",
+        "delayed_trigger_catalog",
+    }
     assert report["safety"]["capture_transport_only"] is True
     assert report["safety"]["loopback_only"] is True
     assert report["safety"]["onebot_loopback_only"] is True

@@ -106,6 +106,88 @@ def _canonical_hash(value: object) -> str:
     ).hexdigest()
 
 
+def _sha256_file(path: Path) -> str | None:
+    """Return a reproducible source digest, or ``None`` if the file is absent."""
+
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def _git_revision() -> str | None:
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=_ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    revision = completed.stdout.strip()
+    return revision if completed.returncode == 0 and revision else None
+
+
+def _git_tracked_worktree_dirty() -> bool | None:
+    try:
+        completed = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=_ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return bool(completed.stdout.strip())
+
+
+def _acceptance_provenance() -> dict[str, object]:
+    """Bind an acceptance report to the source artifacts it actually ran."""
+
+    source_files = {
+        "acceptance_script": _ROOT / "scripts" / "run_isolated_daemon_acceptance.py",
+        "inbound_tool_contract": (
+            _ROOT
+            / "src"
+            / "companion_daemon"
+            / "world_v2"
+            / "character_interior"
+            / "inbound_tool_contract.py"
+        ),
+        "structured_role_tool_contract": (
+            _ROOT
+            / "src"
+            / "companion_daemon"
+            / "world_v2"
+            / "character_interior"
+            / "structured_role_tool_contract.py"
+        ),
+        "delayed_trigger_catalog": (
+            _ROOT / "configs" / "delayed_trigger_qualification.v1.yaml"
+        ),
+    }
+    return {
+        "git_revision": _git_revision(),
+        "tracked_worktree_dirty": _git_tracked_worktree_dirty(),
+        "source_file_sha256": {
+            name: digest
+            for name, path in source_files.items()
+            if (digest := _sha256_file(path)) is not None
+        },
+    }
+
+
 def _decoded_json_material(value: object, *, depth: int = 0) -> object:
     """Decode nested provider JSON without retaining it outside one request."""
 
@@ -3226,11 +3308,10 @@ def run(
                 combined_log_tail = "\n".join(daemon_logs)[-8_000:]
                 report = {
                     "contract": (
-                        "isolated-daemon-process-acceptance.1"
-                        if model_mode == "fake"
-                        else "isolated-daemon-process-acceptance.2"
+                        "isolated-daemon-process-acceptance.3"
                     ),
                     "generated_at": datetime.now(UTC).isoformat(),
+                    "provenance": _acceptance_provenance(),
                     "safety": {
                         "capture_transport_only": True,
                         "loopback_only": network_topology["aggregate_loopback_only"],
