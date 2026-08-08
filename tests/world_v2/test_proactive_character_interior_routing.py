@@ -66,6 +66,7 @@ class _Projection:
 
 class _Model:
     model = "character-model"
+    supports_required_tool_choice = True
 
     def __init__(self, response: object) -> None:
         self.response = response
@@ -77,6 +78,21 @@ class _Model:
         if isinstance(self.response, BaseException):
             raise self.response
         return json.dumps(self.response, ensure_ascii=False)
+
+    async def complete_json(
+        self,
+        messages,
+        *,
+        temperature=0.8,
+        tools=None,
+        tool_choice=None,
+    ):
+        assert len(tools) == 1
+        assert tool_choice == {
+            "type": "function",
+            "function": {"name": "character_role_proactive_contact_v1"},
+        }
+        return await self.complete(messages, temperature=temperature)
 
 
 def _request() -> ModelInput:
@@ -164,9 +180,7 @@ async def test_proactive_business_opportunity_uses_character_interior_consider()
     assert isinstance(proposal, DecisionProposal)
     assert proposal.timing_choice == "silent"
     assert proposal.private_turn_state.inner_state_summary.startswith("She noticed")
-    assert proposal.proactive_opportunity_decision.disposition == (
-        "silent_after_consideration"
-    )
+    assert proposal.proactive_opportunity_decision.disposition == ("silent_after_consideration")
     assert model.calls == 1
 
 

@@ -263,32 +263,6 @@ def _supporting_source_reviewer() -> _ProactiveReplySequence:
     return _ProactiveReplySequence([_source_closure_review()])
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _candidate_inventory(
     text: str,
     *,
@@ -451,24 +425,6 @@ def _private_proactive_draft(
     return value
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 @pytest.mark.asyncio
 async def test_later_proactive_multi_beat_plan_preserves_ordered_effect_once_actions() -> None:
     ledger, _unused_model, _unused_runtime, _turn = _runtime(choice="silent")
@@ -530,34 +486,6 @@ def _proactive_biography_request() -> ModelInput:
     return request.model_copy(
         update={"model_content_json": json.dumps(context, ensure_ascii=False)}
     )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _proactive_recall_fixture(
@@ -622,18 +550,6 @@ def _proactive_recall_fixture(
         trigger_ref=request.trigger_ref,
     )
     return request, recall
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _event(
@@ -1303,6 +1219,8 @@ class _ProactiveInteriorProjection:
 class _ProactiveInteriorWireModel:
     """Test-only translation of historical draft fixtures into the one role wire."""
 
+    supports_required_tool_choice = True
+
     def __init__(self, delegate) -> None:  # type: ignore[no-untyped-def]
         self._delegate = delegate
         self.model = str(getattr(delegate, "model", "test-proactive-character"))
@@ -1311,7 +1229,20 @@ class _ProactiveInteriorWireModel:
         raw = await self._delegate.complete(messages, temperature=temperature)
         return self._wrap(raw, messages=messages)
 
-    async def complete_json(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+    async def complete_json(
+        self,
+        messages,
+        *,
+        temperature: float = 0.8,
+        tools=None,
+        tool_choice=None,
+    ):  # type: ignore[no-untyped-def]
+        if tools is not None:
+            assert len(tools) == 1
+            assert tool_choice == {
+                "type": "function",
+                "function": {"name": "character_role_proactive_contact_v1"},
+            }
         complete_json = getattr(self._delegate, "complete_json", None)
         raw = await (
             complete_json(messages, temperature=temperature)
@@ -1563,10 +1494,6 @@ async def test_visible_proactive_expression_is_bound_to_its_semantic_opportunity
     assert user["inner_turn"]["trigger_ref"] == proposal["trigger_ref"]
     assert user["capability_manifest"]["source_refs"] == [proposal["trigger_ref"]]
     assert set(user["inner_life_snapshot"]["faculties"]) == set(FACET_NAMES)
-
-
-
-
 
 
 @pytest.mark.asyncio
@@ -2355,9 +2282,10 @@ async def test_production_application_opens_one_grounded_spontaneous_contact_aft
         supplied = json.loads(proactive.messages[0][1]["content"])
         assert supplied["inner_life_snapshot"]["contract"] == "inner-life-snapshot.1"
         assert supplied["inner_life_snapshot"]["availability"] == "available"
-        assert supplied["capability_manifest"]["payload"]["source_opportunity"][
-            "source_kind"
-        ] == "spontaneous_contact"
+        assert (
+            supplied["capability_manifest"]["payload"]["source_opportunity"]["source_kind"]
+            == "spontaneous_contact"
+        )
         assert transport.bodies == ["好，你先忙。", "刚才那件事我又想了一下。"]
     finally:
         app.close()
@@ -2548,10 +2476,6 @@ async def test_technical_failures_retry_at_ten_thirty_then_capped_one_twenty_min
         assert (await runtime.drain_one()).status == "failed_safe"
 
     assert malformed.calls == 10
-
-
-
-
 
 
 @pytest.mark.parametrize(
@@ -2876,10 +2800,7 @@ async def test_proactive_retry_wait_does_not_starve_ready_background_cognition(
         assert health["initiative_state"] == "retry_wait"
         assert health["initiative_next_consideration_at"] == retry_due.isoformat()
         projection = app._ledger.project()  # noqa: SLF001 - public result corroboration
-        assert any(
-            fact.values.predicate_code == "preference.likes"
-            for fact in projection.facts
-        )
+        assert any(fact.values.predicate_code == "preference.likes" for fact in projection.facts)
     finally:
         app.close()
 
@@ -2953,9 +2874,7 @@ async def test_new_cadence_epoch_cannot_bypass_a_social_technical_backoff(
         assert health["initiative_cadence_reason_codes"] == ["technical_failure:retry"]
         assert health["initiative_consecutive_technical_failures"] == 1
         assert health["initiative_retry_ordinal"] == 1
-        assert health["initiative_last_failure_code"] == (
-            "authored_expression_reselection_invalid"
-        )
+        assert health["initiative_last_failure_code"] == ("authored_expression_reselection_invalid")
         waiting = await app.drain_background_once()
         # A future retry remains visible in health/timer projections, but is
         # not reported as work performed by this background pass.

@@ -256,7 +256,12 @@ class ScenarioVerificationError(AssertionError):
 # provider-shaped legacy envelopes whose refs/payload were authored by the
 # model.  The fixed fixture consequently gets new request/audit identities;
 # no semantic decision, event family, or action state is silently rewritten.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.53"
+# ``.54`` records the first complete deterministic run after the subsequent
+# unified-interior handoff/recovery changes were present together.  The old
+# .53 hash was stale (the per-case verification predicates and replay checks
+# still pass, but the aggregate request/room/replay manifest moved), so this
+# is an explicit audited rebaseline rather than weakening the drift guard.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.54"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
@@ -294,8 +299,12 @@ FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.53"
 # fabricates summary, refs, facts, motive, timing, or silence.  The resulting
 # fixture request/audit identities move while exported event families,
 # visible outputs, action states, and model-call counts remain unchanged.
+# 2026-08-09: complete isolated rerun after the unified-interior handoff and
+# recovery changes produced the stable manifest below.  Every frozen case
+# passed its explicit event/action/replay predicates; only the aggregate
+# manifest changed from the stale .53 value.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "4e9721823f2f7d1bca916af404268e7f450576bdc12ba63ea46a83f071ec4f50"
+    "7726c9567b27348c183567991dc08b54c862c255379ec1e5b77c20e1554e888c"
 )
 
 

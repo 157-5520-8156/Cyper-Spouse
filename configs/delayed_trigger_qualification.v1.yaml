@@ -6,6 +6,84 @@ qualification_layer: declaration_only
 # schedule, execution catalog, or production release authority. release_status
 # records intended inventory posture only; the catalog does not consume it as a
 # runtime truth. A later public-host scenario package must qualify execution.
+#
+# These are static cross-links to committed public-host tests, not host-qualified
+# results, runtime routes, release gates, or deployment evidence. Every row
+# deliberately excludes real provider, stream, autonomy, OneBot callback, and
+# soak coverage; those require distinct evidence before any deployment claim.
+host_scenario_evidence:
+  - scenario_id: qq-later-text-restart-effect-once.1
+    mechanism_ids: [expression.deferred_reply, conversation.commitment_due, action.authorized_due]
+    test_nodeid: tests/world_v2/test_delayed_trigger_host_qualification.py::test_public_host_later_text_survives_restart_and_settles_effect_once
+    qualification_scope: qq_transport_terminal
+    excluded_scope: [WorldV2PlatformHost.receipt, real_provider_author_transport, production_stream_expression_episode, character_autonomy, onebot_provider_callback_normalization, 24_hour_soak]
+
+  - scenario_id: proactive.event-driven-silent-effect-once.1
+    mechanism_ids: [proactive.event_driven]
+    test_nodeid: tests/world_v2/test_delayed_trigger_proactive_host_qualification.py::test_public_host_event_driven_silence_is_effect_once
+    qualification_scope: public_host_proactive_silent_lifecycle
+    excluded_scope: [real_provider_author_transport, production_stream_expression_episode, character_autonomy, onebot_provider_callback_normalization, 24_hour_soak]
+
+  - scenario_id: proactive.technical-retry-restart-effect-once.1
+    mechanism_ids: [proactive.technical_retry]
+    test_nodeid: tests/world_v2/test_delayed_trigger_proactive_host_qualification.py::test_public_host_technical_retry_survives_restart_and_is_effect_once
+    qualification_scope: public_host_proactive_technical_retry_lifecycle
+    excluded_scope: [real_provider_author_transport, production_stream_expression_episode, character_autonomy, onebot_provider_callback_normalization, 24_hour_soak]
+
+  - scenario_id: proactive.technical-retry-superseded-by-inbound.1
+    mechanism_ids: [proactive.technical_retry]
+    test_nodeid: tests/world_v2/test_delayed_trigger_proactive_host_qualification.py::test_public_host_new_inbound_supersedes_old_technical_retry
+    qualification_scope: public_host_proactive_retry_supersession
+    excluded_scope: [real_provider_author_transport, production_stream_expression_episode, character_autonomy, onebot_provider_callback_normalization, 24_hour_soak]
+
+  - scenario_id: expression.multibeat_due
+    mechanism_ids: [expression.multibeat, action.authorized_due]
+    test_nodeid: tests/world_v2/test_delayed_trigger_expression_host_qualification.py::test_public_host_multibeat_due_survives_restart_and_settles_each_beat_once
+    qualification_scope: accepted_typed_plan_host_lifecycle
+    excluded_scope: [real_provider_author_transport, production_stream_expression_episode, character_autonomy, onebot_provider_callback_normalization, 24_hour_soak]
+
+  - scenario_id: expression.interjection_reconsideration
+    mechanism_ids: [expression.reconsideration]
+    test_nodeid: tests/world_v2/test_delayed_trigger_expression_host_qualification.py::test_public_host_interjection_reconsideration_cancels_unsent_plan_effect_once
+    qualification_scope: accepted_typed_plan_host_lifecycle
+    excluded_scope: [real_provider_author_transport, production_stream_expression_episode, character_autonomy, onebot_provider_callback_normalization, 24_hour_soak]
+
+  - scenario_id: platform-receipt-provider-accepted-terminal-restart.1
+    mechanism_ids: [action.authorized_due, expression.deferred_reply, conversation.commitment_due]
+    test_nodeid: tests/world_v2/test_delayed_trigger_platform_receipt_host_qualification.py::test_public_host_receipt_settles_terminal_effect_once_and_cold_replays
+    qualification_scope: normalized_platform_receipt_acceptance_only
+    excluded_scope: [production_provider_callback_normalization, real_provider_author_transport, production_stream_expression_episode, character_autonomy, onebot_provider_callback_normalization, 24_hour_soak]
+
+  - scenario_id: platform-receipt-unknown-late-conflict-restart.1
+    mechanism_ids: [action.authorized_due, expression.deferred_reply, conversation.commitment_due]
+    test_nodeid: tests/world_v2/test_delayed_trigger_platform_receipt_host_qualification.py::test_public_host_receipt_preserves_unknown_and_records_late_terminal_reconciliation
+    qualification_scope: normalized_platform_receipt_unknown_conflict_only
+    excluded_scope: [production_provider_callback_normalization, real_provider_author_transport, production_stream_expression_episode, character_autonomy, onebot_provider_callback_normalization, 24_hour_soak]
+
+  - scenario_id: affect.decay-boundary-restart-effect-once.1
+    mechanism_ids: [affect.decay]
+    test_nodeid: tests/world_v2/test_delayed_trigger_affect_silence_host_qualification.py::test_public_host_affect_decay_obeys_boundary_restart_and_effect_once
+    qualification_scope: public_host_scripted_typed_role_lifecycle
+    excluded_scope: [real_provider_author_transport, production_stream_expression_episode, character_autonomy, onebot_provider_callback_normalization, 24_hour_soak]
+
+  - scenario_id: relationship.silence-aftermath-no_change-effect-once.1
+    mechanism_ids: [relationship.silence_aftermath]
+    test_nodeid: tests/world_v2/test_delayed_trigger_affect_silence_host_qualification.py::test_public_host_silence_aftermath_is_role_owned_and_effect_once[no_change]
+    qualification_scope: public_host_scripted_typed_role_lifecycle
+    excluded_scope: [real_provider_author_transport, production_stream_expression_episode, character_autonomy, onebot_provider_callback_normalization, 24_hour_soak]
+
+  - scenario_id: relationship.silence-aftermath-open_affect-effect-once.1
+    mechanism_ids: [relationship.silence_aftermath]
+    test_nodeid: tests/world_v2/test_delayed_trigger_affect_silence_host_qualification.py::test_public_host_silence_aftermath_is_role_owned_and_effect_once[open_affect]
+    qualification_scope: public_host_scripted_typed_role_lifecycle
+    excluded_scope: [real_provider_author_transport, production_stream_expression_episode, character_autonomy, onebot_provider_callback_normalization, 24_hour_soak]
+
+  - scenario_id: relationship.silence-aftermath-technical-failure-lease-recovery.1
+    mechanism_ids: [relationship.silence_aftermath]
+    test_nodeid: tests/world_v2/test_delayed_trigger_affect_silence_host_qualification.py::test_public_host_silence_technical_failure_is_not_role_no_change
+    qualification_scope: public_host_scripted_typed_role_lifecycle
+    excluded_scope: [real_provider_author_transport, production_stream_expression_episode, character_autonomy, onebot_provider_callback_normalization, 24_hour_soak]
+
 mechanisms:
   - mechanism_id: proactive.event_driven
     purpose: Event-driven proactive-contact consideration

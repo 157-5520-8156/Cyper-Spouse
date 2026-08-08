@@ -52,6 +52,20 @@ class RetryPolicy(_FrozenModel):
         return self
 
 
+class HostScenarioEvidence(_FrozenModel):
+    """One static cross-link to a committed public-host qualification test.
+
+    This is evidence inventory only.  It cannot authorize a runtime route,
+    change a mechanism's release status, or report a host-qualified verdict.
+    """
+
+    scenario_id: str = Field(min_length=1)
+    mechanism_ids: tuple[str, ...] = Field(min_length=1)
+    test_nodeid: str = Field(min_length=1)
+    qualification_scope: str = Field(min_length=1)
+    excluded_scope: tuple[str, ...] = Field(min_length=1)
+
+
 class DelayedTriggerMechanism(_FrozenModel):
     mechanism_id: str = Field(min_length=1)
     purpose: str = Field(min_length=1)
@@ -86,13 +100,28 @@ class DelayedTriggerCatalog(_FrozenModel):
     matrix_id: str = Field(min_length=1)
     qualification_layer: Literal["declaration_only"]
     mechanisms: tuple[DelayedTriggerMechanism, ...] = Field(min_length=1)
+    host_scenario_evidence: tuple[HostScenarioEvidence, ...] = ()
 
     @model_validator(mode="after")
     def unique_ids(self) -> DelayedTriggerCatalog:
         identities = [row.mechanism_id for row in self.mechanisms]
         if len(identities) != len(set(identities)):
             raise ValueError("delayed trigger mechanism ids must be unique")
+        scenario_ids = [row.scenario_id for row in self.host_scenario_evidence]
+        if len(scenario_ids) != len(set(scenario_ids)):
+            raise ValueError("host scenario evidence ids must be unique")
+        nodeids = [row.test_nodeid for row in self.host_scenario_evidence]
+        if len(nodeids) != len(set(nodeids)):
+            raise ValueError("host scenario evidence nodeids must be unique")
         return self
+
+    def host_scenario(self, scenario_id: str) -> HostScenarioEvidence:
+        """Return one declared test-evidence cross-link by its stable identity."""
+
+        for evidence in self.host_scenario_evidence:
+            if evidence.scenario_id == scenario_id:
+                return evidence
+        raise KeyError(f"unknown delayed-trigger host scenario {scenario_id!r}")
 
 
 class _VerticalRow(Protocol):
@@ -177,6 +206,48 @@ def verify_delayed_trigger_catalog(
         for row in catalog.mechanisms
         for closure in row.closure_mechanisms
     }
+
+    evidence_scenario_ids: set[str] = set()
+    evidence_nodeids: set[str] = set()
+    required_excluded_scope = {
+        "real_provider_author_transport",
+        "production_stream_expression_episode",
+        "character_autonomy",
+        "onebot_provider_callback_normalization",
+        "24_hour_soak",
+    }
+    for evidence in catalog.host_scenario_evidence:
+        if evidence.scenario_id in evidence_scenario_ids:
+            errors.append(
+                f"host scenario evidence duplicate scenario id {evidence.scenario_id!r}"
+            )
+        evidence_scenario_ids.add(evidence.scenario_id)
+        if evidence.test_nodeid in evidence_nodeids:
+            errors.append(
+                f"host scenario evidence duplicate test nodeid {evidence.test_nodeid!r}"
+            )
+        evidence_nodeids.add(evidence.test_nodeid)
+        missing_exclusions = required_excluded_scope - set(evidence.excluded_scope)
+        if missing_exclusions:
+            errors.append(
+                f"{evidence.scenario_id}: missing explicit excluded scope "
+                f"{sorted(missing_exclusions)!r}"
+            )
+        for mechanism_id in evidence.mechanism_ids:
+            mechanism = next(
+                (row for row in catalog.mechanisms if row.mechanism_id == mechanism_id),
+                None,
+            )
+            if mechanism is None:
+                errors.append(
+                    f"{evidence.scenario_id}: host evidence mechanism {mechanism_id!r} "
+                    "is absent from the matrix"
+                )
+            elif mechanism.release_status not in {"active", "limited"}:
+                errors.append(
+                    f"{evidence.scenario_id}: host evidence cannot upgrade dormant "
+                    f"mechanism {mechanism_id!r}"
+                )
 
     for row in catalog.mechanisms:
         owner = owners.get(row.mechanism_id)
@@ -343,6 +414,7 @@ __all__ = [
     "DelayedTriggerCatalogError",
     "DelayedTriggerMechanism",
     "DueIdentity",
+    "HostScenarioEvidence",
     "ModelContract",
     "RetryPolicy",
     "load_delayed_trigger_catalog",

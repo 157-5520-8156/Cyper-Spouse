@@ -50,6 +50,10 @@ from .ports import (
     _InteriorRoleResult,
     _RoleResultContractError,
 )
+from .structured_role_tool_contract import (
+    StructuredRoleToolContract,
+    StructuredRoleToolContracts,
+)
 
 
 _FACET_NAMES = (
@@ -476,6 +480,7 @@ class _WorldStimulusAppraisalResult(BaseModel):
             except ValueError:
                 return value
         return value
+
     affect_transition: InteriorAffectTransition | None = None
     relationship_signal: _WorldStimulusRelationshipSignal | None = None
     aspiration_transition: AspirationTransitionPayload | None = None
@@ -695,6 +700,9 @@ _FAILURE_DETAILS = {
     "role_result_not_json": "The provider result was not one valid JSON object.",
     "role_result_not_object": "The JSON root was not an object.",
     "role_result_schema_invalid": "The object did not match the complete role-result schema.",
+    "required_tool_choice_unsupported": (
+        "The selected provider does not support the required purpose tool."
+    ),
     "phase_status_invalid": "The selected status is unavailable in this phase.",
     "attended_source_unpinned": "An attended source ref was absent from the pinned snapshot.",
     "decision_source_unpinned": "A decision source ref was absent from the pinned snapshot or manifest.",
@@ -817,6 +825,10 @@ class StructuredCharacterRoleFaculty:
         )
         self._temperature = temperature
         self._contracts = contracts
+        if bool(getattr(model, "supports_required_tool_choice", False)):
+            # Pay canonical Pydantic schema/ref-closure cost at composition,
+            # outside the first provider-entry and TTFT budgets.
+            StructuredRoleToolContracts().precompile()
         # FacultyRegistry uses this frozen declaration for startup topology.
         # Unknown or unreviewed purposes never fall through to a generic role
         # surface; tests may add an explicit fixture-only contract.
@@ -835,13 +847,20 @@ class StructuredCharacterRoleFaculty:
     async def _complete(self, request: _InteriorRoleRequest) -> Mapping[str, object]:
         contract = self._resolve_contract(request)
         messages = self._messages(request, contract=contract)
-        request_json = _canonical(messages)
+        tool_contract = self._tool_contract(request)
+        request_json = _canonical(
+            self._request_identity_value(messages=messages, tool_contract=tool_contract)
+        )
         request_hash = _hash_text(request_json)
         with model_call_scope("world_v2_character_interior"):
             raw = await complete_json_object(
                 self._model,
                 messages,
                 temperature=self._temperature,
+                tools=(list(tool_contract.provider_tools) if tool_contract is not None else None),
+                tool_choice=(
+                    tool_contract.provider_tool_choice if tool_contract is not None else None
+                ),
             )
         try:
             result, response_hash = self._parse_and_validate(
@@ -874,8 +893,15 @@ class StructuredCharacterRoleFaculty:
                 }
             )
             initial_contract = self._resolve_contract(initial)
+            initial_messages = self._messages(initial, contract=initial_contract)
+            initial_tool_contract = self._tool_contract(initial)
             initial_hash = _hash_text(
-                _canonical(self._messages(initial, contract=initial_contract))
+                _canonical(
+                    self._request_identity_value(
+                        messages=initial_messages,
+                        tool_contract=initial_tool_contract,
+                    )
+                )
             )
             parent_model_call_id = self._model_call_id(
                 request=initial,
@@ -909,6 +935,49 @@ class StructuredCharacterRoleFaculty:
             author_lineage=lineage,
         )
         return normalized.model_dump(mode="python")
+
+    def _tool_contract(
+        self,
+        request: _InteriorRoleRequest,
+    ) -> StructuredRoleToolContract | None:
+        if request.purpose != "proactive_contact":
+            return None
+        if not bool(getattr(self._model, "supports_required_tool_choice", False)):
+            raise StructuredRoleResultError(
+                "required_tool_choice_unsupported",
+                detail=_FAILURE_DETAILS["required_tool_choice_unsupported"],
+            )
+        manifest = request.capability_manifest
+        if manifest is None:
+            raise StructuredRoleResultError(
+                "capability_manifest_required",
+                detail=_FAILURE_DETAILS["capability_manifest_required"],
+            )
+        try:
+            return StructuredRoleToolContracts().proactive_contact(
+                capability_payload=manifest.payload,
+                recall_allowed=not request.recall_completed,
+            )
+        except (TypeError, ValueError) as exc:
+            raise StructuredRoleResultError(
+                "role_result_schema_invalid",
+                detail=f"proactive forced-tool contract is invalid: {exc}",
+            ) from exc
+
+    @staticmethod
+    def _request_identity_value(
+        *,
+        messages: list[dict[str, str]],
+        tool_contract: StructuredRoleToolContract | None,
+    ) -> object:
+        if tool_contract is None:
+            return messages
+        return {
+            "messages": messages,
+            "tools": list(tool_contract.provider_tools),
+            "tool_choice": tool_contract.provider_tool_choice,
+            "tool_contract_identity": (tool_contract.identity.request_identity_material()),
+        }
 
     def _messages(
         self,
@@ -1270,11 +1339,15 @@ class StructuredCharacterRoleFaculty:
             )
             affect_transition = proposal.affect_transition
             raw_heads = manifest.payload.get("active_affect_heads")
-            heads = {
-                item.get("episode_id"): item
-                for item in raw_heads
-                if isinstance(item, dict) and isinstance(item.get("episode_id"), str)
-            } if isinstance(raw_heads, list) else {}
+            heads = (
+                {
+                    item.get("episode_id"): item
+                    for item in raw_heads
+                    if isinstance(item, dict) and isinstance(item.get("episode_id"), str)
+                }
+                if isinstance(raw_heads, list)
+                else {}
+            )
             if affect_transition is not None:
                 invalid = False
                 if isinstance(affect_transition, InteriorAffectOpenTransition):
@@ -1286,16 +1359,14 @@ class StructuredCharacterRoleFaculty:
                 else:
                     head = heads.get(affect_transition.episode_id)
                     invalid = head is None
-                    if (
-                        not invalid
-                        and isinstance(affect_transition, InteriorAffectUpdateTransition)
+                    if not invalid and isinstance(
+                        affect_transition, InteriorAffectUpdateTransition
                     ):
                         assert isinstance(head, dict)
                         components = {
                             item.get("component_id"): item
                             for item in head.get("components", [])
-                            if isinstance(item, dict)
-                            and isinstance(item.get("component_id"), str)
+                            if isinstance(item, dict) and isinstance(item.get("component_id"), str)
                         }
                         invalid = any(
                             (offered := components.get(target.component_id)) is None
@@ -1304,11 +1375,8 @@ class StructuredCharacterRoleFaculty:
                             < offered.get("minimum_target_intensity_bp", 10_001)
                             for target in affect_transition.component_targets
                         )
-                    elif (
-                        not invalid
-                        and isinstance(
-                            affect_transition, InteriorAffectSupersedeTransition
-                        )
+                    elif not invalid and isinstance(
+                        affect_transition, InteriorAffectSupersedeTransition
                     ):
                         invalid = not minima or any(
                             target.dimension not in minima
@@ -1337,26 +1405,31 @@ class StructuredCharacterRoleFaculty:
             if proposal.aspiration_transition is not None:
                 current_source_refs = set(manifest.source_refs)
                 raw_aspirations = manifest.payload.get("active_aspirations")
-                active = {
-                    item.get("aspiration_id"): item
-                    for item in raw_aspirations
-                    if isinstance(item, dict)
-                    and isinstance(item.get("aspiration_id"), str)
-                    and isinstance(item.get("authority_source_ref"), str)
-                } if isinstance(raw_aspirations, list) else {}
-                offered_source_refs = current_source_refs | {
-                    str(item["authority_source_ref"]) for item in active.values()
-                } | {
-                    str(item["planted_event_ref"])
-                    for item in active.values()
-                    if isinstance(item.get("planted_event_ref"), str)
-                }
+                active = (
+                    {
+                        item.get("aspiration_id"): item
+                        for item in raw_aspirations
+                        if isinstance(item, dict)
+                        and isinstance(item.get("aspiration_id"), str)
+                        and isinstance(item.get("authority_source_ref"), str)
+                    }
+                    if isinstance(raw_aspirations, list)
+                    else {}
+                )
+                offered_source_refs = (
+                    current_source_refs
+                    | {str(item["authority_source_ref"]) for item in active.values()}
+                    | {
+                        str(item["planted_event_ref"])
+                        for item in active.values()
+                        if isinstance(item.get("planted_event_ref"), str)
+                    }
+                )
                 transition = proposal.aspiration_transition
                 selected_sources = set(transition.source_refs)
-                if (
-                    not current_source_refs.issubset(selected_sources)
-                    or not selected_sources.issubset(offered_source_refs)
-                ):
+                if not current_source_refs.issubset(
+                    selected_sources
+                ) or not selected_sources.issubset(offered_source_refs):
                     cls._raise(
                         "world_stimulus_aspiration_source_outside_capability",
                         response_hash=response_hash,
@@ -1412,6 +1485,7 @@ class StructuredCharacterRoleFaculty:
             # source order.
             raw_token_map = manifest.payload.get("token_map")
             if isinstance(raw_token_map, dict):
+
                 def _map_refs(refs: object) -> object:
                     if not isinstance(refs, list):
                         return refs
@@ -1931,24 +2005,17 @@ class StructuredCharacterRoleFaculty:
         # the proposal payload is persisted, so authority validation and the
         # reducer only ever see canonical source identities.
         manifest_raw_token_map = manifest.payload.get("token_map")
-        if (
-            isinstance(manifest_raw_token_map, dict)
-            and (
-                any(item in manifest_raw_token_map for item in proposal.source_refs)
-                or any(
-                    item in manifest_raw_token_map for item in proposal.predecessor_refs
-                )
-            )
+        if isinstance(manifest_raw_token_map, dict) and (
+            any(item in manifest_raw_token_map for item in proposal.source_refs)
+            or any(item in manifest_raw_token_map for item in proposal.predecessor_refs)
         ):
             proposal = proposal.model_copy(
                 update={
                     "source_refs": [
-                        manifest_raw_token_map.get(item, item)
-                        for item in proposal.source_refs
+                        manifest_raw_token_map.get(item, item) for item in proposal.source_refs
                     ],
                     "predecessor_refs": [
-                        manifest_raw_token_map.get(item, item)
-                        for item in proposal.predecessor_refs
+                        manifest_raw_token_map.get(item, item) for item in proposal.predecessor_refs
                     ],
                 }
             )
@@ -2096,16 +2163,17 @@ class StructuredCharacterRoleFaculty:
                 "confidence": 7000,
                 "meaning_candidates": [
                     {"meaning": "A small moment of genuine connection", "confidence": 6000},
-                    {"meaning": "A reminder that quiet shared experiences matter", "confidence": 4000},
+                    {
+                        "meaning": "A reminder that quiet shared experiences matter",
+                        "confidence": 4000,
+                    },
                 ],
                 "attribution": "situation",
                 "severity": 4000,
                 "expiry": "2026-08-09T12:00:00Z",
                 "affect_transition": {
                     "operation": "open",
-                    "component_targets": [
-                        {"dimension": "warmth", "target_intensity_bp": 6000}
-                    ],
+                    "component_targets": [{"dimension": "warmth", "target_intensity_bp": 6000}],
                 },
                 "relationship_signal": None,
                 "aspiration_transition": None,
@@ -2146,9 +2214,9 @@ class StructuredCharacterRoleFaculty:
                 "display_strategy": "free text (required, even for no_change)",
                 "confidence": "integer 0..10000",
                 "meaning_candidates": (
-                    "activate only: one or more objects, each with \"meaning\": a short "
+                    'activate only: one or more objects, each with "meaning": a short '
                     "free-text tentative interpretation grounded in the supplied source "
-                    "context, and \"confidence\": an integer 0..10000 private weight; "
+                    'context, and "confidence": an integer 0..10000 private weight; '
                     "meanings must be unique and are not enum labels or facts about "
                     "another person"
                 ),
@@ -2169,8 +2237,7 @@ class StructuredCharacterRoleFaculty:
                         "that name exact offered component_id, dimension and intensity"
                     ),
                     "resolve": (
-                        "one episode_id from active_affect_heads and a free-text "
-                        "resolution_summary"
+                        "one episode_id from active_affect_heads and a free-text resolution_summary"
                     ),
                     "supersede": (
                         "one episode_id from active_affect_heads plus new successor "

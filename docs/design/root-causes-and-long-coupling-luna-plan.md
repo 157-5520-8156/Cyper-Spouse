@@ -993,6 +993,32 @@ commit：hash
 - tool name/version、canonical/provider schema digest 与 capability profile 绑定 provider request identity；它们不作为
   非标准字段发给 provider。可读 contract audit 与冷重放 fixture 仍列入下一包，不由 opaque hash
   的存在冒充完成。
-- 当前本地证据：直接相关与扩展 CharacterInterior/LLM/registry 回归合计 `589 passed`；相关
-  ruff 与 `git diff --check` 通过。真实 DeepSeek ordinary function-call 样本、流式工具碎片、每 purpose
-  first-attempt 统计与真实 daemon 资格测试仍未完成。
+- 当时的本地证据：直接相关与扩展 CharacterInterior/LLM/registry 回归通过；具体样本数随之后的
+  contract 与 host 场景切片变化，不作为当前计数。真实 DeepSeek ordinary function-call 样本、流式工具碎片、
+  每 purpose first-attempt 统计与真实 daemon 资格测试仍未完成。
+
+### 2026-08-09 继续核验：入站流式闭合、主动联系强制工具与延迟触发证据
+
+- 入站 combined 路径的强制工具已继续覆盖到生产 stream、recall-final 和同角色 correction；stream 仍保持一
+  次物理 provider 调用、head/tail 语义拆分、旧 SSE 纠正前真实退休，以及工具参数乱序时只在 transport 与
+  source closure 闭合后释放可见 head。表达式专用的 source-closure correction 仍是独立 strict wire，未被
+  错套 combined contract；因此不能把“所有 CharacterInterior purpose 已 forced-tool 化”写成完成。
+- `proactive_contact` 现在使用由 `ExpressionDraft`/`ProactiveDraft` 派生的版本化 required tool。契约缓存按
+  capability profile 与 recall phase 复用，`now/later/silent`、多 Beat、typing/reaction/sticker 与有来源事实
+  声明均保留；schema 会在 provider 侧拒绝空 impulse、空 later 到期字段、模态载荷不一致和 grounded claim
+  缺来源。`expires_after_seconds > delay_seconds` 是标准 JSON Schema 无法表达的兄弟字段比较，继续由工具描述
+  提示并由 canonical `ProactiveDraft` fail-closed，不能当作 provider 首次结构资格已解决。
+- 主动联系的极短预算回归证明 provider 首次调用进入且取消后不会再次 author（当前 fixture `calls=1`）；为避开
+  capability 专用 schema 与 pinned snapshot 的首次构建竞争，确定性准备在语义审议前完成，未改变模型对
+  `now/later/silent` 的决定，也未把异常转写成 silent。该路径的真实 DeepSeek 首次成功率、真实 QQ 回执和 24
+  小时成本/延迟样本仍是 `qualification_incomplete`。
+- `Delayed Trigger Qualification Matrix` 现在明确是 `declaration_only`：静态 catalog、真实 owner/Action/
+  projection/公开 seam 的双向核对不会授予发布资格；host 场景证据必须指向实际 pytest collection 中存在的
+  node。当前已加入的 public-host 场景覆盖 deferred reply/Commitment/Action、proactive silent 与技术退避、
+  expression multibeat/interjection、platform receipt unknown→late conflict，以及 affect decay/silence
+  aftermath 的重启、effect-once 和冷重放；测试明确排除真实 provider 自主性、OneBot callback 归一化和 24h
+  soak。Life occurrence、NPC/reflection、memory consolidation、perception/media 仍按 limited/dormant 事实
+  标注，不得因为 catalog 有行就激活。
+- 本轮当前工作树的定向回归均已通过（覆盖结构化角色、LLM、主动联系与延迟触发主机证据）；最终完整套件为
+  `4858 passed, 1 warning`，ruff、语法检查和 `git diff --check` 也通过。这仍不是真实 provider
+  qualification 或生产上线证明，具体资格缺口保持 `qualification_incomplete`。

@@ -7,12 +7,31 @@ from pathlib import Path
 import pytest
 
 from companion_daemon.config import Settings
+from companion_daemon.delayed_trigger_catalog import load_delayed_trigger_catalog
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.world_v2.proactive_action import proactive_technical_retry_states
 from companion_daemon.world_v2.qq_c2c_host import build_qq_c2c_host
 
 
 NOW = datetime.now(UTC).replace(microsecond=0)
+_CATALOG = Path("configs/delayed_trigger_qualification.v1.yaml")
+
+
+def _host_scenario(
+    scenario_id: str, nodeid: str, *, mechanism_ids: tuple[str, ...], qualification_scope: str
+):
+    evidence = load_delayed_trigger_catalog(_CATALOG).host_scenario(scenario_id)
+    assert evidence.test_nodeid == nodeid
+    assert evidence.mechanism_ids == mechanism_ids
+    assert evidence.qualification_scope == qualification_scope
+    assert {
+        "real_provider_author_transport",
+        "production_stream_expression_episode",
+        "character_autonomy",
+        "onebot_provider_callback_normalization",
+        "24_hour_soak",
+    } <= set(evidence.excluded_scope)
+    return evidence
 
 
 class _DeliveredQQ:
@@ -35,18 +54,14 @@ class _DeliveredQQ:
             "data": {"message_id": f"qq-public-host-{len(self.sent)}"},
         }
 
-    async def send_sticker(
-        self, recipient_id: str, *, sticker_id: str
-    ) -> dict[str, object]:
+    async def send_sticker(self, recipient_id: str, *, sticker_id: str) -> dict[str, object]:
         self.sent.append((recipient_id, f"sticker:{sticker_id}"))
         return {
             "status": "ok",
             "data": {"message_id": f"qq-public-host-{len(self.sent)}"},
         }
 
-    async def send_typing(
-        self, recipient_id: str, *, state: str
-    ) -> dict[str, object]:
+    async def send_typing(self, recipient_id: str, *, state: str) -> dict[str, object]:
         self.sent.append((recipient_id, f"typing:{state}"))
         return {
             "status": "ok",
@@ -56,15 +71,33 @@ class _DeliveredQQ:
 
 class _ProactiveRoleScript:
     model = "fixture:public-host-proactive-qualification"
+    supports_required_tool_choice = True
 
     def __init__(self, proactive_replies: tuple[dict[str, object] | str, ...]) -> None:
         self._proactive_replies = list(proactive_replies)
         self.proactive_calls = 0
         self._ordinary = FakeCompanionModel()
 
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
+        return await self._next(messages, temperature=temperature)
+
+    async def complete_json(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
     ) -> str:
+        if tools is not None:
+            assert len(tools) == 1
+            assert tool_choice == {
+                "type": "function",
+                "function": {"name": "character_role_proactive_contact_v1"},
+            }
+        return await self._next(messages, temperature=temperature)
+
+    async def _next(self, messages: list[dict[str, str]], *, temperature: float) -> str:
         joined = "\n".join(message["content"] for message in messages)
         if "proactive_contact" not in joined or "impulse_summary" not in joined:
             return await self._ordinary.complete(messages, temperature=temperature)
@@ -122,6 +155,7 @@ def _silent() -> dict[str, object]:
     return {
         "timing_choice": "silent",
         "cadence": "conversational",
+        "beats": [],
         "stance": "quietly_content",
         "brief_rationale": "此刻没有想主动说出口的话。",
         "impulse_summary": "念头停在心里，没有形成表达冲动。",
@@ -141,13 +175,20 @@ def _proactive_terminal_outcomes(host) -> tuple[str, ...]:  # type: ignore[no-un
     return tuple(
         str(process.runtime_outcome_ref)
         for process in host.export_replay_evidence().projection.trigger_processes
-        if process.process_kind == "proactive_action_deliberation"
-        and process.state == "terminal"
+        if process.process_kind == "proactive_action_deliberation" and process.state == "terminal"
     )
 
 
 @pytest.mark.asyncio
-async def test_public_host_event_driven_silence_is_effect_once(tmp_path: Path) -> None:
+async def test_public_host_event_driven_silence_is_effect_once(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    _host_scenario(
+        "proactive.event-driven-silent-effect-once.1",
+        request.node.nodeid,
+        mechanism_ids=("proactive.event_driven",),
+        qualification_scope="public_host_proactive_silent_lifecycle",
+    )
     model = _ProactiveRoleScript((_silent(),))
     host = build_qq_c2c_host(
         settings=Settings(
@@ -208,8 +249,14 @@ async def test_public_host_event_driven_silence_is_effect_once(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_public_host_technical_retry_survives_restart_and_is_effect_once(
-    tmp_path: Path,
+    tmp_path: Path, request: pytest.FixtureRequest
 ) -> None:
+    _host_scenario(
+        "proactive.technical-retry-restart-effect-once.1",
+        request.node.nodeid,
+        mechanism_ids=("proactive.technical_retry",),
+        qualification_scope="public_host_proactive_technical_retry_lifecycle",
+    )
     model = _ProactiveRoleScript(("{}", "{}", _silent()))
     settings = Settings(
         _env_file=None,
@@ -306,10 +353,13 @@ async def test_public_host_technical_retry_survives_restart_and_is_effect_once(
         assert _proactive_action_count(restarted) == 0
         recovered_outcomes = _proactive_terminal_outcomes(restarted)
         assert len(recovered_outcomes) == 2
-        assert sum(
-            outcome.startswith("proactive:deliberation-failed:")
-            for outcome in recovered_outcomes
-        ) == 1
+        assert (
+            sum(
+                outcome.startswith("proactive:deliberation-failed:")
+                for outcome in recovered_outcomes
+            )
+            == 1
+        )
         assert recovered_outcomes.count("proactive:silent") == 1
         recovered_projection = restarted.export_replay_evidence().projection
         recovered_processes = tuple(
@@ -319,9 +369,7 @@ async def test_public_host_technical_retry_survives_restart_and_is_effect_once(
         )
         assert len(recovered_processes) == 2
         assert len({item.trigger_id for item in recovered_processes}) == 2
-        assert {item.trigger_ref for item in recovered_processes} == {
-            retry_state.trigger_ref
-        }
+        assert {item.trigger_ref for item in recovered_processes} == {retry_state.trigger_ref}
         assert {item.source_evidence_ref for item in recovered_processes} == {
             retry_state.source_evidence_ref
         }
@@ -345,8 +393,14 @@ async def test_public_host_technical_retry_survives_restart_and_is_effect_once(
 
 @pytest.mark.asyncio
 async def test_public_host_new_inbound_supersedes_old_technical_retry(
-    tmp_path: Path,
+    tmp_path: Path, request: pytest.FixtureRequest
 ) -> None:
+    _host_scenario(
+        "proactive.technical-retry-superseded-by-inbound.1",
+        request.node.nodeid,
+        mechanism_ids=("proactive.technical_retry",),
+        qualification_scope="public_host_proactive_retry_supersession",
+    )
     model = _ProactiveRoleScript(("{}", "{}"))
     host = build_qq_c2c_host(
         settings=Settings(
@@ -435,9 +489,7 @@ async def test_public_host_new_inbound_supersedes_old_technical_retry(
         latest_observation = projection.message_observations[-1]
         assert latest_observation.actor == "user:geoff"
         assert latest_observation.channel == "qq"
-        failed_result_ref = failed_outcomes[0].removeprefix(
-            "proactive:deliberation-failed:"
-        )
+        failed_result_ref = failed_outcomes[0].removeprefix("proactive:deliberation-failed:")
         failed_audit = next(
             item
             for item in projection.model_result_audits

@@ -3,9 +3,13 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 import hashlib
 import json
+from time import perf_counter_ns
 
+import httpx
+from jsonschema import Draft202012Validator
 import pytest
 
+from companion_daemon.llm import DeepSeekChatModel
 from companion_daemon.world_v2.character_interior import CharacterInterior, InteriorOpportunity
 from companion_daemon.world_v2.character_interior.contracts import (
     FACET_NAMES,
@@ -17,9 +21,13 @@ from companion_daemon.world_v2.character_interior.structured_role import (
     StructuredCharacterRoleFaculty as _ProductionStructuredCharacterRoleFaculty,
     StructuredRoleResultError,
 )
+from companion_daemon.world_v2.character_interior.structured_role_tool_contract import (
+    StructuredRoleToolContracts,
+)
 from companion_daemon.world_v2.character_interior.production import (
     compose_fixture_character_interior,
 )
+from companion_daemon.world_v2.expression_draft import QQ_NAPCAT_EXPRESSION_CAPABILITIES
 from companion_daemon.world_v2.schemas import ProjectionCursor
 
 
@@ -103,6 +111,55 @@ class _QueueModel:
         return result
 
 
+class _RequiredToolQueueModel(_QueueModel):
+    supports_required_tool_choice = True
+
+    def __init__(self, *responses: object) -> None:
+        super().__init__(*responses)
+        self.tool_calls: list[tuple[list[dict[str, object]], object]] = []
+
+    async def complete_json(
+        self,
+        messages,
+        *,
+        temperature=0.8,
+        tools,
+        tool_choice,
+    ):
+        self.calls.append((messages, temperature))
+        self.tool_calls.append((tools, tool_choice))
+        result = self.responses.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+
+class _FailingRequiredToolModel:
+    model = "required-tool-failure"
+    supports_required_tool_choice = True
+
+    def __init__(self) -> None:
+        self.forced_calls = 0
+        self.plain_calls = 0
+
+    async def complete_json(
+        self,
+        messages,
+        *,
+        temperature=0.8,
+        tools,
+        tool_choice,
+    ):
+        del messages, temperature, tools, tool_choice
+        self.forced_calls += 1
+        raise TypeError("provider required-tool transport failed")
+
+    async def complete(self, messages, *, temperature=0.8):
+        del messages, temperature
+        self.plain_calls += 1
+        return _result(status="silent")
+
+
 class _ForbiddenFallback:
     def __init__(self) -> None:
         self.calls = 0
@@ -120,8 +177,6 @@ def _manifest(*tokens: str, kind: str = "media_selection") -> _InteriorCapabilit
         sort_keys=True,
         separators=(",", ":"),
     )
-    import hashlib
-
     return _InteriorCapabilityManifest(
         capability_ref=f"capability:{kind}:71",
         capability_kind=kind,
@@ -129,6 +184,53 @@ def _manifest(*tokens: str, kind: str = "media_selection") -> _InteriorCapabilit
         payload_hash="sha256:" + hashlib.sha256(payload_json.encode()).hexdigest(),
         source_refs=("source:private_self",),
     )
+
+
+def _proactive_manifest() -> _InteriorCapabilityManifest:
+    payload_json = json.dumps(
+        {
+            "contract": "character-interior-proactive-capability.1",
+            "expression_capabilities": QQ_NAPCAT_EXPRESSION_CAPABILITIES.prompt_value(),
+            "source_opportunity": {"source_kind": "spontaneous_contact"},
+            "target_ref": "user:primary",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return _InteriorCapabilityManifest(
+        capability_ref="capability:proactive:test",
+        capability_kind="proactive_contact",
+        payload_json=payload_json,
+        payload_hash="sha256:" + hashlib.sha256(payload_json.encode()).hexdigest(),
+        source_refs=("source:private_self",),
+    )
+
+
+def _proactive_provider_payload_schema() -> dict[str, object]:
+    contract = StructuredRoleToolContracts().proactive_contact(
+        capability_payload=_proactive_manifest().payload,
+        recall_allowed=True,
+    )
+    function = contract.provider_tools[0]["function"]
+    parameters = function["parameters"]
+    decision_branch = parameters["anyOf"][0]
+    return decision_branch["properties"]["decision"]["properties"]["payload"]
+
+
+def _valid_proactive_payload(**updates: object) -> dict[str, object]:
+    value: dict[str, object] = {
+        "timing_choice": "now",
+        "cadence": "conversational",
+        "beats": [{"modality": "text", "text": "想到你了。"}],
+        "stance": "warm",
+        "brief_rationale": "I want to say this now.",
+        "impulse_summary": "The counterpart crossed my mind.",
+        "confidence": 6500,
+        "world_claims": [],
+    }
+    value.update(updates)
+    return value
 
 
 def _source_bound_media_manifest() -> _InteriorCapabilityManifest:
@@ -369,9 +471,7 @@ async def test_bare_decision_payload_requires_explicit_decision_source_refs() ->
     role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-chat-v4")
 
     with pytest.raises(StructuredRoleResultError, match="role_result_schema_invalid"):
-        await role.consider(
-            await _request(purpose="media_selection", capability_manifest=manifest)
-        )
+        await role.consider(await _request(purpose="media_selection", capability_manifest=manifest))
 
 
 @pytest.mark.asyncio
@@ -392,9 +492,7 @@ async def test_bare_decision_payload_without_attended_sources_stays_invalid() ->
     role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-chat-v4")
 
     with pytest.raises(StructuredRoleResultError, match="role_result_schema_invalid"):
-        await role.consider(
-            await _request(purpose="media_selection", capability_manifest=manifest)
-        )
+        await role.consider(await _request(purpose="media_selection", capability_manifest=manifest))
 
 
 @pytest.mark.asyncio
@@ -590,14 +688,15 @@ async def test_outcome_selection_rejects_a_candidate_outside_the_manifest() -> N
 
 @pytest.mark.asyncio
 async def test_proactive_contact_is_one_capability_bound_interior_decision() -> None:
-    manifest = _manifest("send:qq", kind="proactive_contact")
-    model = _QueueModel(
+    manifest = _proactive_manifest()
+    model = _RequiredToolQueueModel(
         _result(
             status="decision",
             decision={
                 "source_refs": ["source:private_self"],
                 "payload": {
                     "timing_choice": "silent",
+                    "cadence": "conversational",
                     "beats": [],
                     "stance": "keeping the thought private",
                     "brief_rationale": "she does not want to send it now",
@@ -619,6 +718,573 @@ async def test_proactive_contact_is_one_capability_bound_interior_decision() -> 
         "character-interior-proactive-contact-decision.1"
     )
     assert result["decision"]["payload"]["timing_choice"] == "silent"
+
+
+@pytest.mark.asyncio
+async def test_proactive_contact_uses_one_versioned_forced_tool_at_http_boundary() -> None:
+    captured: dict[str, object] = {}
+    raw_result = _result(
+        status="decision",
+        decision={
+            "source_refs": ["source:private_self"],
+            "payload": {
+                "timing_choice": "silent",
+                "cadence": "conversational",
+                "beats": [],
+                "stance": "keeping the thought private",
+                "brief_rationale": "she does not want to send it now",
+                "impulse_summary": "the conversation crossed her mind",
+                "confidence": 6400,
+                "world_claims": [],
+            },
+        },
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "character_role_proactive_contact_v1",
+                                        "arguments": raw_result,
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    model = DeepSeekChatModel(
+        "key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await StructuredCharacterRoleFaculty(
+            model=model,
+            model_id="deepseek-v4-flash",
+        ).consider(
+            await _request(
+                purpose="proactive_contact",
+                capability_manifest=_proactive_manifest(),
+            )
+        )
+    finally:
+        await model.aclose()
+
+    assert result["decision"]["payload"]["timing_choice"] == "silent"
+    assert "response_format" not in captured
+    assert captured["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "character_role_proactive_contact_v1"},
+    }
+    tools = captured["tools"]
+    assert isinstance(tools, list) and len(tools) == 1
+    function = tools[0]["function"]
+    assert function["name"] == "character_role_proactive_contact_v1"
+    branches = function["parameters"]["anyOf"]
+    decision = branches[0]
+    assert decision["properties"]["status"]["enum"] == ["decision"]
+    assert {
+        "status",
+        "summary",
+        "attended_source_refs",
+        "decision",
+        "recall_query",
+        "proposals",
+    } <= set(decision["required"])
+    payload = decision["properties"]["decision"]["properties"]["payload"]
+    assert {
+        "timing_choice",
+        "cadence",
+        "beats",
+        "stance",
+        "brief_rationale",
+        "impulse_summary",
+        "confidence",
+        "world_claims",
+    } <= set(payload["required"])
+    assert len(branches) == 2
+    assert branches[1]["properties"]["status"]["enum"] == ["recall_request"]
+    assert decision["properties"]["proposals"]["maxItems"] == 0
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _valid_proactive_payload(beats=[]),
+        _valid_proactive_payload(delay_seconds=30),
+        _valid_proactive_payload(expires_after_seconds=90),
+        _valid_proactive_payload(turn_posture="yield"),
+        _valid_proactive_payload(
+            beats=[
+                {"modality": "text", "text": "先说一句。"},
+                {"modality": "typing"},
+            ]
+        ),
+        _valid_proactive_payload(
+            timing_choice="later",
+            turn_posture="interject",
+            delay_seconds=30,
+            expires_after_seconds=90,
+        ),
+        _valid_proactive_payload(
+            timing_choice="later",
+            beats=[],
+            delay_seconds=30,
+            expires_after_seconds=90,
+        ),
+        _valid_proactive_payload(
+            timing_choice="later",
+            delay_seconds=None,
+            expires_after_seconds=None,
+        ),
+        _valid_proactive_payload(
+            timing_choice="later",
+            beats=[{"modality": "reaction", "reaction_id": "face:178"}],
+            delay_seconds=30,
+            expires_after_seconds=90,
+        ),
+        _valid_proactive_payload(impulse_summary=None),
+        _valid_proactive_payload(
+            beats=[{"modality": "text", "reaction_id": "heart"}],
+        ),
+        _valid_proactive_payload(
+            world_claims=[
+                {
+                    "claim_text": "I am sorting photos now.",
+                    "scope": "current_world",
+                    "source_refs": [],
+                }
+            ],
+        ),
+        _valid_proactive_payload(
+            timing_choice="silent",
+            beats=[],
+            delay_seconds=30,
+            expires_after_seconds=90,
+        ),
+        _valid_proactive_payload(
+            timing_choice="silent",
+            beats=[],
+            response_expectation={
+                "hoped_response": "reply",
+                "pressure_bp": 1,
+                "importance_bp": 1,
+                "wait_seconds": 30,
+                "expires_after_seconds": 60,
+            },
+        ),
+        _valid_proactive_payload(
+            timing_choice="silent",
+            turn_posture="interject",
+            beats=[],
+        ),
+    ],
+    ids=(
+        "now-empty",
+        "now-delay",
+        "now-expiry",
+        "now-yield",
+        "terminal-typing",
+        "later-interject",
+        "later-empty",
+        "later-null-due-window",
+        "later-non-text",
+        "null-impulse",
+        "text-with-reaction-payload",
+        "grounded-claim-without-sources",
+        "silent-due-window",
+        "silent-response-expectation",
+        "silent-interject",
+    ),
+)
+def test_proactive_provider_schema_rejects_host_invalid_timing_shapes(
+    payload: dict[str, object],
+) -> None:
+    validator = Draft202012Validator(_proactive_provider_payload_schema())
+
+    assert list(validator.iter_errors(payload))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _valid_proactive_payload(),
+        _valid_proactive_payload(
+            turn_posture="interject",
+            beats=[
+                {"modality": "typing"},
+                {"modality": "reaction", "reaction_id": "heart"},
+                {"modality": "text", "text": "刚刚忽然想到你。"},
+            ],
+        ),
+        _valid_proactive_payload(
+            timing_choice="later",
+            turn_posture="yield",
+            beats=[
+                {"modality": "text", "text": "晚一点想跟你说件事。"},
+                {"modality": "text", "text": "等我整理好思绪。"},
+            ],
+            delay_seconds=60,
+            expires_after_seconds=600,
+        ),
+        _valid_proactive_payload(
+            timing_choice="silent",
+            turn_posture="yield",
+            beats=[],
+        ),
+    ],
+    ids=("now", "now-multibeat", "later", "silent"),
+)
+def test_proactive_provider_schema_preserves_all_legal_timing_coordinates(
+    payload: dict[str, object],
+) -> None:
+    validator = Draft202012Validator(_proactive_provider_payload_schema())
+
+    assert list(validator.iter_errors(payload)) == []
+
+
+def test_proactive_provider_schema_documents_relative_expiry_dialect_gap() -> None:
+    from companion_daemon.world_v2.proactive_action import ProactiveDraft
+
+    payload = _valid_proactive_payload(
+        timing_choice="later",
+        delay_seconds=90,
+        expires_after_seconds=60,
+    )
+
+    # Standard JSON Schema cannot compare two sibling numeric values.  The
+    # provider receives the rule in the function description, while the same
+    # canonical ProactiveDraft remains the fail-closed acceptance authority.
+    assert (
+        list(Draft202012Validator(_proactive_provider_payload_schema()).iter_errors(payload)) == []
+    )
+    with pytest.raises(ValueError, match="expiry must follow"):
+        ProactiveDraft.model_validate_json(json.dumps(payload))
+
+
+def test_proactive_tool_contract_hot_compile_is_cached_below_one_millisecond() -> None:
+    compiler = StructuredRoleToolContracts()
+    manifest = _proactive_manifest()
+    expected = compiler.proactive_contact(
+        capability_payload=manifest.payload,
+        recall_allowed=True,
+    )
+
+    started = perf_counter_ns()
+    observed = [
+        compiler.proactive_contact(
+            capability_payload=manifest.payload,
+            recall_allowed=True,
+        )
+        for _ in range(100)
+    ]
+    elapsed_per_call_ns = (perf_counter_ns() - started) / len(observed)
+
+    assert all(item is expected for item in observed)
+    assert elapsed_per_call_ns < 1_000_000
+
+
+def test_proactive_tool_contract_first_capability_specialization_stays_outside_ttft_budget() -> (
+    None
+):
+    StructuredRoleToolContracts.precompile()
+    manifest = _proactive_manifest()
+    unique_profile = dict(manifest.payload["expression_capabilities"])
+    unique_profile["profile_id"] = "expression:cold-specialization-test.1"
+
+    started = perf_counter_ns()
+    contract = StructuredRoleToolContracts().proactive_contact(
+        capability_payload={"expression_capabilities": unique_profile},
+        recall_allowed=False,
+    )
+    elapsed_ns = perf_counter_ns() - started
+
+    assert contract.identity.capabilities_sha256.startswith("sha256:")
+    assert elapsed_ns < 30_000_000
+
+
+@pytest.mark.asyncio
+async def test_proactive_contact_without_required_tool_support_fails_closed() -> None:
+    model = _QueueModel(
+        _result(
+            status="decision",
+            decision={
+                "source_refs": ["source:private_self"],
+                "payload": {
+                    "timing_choice": "silent",
+                    "cadence": "conversational",
+                    "beats": [],
+                    "stance": "private",
+                    "brief_rationale": "not sending",
+                    "impulse_summary": "thought of them",
+                    "confidence": 5000,
+                    "world_claims": [],
+                },
+            },
+        )
+    )
+
+    with pytest.raises(StructuredRoleResultError) as raised:
+        await StructuredCharacterRoleFaculty(
+            model=model,
+            model_id="plain-json-only",
+        ).consider(
+            await _request(
+                purpose="proactive_contact",
+                capability_manifest=_proactive_manifest(),
+            )
+        )
+
+    assert raised.value.code == "required_tool_choice_unsupported"
+    assert model.calls == []
+
+
+@pytest.mark.asyncio
+async def test_proactive_required_tool_failure_never_retries_as_plain_json() -> None:
+    model = _FailingRequiredToolModel()
+
+    with pytest.raises(TypeError, match="required-tool transport failed"):
+        await StructuredCharacterRoleFaculty(
+            model=model,
+            model_id=model.model,
+        ).consider(
+            await _request(
+                purpose="proactive_contact",
+                capability_manifest=_proactive_manifest(),
+            )
+        )
+
+    assert model.forced_calls == 1
+    assert model.plain_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_proactive_forced_tool_preserves_selective_recall_choice() -> None:
+    model = _RequiredToolQueueModel(
+        json.dumps(
+            {
+                "status": "recall_request",
+                "summary": "A memory may matter before deciding whether to reach out.",
+                "attended_source_refs": ["source:private_self"],
+                "decision": None,
+                "recall_query": "the last unfinished conversation",
+                "proposals": [],
+            }
+        )
+    )
+
+    result = await StructuredCharacterRoleFaculty(
+        model=model,
+        model_id="deepseek-v4-flash",
+    ).consider(
+        await _request(
+            purpose="proactive_contact",
+            capability_manifest=_proactive_manifest(),
+        )
+    )
+
+    assert result["status"] == "recall_request"
+    assert result["recall_query"] == "the last unfinished conversation"
+    assert result["decision"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "timing_choice": "silent",
+            "cadence": "hesitant",
+            "beats": [],
+            "stance": "keeping this private",
+            "brief_rationale": "I do not want to send it now.",
+            "impulse_summary": "The counterpart crossed my mind.",
+            "confidence": 6100,
+            "world_claims": [],
+        },
+        {
+            "timing_choice": "now",
+            "cadence": "rapid",
+            "beats": [{"modality": "text", "text": "刚刚忽然想到你。"}],
+            "stance": "openly warm",
+            "brief_rationale": "I want to say this now.",
+            "impulse_summary": "A present fact made me want contact.",
+            "confidence": 7200,
+            "world_claims": [
+                {
+                    "claim_text": "I am sorting photos now.",
+                    "scope": "current_world",
+                    "source_refs": ["source:private_self"],
+                }
+            ],
+        },
+        {
+            "timing_choice": "later",
+            "cadence": "conversational",
+            "beats": [
+                {"modality": "text", "text": "晚一点想跟你说件事。"},
+                {"modality": "text", "text": "等我整理好思绪。"},
+            ],
+            "delay_seconds": 60,
+            "expires_after_seconds": 600,
+            "stance": "deliberate",
+            "brief_rationale": "I want to wait, then send both beats.",
+            "impulse_summary": "The thought matters but not immediately.",
+            "confidence": 6800,
+            "world_claims": [],
+        },
+    ],
+)
+async def test_proactive_forced_tool_preserves_every_role_owned_choice(
+    payload: dict[str, object],
+) -> None:
+    model = _RequiredToolQueueModel(
+        _result(
+            status="decision",
+            decision={
+                "source_refs": ["source:private_self"],
+                "payload": payload,
+            },
+        )
+    )
+
+    result = await StructuredCharacterRoleFaculty(
+        model=model,
+        model_id="deepseek-v4-flash",
+    ).consider(
+        await _request(
+            purpose="proactive_contact",
+            capability_manifest=_proactive_manifest(),
+        )
+    )
+
+    assert result["summary"] == "private decision"
+    assert result["attended_source_refs"] == ("source:private_self",)
+    assert result["decision"]["source_refs"] == ["source:private_self"]
+    assert result["decision"]["payload"] == {
+        "contract": "character-interior-proactive-contact-decision.1",
+        **payload,
+    }
+
+
+@pytest.mark.asyncio
+async def test_proactive_correction_uses_the_same_forced_tool_and_parent_identity() -> None:
+    payload = {
+        "timing_choice": "silent",
+        "cadence": "conversational",
+        "beats": [],
+        "stance": "quiet",
+        "brief_rationale": "I choose not to send this.",
+        "impulse_summary": "A passing thought stayed private.",
+        "confidence": 5000,
+        "world_claims": [],
+    }
+    model = _RequiredToolQueueModel(
+        _result(
+            status="decision",
+            decision={"source_refs": ["source:private_self"], "payload": payload},
+        ),
+        _result(
+            status="decision",
+            decision={"source_refs": ["source:private_self"], "payload": payload},
+        ),
+    )
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-v4-flash")
+    manifest = _proactive_manifest()
+
+    initial = await role.consider(
+        await _request(purpose="proactive_contact", capability_manifest=manifest)
+    )
+    corrected = await role.consider(
+        await _request(
+            purpose="proactive_contact",
+            capability_manifest=manifest,
+            correction_ordinal=1,
+            correction_failure_code="role_result_schema_invalid",
+            correction_failure_detail="timing_choice was missing",
+        )
+    )
+
+    assert len(model.tool_calls) == 2
+    assert model.tool_calls[0] == model.tool_calls[1]
+    assert corrected["author_lineage"]["attempt_ordinal"] == 1
+    assert (
+        corrected["author_lineage"]["parent_model_call_id"]
+        == (initial["author_lineage"]["model_call_id"])
+    )
+    assert (
+        corrected["author_lineage"]["request_hash"] != (initial["author_lineage"]["request_hash"])
+    )
+
+
+@pytest.mark.asyncio
+async def test_proactive_request_audit_binds_exact_tool_schema_and_identity() -> None:
+    manifest = _proactive_manifest()
+    model = _RequiredToolQueueModel(
+        _result(
+            status="decision",
+            decision={
+                "source_refs": ["source:private_self"],
+                "payload": {
+                    "timing_choice": "silent",
+                    "cadence": "conversational",
+                    "beats": [],
+                    "stance": "private",
+                    "brief_rationale": "I choose silence.",
+                    "impulse_summary": "A passing thought.",
+                    "confidence": 5000,
+                    "world_claims": [],
+                },
+            },
+        )
+    )
+    result = await StructuredCharacterRoleFaculty(
+        model=model,
+        model_id="deepseek-v4-flash",
+    ).consider(await _request(purpose="proactive_contact", capability_manifest=manifest))
+    contract = StructuredRoleToolContracts().proactive_contact(
+        capability_payload=manifest.payload,
+        recall_allowed=True,
+    )
+    request_identity = {
+        "messages": model.calls[0][0],
+        "tools": list(contract.provider_tools),
+        "tool_choice": contract.provider_tool_choice,
+        "tool_contract_identity": contract.identity.request_identity_material(),
+    }
+    expected_hash = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(
+                request_identity,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+    )
+
+    assert result["author_lineage"]["request_hash"] == expected_hash
+    identity = contract.identity.request_identity_material()
+    assert identity["contract_id"] == "character-role-forced-tool"
+    assert identity["purpose"] == "proactive_contact"
+    assert identity["version"] == "1"
+    assert identity["tool_name"] == "character_role_proactive_contact_v1"
+    assert identity["schema_sha256"].startswith("sha256:")
+    assert identity["contract_sha256"].startswith("sha256:")
 
 
 @pytest.mark.asyncio
@@ -1399,7 +2065,6 @@ def test_fixture_composition_installs_the_structured_author_as_primary() -> None
 @pytest.mark.asyncio
 async def test_bare_world_stimulus_proposal_is_rejected_without_host_authored_envelope() -> None:
 
-
     model = _QueueModel(
         json.dumps(
             {
@@ -1410,9 +2075,7 @@ async def test_bare_world_stimulus_proposal_is_rejected_without_host_authored_en
                 "stance": "moved",
                 "display_strategy": "share softly",
                 "confidence": 7000,
-                "meaning_candidates": [
-                    {"meaning": "connection", "confidence": 7000}
-                ],
+                "meaning_candidates": [{"meaning": "connection", "confidence": 7000}],
                 "attribution": "situation",
                 "severity": 4000,
             },
@@ -1428,7 +2091,10 @@ async def test_bare_world_stimulus_proposal_is_rejected_without_host_authored_en
                 "contract": "character-interior-world-stimulus-capability.1",
                 "process_kind": "npc_world_appraisal",
                 "stimulus_kind": "settled_world_occurrence",
-                "source_event": {"event_id": "source:private_self", "event_type": "WorldOccurrenceSettled"},
+                "source_event": {
+                    "event_id": "source:private_self",
+                    "event_type": "WorldOccurrenceSettled",
+                },
                 "result_choices": ["no_change", "activate"],
             }
         ),
@@ -1440,9 +2106,7 @@ async def test_bare_world_stimulus_proposal_is_rejected_without_host_authored_en
         capability_ref="capability:world-stimulus:1",
         capability_kind="world_stimulus_appraisal",
         payload_json=stimulus_payload_json,
-        payload_hash=(
-            "sha256:" + hashlib.sha256(stimulus_payload_json.encode()).hexdigest()
-        ),
+        payload_hash=("sha256:" + hashlib.sha256(stimulus_payload_json.encode()).hexdigest()),
         source_refs=("source:private_self",),
     )
     with pytest.raises(StructuredRoleResultError, match="role_result_schema_invalid"):

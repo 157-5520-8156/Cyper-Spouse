@@ -26,6 +26,7 @@ from .character_interior.inbound_wire import (
     review_candidate_external_proposition_coverage,
     review_expression_with_candidate_external_coverage,
 )
+from .character_interior.structured_role_tool_contract import StructuredRoleToolContracts
 from .companion_identity import CompanionIdentityFrame
 from .context_capsule import ContextCapsuleCompiler, InnerAdvisoryCandidate, InnerAdvisoryProjection
 from .context_resolver import query_from_projection
@@ -227,9 +228,61 @@ class _CharacterInteriorProactiveTransport:
         self._source_closure_reviewer = source_closure_reviewer
         self._report_relative_reviewer = report_relative_reviewer
         self._inventory_model = candidate_external_proposition_inventory_model
+        # The role contract is capability-specialized.  Warm both legal
+        # proactive phases before any claimed opportunity starts its bounded
+        # author budget; the live CharacterInterior call then only performs
+        # an LRU lookup and never races schema construction with provider
+        # entry.  This is transport preparation, not a semantic decision.
+        StructuredRoleToolContracts.precompile_proactive(
+            expression_capabilities=expression_capabilities.prompt_value(),
+        )
 
     def has_hedge_provider(self, _request: ModelInput) -> bool:
         return False
+
+    async def prepare(
+        self,
+        *,
+        attempt_id: str,
+        trigger_ref: str,
+        source_refs: tuple[str, ...],
+        cursor: ProjectionCursor,
+        model_content_json: str,
+    ) -> None:
+        """Warm the pinned Interior snapshot before the author budget starts.
+
+        ``ProactiveDeliberationTurn`` already compiled the ledger Capsule for
+        this exact cursor.  CharacterInterior still has to materialize its
+        source-bound snapshot before it can invoke the role.  Warming that
+        deterministic projection here keeps a very small role budget from
+        expiring while local projection work is still running; no Recall,
+        model, proposal, or Action is touched.
+        """
+
+        try:
+            context = json.loads(model_content_json)
+            logical_time = datetime.fromisoformat(context["logical_time"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("proactive Interior opportunity lacks pinned logical time") from exc
+        if logical_time.tzinfo is None or logical_time.utcoffset() is None:
+            raise ValueError("proactive Interior logical time must be timezone-aware")
+        if not source_refs or trigger_ref not in source_refs:
+            raise ValueError("proactive Interior opportunity lacks trigger evidence")
+        capability = self._capability_from_parts(
+            attempt_id=attempt_id,
+            source_refs=source_refs,
+            model_content_json=model_content_json,
+        )
+        await self._interior.project(
+            self._opportunity(
+                attempt_id=attempt_id,
+                trigger_ref=trigger_ref,
+                source_refs=source_refs,
+                cursor=cursor,
+                logical_time=logical_time,
+                capability=capability,
+            )
+        )
 
     def source_closure_review_enabled(self) -> bool:
         return self._source_closure_reviewer is not None or self._inventory_model is not None
@@ -255,25 +308,17 @@ class _CharacterInteriorProactiveTransport:
             raise ValueError("proactive Interior opportunity lacks trigger evidence")
         capability = self._capability(request=request, source_refs=source_refs)
         decision = await self._interior.consider(
-            InteriorOpportunity(
-                opportunity_ref=f"opportunity:proactive:{request.attempt_id}",
-                inner_turn_ref=request.attempt_id,
-                world_id=self._world_id,
-                actor_ref=self._actor_ref,
+            self._opportunity(
+                attempt_id=request.attempt_id,
                 trigger_ref=request.trigger_ref,
+                source_refs=source_refs,
                 cursor=ProjectionCursor(
                     world_revision=request.evaluated_world_revision,
                     deliberation_revision=request.evaluated_deliberation_revision,
                     ledger_sequence=request.evaluated_ledger_sequence,
                 ),
                 logical_time=logical_time,
-                purpose="proactive_contact",
-                source_refs=source_refs,
-                capability_manifest=capability,
-                context_note=(
-                    "A source-bound proactive contact opportunity is due; the character "
-                    "freely owns now, later, silent, wording and message count."
-                ),
+                capability=capability,
             )
         )
         if decision.status == "technical_failure":
@@ -331,19 +376,59 @@ class _CharacterInteriorProactiveTransport:
         request: ModelInput,
         source_refs: tuple[str, ...],
     ) -> _InteriorCapabilityManifest:
+        return self._capability_from_parts(
+            attempt_id=request.attempt_id,
+            source_refs=source_refs,
+            model_content_json=request.model_content_json,
+        )
+
+    def _capability_from_parts(
+        self,
+        *,
+        attempt_id: str,
+        source_refs: tuple[str, ...],
+        model_content_json: str,
+    ) -> _InteriorCapabilityManifest:
         payload = {
             "contract": "character-interior-proactive-capability.1",
             "expression_capabilities": self._capabilities.prompt_value(),
-            "source_opportunity": _proactive_source_frame(request.model_content_json),
+            "source_opportunity": _proactive_source_frame(model_content_json),
             "target_ref": self._target,
         }
         payload_json = _canonical(payload)
         return _InteriorCapabilityManifest(
-            capability_ref=f"capability:proactive:{request.attempt_id}",
+            capability_ref=f"capability:proactive:{attempt_id}",
             capability_kind="proactive_contact",
             payload_json=payload_json,
             payload_hash="sha256:" + hashlib.sha256(payload_json.encode()).hexdigest(),
             source_refs=source_refs,
+        )
+
+    def _opportunity(
+        self,
+        *,
+        attempt_id: str,
+        trigger_ref: str,
+        source_refs: tuple[str, ...],
+        cursor: ProjectionCursor,
+        logical_time: datetime,
+        capability: _InteriorCapabilityManifest,
+    ) -> InteriorOpportunity:
+        return InteriorOpportunity(
+            opportunity_ref=f"opportunity:proactive:{attempt_id}",
+            inner_turn_ref=attempt_id,
+            world_id=self._world_id,
+            actor_ref=self._actor_ref,
+            trigger_ref=trigger_ref,
+            cursor=cursor,
+            logical_time=logical_time,
+            purpose="proactive_contact",
+            source_refs=source_refs,
+            capability_manifest=capability,
+            context_note=(
+                "A source-bound proactive contact opportunity is due; the character "
+                "freely owns now, later, silent, wording and message count."
+            ),
         )
 
     def _draft(self, *, decision) -> ProactiveDraft:  # type: ignore[no-untyped-def]
@@ -851,6 +936,7 @@ class ProactiveDeliberationTurn:
                 candidate_external_proposition_inventory_model
             ),
         )
+        self._transport = transport
         deliberation = compose_production_deliberation(
             lane_id="proactive",
             router=router,
@@ -1119,25 +1205,39 @@ class ProactiveDeliberationTurn:
             (advisory, *invitation_advisories),
             model_content_profile="proactive_decision",
         )
+        resolved_attempt_id = attempt_id or "attempt:proactive:" + _digest(
+            {
+                "trigger": opportunity.source_event_ref,
+                "cursor": cursor.model_dump(mode="json"),
+            }
+        )
+        trigger_evidence = tuple(
+            ProposalEvidenceRef(
+                ref_id=ref.event_id,
+                evidence_kind="committed_world_event",
+                source_world_revision=ref.world_revision,
+                immutable_hash="sha256:" + ref.payload_hash,
+            )
+            for ref in evidence_refs
+        )
+        # This is deterministic projection preparation only.  A failure is
+        # deliberately left for the normal Interior/Deliberation path to
+        # classify as a technical failure; it must never become a local
+        # silence or a fabricated role result.
+        try:
+            await self._transport.prepare(
+                attempt_id=resolved_attempt_id,
+                trigger_ref=opportunity.source_event_ref,
+                source_refs=tuple(ref.ref_id for ref in trigger_evidence),
+                cursor=cursor,
+                model_content_json=capsule.capsule.model_content_json,
+            )
+        except Exception:
+            _LOG.debug("proactive Interior projection warmup deferred", exc_info=True)
         result = await self._deliberation.deliberate(
             capsule,
-            attempt_id=attempt_id
-            or "attempt:proactive:"
-            + _digest(
-                {
-                    "trigger": opportunity.source_event_ref,
-                    "cursor": cursor.model_dump(mode="json"),
-                }
-            ),
-            trigger_evidence=tuple(
-                ProposalEvidenceRef(
-                    ref_id=ref.event_id,
-                    evidence_kind="committed_world_event",
-                    source_world_revision=ref.world_revision,
-                    immutable_hash="sha256:" + ref.payload_hash,
-                )
-                for ref in evidence_refs
-            ),
+            attempt_id=resolved_attempt_id,
+            trigger_evidence=trigger_evidence,
             budget=(self._budget_policy.start() if self._budget_policy is not None else None),
         )
         projection_time = projection.logical_time or stored[0].logical_time
@@ -2083,8 +2183,7 @@ class ProactiveActionRuntime:
                 and occurrence.settlement_event_ref
                 and occurrence.visibility in {"public", "shareable"}
                 and occurrence.settlement_event_ref in legacy_settlement_recovery_refs
-                and self._policy.actor
-                in getattr(occurrence, "participant_refs", ())
+                and self._policy.actor in getattr(occurrence, "participant_refs", ())
             ):
                 candidates.append(
                     (

@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from companion_daemon.config import Settings
+from companion_daemon.delayed_trigger_catalog import load_delayed_trigger_catalog
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.world_v2.qq_c2c_host import build_qq_c2c_host
 
@@ -45,6 +46,24 @@ HOST_QUALIFICATION_DECLARATIONS = {
 }
 
 HOST_LIFECYCLE_TIMEOUT_SECONDS = 15.0
+_CATALOG = Path("configs/delayed_trigger_qualification.v1.yaml")
+
+
+def _host_scenario(
+    scenario_id: str, nodeid: str, *, mechanism_ids: tuple[str, ...]
+):
+    evidence = load_delayed_trigger_catalog(_CATALOG).host_scenario(scenario_id)
+    assert evidence.test_nodeid == nodeid
+    assert evidence.mechanism_ids == mechanism_ids
+    assert evidence.qualification_scope == "accepted_typed_plan_host_lifecycle"
+    assert set(HOST_QUALIFICATION_DECLARATIONS["excluded_evidence"]) <= set(
+        evidence.excluded_scope
+    )
+    assert {
+        "onebot_provider_callback_normalization",
+        "24_hour_soak",
+    } <= set(evidence.excluded_scope)
+    return evidence
 
 
 def _json_material(messages: list[dict[str, str]]) -> dict[str, object]:
@@ -523,8 +542,13 @@ async def _qualify_interjection_reconsideration(tmp_path: Path) -> dict[str, Any
 
 @pytest.mark.asyncio
 async def test_public_host_multibeat_due_survives_restart_and_settles_each_beat_once(
-    tmp_path: Path,
+    tmp_path: Path, request: pytest.FixtureRequest
 ) -> None:
+    _host_scenario(
+        "expression.multibeat_due",
+        request.node.nodeid,
+        mechanism_ids=("expression.multibeat", "action.authorized_due"),
+    )
     evidence = await _qualify_multibeat_due(tmp_path)
 
     assert evidence["scenario_id"] == "expression.multibeat_due"
@@ -561,8 +585,13 @@ async def test_public_host_multibeat_due_survives_restart_and_settles_each_beat_
 
 @pytest.mark.asyncio
 async def test_public_host_interjection_reconsideration_cancels_unsent_plan_effect_once(
-    tmp_path: Path,
+    tmp_path: Path, request: pytest.FixtureRequest
 ) -> None:
+    _host_scenario(
+        "expression.interjection_reconsideration",
+        request.node.nodeid,
+        mechanism_ids=("expression.reconsideration",),
+    )
     evidence = await _qualify_interjection_reconsideration(tmp_path)
 
     assert evidence["scenario_id"] == "expression.interjection_reconsideration"

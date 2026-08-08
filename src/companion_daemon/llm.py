@@ -28,9 +28,9 @@ _MODEL_CALL_META: ContextVar[dict[str, object]] = ContextVar("model_call_meta", 
 _MODEL_CALL_STATE: ContextVar["ModelCallScopeState | None"] = ContextVar(
     "model_call_state", default=None
 )
-_MODEL_REQUEST_EMISSION_STATE: ContextVar[
-    "ModelRequestEmissionScopeState | None"
-] = ContextVar("model_request_emission_state", default=None)
+_MODEL_REQUEST_EMISSION_STATE: ContextVar["ModelRequestEmissionScopeState | None"] = ContextVar(
+    "model_request_emission_state", default=None
+)
 
 
 @contextmanager
@@ -849,13 +849,20 @@ class DeepSeekChatModel:
         return result
 
     async def complete_json(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
     ) -> str:
         """Request one JSON object without changing the generic ChatModel API."""
         result = await self._complete(
             messages,
             temperature=temperature,
-            json_object=True,
+            json_object=not tools,
+            tools=tools,
+            tool_choice=tool_choice,
         )
         if not isinstance(result, str):
             raise AssertionError("unmetered JSON completion returned usage")
@@ -984,11 +991,7 @@ class DeepSeekChatModel:
                         )
                         content = message.get("content") if isinstance(message, dict) else None
                         if tools:
-                            calls = (
-                                message.get("tool_calls")
-                                if isinstance(message, dict)
-                                else None
-                            )
+                            calls = message.get("tool_calls") if isinstance(message, dict) else None
                             content = _arguments_content(
                                 calls,
                                 expected_tool_name=_forced_tool_name(tool_choice),
@@ -1030,7 +1033,9 @@ class DeepSeekChatModel:
                                     if inspect.isawaitable(callback_result):
                                         await callback_result
                                 continue
-                            tool_calls = delta.get("tool_calls") if isinstance(delta, dict) else None
+                            tool_calls = (
+                                delta.get("tool_calls") if isinstance(delta, dict) else None
+                            )
                             if isinstance(tool_calls, list):
                                 if not tool_args:
                                     mark_model_request_first_token(request_span)
@@ -1107,9 +1112,7 @@ class DeepSeekChatModel:
                 self.capacity_gate.abandon(
                     capacity_token,
                     reason=(
-                        "provider_timeout"
-                        if provider_timeout
-                        else "cancelled_may_still_be_running"
+                        "provider_timeout" if provider_timeout else "cancelled_may_still_be_running"
                     ),
                 )
             if self.circuit_breaker is not None:

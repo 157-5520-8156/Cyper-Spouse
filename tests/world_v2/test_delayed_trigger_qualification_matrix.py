@@ -101,6 +101,178 @@ def test_catalog_cannot_claim_host_qualification_at_root_or_row_level() -> None:
         DelayedTriggerCatalog.model_validate(raw)
 
 
+def test_host_scenario_evidence_is_static_cross_link_not_release_authority() -> None:
+    catalog = load_delayed_trigger_catalog(CATALOG)
+
+    evidence = catalog.host_scenario("qq-later-text-restart-effect-once.1")
+
+    assert evidence.mechanism_ids == (
+        "expression.deferred_reply",
+        "conversation.commitment_due",
+        "action.authorized_due",
+    )
+    assert evidence.test_nodeid == (
+        "tests/world_v2/test_delayed_trigger_host_qualification.py::"
+        "test_public_host_later_text_survives_restart_and_settles_effect_once"
+    )
+    assert evidence.qualification_scope == "qq_transport_terminal"
+    assert "WorldV2PlatformHost.receipt" in evidence.excluded_scope
+    assert catalog.qualification_layer == "declaration_only"
+    assert not hasattr(evidence, "host_qualified")
+
+
+def test_verifier_rejects_host_evidence_for_dormant_or_unknown_mechanisms() -> None:
+    catalog = load_delayed_trigger_catalog(CATALOG)
+    evidence = catalog.host_scenario("qq-later-text-restart-effect-once.1")
+
+    dormant = evidence.model_copy(update={"mechanism_ids": ("conversation.thread_expiry",)})
+    with pytest.raises(DelayedTriggerCatalogError, match="dormant"):
+        verify_delayed_trigger_catalog(
+            catalog.model_copy(update={"host_scenario_evidence": (dormant,)}),
+            vertical_registry=VERTICAL_REGISTRY,
+            mechanism_rows=_mechanism_rows(),
+        )
+
+    missing = evidence.model_copy(update={"mechanism_ids": ("missing.host.evidence",)})
+    with pytest.raises(DelayedTriggerCatalogError, match="missing.host.evidence"):
+        verify_delayed_trigger_catalog(
+            catalog.model_copy(update={"host_scenario_evidence": (missing,)}),
+            vertical_registry=VERTICAL_REGISTRY,
+            mechanism_rows=_mechanism_rows(),
+        )
+
+
+def test_host_scenario_evidence_registers_only_the_committed_public_host_cases() -> None:
+    catalog = load_delayed_trigger_catalog(CATALOG)
+
+    assert {
+        evidence.scenario_id: evidence.test_nodeid
+        for evidence in catalog.host_scenario_evidence
+    } == {
+        "qq-later-text-restart-effect-once.1": (
+            "tests/world_v2/test_delayed_trigger_host_qualification.py::"
+            "test_public_host_later_text_survives_restart_and_settles_effect_once"
+        ),
+        "proactive.event-driven-silent-effect-once.1": (
+            "tests/world_v2/test_delayed_trigger_proactive_host_qualification.py::"
+            "test_public_host_event_driven_silence_is_effect_once"
+        ),
+        "proactive.technical-retry-restart-effect-once.1": (
+            "tests/world_v2/test_delayed_trigger_proactive_host_qualification.py::"
+            "test_public_host_technical_retry_survives_restart_and_is_effect_once"
+        ),
+        "proactive.technical-retry-superseded-by-inbound.1": (
+            "tests/world_v2/test_delayed_trigger_proactive_host_qualification.py::"
+            "test_public_host_new_inbound_supersedes_old_technical_retry"
+        ),
+        "expression.multibeat_due": (
+            "tests/world_v2/test_delayed_trigger_expression_host_qualification.py::"
+            "test_public_host_multibeat_due_survives_restart_and_settles_each_beat_once"
+        ),
+        "expression.interjection_reconsideration": (
+            "tests/world_v2/test_delayed_trigger_expression_host_qualification.py::"
+            "test_public_host_interjection_reconsideration_cancels_unsent_plan_effect_once"
+        ),
+        "platform-receipt-provider-accepted-terminal-restart.1": (
+            "tests/world_v2/test_delayed_trigger_platform_receipt_host_qualification.py::"
+            "test_public_host_receipt_settles_terminal_effect_once_and_cold_replays"
+        ),
+        "platform-receipt-unknown-late-conflict-restart.1": (
+            "tests/world_v2/test_delayed_trigger_platform_receipt_host_qualification.py::"
+            "test_public_host_receipt_preserves_unknown_and_records_late_terminal_reconciliation"
+        ),
+        "affect.decay-boundary-restart-effect-once.1": (
+            "tests/world_v2/test_delayed_trigger_affect_silence_host_qualification.py::"
+            "test_public_host_affect_decay_obeys_boundary_restart_and_effect_once"
+        ),
+        "relationship.silence-aftermath-no_change-effect-once.1": (
+            "tests/world_v2/test_delayed_trigger_affect_silence_host_qualification.py::"
+            "test_public_host_silence_aftermath_is_role_owned_and_effect_once[no_change]"
+        ),
+        "relationship.silence-aftermath-open_affect-effect-once.1": (
+            "tests/world_v2/test_delayed_trigger_affect_silence_host_qualification.py::"
+            "test_public_host_silence_aftermath_is_role_owned_and_effect_once[open_affect]"
+        ),
+        "relationship.silence-aftermath-technical-failure-lease-recovery.1": (
+            "tests/world_v2/test_delayed_trigger_affect_silence_host_qualification.py::"
+            "test_public_host_silence_technical_failure_is_not_role_no_change"
+        ),
+    }
+    assert all(
+        {"real_provider_author_transport", "production_stream_expression_episode", "character_autonomy",
+         "onebot_provider_callback_normalization", "24_hour_soak"} <= set(evidence.excluded_scope)
+        for evidence in catalog.host_scenario_evidence
+    )
+
+
+def test_host_evidence_nodeids_are_present_in_real_pytest_collection() -> None:
+    """Keep the declaration linked to an actually collected test node.
+
+    The catalog remains the only scenario inventory.  This check observes
+    pytest's collection output rather than copying function names or scanning
+    source text, so deleting or renaming a qualified scenario cannot leave the
+    static matrix green.
+    """
+
+    catalog = load_delayed_trigger_catalog(CATALOG)
+    paths = tuple(
+        sorted(
+            {
+                evidence.test_nodeid.split("::", 1)[0]
+                for evidence in catalog.host_scenario_evidence
+            }
+        )
+    )
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", *paths],
+        cwd=Path.cwd(),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    collected = {
+        line.strip()
+        for line in completed.stdout.splitlines()
+        if "::" in line and not line.lstrip().startswith("=")
+    }
+    missing = sorted(
+        evidence.test_nodeid
+        for evidence in catalog.host_scenario_evidence
+        if evidence.test_nodeid not in collected
+    )
+    assert not missing, "host evidence points to uncollected pytest node(s): " + repr(missing)
+
+
+def test_catalog_rejects_duplicate_host_evidence_scenario_ids_and_nodeids() -> None:
+    raw = yaml.safe_load(CATALOG.read_text(encoding="utf-8"))
+    duplicate_scenario = dict(raw["host_scenario_evidence"][0])
+    duplicate_scenario["test_nodeid"] += "_duplicate"
+    raw["host_scenario_evidence"].append(duplicate_scenario)
+    with pytest.raises(ValueError, match="scenario evidence ids"):
+        DelayedTriggerCatalog.model_validate(raw)
+
+    raw = yaml.safe_load(CATALOG.read_text(encoding="utf-8"))
+    duplicate_nodeid = dict(raw["host_scenario_evidence"][0])
+    duplicate_nodeid["scenario_id"] += ".duplicate"
+    raw["host_scenario_evidence"].append(duplicate_nodeid)
+    with pytest.raises(ValueError, match="scenario evidence nodeids"):
+        DelayedTriggerCatalog.model_validate(raw)
+
+
+def test_verifier_requires_every_host_evidence_row_to_exclude_the_out_of_scope_claims() -> None:
+    catalog = load_delayed_trigger_catalog(CATALOG)
+    evidence = catalog.host_scenario("qq-later-text-restart-effect-once.1")
+    incomplete = evidence.model_copy(update={"excluded_scope": ("character_autonomy",)})
+
+    with pytest.raises(DelayedTriggerCatalogError, match="missing explicit excluded scope"):
+        verify_delayed_trigger_catalog(
+            catalog.model_copy(update={"host_scenario_evidence": (incomplete,)}),
+            vertical_registry=VERTICAL_REGISTRY,
+            mechanism_rows=_mechanism_rows(),
+        )
+
+
 def test_life_model_followups_are_independently_and_honestly_declared() -> None:
     by_id = {
         row.mechanism_id: row for row in load_delayed_trigger_catalog(CATALOG).mechanisms

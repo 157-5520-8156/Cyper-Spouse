@@ -1675,8 +1675,6 @@ class RecallCoordinator:
         with self._prefetch_worker_guard:
             worker_threads = tuple(self._prefetch_worker_threads)
         close_embedding = getattr(self._semantic_embedding, "close", None)
-        if not callable(close_embedding):
-            return
         deadline = time.monotonic() + 0.05
         for thread in worker_threads:
             remaining = deadline - time.monotonic()
@@ -1685,7 +1683,16 @@ class RecallCoordinator:
             thread.join(timeout=remaining)
         alive = tuple(thread for thread in worker_threads if thread.is_alive())
         if not alive and self._active_recalls_drained.is_set():
-            close_embedding()
+            if callable(close_embedding):
+                close_embedding()
+            return
+
+        if not callable(close_embedding):
+            # Even embeddings without an explicit close hook must observe the
+            # bounded worker join above.  Do not leave completed prefetch
+            # threads behind merely because their provider has no resource
+            # finalizer; any still-running provider call remains detached and
+            # will finish through the worker's normal cleanup path.
             return
 
         # A provider call already in flight cannot be force-cancelled safely.

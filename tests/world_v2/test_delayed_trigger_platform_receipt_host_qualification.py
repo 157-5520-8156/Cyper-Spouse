@@ -10,6 +10,7 @@ from typing import Literal
 import pytest
 
 from companion_daemon.config import Settings
+from companion_daemon.delayed_trigger_catalog import load_delayed_trigger_catalog
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.world_v2.character_interior.turn_store import (
     open_sqlite_character_interior_turn_store,
@@ -55,8 +56,35 @@ RECEIPT_HOST_QUALIFICATION = {
     "excluded_scope": "production_provider_callback_normalization",
 }
 
+_CATALOG = Path("configs/delayed_trigger_qualification.v1.yaml")
+
+
+def _host_scenario(
+    scenario_id: str, nodeid: str, *, qualification_scope: str
+):
+    evidence = load_delayed_trigger_catalog(_CATALOG).host_scenario(scenario_id)
+    assert evidence.test_nodeid == nodeid
+    assert evidence.mechanism_ids == (
+        "action.authorized_due",
+        "expression.deferred_reply",
+        "conversation.commitment_due",
+    )
+    assert evidence.qualification_scope == qualification_scope
+    assert "production_provider_callback_normalization" in evidence.excluded_scope
+    assert {
+        "real_provider_author_transport",
+        "production_stream_expression_episode",
+        "character_autonomy",
+        "onebot_provider_callback_normalization",
+        "24_hour_soak",
+    } <= set(evidence.excluded_scope)
+    return evidence
+
 
 def test_receipt_host_qualification_declaration_is_narrow_and_machine_readable() -> None:
+    evidence = load_delayed_trigger_catalog(_CATALOG).host_scenario(
+        RECEIPT_HOST_QUALIFICATION["scenario_id"]
+    )
     assert RECEIPT_HOST_QUALIFICATION == {
         "qualification_layer": "public_host_scenario",
         "scenario_id": "platform-receipt-provider-accepted-terminal-restart.1",
@@ -73,6 +101,11 @@ def test_receipt_host_qualification_declaration_is_narrow_and_machine_readable()
         "receipt_scope": "normalized_platform_receipt_acceptance_only",
         "excluded_scope": "production_provider_callback_normalization",
     }
+    assert evidence.qualification_scope == RECEIPT_HOST_QUALIFICATION["receipt_scope"]
+    assert evidence.test_nodeid == (
+        "tests/world_v2/test_delayed_trigger_platform_receipt_host_qualification.py::"
+        "test_public_host_receipt_settles_terminal_effect_once_and_cold_replays"
+    )
 
 
 def _observation_ref(messages: list[dict[str, str]]) -> str:
@@ -392,8 +425,13 @@ class _PublicReceiptHarness:
 
 @pytest.mark.asyncio
 async def test_public_host_receipt_settles_terminal_effect_once_and_cold_replays(
-    tmp_path: Path,
+    tmp_path: Path, request: pytest.FixtureRequest
 ) -> None:
+    _host_scenario(
+        "platform-receipt-provider-accepted-terminal-restart.1",
+        request.node.nodeid,
+        qualification_scope="normalized_platform_receipt_acceptance_only",
+    )
     harness = _PublicReceiptHarness(tmp_path=tmp_path, database_name="terminal.sqlite")
     first = harness.build()
     try:
@@ -497,8 +535,13 @@ async def test_public_host_receipt_settles_terminal_effect_once_and_cold_replays
 
 @pytest.mark.asyncio
 async def test_public_host_receipt_preserves_unknown_and_records_late_terminal_reconciliation(
-    tmp_path: Path,
+    tmp_path: Path, request: pytest.FixtureRequest
 ) -> None:
+    _host_scenario(
+        "platform-receipt-unknown-late-conflict-restart.1",
+        request.node.nodeid,
+        qualification_scope="normalized_platform_receipt_unknown_conflict_only",
+    )
     harness = _PublicReceiptHarness(tmp_path=tmp_path, database_name="unknown.sqlite")
     first = harness.build()
     try:

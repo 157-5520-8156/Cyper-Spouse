@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from companion_daemon.config import Settings
+from companion_daemon.delayed_trigger_catalog import load_delayed_trigger_catalog
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.world_v2.qq_c2c_host import build_qq_c2c_host
 
@@ -31,6 +32,23 @@ HOST_QUALIFICATION_DECLARATION = {
     "receipt_scope": "qq_transport_terminal",
     "excluded_scope": "WorldV2PlatformHost.receipt",
 }
+
+_CATALOG = Path("configs/delayed_trigger_qualification.v1.yaml")
+
+
+def _host_scenario(nodeid: str):
+    evidence = load_delayed_trigger_catalog(_CATALOG).host_scenario(
+        "qq-later-text-restart-effect-once.1"
+    )
+    assert evidence.test_nodeid == nodeid
+    assert evidence.mechanism_ids == (
+        "expression.deferred_reply",
+        "conversation.commitment_due",
+        "action.authorized_due",
+    )
+    assert evidence.qualification_scope == HOST_QUALIFICATION_DECLARATION["receipt_scope"]
+    assert "WorldV2PlatformHost.receipt" in evidence.excluded_scope
+    return evidence
 
 
 def _observation_ref(messages: list[dict[str, str]]) -> str:
@@ -294,8 +312,9 @@ async def _run_public_host_qualification(tmp_path: Path) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_public_host_later_text_survives_restart_and_settles_effect_once(
-    tmp_path: Path,
+    tmp_path: Path, request: pytest.FixtureRequest
 ) -> None:
+    _host_scenario(request.node.nodeid)
     evidence = await _run_public_host_qualification(tmp_path)
 
     assert evidence["qualification"] == HOST_QUALIFICATION_DECLARATION
