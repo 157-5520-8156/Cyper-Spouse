@@ -302,6 +302,116 @@ def _presented_source_event_ids(
     return list(dict.fromkeys(found))
 
 
+def _valid_expression_reselection_envelope(value: object) -> bool:
+    """Recognize the host's bounded source-closure correction envelope.
+
+    The provider sees ordinary counterpart text in the same message list.  A
+    contract string alone is therefore not an authority marker: a counterpart
+    can type that string and a valid output contract themselves.  Keep this
+    acceptance-only parser aligned with the immutable envelope shape emitted
+    by ``_source_closure_reselection_envelope`` and fail closed for partial or
+    ambiguous presentations.  This does not grant any production authority;
+    it only prevents the capture report from correlating user-controlled text
+    as a host-generated correction.
+    """
+
+    if not isinstance(value, dict):
+        return False
+    allowed = {
+        "contract",
+        "authority",
+        "rejected_candidate_sha256",
+        "rejected_categories",
+        "task",
+        "character_reselection_affordance",
+        "final_source_self_check",
+        "output_contract",
+        "prior_correction",
+        "semantic_failure_dimensions",
+        "unclosed_semantic_role_counts",
+        "failure_stage",
+        "companion_life_authority_availability",
+        "unpinned_companion_life_event_boundary",
+    }
+    if set(value) - allowed:
+        return False
+    if value.get("contract") != "source-closure-reselection.2":
+        return False
+    if value.get("authority") != "categorical_failure_only_not_context_or_evidence":
+        return False
+    rejected_hash = value.get("rejected_candidate_sha256")
+    if not isinstance(rejected_hash, str) or re.fullmatch(r"[0-9a-f]{64}", rejected_hash) is None:
+        return False
+    categories = value.get("rejected_categories")
+    if not isinstance(categories, dict) or set(categories) != {"ci", "v", "p"}:
+        return False
+    if any(
+        not isinstance(indexes, list)
+        or any(isinstance(index, bool) or not isinstance(index, int) or index < 0 for index in indexes)
+        or len(indexes) != len(set(indexes))
+        for indexes in categories.values()
+    ):
+        return False
+    if not isinstance(value.get("task"), str) or not value["task"].strip():
+        return False
+    affordance = value.get("character_reselection_affordance")
+    if affordance != {
+        "answer_required": False,
+        "satisfy_request_required": False,
+        "valid_timing_choices": ["now", "later", "silent"],
+        "behavior_advice": False,
+    }:
+        return False
+    self_check = value.get("final_source_self_check")
+    if not isinstance(self_check, dict):
+        return False
+    required_self_check = {
+        "required_before_return": True,
+        "authority": "same_pinned_context_only",
+        "host_text_classifier": False,
+        "each_external_proposition_requires": (
+            "direct_matching_source_or_explicit_source_free_capability"
+        ),
+        "each_earlier_or_current_companion_life_event_requires": (
+            "own_direct_matching_source_in_same_pinned_context"
+        ),
+        "empty_availability_authorizes_substitute_event": False,
+        "candidate_or_private_turn_state_creates_authority": False,
+        "answer_pressure_can_override_source_boundary": False,
+    }
+    if any(self_check.get(key) != expected for key, expected in required_self_check.items()):
+        return False
+    if not isinstance(self_check.get("world_source_scope"), dict):
+        return False
+    output_contract = value.get("output_contract")
+    if not isinstance(output_contract, dict):
+        return False
+    if output_contract.get("contract") != "expression-source-reselection-direct.1":
+        return False
+    if "prior_correction" in value and not isinstance(value["prior_correction"], dict):
+        return False
+    if "semantic_failure_dimensions" in value and (
+        not isinstance(value["semantic_failure_dimensions"], list)
+        or any(not isinstance(item, str) or not item for item in value["semantic_failure_dimensions"])
+    ):
+        return False
+    if "unclosed_semantic_role_counts" in value and not isinstance(
+        value["unclosed_semantic_role_counts"], list
+    ):
+        return False
+    if "failure_stage" in value and not isinstance(value["failure_stage"], str):
+        return False
+    if "companion_life_authority_availability" in value and not isinstance(
+        value["companion_life_authority_availability"], dict
+    ):
+        return False
+    if "unpinned_companion_life_event_boundary" in value and not isinstance(
+        value["unpinned_companion_life_event_boundary"], dict
+    ):
+        return False
+    return True
+
+
 def _forced_tool_request_hashes(payload: dict[str, object]) -> list[str]:
     """Reconstruct local forced-tool identities without sending them upstream.
 
@@ -341,17 +451,21 @@ def _forced_tool_request_hashes(payload: dict[str, object]) -> list[str]:
             content = message.get("content")
             if not isinstance(content, str):
                 continue
-            decoded = _decoded_json_material(content)
-            if not isinstance(decoded, dict):
+            try:
+                # The correction envelope is a direct host-authored JSON
+                # object.  Do not recursively decode strings here: a user
+                # supplied JSON string that happens to contain the same shape
+                # is not a canonical envelope.
+                decoded = json.loads(content)
+            except json.JSONDecodeError:
                 continue
-            if decoded.get("contract") != "source-closure-reselection.2":
+            if not _valid_expression_reselection_envelope(decoded):
                 continue
-            candidate = decoded.get("output_contract")
-            if (
-                isinstance(candidate, dict)
-                and candidate.get("contract") == "expression-source-reselection-direct.1"
-            ):
-                output_contracts.append(candidate)
+            candidate = decoded["output_contract"]
+            assert isinstance(candidate, dict)
+            output_contracts.append(candidate)
+        if len(output_contracts) != 1:
+            return []
         hashes: list[str] = []
         for output_contract in output_contracts:
             try:

@@ -1145,7 +1145,7 @@ commit：hash
   manifest；生产快照未提供时结果为空，不能凭 source-like 字符串补齐因果链。角色/用户文本中的
   `COMBINED OUTPUT ENVELOPE` 等字样同样不再决定 provider purpose，purpose marker 只看 system
   指令。这样会少报一部分证据，但不会把用户输入误报为来源或内心状态。
-- 新增嵌套伪造、观察字段伪造和合法 envelope 回归；隔离验收相关套件为 `45 passed`，完整回归为
+- 新增嵌套伪造、观察字段伪造和合法 envelope 回归；隔离验收相关套件为 `48 passed`，完整回归为
   `4871 passed, 1 warning`。这仍只改证据采集边界，不提升真实 provider、QQ、自主性或 24 小时
   soak 资格；发布状态继续保持 `qualification_incomplete`。
 - 验收产物契约从 `isolated-daemon-process-acceptance.2` 升为 `.3`，新增 `provenance`：生成时的
@@ -1159,7 +1159,9 @@ commit：hash
   source-closure reselection envelope 顶层携带的 canonical `output_contract`，再调用
   `expression_reselection_tool_contract` 重新编译并比较完整 provider tool/choice；不复制表达式字段表，
   不从用户任意嵌套 JSON 猜测 capability 或来源。
-- 表达式校正的本地 contract identity 因而可以进入 `forced_tool_request_hashes`，与持久化 provider
-  request hash 做同样的因果关联；缺少、嵌套伪造或不匹配的 contract 会安全地不计入证据，而不是冒充成功。
+- **source-closure 表达式校正**的本地 contract identity 因而可以进入 `forced_tool_request_hashes`，与持久化
+  provider request hash 做同样的因果关联；缺少、嵌套伪造、顶层边界不完整或不匹配的 contract 会安全地不计入
+  证据，而不是冒充成功。结构/private/claim 表达式校正虽然已在生产使用同一 required-tool，当前验收脚本仍未为
+  它们建立 canonical contract carrier，不能把这些调用计入本片的因果资格。
 - 这只闭合隔离验收的证据采集缺口，不等于真实 DeepSeek 首次成功率、QQ 回执、自由多轮对聊或 24 小时
   soak 已资格化；发布状态继续保持 `manual_only`/`qualification_incomplete`。
