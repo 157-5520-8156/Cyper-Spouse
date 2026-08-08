@@ -1,6 +1,9 @@
 # Luna 执行计划：因果基底、统一内心与长程涌现生产化
 
-状态：进行中（L0 基线已完成；L2 与 L3 的第一批生产阻断修复已实现，完整生产资格仍待 daemon 重启、全量测试和真实对聊证据）。本文是施工顺序、验证门槛和交接契约，不替代架构设计。
+状态：进行中（L0 已完成；L1–L3 仍为 partial。L2 durable turn 主体与 L3 第一批阻断修复已落地并完成一次
+daemon 重启和全量测试，但 2026-08-08 审计仍发现 world-stimulus terminal recovery 饥饿 P1；逐 purpose
+资格、冷重放、真实自由对聊、延迟触发全覆盖和 24 小时 soak 尚未闭合）。本文是施工顺序、验证门槛和
+交接契约，不替代架构设计。
 
 执行者：Luna；架构复核：Sol；建立：2026-08-08。
 
@@ -254,6 +257,59 @@ Luna 可以迭代任意轮，直到达到门槛或发现需要 Sol/用户裁决�
 - 降载优先减少实验、渲染、低显著度 NPC/ambient/perception opportunity；不得减少当前 turn 必需事实、
   改写角色选择、使用本地人格 fallback、仅因超过目标拒绝可见回复，或把预算压力伪装成 silent。
 
+### 1.5 延迟触发全覆盖与上游受控注入
+
+所有依赖未来时间的生产机制必须进入一份由代码版本化维护、由 CI 校验双向一致性的
+`Delayed Trigger Qualification Matrix`。Matrix 是规范来源；scheduler contract、vertical registry、Action
+kind、retry policy、Projection due/expiry 字段和 `mechanism_closure.yaml` 必须与它互相核对。自动扫描只用于
+提出候选和发现差异，不能被宣称为完整真相；每个差异必须人工审计并留下理由。新增延迟机制若未登记，
+架构门直接失败。
+资格 harness 只能经过 production QQ host 已公开的 `inbound`、`tick`、`drain`、正式 `receipt` seam，以及
+正式外部感知 provider injection seam；可见外发用 production transport interceptor 捕获 provider accepted、
+迟到/丢失/unknown 与最终 receipt。不得调用任何 `*_worker.drain_one()`、`advance_once()` 或私有 runtime 方法。
+Clock 同批派生的 Goal expiry、Occurrence activation/expiry、Affect decay、DeferredReply 等责任必须从
+一次真实 tick 一并观察，不能拆成若干“各自直调都成功”的假闭环。
+
+每一行至少声明：
+
+| 字段 | 要求 |
+| --- | --- |
+| mechanism / purpose | 稳定机制身份；涉及模型时写精确 model purpose 与 contract/schema identity |
+| upstream authority | 生产中真实打开机会的 accepted event、Observation、Clock/expiry 或 authorized Action |
+| due identity | actor、world、source set、epoch、retry ordinal、logical deadline 与 merge/dedup key |
+| controlled injection | 仅在隔离生产副本提交真实上游材料并推进 Logical Time；禁止直接调用下游 worker |
+| expected path | scheduler discovery → claim/CAS → semantic author（若有）→ typed authority → Action/receipt |
+| legal terminals | accepted、角色 no-change/silent/later、superseded/cancelled、技术失败/retry 等精确终态 |
+| visible effect | 是否可能产生 QQ/媒体/其他外部 effect；测试时用真实 transport seam 拦截并保存 receipt |
+| observability | health、causal lineage、ModelResult、usage/cost、latency、ledger/sidecar refs |
+| fault matrix | provider timeout/invalid、CAS 冲突、重启、lease 过期、迟到结果、撤回、权限变化、坏 trigger 饥饿 |
+
+当前 release 中已启用机制的最低覆盖包括：ambient/event-driven proactive、silent/later 后续考虑、10/30/120 技术退避、Life/NPC
+Ecology、Reflection、MemoryCandidate/巩固、authorized Action 精确到期、deferred reply、Expression 多 Beat、
+被打断后的 reconsideration、Commitment/Thread/Expectation expiry、Activity/Plan/Outcome 生命周期、Affect
+衰减与 silence aftermath，以及后续新登记并在该 release 启用的任何延迟机制。Perception
+refresh/attention、Media planning/render/inspection/delivery 等 limited-production/dormant 能力只在声明启用的
+release 做完整资格；未启用时只验证关闭不阻断核心及 replay/compatibility，不得为凑表激活生产 producer。
+是否产生消息仍由角色决定；合法 silent/no-change 是语义成功，不是发送失败。
+只有 schema/head 而没有生产 producer 的 dormant 机制（例如当前 V2 Goal）只做 replay/compatibility 资格，
+不得借手工注入升级为生产 `[active]`。
+
+资格分成不能互相替代的两条证据：
+
+1. **虚拟 Logical Time**：穷举边界前/边界/边界后、时区/DST、批量 merge、同 deadline 并发、重启、CAS、
+   retry ordinal 和迟到回执。确定性 discovery、claim、terminal、effect-once 与“不饿死其他 trigger”必须
+   100% 通过。
+2. **真实 wall-clock daemon soak**：真实 provider、真实 scheduler、QQ/Action transport、进程重启和至少
+   24 小时运行；证明没有仅在 monkeypatch/加速时钟下成立的实现。
+
+模型样本仍按 purpose 分账：100 次零结构错误只授予初始供应商资格；最近 1,000 次用于滚动观测；若要在
+约 95% 置信水平下以零失败支持失败率低于 0.1%，需要约 3,000 个独立样本。样本不足时必须显示
+`qualification_incomplete`，不能写“接近 100%”。`accepted_first_attempt`、纠正后接受、最终 Action delivered
+和角色 no-change/silent 分列；技术失败、source/cross-field 拒绝与 provider outage 保留精确归因。
+
+资格运行使用隔离库、可审计真实 provider 与统一月度资格预算；允许为必要资格化有依据地临时超过 ¥100
+设计目标，但必须提前估算、逐 purpose 记账，并在达到既定样本或发现系统性失败后立即停止无价值重复。
+
 ## 2. 总体顺序
 
 L0→L15 是依赖顺序和完整愿景，**不是要求一次大爆炸式改完才允许上线**。采用三个可独立回滚、每阶段
@@ -274,6 +330,39 @@ L0→L15 是依赖顺序和完整愿景，**不是要求一次大爆炸式改完
 
 每个工作包都必须留下：红测、最小实现、相关测试、全量测试结果、静态检查、生产证据、剩余缺口、
 精确 commit。不得把未接入的文件或只收集的测试称为完成。
+
+### 2.0A Sol 主控与低成本执行 agent 的无人值守契约
+
+无人值守的含义是“在已批准 release 与硬边界内自动迭代到证据门或真实决策门”，不是允许一个模型从
+L0 一路自行改变业务并自动上线。默认职责如下：
+
+- **Sol / 架构主控**：维护本文与设计总纲，定义 release scope、authority/actor/privacy 边界、验收指标，
+  审核跨 Module seam、解释真实体验失败并签署阶段门；不承担所有机械实现。
+- **低成本执行 agent（Luna 或 Sol/用户批准的同类模型）**：在固定工作包内做代码盘点、TDD、迁移、
+  资格样本、故障注入、性能测量、文档证据与小步提交；不能自行改写业务目标或把未达标项降级。当前
+  orchestrator 若无法选择经批准的模型，必须记录能力限制并交回选择，不能静默换模型。
+- **独立审查 agent**：保持只读，分别审 Standards、Spec、Agency/Authority、Production Readiness；不能由
+  写作者给自己签字。最终产品体验仍由 Sol/用户抽查真实 transcript。
+
+并行规则：同一时刻每个文件/authority seam 只有一个写 owner；其他 agent 做只读研究、测试设计、日志分析
+或不重叠文件。共享工作树下不得让多个 agent 同时格式化、批量重写、迁移同一事件族或提交彼此未审的
+混合 diff。并发上限按运行时实际 slot、工作树/数据库隔离能力和成本信封确定，始终为 Sol/写 owner 保留
+必要容量；agent 完成后复用 slot，不能为了并发把一个因果闭环拆成互相不可验收的碎片。
+
+自动继续条件：工作包边界和 producer→consumer 已批准；红测能复现真实失败；不新增 authority、不改变
+隐私/同意/Action/角色选择；改动只在隔离库或明确 canary；成本预测在批准信封内。满足时执行 agent 应持续
+完成“调查→候选方案→判别实验→TDD→相关/全量测试→真实证据→独立审查→小步 commit/push”，无需用户
+守在电脑前。
+
+强制停止并交回 Sol/用户：本文 §20 任一事项、发现规格自相矛盾、需要删除/重写不可变数据、要启用新的
+生产媒体/感知/成人能力、无法证明 source/actor scope、连续两轮同类补丁无改善、成本预测显著超出已批准
+资格预算、存在 P0/P1、或准备进行最终生产替换。停止时必须留下可恢复 checkpoint、失败证据和至少两个
+可选方案，不能留下半迁移生产状态。
+
+无人值守 release 的最大默认范围是当前阶段：先闭合 L1–L3 与 §1.5，再执行稳定内核所需 L4–L6 和必要
+L9/L10 切片；每个切片通过 L14/L15 的自动门。24 小时 soak 与真实对聊可无人值守采证，但最终 production
+资格、真实 QQ 用户体验和扩大到下一条 release train 仍需 Sol/用户签署。一个坏 trigger、测试绿或单次消息
+送达都不能触发自动“完成/上线”。
 
 ### 2.0 生产复杂度预算
 
@@ -808,6 +897,10 @@ commit：hash
 ## 21. 2026-08-08 执行记录（Luna）
 
 本节只记录本轮实际核验与改动，不把代码存在或测试变绿误写成生产完成。
+
+- 本次 Sol 交接审计所在的 Codex 桌面任务共有 4 个 active slot，子 agent override 仅暴露 Sol/Terra，未暴露
+  Luna；因此本次文档盘点使用 Terra 只读 agent，未冒充 Luna 执行。该限制只是本次运行环境证据，不是
+  长期架构规范；后续编排必须重新查询当时可用模型和 slot。
 
 ### L0 基线与已证实根因
 

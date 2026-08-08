@@ -1620,6 +1620,21 @@ CAS、Action 或 receipt 的断点，不是第二真相源，也不能作为模�
 - 每个 model purpose 的首次成功、延迟、token、成本、技术失败和资格样本数；
 - 是否存在跨 interaction→emotion→life/NPC→memory→later choice 的生产样本。
 
+所有依赖 Logical Time、expiry、cadence、retry、ambient window 或未来 Action 的机制还必须能被一个统一的
+**隔离资格 harness** 从受控上游触发。该 harness 不是新的生产 API，也不允许每个机制建立 test-only Runtime；
+它只复用 production host 已有公开 seam，在隔离生产副本中提交该机制本来就有权消费的源事件、到期条件、
+已授权 Action 或正式 receipt，并推进同一套 Logical Time。随后必须由生产 scheduler 自己完成 due discovery、
+claim、CharacterInterior/其他合法 semantic author、typed authority、Action/receipt 与 terminal。不得直接调用
+下游 worker、伪造 ModelResult、跳过 scheduler 或在测试专用旁路里制造“成功”。虚拟时间用于穷举窗口、
+重试、重启和并发组合；真实时间 daemon soak 用于证明 wall clock、时区、provider 波动和进程生命周期，
+二者不能互相替代。
+
+每个延迟机制必须在同一可审计清单中声明 source authority、due identity、merge/dedup key、model purpose、
+合法 no-change/silent、成功 terminal、技术失败 terminal/retry、可见 Action 与 kill switch。清单中存在但无法
+从上游触发、代码中存在但没有登记、或 health 无法区分“未到期 / 角色不做 / 技术失败 / 卡住”的机制，均
+不得标为 `[active]`。确定性调度与 effect-once 组合必须 100% 通过；model-bearing purpose 仍按首次合法率
+单独资格化，不能用纠正后成功或最终送达率掩盖第一次非法。
+
 S1–S26 继续作为体验验收目录，不是剧情库：测试连接、来源、actor isolation、可达选择、合法终止和
 effect-once；真实对聊判断自然度。尤其优先闭合 S9 分享余波、S10 自我回看、S18 独处内省、S19 心愿、
 S20 图片分享等明确 disconnected 场景。
