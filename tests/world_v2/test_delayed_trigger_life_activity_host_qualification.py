@@ -16,6 +16,7 @@ from companion_daemon.world_v2.qq_c2c_host import build_qq_c2c_host
 
 _CATALOG = Path("configs/delayed_trigger_qualification.v1.yaml")
 _SCENARIO_ID = "life.activity-lifecycle-public-host.1"
+_AFTERMATH_SCENARIO_ID = "life.aftermath-outcome-public-host.1"
 
 
 class _PlanWorldAuthor:
@@ -87,6 +88,25 @@ class _PlanWorldAuthor:
             },
             ensure_ascii=False,
         )
+
+
+class _CharacterChoiceWorldAuthor(_PlanWorldAuthor):
+    """Use the same public plan source with model-owned outcome settlement."""
+
+    model = "fixture:life-aftermath-character-choice-world-author"
+    semantic_authority_id = "semantic-authority:fixture:life-aftermath-character-choice-world-author"
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.2,
+    ) -> str:
+        raw = await super().complete(messages, temperature=temperature)
+        payload = json.loads(raw)
+        payload["causal_authority"] = "character_choice"
+        payload["outcome_resolution_authority"] = "character_choice"
+        return json.dumps(payload, ensure_ascii=False)
 
 
 class _LifeSourceReviewer:
@@ -169,6 +189,12 @@ class _CharacterModel(FakeCompanionModel):
                 "decision": "select",
                 "selected_token": openings[0]["opening_token"],
             }
+        elif purpose == "outcome_selection":
+            offered_tokens = request["capability_manifest"]["payload"]["offered_tokens"]
+            payload = {
+                "selected_token": offered_tokens[0],
+                "character_life_direction": None,
+            }
         else:
             return await super().complete(messages, temperature=temperature)
         return json.dumps(
@@ -228,10 +254,14 @@ class _Delivery:
         return {"status": "ok", "retcode": 0, "data": {"message_id": message_id}}
 
 
-def _host_scenario(nodeid: str) -> None:
-    evidence = load_delayed_trigger_catalog(_CATALOG).host_scenario(_SCENARIO_ID)
+def _host_scenario(nodeid: str, *, scenario_id: str = _SCENARIO_ID) -> None:
+    evidence = load_delayed_trigger_catalog(_CATALOG).host_scenario(scenario_id)
     assert evidence.test_nodeid == nodeid
-    assert evidence.mechanism_ids == ("life.activity_lifecycle",)
+    assert evidence.mechanism_ids == (
+        ("life.activity_lifecycle",)
+        if scenario_id == _SCENARIO_ID
+        else ("life.aftermath_outcome",)
+    )
 
 
 @pytest.mark.asyncio
@@ -374,5 +404,145 @@ async def test_public_host_activity_lifecycle_is_role_owned_and_effect_once(
         assert health["mechanisms"]["life_ecology"]["schedule"]["last_outcome_ref"] == (
             "life-ecology:aftermath_occurrence_opened"
         )
+    finally:
+        await host.aclose()
+
+
+@pytest.mark.asyncio
+async def test_public_host_aftermath_outcome_is_role_owned_and_effect_once(
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    _host_scenario(request.node.nodeid, scenario_id=_AFTERMATH_SCENARIO_ID)
+    started_at = datetime.now(UTC).replace(microsecond=0)
+    scheduler_clock = {"now": started_at}
+    settings = Settings(
+        _env_file=None,
+        database_path=tmp_path / "life-aftermath-outcome-host-qualification.sqlite",
+        PRIMARY_USER_ID="geoff",
+        WORLD_V2_EXPRESSION_EPISODE_MODE="off",
+        WORLD_V2_LIFE_SOURCE_REVIEW_ENABLED=False,
+    )
+
+    async def skip_pacing(seconds: float) -> None:
+        scheduler_clock["now"] += timedelta(seconds=max(0.0, seconds))
+        await asyncio.sleep(0)
+
+    world_author = _CharacterChoiceWorldAuthor()
+    character_model = _CharacterModel()
+    source_reviewer = _LifeSourceReviewer()
+
+    def build():
+        return build_qq_c2c_host(
+            settings=settings,
+            recipient_id="10001",
+            bootstrap_at=started_at,
+            model=character_model,
+            world_support_model=world_author,
+            life_source_closure_model=source_reviewer,
+            delivery=_Delivery(),
+            ingress_now=lambda: scheduler_clock["now"],
+            ingress_sleep=skip_pacing,
+            action_due_now=lambda: scheduler_clock["now"],
+            use_configured_recall_embedding=False,
+        )
+
+    host = build()
+    try:
+        plan_due = started_at + timedelta(minutes=10)
+        await host.tick(
+            tick_id="life-aftermath-public-plan",
+            logical_time_from=started_at,
+            logical_time_to=plan_due,
+            observed_at=plan_due,
+            reason="life_aftermath_public_plan",
+            run_life_ecology=True,
+        )
+        choice_due = plan_due + timedelta(minutes=1)
+        scheduler_clock["now"] = choice_due
+        await host.tick(
+            tick_id="life-aftermath-public-choice",
+            logical_time_from=plan_due,
+            logical_time_to=choice_due,
+            observed_at=choice_due,
+            reason="life_aftermath_public_choice",
+            run_life_ecology=True,
+        )
+        active = host.export_replay_evidence()
+        assert len(active.projection.world_occurrences) == 1
+        assert active.projection.world_occurrences[0].status == "active"
+
+        settle_due = choice_due + timedelta(minutes=1)
+        scheduler_clock["now"] = settle_due
+        await host.tick(
+            tick_id="life-aftermath-public-settle",
+            logical_time_from=choice_due,
+            logical_time_to=settle_due,
+            observed_at=settle_due,
+            reason="life_aftermath_public_settle",
+            run_life_ecology=True,
+        )
+        settled = host.export_replay_evidence()
+        assert settled.projection.world_occurrences[0].status == "settled"
+        assert any(
+            item.event.event_type == "OutcomeObservationRecorded" for item in settled.events
+        )
+        assert any(item.event.event_type == "OutcomeProposalRecorded" for item in settled.events)
+        assert any(item.event.event_type == "WorldOccurrenceSettled" for item in settled.events)
+        def calls_for_purpose(purpose: str) -> int:
+            count = 0
+            for messages in character_model.calls:
+                try:
+                    request = json.loads(messages[-1]["content"])
+                    if request.get("inner_turn", {}).get("purpose") == purpose:
+                        count += 1
+                except (IndexError, KeyError, TypeError, json.JSONDecodeError):
+                    continue
+            return count
+
+        assert calls_for_purpose("outcome_selection") == 1
+        assert source_reviewer.calls >= 1
+        outcome_event_types = {
+            "OutcomeObservationRecorded",
+            "OutcomeProposalRecorded",
+            "AcceptanceRecorded",
+            "WorldOccurrenceSettled",
+        }
+        outcome_event_ids = tuple(
+            item.event.event_id
+            for item in settled.events
+            if item.event.event_type in outcome_event_types
+        )
+        outcome_calls_before_repeat = calls_for_purpose("outcome_selection")
+        await host.tick(
+            tick_id="life-aftermath-public-settle",
+            logical_time_from=choice_due,
+            logical_time_to=settle_due,
+            observed_at=settle_due,
+            reason="life_aftermath_public_settle",
+            run_life_ecology=True,
+        )
+        await host.drain(max_action_units=8, max_background_units=16)
+        repeated = host.export_replay_evidence()
+        assert tuple(
+            item.event.event_id
+            for item in repeated.events
+            if item.event.event_type in outcome_event_types
+        ) == outcome_event_ids
+        assert calls_for_purpose("outcome_selection") == outcome_calls_before_repeat
+
+        await host.aclose()
+        host = build()
+        await host.drain(max_action_units=8, max_background_units=16)
+        cold = host.export_replay_evidence()
+        assert cold.cursor == repeated.cursor
+        assert cold.projection.semantic_hash == repeated.projection.semantic_hash
+        assert len(cold.events) == len(repeated.events)
+        assert tuple(
+            item.event.event_id
+            for item in cold.events
+            if item.event.event_type in outcome_event_types
+        ) == outcome_event_ids
+        assert calls_for_purpose("outcome_selection") == outcome_calls_before_repeat
     finally:
         await host.aclose()

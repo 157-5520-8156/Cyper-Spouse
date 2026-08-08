@@ -1129,11 +1129,10 @@ commit：hash
   技术失败仍准确终结；重复 drain 不重新打开已完成 trigger，冷重放语义哈希保持一致。
 - 该场景验证的是 Life Ecology 调度、隔离、退避和 replay 语义，不是 World Author 的真实模型质量或 Life
   内容生成资格。真实 provider、自主生活选择、OneBot 回执和 24 小时 soak 继续排除；Matrix 仍为
-  `declaration_only`。本薄片及既有延迟触发场景回归共 `44 passed`，静态 verifier 仍报告
+  `declaration_only`。本薄片及既有延迟触发场景回归共 `46 passed`，静态 verifier 仍报告
   `28 delayed trigger mechanisms`。
-- 当前仍有两个 `release_status: active` 机制没有独立 host 场景：`proactive.post_silent` 与
-  `life.aftermath_outcome`。它们保持现状，不用空测试或降级状态伪造资格；其中 `proactive.post_silent` 的
-  公开关系/节奏材料、以及 aftermath 的真实 outcome-author 路径，仍需后续隔离场景或明确 release 取舍。
+- 当前仍有一个 `release_status: active` 机制没有独立 host 场景：`proactive.post_silent`。它保持现状，
+  不用空测试或降级状态伪造资格；公开关系/节奏材料仍需后续隔离场景或明确 release 取舍。
 
 ### 2026-08-09：Life activity lifecycle public-host 调度资格薄片
 
@@ -1147,6 +1146,16 @@ commit：hash
 - 该证据使用 scripted typed World Author/CharacterInterior fixture，只证明公开调度、角色选择绑定和接受链路；
   Matrix 仍是 `declaration_only`，明确排除真实 DeepSeek、自主内容质量、OneBot 回执和 24 小时 soak。
   新增场景与 Life Ecology/Matrix 定向回归共 `31 passed`，静态 verifier 仍报告 `28 delayed trigger mechanisms`。
+
+### 2026-08-09：Life aftermath outcome public-host 调度资格薄片
+
+- 在同一公开宿主入口上补齐 `life.aftermath_outcome` 的角色选择链：已提交的 activity occurrence 到期后，
+  `CharacterInterior` 从当前 capability 提供的 outcome token 中自行选择，系统只负责来源、权限、CAS、接受和
+  occurrence 结算，不预置具体结果或人生方向。
+- 场景覆盖 `OutcomeObservationRecorded`、`OutcomeProposalRecorded`、`WorldOccurrenceSettled`；重复相同
+  tick/drain 与冷重建均不重复调用 outcome 选择、不追加事件，语义哈希和 cursor 保持一致。它使用 scripted
+  typed fixture，仅证明公开调度与 effect-once/replay 边界，不证明真实 DeepSeek、自主内容质量、OneBot 回执
+  或 24 小时 soak；Matrix 仍为 `declaration_only`。
 
 ### 2026-08-09：隔离验收证据的精确上下文边界
 
