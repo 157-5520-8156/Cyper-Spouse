@@ -13,6 +13,10 @@ from companion_daemon.world_v2.isolated_daemon_acceptance import (
     evaluate_deterministic_invariants,
     qualified_inventory_route_models,
 )
+from companion_daemon.world_v2.expression_draft import qq_expression_capabilities
+from companion_daemon.world_v2.character_interior.inbound_tool_contract import (
+    InboundToolContracts,
+)
 
 
 _RUNNER_PATH = Path(__file__).resolve().parents[2] / "scripts" / "run_isolated_daemon_acceptance.py"
@@ -25,6 +29,8 @@ _RUNNER_MODULE = importlib.util.module_from_spec(_RUNNER_SPEC)
 sys.modules[_RUNNER_SPEC.name] = _RUNNER_MODULE
 _RUNNER_SPEC.loader.exec_module(_RUNNER_MODULE)
 _ProviderCaptureState = _RUNNER_MODULE._ProviderCaptureState
+_forced_tool_request_hashes = _RUNNER_MODULE._forced_tool_request_hashes
+_canonical_hash = _RUNNER_MODULE._canonical_hash
 _ci_environment_detected = _RUNNER_MODULE._ci_environment_detected
 _daemon_environment = _RUNNER_MODULE._daemon_environment
 _network_topology = _RUNNER_MODULE._network_topology
@@ -820,6 +826,184 @@ def _capture_provider_presentation(material: dict[str, object]) -> dict[str, obj
     return state.report()
 
 
+def test_loopback_stub_returns_required_tool_arguments_for_tool_request() -> None:
+    """The isolated provider boundary must exercise the current forced-tool wire."""
+
+    state = _ProviderCaptureState(
+        mode="loopback-stub",
+        upstream_base_url=None,
+    )
+    tool_name = "character_inbound_initial_v1"
+    status, response = state.handle(
+        path="/chat/completions",
+        payload={
+            "messages": [
+                {"role": "system", "content": "COMBINED OUTPUT ENVELOPE"},
+                {"role": "user", "content": "请按当前角色状态回应。"},
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+            "tool_choice": {"type": "function", "function": {"name": tool_name}},
+        },
+        authorization="Bearer isolated-test",
+    )
+
+    assert status == 200
+    choices = response["choices"]
+    assert isinstance(choices, list) and choices
+    message = choices[0]["message"]
+    assert isinstance(message, dict)
+    calls = message.get("tool_calls")
+    assert isinstance(calls, list) and len(calls) == 1
+    function = calls[0]["function"]
+    assert function["name"] == tool_name
+    arguments = function["arguments"]
+    assert isinstance(arguments, str)
+    decoded = json.loads(arguments)
+    assert decoded["result_kind"] == "decision"
+    assert decoded["appraisal_draft"]["affect"] == "open"
+    assert decoded["expression_draft"]["timing_choice"] == "now"
+
+
+def test_provider_capture_retains_presented_source_ids_for_causal_correlation() -> None:
+    state = _ProviderCaptureState(
+        mode="loopback-stub",
+        upstream_base_url=None,
+    )
+    status, _response = state.handle(
+        path="/chat/completions",
+        payload={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "pinned_context": {
+                                "source_event_ids": ["isolated-daemon-inbound-1"],
+                                "inner_life_snapshot": {
+                                    "source_refs": ["event:inner-life:1"],
+                                    "summary": "A source-bound current state.",
+                                },
+                            },
+                            "user_text": '{"source_event_ids":["spoofed-by-user"]}',
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            ],
+            "temperature": 0.7,
+        },
+        authorization="Bearer isolated-test",
+    )
+
+    assert status == 200
+    evidence = state.report()["request_evidence"]
+    assert isinstance(evidence, list) and evidence
+    assert evidence[0]["source_event_ids"] == ["isolated-daemon-inbound-1"]
+
+
+def test_provider_capture_reconstructs_final_atomic_tool_identity() -> None:
+    capabilities = qq_expression_capabilities(
+        "napcat",
+        recorded_cadence_mode="shadow",
+    )
+    contract = InboundToolContracts().contract_for(
+        phase="final",
+        transport="atomic",
+        capabilities=capabilities,
+        recall_allowed=False,
+    )
+    state = _ProviderCaptureState(
+        mode="loopback-stub",
+        upstream_base_url=None,
+    )
+    status, _response = state.handle(
+        path="/chat/completions",
+        payload={
+            "messages": [
+                {"role": "system", "content": "COMBINED OUTPUT ENVELOPE"},
+            ],
+            "temperature": 0.7,
+            "tools": list(contract.provider_tools),
+            "tool_choice": contract.provider_tool_choice,
+        },
+        authorization="Bearer isolated-test",
+    )
+
+    assert status == 200
+    evidence = state.report()["request_evidence"]
+    assert isinstance(evidence, list) and evidence
+    assert evidence[0]["forced_tool_request_hashes"]
+    expected_hash = _canonical_hash(
+        {
+            "messages": [
+                {"role": "system", "content": "COMBINED OUTPUT ENVELOPE"},
+            ],
+            "temperature": 0.7,
+            "tools": list(contract.provider_tools),
+            "tool_choice": contract.provider_tool_choice,
+            "tool_contract_identity": contract.identity.request_identity_material(),
+        }
+    )
+    assert evidence[0]["forced_tool_request_hashes"] == [expected_hash]
+    assert _forced_tool_request_hashes(
+        {
+            "messages": [
+                {"role": "system", "content": "COMBINED OUTPUT ENVELOPE"},
+            ],
+            "temperature": 0.7,
+            "tools": list(contract.provider_tools),
+            "tool_choice": contract.provider_tool_choice,
+        }
+    ) == [expected_hash]
+
+
+def test_provider_capture_fails_closed_on_malformed_stream_schema() -> None:
+    payload = {
+        "messages": [{"role": "system", "content": "COMBINED OUTPUT ENVELOPE"}],
+        "temperature": 0.7,
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "character_inbound_initial_stream_v1",
+                    "description": "max_beats=1; max_later_beats=1",
+                    "parameters": {
+                        "anyOf": [
+                            {
+                                "properties": {
+                                    "result_kind": {"enum": ["decision"]},
+                                    "events": {
+                                        "items": {
+                                            "anyOf": [
+                                                {
+                                                    "properties": {"type": "malformed"},
+                                                }
+                                            ]
+                                        }
+                                    },
+                                }
+                            }
+                        ]
+                    },
+                },
+            }
+        ],
+        "tool_choice": {
+            "type": "function",
+            "function": {"name": "character_inbound_initial_stream_v1"},
+        },
+    }
+    assert _forced_tool_request_hashes(payload) == []
+
+
 def test_interruption_overlap_tracks_only_authoritative_role_provider_requests() -> None:
     background = _provider_request_evidence(
         {
@@ -1044,6 +1228,11 @@ def test_causal_report_does_not_join_unrelated_run_wide_coverage() -> None:
         "recall_material_present_count": 1,
         "source_closure_request_count": 1,
         "inner_life_snapshot_model_request_hashes": [accepted_request_hash],
+        # A mixed run may contain both a forced-tool and a plain role request;
+        # retaining both lanes is required for causal correlation.
+        "inner_life_snapshot_forced_tool_request_hashes": [
+            "forced-only-inner-life-request"
+        ],
         "recall_material_model_request_hashes": [unrelated_recall_request_hash],
         "source_closure_model_request_hashes": [unrelated_source_review_hash],
         "request_evidence": [
@@ -1180,6 +1369,7 @@ def test_production_source_authority_preserves_only_its_external_credentials(
     assert environment["OPENAI_PROXY_URL"] == ""
     assert environment["ARK_API_KEY"] == ""
     assert environment["CIVITAI_API_KEY"] == ""
+    assert environment["WORLD_V2_RECORDED_CADENCE_MODE"] == "shadow"
 
 
 def test_provider_acceptance_clears_source_authority_without_separate_opt_in(
@@ -1201,6 +1391,7 @@ def test_provider_acceptance_clears_source_authority_without_separate_opt_in(
     assert environment["OPENAI_API_KEY"] == ""
     assert environment["OPENROUTER_API_KEY"] == ""
     assert environment["WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED"] == "false"
+    assert environment["WORLD_V2_RECORDED_CADENCE_MODE"] == "shadow"
 
 
 def test_fake_acceptance_also_clears_ambient_source_authority(

@@ -26,6 +26,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import socket
 import sqlite3
@@ -55,6 +56,10 @@ from companion_daemon.world_v2.isolated_daemon_acceptance import (
 )
 from companion_daemon.world_v2.qq_c2c_host import qq_c2c_world_id
 from companion_daemon.world_v2.qq_c2c_onebot_app import create_qq_c2c_onebot_app
+from companion_daemon.world_v2.expression_draft import qq_expression_capabilities
+from companion_daemon.world_v2.character_interior.inbound_tool_contract import (
+    InboundToolContracts,
+)
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from companion_daemon.world_v2.structured_source_review_model import (
     StrictOutputCapabilityEvidence,
@@ -144,6 +149,169 @@ def _named_material(
 
     visit(value)
     return found
+
+
+def _presented_source_event_ids(value: object) -> list[str]:
+    """Extract source IDs from named context material, never arbitrary prose.
+
+    Provider prompts contain user text as well as pinned context.  Parsing a
+    user-supplied JSON snippet that happens to contain ``source_event_ids``
+    would create a false causal edge, so IDs are accepted only below a
+    context-bearing container.
+    """
+
+    found: list[str] = []
+    context_markers = (
+        "context",
+        "capsule",
+        "snapshot",
+        "observation",
+        "source_closure",
+        "turn_state",
+    )
+
+    def add(raw: object) -> None:
+        if isinstance(raw, str) and raw.strip():
+            found.append(raw)
+        elif isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, str) and item.strip():
+                    found.append(item)
+
+    def visit(item: object, path: tuple[str, ...] = ()) -> None:
+        if isinstance(item, dict):
+            for key, child in item.items():
+                key_name = str(key).lower()
+                trusted_container = any(
+                    any(marker in parent for marker in context_markers)
+                    for parent in path
+                )
+                if trusted_container and key_name in {"source_event_id", "source_event_ids"}:
+                    add(child)
+                visit(child, path + (key_name,))
+        elif isinstance(item, list):
+            for child in item:
+                visit(child, path)
+
+    visit(value)
+    return list(dict.fromkeys(found))
+
+
+def _forced_tool_request_hashes(payload: dict[str, object]) -> list[str]:
+    """Reconstruct local forced-tool identities without sending them upstream.
+
+    The production request hash intentionally includes local contract identity,
+    while the provider only receives the rendered tool schema.  The hermetic
+    capture can independently derive the identity from that schema and use it
+    solely to correlate the provider observation with the durable audit chain.
+    """
+
+    raw_tools = payload.get("tools")
+    if not isinstance(raw_tools, list) or len(raw_tools) != 1:
+        return []
+    tool = raw_tools[0]
+    if not isinstance(tool, dict):
+        return []
+    function = tool.get("function")
+    if not isinstance(function, dict):
+        return []
+    tool_name = function.get("name")
+    description = function.get("description")
+    if not isinstance(tool_name, str) or not isinstance(description, str):
+        return []
+    name_match = re.fullmatch(
+        r"character_inbound_(initial|after_recall|final)(?:_(atomic|stream))?_v1",
+        tool_name,
+    )
+    if name_match is None:
+        return []
+    phase = name_match.group(1)
+    transport = name_match.group(2) or "atomic"
+    limits = re.search(r"max_beats=(\d+); max_later_beats=(\d+)", description)
+    if limits is None:
+        return []
+    max_beats = int(limits.group(1))
+    max_later_beats = int(limits.group(2))
+    parameters = function.get("parameters")
+    branches = parameters.get("anyOf") if isinstance(parameters, dict) else None
+    if not isinstance(branches, list) or not branches:
+        return []
+    recall_allowed = len(branches) == 2
+    decision_branch = next(
+        (
+            branch
+            for branch in branches
+            if isinstance(branch, dict)
+            and isinstance(branch.get("properties"), dict)
+            and isinstance(branch["properties"].get("result_kind"), dict)
+            and branch["properties"]["result_kind"].get("enum") == ["decision"]
+        ),
+        None,
+    )
+    if not isinstance(decision_branch, dict):
+        return []
+    decision_properties = decision_branch.get("properties")
+    if not isinstance(decision_properties, dict):
+        return []
+    expression_schema = decision_properties.get("expression_draft")
+    if transport == "stream":
+        events = decision_properties.get("events")
+        if not isinstance(events, dict):
+            return []
+        items = events.get("items")
+        event_branches = items.get("anyOf") if isinstance(items, dict) else None
+        head = None
+        if isinstance(event_branches, list):
+            for branch in event_branches:
+                if not isinstance(branch, dict):
+                    continue
+                branch_properties = branch.get("properties")
+                if not isinstance(branch_properties, dict):
+                    continue
+                type_schema = branch_properties.get("type")
+                if not isinstance(type_schema, dict):
+                    continue
+                if type_schema.get("enum") == ["head"]:
+                    head = branch
+                    break
+        expression_schema = head
+    if not isinstance(expression_schema, dict):
+        return []
+    required = expression_schema.get("required")
+    if not isinstance(required, list):
+        return []
+    require_turn_posture = "turn_posture" in required
+    contracts = InboundToolContracts()
+    messages = payload.get("messages")
+    temperature = payload.get("temperature")
+    if not isinstance(messages, list) or not isinstance(temperature, (int, float)):
+        return []
+    hashes: list[str] = []
+    # The isolated daemon environment fixes cadence to shadow.  Do not report
+    # indistinguishable off/shadow schema candidates as if both were evidence.
+    for recorded_cadence_mode in ("shadow",):
+        capabilities = qq_expression_capabilities(
+            "napcat",
+            recorded_cadence_mode=recorded_cadence_mode,  # type: ignore[arg-type]
+        ).model_copy(update={"max_beats": max_beats, "max_later_beats": max_later_beats})
+        contract = contracts.contract_for(
+            phase=phase,  # type: ignore[arg-type]
+            transport=transport,  # type: ignore[arg-type]
+            capabilities=capabilities,
+            recall_allowed=recall_allowed,
+            require_turn_posture=require_turn_posture,
+        )
+        if list(contract.provider_tools) != raw_tools:
+            continue
+        identity_payload = {
+            "messages": messages,
+            "temperature": temperature,
+            "tools": raw_tools,
+            "tool_choice": payload.get("tool_choice"),
+            "tool_contract_identity": contract.identity.request_identity_material(),
+        }
+        hashes.append(_canonical_hash(identity_payload))
+    return hashes
 
 
 def _has_source_bound_semantic_material(value: object) -> bool:
@@ -315,6 +483,8 @@ def _provider_request_evidence(payload: dict[str, object]) -> dict[str, object]:
     inner_life_snapshot_hash = (
         _canonical_hash(inner_life_snapshots) if inner_life_snapshots else None
     )
+    source_event_ids = _presented_source_event_ids(decoded)
+    forced_tool_request_hashes = _forced_tool_request_hashes(payload)
     recall_hash = _canonical_hash(recall) if recall else None
     emotion_hash = _canonical_hash(emotion) if emotion else None
     temperature = payload.get("temperature")
@@ -332,7 +502,9 @@ def _provider_request_evidence(payload: dict[str, object]) -> dict[str, object]:
         "request_hash": _canonical_hash(payload),
         "presentation_hash": _canonical_hash(messages),
         "model_invocation_request_hash": model_invocation_request_hash,
+        "forced_tool_request_hashes": forced_tool_request_hashes,
         "inner_life_snapshot_hash": inner_life_snapshot_hash,
+        "source_event_ids": source_event_ids,
         "recall_context_hash": recall_hash,
         "emotion_context_hash": emotion_hash,
         "source_closure_request": source_closure,
@@ -415,6 +587,7 @@ class _ProviderCaptureState:
         ):
             return json.dumps(
                 {
+                    "result_kind": "decision",
                     "appraisal_draft": {
                         "appraise": True,
                         "affect": "open",
@@ -499,9 +672,46 @@ class _ProviderCaptureState:
                     1,
                     sum(len(message["content"]) for message in messages) // 4,
                 )
+                tools = payload.get("tools")
+                if isinstance(tools, list) and tools:
+                    # The live CharacterInterior route now uses a required
+                    # function tool.  Keep this hermetic provider boundary
+                    # faithful to that transport: the role result lives in
+                    # tool-call arguments, never in a legacy content field.
+                    if len(tools) != 1 or not isinstance(tools[0], dict):
+                        return 400, {"error": {"message": "stub expects one tool"}}
+                    function = tools[0].get("function")
+                    tool_name = function.get("name") if isinstance(function, dict) else None
+                    if not isinstance(tool_name, str) or not tool_name:
+                        return 400, {"error": {"message": "stub tool name is required"}}
+                    tool_choice = payload.get("tool_choice")
+                    requested_name = (
+                        tool_choice.get("function", {}).get("name")
+                        if isinstance(tool_choice, dict)
+                        and isinstance(tool_choice.get("function"), dict)
+                        else None
+                    )
+                    if requested_name is not None and requested_name != tool_name:
+                        return 400, {"error": {"message": "stub tool choice mismatch"}}
+                    message: dict[str, object] = {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": f"isolated-tool-{secrets.token_hex(8)}",
+                                "type": "function",
+                                "function": {
+                                    "name": tool_name,
+                                    "arguments": content,
+                                },
+                            }
+                        ],
+                    }
+                else:
+                    message = {"role": "assistant", "content": content}
                 return 200, {
                     "id": f"isolated-stub-{secrets.token_hex(8)}",
-                    "choices": [{"message": {"role": "assistant", "content": content}}],
+                    "choices": [{"message": message}],
                     "usage": {
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
@@ -564,7 +774,11 @@ class _ProviderCaptureState:
             and isinstance(record.get("emotion_context_hash"), str)
         ]
         return {
-            "contract": "provider-presentation-capture.1",
+            # Version 2 adds source identities and forced-tool candidate
+            # hashes.  The old .1 report only represented raw/model hashes;
+            # callers must not silently interpret the new correlation fields
+            # as the old contract.
+            "contract": "provider-presentation-capture.2",
             "capture_mode": self.mode,
             "raw_prompt_retained": False,
             "raw_response_retained": False,
@@ -580,10 +794,19 @@ class _ProviderCaptureState:
                 dict.fromkeys(
                     str(record["model_invocation_request_hash"])
                     for record in inner_life_snapshot_records
-                    if isinstance(
-                        record.get("model_invocation_request_hash"),
-                        str,
+                    if isinstance(record.get("model_invocation_request_hash"), str)
+                )
+            ),
+            "inner_life_snapshot_forced_tool_request_hashes": list(
+                dict.fromkeys(
+                    request_hash
+                    for record in inner_life_snapshot_records
+                    for request_hash in (
+                        record.get("forced_tool_request_hashes")
+                        if isinstance(record.get("forced_tool_request_hashes"), list)
+                        else []
                     )
+                    if isinstance(request_hash, str)
                 )
             ),
             "recall_material_present_count": sum(
@@ -624,7 +847,10 @@ class _ProviderCaptureState:
             "request_evidence": [
                 {
                     "model_invocation_request_hash": record.get("model_invocation_request_hash"),
+                    "forced_tool_request_hashes": record.get("forced_tool_request_hashes", []),
                     "inner_life_snapshot_hash": record.get("inner_life_snapshot_hash"),
+                    "source_event_ids": record.get("source_event_ids", []),
+                    "authoritative_role_request": record.get("authoritative_role_request"),
                     "recall_context_hash": record.get("recall_context_hash"),
                     "emotion_context_hash": record.get("emotion_context_hash"),
                     "source_closure_request": record["source_closure_request"],
@@ -1138,6 +1364,10 @@ def _daemon_environment(
             # has its own transport + production-host acceptance tests; keep
             # this hash-capture harness on its declared non-streaming surface.
             "WORLD_V2_EXPRESSION_EPISODE_MODE": "shadow",
+            # Keep the recorded-cadence capability profile hermetic too.  The
+            # capture-side contract reconstruction must match the daemon's
+            # actual profile rather than inheriting a caller's ambient mode.
+            "WORLD_V2_RECORDED_CADENCE_MODE": "shadow",
             "ATTACHMENT_CACHE_PATH": str(attachment_cache),
         }
     )
@@ -2231,7 +2461,10 @@ def build_causal_audit(
             "AffectEpisodeUpdated",
         )
     )
-    inner_life_snapshot_model_hashes = _string_set(
+    forced_inner_life_hashes = _string_set(
+        provider_audit.get("inner_life_snapshot_forced_tool_request_hashes")
+    )
+    inner_life_snapshot_model_hashes = forced_inner_life_hashes | _string_set(
         provider_audit.get("inner_life_snapshot_model_request_hashes")
     )
     recall_material_model_hashes = _string_set(
@@ -2255,6 +2488,11 @@ def build_causal_audit(
             request_hash = item.get("model_invocation_request_hash")
             if isinstance(request_hash, str):
                 request_evidence_by_hash[request_hash] = item
+            forced_hashes = item.get("forced_tool_request_hashes")
+            if isinstance(forced_hashes, list):
+                for forced_hash in forced_hashes:
+                    if isinstance(forced_hash, str) and forced_hash.strip():
+                        request_evidence_by_hash[forced_hash] = item
 
     model_result_records = [
         item for item in final_replay.get("model_result_records", []) if isinstance(item, dict)
@@ -2401,6 +2639,11 @@ def build_causal_audit(
         ),
         "inner_life_snapshot_correlated_character_choice_request_hashes": sorted(
             accepted_character_choice_request_hashes & inner_life_snapshot_model_hashes
+        ),
+        "inner_life_snapshot_correlation_method": (
+            "provider_request_hash"
+            if accepted_character_choice_request_hashes & inner_life_snapshot_model_hashes
+            else "none"
         ),
         # Deliberately excludes prompts, responses and visible text. This is
         # enough to distinguish an aggregate validation failure from the exact
@@ -2825,6 +3068,8 @@ def run(
                 if model_mode != "real-provider" and visible_before_restart < 1:
                     raise RuntimeError(
                         "pre-restart turns did not reach the isolated provider capture"
+                        "\n"
+                        + first.log_tail()
                     )
                 if model_mode != "real-provider" and new_turn_effects < 1:
                     raise RuntimeError("new post-restart turn produced no visible provider effect")
@@ -2839,11 +3084,32 @@ def run(
                     provider_capture.report()
                     if isinstance(provider_capture, _ProviderCaptureState)
                     else {
-                        "contract": "provider-presentation-capture.1",
+                        "contract": "provider-presentation-capture.2",
                         "capture_mode": "disabled_fake",
                         "raw_prompt_retained": False,
                         "raw_response_retained": False,
                         "request_count": 0,
+                        "request_hashes": [],
+                        "presentation_hashes": [],
+                        "model_invocation_request_hashes": [],
+                        "inner_life_snapshot_present_count": 0,
+                        "inner_life_snapshot_hashes": [],
+                        "inner_life_snapshot_model_request_hashes": [],
+                        "inner_life_snapshot_forced_tool_request_hashes": [],
+                        "recall_material_present_count": 0,
+                        "recall_material_hashes": [],
+                        "recall_material_model_request_hashes": [],
+                        "recall_context_present_count": 0,
+                        "recall_context_hashes": [],
+                        "emotion_context_present_count": 0,
+                        "emotion_context_hashes": [],
+                        "source_closure_request_count": 0,
+                        "source_closure_request_hashes": [],
+                        "source_closure_model_request_hashes": [],
+                        "request_evidence": [],
+                        "causal_context_request_count": 0,
+                        "causal_context_request_hashes": [],
+                        "causal_context_model_request_hashes": [],
                     }
                 )
                 if production_source_authority:

@@ -967,14 +967,14 @@ commit：hash
   `93e2f9fb` 的 terminal-recovery 修复及当前 `02e0a01f`，因此这条运行态不能作为当前 HEAD 的证据。
   现场只读 `/health` 连续三次均可返回（约 2.6–3.7 秒），但在本次观测窗口（2026-08-09
   01:41–01:47，Asia/Shanghai）仍显示 `scheduler=failing`、`last_error=ValueError`，失败计数也在
-  增长；旧日志仍出现旧版的 `settling appraisal-only` 分支。`accepted world stimulus did not
+  增长；该 PID 的旧日志仍出现旧版的 `settling appraisal-only` 分支。`accepted world stimulus did not
   terminalize its source trigger` 仍保留为当前源码的防御性不变量错误，但旧进程反复触发它。这证明
   旧进程需要在人工发布门后重启，不能据此否定当前源码，也不能宣称生产恢复完成。当前未执行重启或
   生产替换。
 - 当前源码已将 proactive situation window 证据按已声明刺激事件去重并保留窗口锚点与最新 7 条；
   这避免 `trigger evidence must be a bounded unique tuple` 令整轮 scheduler 失败。该行为与
   `ExpressionPlan -> send_private_msg` 的主动联系回归均已有隔离测试，但仍需重启后的真实 daemon
-  观察确认。上段旧 PID 的 health 还显示 fast stream 为活动回复接口、delayed attention 接口保持禁用；
+  观察确认。上段 PID `12121` 的旧 health 还显示 fast stream 为活动回复接口、delayed attention 接口保持禁用；
   sidecar 暴露 `scope/expired_claim_count/recovered_attempt_count`，不再用未绑定 actor 的空查询伪装成
   scoped ready，这些字段同样不能当作当前 HEAD 已重启的运行证明。
 - 最新源码对单个坏 trigger 使用进程内 technical defer；world-stimulus 定向回归证明其他 trigger
@@ -984,6 +984,31 @@ commit：hash
 - 仍未宣称生产资格完成：当前生产账本保留 24 小时历史技术失败 warning，语义 embedding 8190 未部署时 Recall
   会降级到本地索引，Perception enforcement authority 与独立事实 reviewer 仍是明确 degraded 能力；这些不被
   结构化封套修复冒充为角色选择。真实 QQ 自由对聊、冷重放和 24 小时稳定性样本仍是 qualification gate。
+
+### 2026-08-09 继续核验：隔离 daemon required-tool 重启连续性
+
+- 首次运行 `loopback-stub` 失败的原因是资格 harness 仍返回旧式 `message.content`，而当前 CharacterInterior
+  已要求 required function tool；这不是生产 daemon 的失败。按红→绿修复后，stub 会从请求中的真实 tool
+  名返回单一 `tool_calls[].function.arguments`，并包含当前 transport 必需的 `result_kind=decision`，不改变角色
+  语义或生产 provider adapter。
+- 通过命令：
+  `uv run python scripts/run_isolated_daemon_acceptance.py --output /tmp/girl-agent-daemon-acceptance-loopback-fixed5.json --startup-timeout-seconds 120 --model-mode loopback-stub`。
+  运行契约 `isolated-daemon-process-acceptance.2`，UTC `2026-08-08T18:26:15Z`（Asia/Shanghai 02:26），只使用
+  临时库、127.0.0.1 daemon/OneBot/provider capture 和 test-only semantic authorities；生产库、真实 QQ 发送和外部
+  provider 均未触碰。
+- 两次独立 daemon 进程均健康启动；7 个入站 source identity（包括三条 burst 和两条重叠打断）全部保留，
+  burst 合并为一个 Observation，第二条打断在第一条 provider 请求仍在途时到达；重启后重复 source 的可见效果和
+  新模型请求均为 0，新 source 产生 1 个新效果；Action/回执 4 次，cold replay 与 live head 一致，最终事件数
+  156，确定性 invariant `passed=true`。这证明的是本地 provider HTTP/daemon/CAS/冷重放连续性，不是 DeepSeek
+  真实模型成功率或角色措辞资格。
+- 本次 loopback 还暴露并修正了一个审计边界：required-tool 的本地 contract identity 不发送给 provider，harness
+  通过 provider 可见的完整 tool schema 在本地重建候选 identity，再与持久化 request hash 对齐；因此没有为测试
+  方便把本地身份塞进 provider 请求。provider presentation capture 已升级为 `.2`：原始 provider/model
+  request hash、forced-tool 本地重建候选、来源事件 ID 和可见角色请求标记分别记录，混合 plain/forced 调用不会
+  互相覆盖；来源事件 ID 只作为审计展示，因果闭合仍只接受 exact provider request hash，不会用用户文本中的
+  同名字段兜底关联。隔离 daemon 固定使用 `WORLD_V2_RECORDED_CADENCE_MODE=shadow`，保证重建的 capability profile
+  与被测进程一致。真实 DeepSeek 100 次 forced-tool/stream/回执样本仍保持
+  `qualification_incomplete`，必须经过人工发布门。
 
 ### L1 第一个生产薄片：non-stream inbound initial（2026-08-08）
 
@@ -1029,5 +1054,5 @@ commit：hash
   soak。Life occurrence、NPC/reflection、memory consolidation、perception/media 仍按 limited/dormant 事实
   标注，不得因为 catalog 有行就激活。
 - 本轮当前工作树的定向回归均已通过（覆盖结构化角色、LLM、主动联系与延迟触发主机证据）；最终完整套件为
-  `4858 passed, 1 warning`，ruff、语法检查和 `git diff --check` 也通过。这仍不是真实 provider
+  `4860 passed, 1 warning`，ruff、语法检查和 `git diff --check` 也通过。这仍不是真实 provider
   qualification 或生产上线证明，具体资格缺口保持 `qualification_incomplete`。
