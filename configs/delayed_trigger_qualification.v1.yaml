@@ -1,0 +1,500 @@
+schema_version: 1
+matrix_id: delayed-trigger-qualification.1
+qualification_layer: declaration_only
+
+# This file is a static declaration inventory, not a host qualification result,
+# schedule, execution catalog, or production release authority. release_status
+# records intended inventory posture only; the catalog does not consume it as a
+# runtime truth. A later public-host scenario package must qualify execution.
+mechanisms:
+  - mechanism_id: proactive.event_driven
+    purpose: Event-driven proactive-contact consideration
+    release_status: active
+    upstream_authority: [accepted-character-visible-context-stimulus]
+    due_identity: {coordinates: [world_id, actor_ref, source_set, epoch, retry_ordinal], logical_deadline: next_consideration_at, merge_dedup_key: proactive_context_window}
+    controlled_injection: {public_seams: [QQC2CHost.inbound_text, QQC2CHost.inbound_fragment, QQC2CHost.tick, QQC2CHost.drain], upstream_material: [real accepted stimulus, logical Clock advance]}
+    expected_path: [scheduler discovery, TriggerProcess claim/CAS, CharacterInterior decision, typed proposal, Action/receipt]
+    legal_terminals: [now accepted, later scheduled, role silent, superseded, technical failure/retry]
+    visible_effect: qq
+    observability: [health, causal lineage, ModelResult, usage/cost, latency, ledger refs]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, lease expiry, late result, withdrawal/permission change, bad-trigger starvation]
+    vertical_lanes: [proactive_action]
+    closure_mechanisms: [expression-beats-deferred-replies]
+    projection_due_fields: [ProactiveOpportunity.scheduled_for]
+    action_kinds: [proactive_message]
+    model_contract: {purpose: proactive_contact, contract_identity: character-interior-proactive-contact-decision.1}
+    retry_policy: {policy_id: technical-retry-10-30-120.1, seconds: [600, 1800, 7200]}
+    activation_note: Active event opportunity; the scheduler never decides whether the character speaks.
+
+  - mechanism_id: proactive.ambient
+    purpose: Sparse ambient proactive-contact consideration
+    release_status: active
+    upstream_authority: [persisted ClockAdvanced opportunity]
+    due_identity: {coordinates: [world_id, actor_ref, epoch, retry_ordinal], logical_deadline: next_consideration_at, merge_dedup_key: proactive_ambient_epoch}
+    controlled_injection: {public_seams: [QQC2CHost.tick, QQC2CHost.drain], upstream_material: [logical Clock advance]}
+    expected_path: [scheduler discovery, TriggerProcess claim/CAS, CharacterInterior decision, typed proposal, Action/receipt]
+    legal_terminals: [now accepted, later scheduled, role silent, superseded, technical failure/retry]
+    visible_effect: qq
+    observability: [health, causal lineage, ModelResult, usage/cost, latency, ledger refs]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, lease expiry, late result, withdrawal/permission change, bad-trigger starvation]
+    vertical_lanes: [proactive_action]
+    closure_mechanisms: [expression-beats-deferred-replies]
+    projection_due_fields: [ProactiveOpportunity.scheduled_for]
+    action_kinds: [proactive_message]
+    model_contract: {purpose: proactive_contact, contract_identity: character-interior-proactive-contact-decision.1}
+    retry_policy: {policy_id: technical-retry-10-30-120.1, seconds: [600, 1800, 7200]}
+    activation_note: Active sparse fallback opportunity; no Clock event supplies motive or wording.
+
+  - mechanism_id: proactive.post_silent
+    purpose: Reconsideration after one role-authored proactive silence
+    release_status: active
+    upstream_authority: [accepted proactive silent decision]
+    due_identity: {coordinates: [world_id, actor_ref, source_set, epoch, retry_ordinal], logical_deadline: next_consideration_at, merge_dedup_key: proactive_post_silent_epoch}
+    controlled_injection: {public_seams: [QQC2CHost.tick, QQC2CHost.drain], upstream_material: [accepted role-silent terminal, logical Clock advance]}
+    expected_path: [scheduler discovery, TriggerProcess claim/CAS, CharacterInterior decision, typed proposal, Action/receipt]
+    legal_terminals: [now accepted, later scheduled, role silent, superseded, technical failure/retry]
+    visible_effect: qq
+    observability: [health, causal lineage, ModelResult, usage/cost, latency, ledger refs]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, lease expiry, late result, withdrawal/permission change, bad-trigger starvation]
+    vertical_lanes: [proactive_action]
+    closure_mechanisms: [expression-beats-deferred-replies]
+    projection_due_fields: [ProactiveOpportunity.scheduled_for]
+    action_kinds: [proactive_message]
+    model_contract: {purpose: proactive_contact, contract_identity: character-interior-proactive-contact-decision.1}
+    retry_policy: {policy_id: technical-retry-10-30-120.1, seconds: [600, 1800, 7200]}
+    activation_note: A prior silence closes only its own consideration and cannot consume future context.
+
+  - mechanism_id: proactive.technical_retry
+    purpose: Durable retry after proactive character-author technical failure
+    release_status: active
+    upstream_authority: [technical ModelResult terminal]
+    due_identity: {coordinates: [world_id, actor_ref, consideration_epoch, retry_ordinal], logical_deadline: next_retry_at, merge_dedup_key: proactive_retry_attempt}
+    controlled_injection: {public_seams: [QQC2CHost.tick, QQC2CHost.drain], upstream_material: [real technical failure terminal, logical Clock advance]}
+    expected_path: [scheduler discovery, TriggerProcess claim/CAS, same role author, typed proposal, Action/receipt]
+    legal_terminals: [accepted, role silent, superseded, technical failure/retry exhausted]
+    visible_effect: qq
+    observability: [health, causal lineage, ModelResult, usage/cost, latency, ledger refs]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, lease expiry, late result, withdrawal/permission change, bad-trigger starvation]
+    vertical_lanes: [proactive_action]
+    closure_mechanisms: [action-budget-receipt-recovery]
+    projection_due_fields: [ProactiveTechnicalRetryState.next_retry_at]
+    action_kinds: [proactive_message]
+    model_contract: {purpose: proactive_contact, contract_identity: character-interior-proactive-contact-decision.1}
+    retry_policy: {policy_id: technical-retry-10-30-120.1, seconds: [600, 1800, 7200]}
+    activation_note: Technical failure is never represented as character silence.
+
+  - mechanism_id: life.ecology
+    purpose: Deterministic event-driven or idle-heartbeat Life Ecology wake orchestration
+    release_status: active
+    upstream_authority: [accepted World change, persisted ClockAdvanced]
+    due_identity: {coordinates: [world_id, actor_ref, source_set, epoch], logical_deadline: next_consideration_at, merge_dedup_key: life_ecology_window}
+    controlled_injection: {public_seams: [QQC2CHost.inbound_text, QQC2CHost.inbound_fragment, QQC2CHost.tick, QQC2CHost.drain], upstream_material: [real accepted World source, logical Clock advance]}
+    expected_path: [scheduler discovery, TriggerProcess claim/CAS, installed followup dispatch, durable completion]
+    legal_terminals: [completed, idle, cooldown, superseded, technical failure/retry]
+    visible_effect: none
+    observability: [health, causal lineage, followup status, latency, ledger refs]
+    fault_matrix: [CAS conflict, restart, lease expiry, followup failure, same-deadline concurrency, bad-trigger starvation]
+    vertical_lanes: [life_ecology]
+    closure_mechanisms: [life-npc-outcome-continuity]
+    projection_due_fields: [LifeEcologyScheduleProjection.next_consideration_at]
+    retry_policy: {policy_id: technical-retry-10-30-120.1, seconds: [600, 1800, 7200]}
+    activation_note: Active scheduler core only; every model-bearing followup requires its own exact contract row and is not implied by this row.
+
+  - mechanism_id: npc.ecology
+    purpose: NPC event or ambient consideration
+    release_status: limited
+    trigger_mode: event_triggered
+    upstream_authority: [accepted NPC-visible World change, sparse ambient Clock]
+    due_identity: {coordinates: [world_id, npc_actor_ref, source_set, epoch], logical_deadline: triggering accepted event or unscheduled ambient opportunity, merge_dedup_key: npc_actor_context_window}
+    controlled_injection: {public_seams: [QQC2CHost.tick, QQC2CHost.drain], upstream_material: [accepted NPC-visible source, logical Clock advance]}
+    expected_path: [scheduler discovery, NPC claim/CAS, NPC Interior decision, typed World proposal, settlement]
+    legal_terminals: [accepted, npc no-change, superseded, technical failure/retry]
+    visible_effect: conditional
+    observability: [health, causal lineage, ModelResult, usage/cost, latency, ledger refs]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, lease expiry, late result, withdrawal/permission change, bad-trigger starvation]
+    vertical_lanes: [npc_ecology]
+    closure_mechanisms: [life-npc-outcome-continuity]
+    projection_due_fields: []
+    activation_note: Limited because no unified durable NPC schedule Projection or declared structured model contract exists.
+
+  - mechanism_id: reflection.life
+    purpose: Source-bound private life reflection opportunity
+    release_status: limited
+    trigger_mode: event_triggered
+    upstream_authority: [accepted appraisal or settled experience]
+    due_identity: {coordinates: [world_id, actor_ref, source_set, epoch], logical_deadline: immediate accepted appraisal event, merge_dedup_key: reflection_source_window}
+    controlled_injection: {public_seams: [QQC2CHost.inbound_text, QQC2CHost.inbound_fragment, QQC2CHost.tick, QQC2CHost.drain], upstream_material: [real accepted appraisal or experience, logical Clock advance]}
+    expected_path: [scheduler discovery, TriggerProcess claim/CAS, CharacterInterior reflection, typed transition, terminal]
+    legal_terminals: [accepted, role no-change, superseded, technical failure/retry]
+    visible_effect: none
+    observability: [health, causal lineage, ModelResult, usage/cost, latency, ledger refs]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, lease expiry, late result, withdrawal/permission change, bad-trigger starvation]
+    vertical_lanes: [life_reflection]
+    closure_mechanisms: [appraisal-affect-relationship-impression]
+    projection_due_fields: []
+    activation_note: Limited because the current scheduler opens immediately and owns neither a delayed due field nor a reflection-specific installed role contract.
+
+  - mechanism_id: memory.candidate_consolidation
+    purpose: Due MemoryCandidate review and consolidation
+    release_status: dormant
+    upstream_authority: [MemoryCandidate accepted with review_due_at]
+    due_identity: {coordinates: [world_id, actor_ref, candidate_id, revision], logical_deadline: review_due_at, merge_dedup_key: memory_candidate_revision}
+    controlled_injection: {public_seams: [], upstream_material: [immutable historical MemoryCandidate only]}
+    expected_path: [schema and cold-replay compatibility only]
+    legal_terminals: [retain, withdraw, revise, role no-change, superseded, technical failure/retry]
+    visible_effect: none
+    observability: [health, causal lineage, ModelResult, usage/cost, latency, ledger refs]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, lease expiry, late result, withdrawal/permission change, bad-trigger starvation]
+    vertical_lanes: []
+    closure_mechanisms: [source-bound-fact-experience-memory-core]
+    projection_due_fields: []
+    activation_note: Dormant because review_due_at has no production scheduler consumer or consolidation role contract; withdrawal review is a different mechanism.
+
+  - mechanism_id: action.authorized_due
+    purpose: Exact dispatch of an authorized Action when not_before becomes due
+    release_status: active
+    upstream_authority: [ActionAuthorized]
+    due_identity: {coordinates: [world_id, action_id, idempotency_key], logical_deadline: Action.not_before, merge_dedup_key: action_idempotency_key}
+    controlled_injection: {public_seams: [QQC2CHost.tick, QQC2CHost.drain, WorldV2PlatformHost.receipt], upstream_material: [real authorized Action, logical Clock advance, formal receipt]}
+    expected_path: [scheduler discovery, Action claim/CAS, dispatch, formal receipt, settlement]
+    legal_terminals: [delivered, failed, cancelled, expired, unknown]
+    visible_effect: conditional
+    observability: [health, causal lineage, Action state, budget/usage, dispatch latency, ledger refs]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, lease expiry, late result, withdrawal/permission change, bad-trigger starvation]
+    vertical_lanes: [clock, settlement, recovery]
+    closure_mechanisms: [action-budget-receipt-recovery]
+    projection_due_fields: [Action.not_before, Action.expires_at, ClaimLease.expires_at]
+    action_kinds: [reply, followup, proactive_message, reaction, sticker, typing, media_planning, media_render, media_inspection, media_repair, media_delivery]
+    activation_note: Active inventory declaration; a later host scenario must intercept transport and save a real receipt before qualification.
+
+  - mechanism_id: expression.deferred_reply
+    purpose: Character-authored later reply Action
+    release_status: active
+    upstream_authority: [accepted Expression timing later]
+    due_identity: {coordinates: [world_id, actor_ref, plan_id, beat_id], logical_deadline: ExpressionPlanManifestBeatRef.not_before, merge_dedup_key: expression_beat_id}
+    controlled_injection: {public_seams: [QQC2CHost.inbound_text, QQC2CHost.inbound_fragment, QQC2CHost.tick, QQC2CHost.drain, WorldV2PlatformHost.receipt], upstream_material: [real inbound Observation, logical Clock advance, formal receipt]}
+    expected_path: [CharacterInterior decision, typed Expression acceptance, Action claim/CAS, dispatch, receipt]
+    legal_terminals: [delivered, failed, cancelled, expired, unknown, superseded]
+    visible_effect: qq
+    observability: [health, causal lineage, ModelResult, Action state, latency, ledger refs]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, lease expiry, late result, withdrawal/permission change, bad-trigger starvation]
+    vertical_lanes: [expression_episode, clock, settlement]
+    closure_mechanisms: [expression-beats-deferred-replies]
+    projection_due_fields: [ExpressionPlanManifestBeatRef.not_before, ExpressionPlanManifestBeatRef.expires_at]
+    action_kinds: [followup]
+    activation_note: Active; timing is an explicit character coordinate, never a technical-failure fallback.
+
+  - mechanism_id: expression.multibeat
+    purpose: Ordered later Beats in one accepted ExpressionPlan
+    release_status: active
+    upstream_authority: [ExpressionPlanAccepted]
+    due_identity: {coordinates: [world_id, actor_ref, plan_id, beat_id, beat_index], logical_deadline: ExpressionPlanManifestBeatRef.not_before, merge_dedup_key: expression_plan_beat}
+    controlled_injection: {public_seams: [QQC2CHost.inbound_text, QQC2CHost.inbound_fragment, QQC2CHost.tick, QQC2CHost.drain, WorldV2PlatformHost.receipt], upstream_material: [real inbound Observation, logical Clock advance, formal receipt]}
+    expected_path: [CharacterInterior decision, ExpressionPlan acceptance, per-Beat Action claim/CAS, dispatch, receipt]
+    legal_terminals: [delivered, failed, cancelled, expired, unknown, interrupted, plan completed]
+    visible_effect: qq
+    observability: [health, causal lineage, ModelResult, Action state, per-Beat latency, ledger refs]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, lease expiry, late result, withdrawal/permission change, bad-trigger starvation]
+    vertical_lanes: [expression_episode, clock, settlement]
+    closure_mechanisms: [expression-beats-deferred-replies]
+    projection_due_fields: [ExpressionPlanManifestBeatRef.not_before, ExpressionPlanManifestBeatRef.expires_at]
+    action_kinds: [reply, followup, reaction, sticker, typing]
+    activation_note: Active; all Beats have one semantic author and remain individually settleable.
+
+  - mechanism_id: expression.reconsideration
+    purpose: Reconsider remaining frozen Beats after user interjection
+    release_status: active
+    trigger_mode: event_triggered
+    upstream_authority: [new Observation while accepted Beats remain]
+    due_identity: {coordinates: [world_id, actor_ref, plan_id, interruption_observation_ref, epoch], logical_deadline: interjecting Observation commit, merge_dedup_key: plan_interruption_epoch}
+    controlled_injection: {public_seams: [QQC2CHost.inbound_text, QQC2CHost.inbound_fragment, QQC2CHost.tick, QQC2CHost.drain, WorldV2PlatformHost.receipt], upstream_material: [real interjecting Observation, logical Clock advance, formal receipt]}
+    expected_path: [scheduler discovery, TriggerProcess claim/CAS, CharacterInterior reconsideration, typed cancellation or continuation, Action/receipt]
+    legal_terminals: [continue, revise, cancel, role no-change, superseded, technical failure/retry]
+    visible_effect: qq
+    observability: [health, causal lineage, ModelResult, Action state, latency, ledger refs]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, lease expiry, late result, withdrawal/permission change, bad-trigger starvation]
+    vertical_lanes: [expression_reconsideration]
+    closure_mechanisms: [expression-beats-deferred-replies]
+    projection_due_fields: []
+    model_contract: {purpose: expression_reconsideration, contract_identity: character-interior-expression-reconsideration-decision.1}
+    activation_note: Active; latest cursor gates every still-visible Beat.
+
+  - mechanism_id: conversation.commitment_due
+    purpose: Dispatch or break a deferred-reply private commitment at its due window
+    release_status: active
+    upstream_authority: [accepted PrivateCommitment with due_window]
+    due_identity: {coordinates: [world_id, actor_ref, commitment_id, revision], logical_deadline: CommitmentValues.due_window, merge_dedup_key: commitment_revision}
+    controlled_injection: {public_seams: [QQC2CHost.tick, QQC2CHost.drain, WorldV2PlatformHost.receipt], upstream_material: [real accepted deferred reply, logical Clock advance, formal receipt]}
+    expected_path: [Clock-derived due discovery, deferred reply Action claim/CAS, dispatch, receipt or deadline transition]
+    legal_terminals: [due, fulfilled, broken, released, cancelled, expired, unknown]
+    visible_effect: qq
+    observability: [health, causal lineage, authority revision, expiry latency, ledger refs]
+    fault_matrix: [CAS conflict, restart, lease expiry, late result, withdrawal/permission change, same-deadline concurrency, bad-trigger starvation]
+    vertical_lanes: [clock]
+    closure_mechanisms: [situation-context-and-advisory, expression-beats-deferred-replies, action-budget-receipt-recovery]
+    projection_due_fields: [CommitmentValues.due_window]
+    action_kinds: [followup]
+    activation_note: Active only for the installed deferred-reply commitment runtime.
+
+  - mechanism_id: conversation.thread_expiry
+    purpose: Mechanical expiry of an accepted ConversationThread
+    release_status: dormant
+    trigger_mode: replay_only
+    upstream_authority: [accepted ThreadValues with expires_at]
+    due_identity: {coordinates: [world_id, actor_ref, thread_id, revision], logical_deadline: ThreadValues.expires_at, merge_dedup_key: thread_revision}
+    controlled_injection: {public_seams: [], upstream_material: [cold replay fixture only]}
+    expected_path: [cold replay, ThreadExpired reducer compatibility]
+    legal_terminals: [expired, resolved, superseded, cancelled]
+    visible_effect: none
+    observability: [replay report, mechanism closure status, ledger refs]
+    fault_matrix: [restart, replay drift, stale revision, time boundary]
+    vertical_lanes: []
+    closure_mechanisms: [situation-context-and-advisory]
+    projection_due_fields: []
+    activation_note: Dormant because the reducer/event exists but no production scheduler emits ThreadExpired.
+
+  - mechanism_id: conversation.expectation_expiry
+    purpose: Expiring advisory view of a ResponseExpectationAuthority
+    release_status: limited
+    trigger_mode: derived_formula
+    upstream_authority: [accepted ResponseExpectationAuthority]
+    due_identity: {coordinates: [world_id, actor_ref, source_plan_id, source_beat_id], logical_deadline: ResponseExpectationAuthority.expires_at, merge_dedup_key: expectation_source_beat}
+    controlled_injection: {public_seams: [QQC2CHost.inbound_text, QQC2CHost.inbound_fragment, QQC2CHost.tick], upstream_material: [real accepted expression, logical Clock advance]}
+    expected_path: [projection read, expiry filtering, no independent proactive trigger]
+    legal_terminals: [fulfilled, superseded, still pending until original expiry, expired advisory]
+    visible_effect: none
+    observability: [health, expectation assessment, source plan/beat refs]
+    fault_matrix: [restart, stale projection, user reply supersession, time boundary]
+    vertical_lanes: [clock]
+    closure_mechanisms: [situation-context-and-advisory]
+    projection_due_fields: [ResponseExpectationAuthority.not_before, ResponseExpectationAuthority.expires_at]
+    activation_note: Limited because expiry is a derived read filter, not a scheduler-owned terminal event.
+
+  - mechanism_id: life.activity_occurrence
+    purpose: Deterministic activity and occurrence due discovery
+    release_status: active
+    upstream_authority: [accepted Plan or Activity, committed WorldOccurrence]
+    due_identity: {coordinates: [world_id, actor_ref, lifecycle_kind, source_id, revision], logical_deadline: lifecycle_due_at, merge_dedup_key: lifecycle_source_revision}
+    controlled_injection: {public_seams: [QQC2CHost.tick, QQC2CHost.drain], upstream_material: [real accepted Plan/Activity/Occurrence, logical Clock advance]}
+    expected_path: [Clock-derived discovery, claim/CAS, lifecycle opportunity dispatch]
+    legal_terminals: [due opportunity, expired, superseded]
+    visible_effect: conditional
+    observability: [health, causal lineage, ModelResult, lifecycle state, latency, ledger refs]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, lease expiry, late result, withdrawal/permission change, bad-trigger starvation]
+    vertical_lanes: [life_ecology, clock]
+    closure_mechanisms: [life-npc-outcome-continuity, open-world-temporary-events]
+    projection_due_fields: [PlanStateProjection.scheduled_window, WorldOccurrenceProjection.time_window]
+    activation_note: Active deterministic discovery declaration only; each model-bearing followup is declared separately below.
+
+  - mechanism_id: life.activity_lifecycle
+    purpose: Character-authored transition of one due Activity lifecycle opportunity
+    release_status: active
+    trigger_mode: event_triggered
+    upstream_authority: [accepted due Activity opportunity]
+    due_identity: {coordinates: [world_id, actor_ref, activity_id, revision, wake_event_ref], logical_deadline: accepted lifecycle opportunity, merge_dedup_key: activity_lifecycle_revision}
+    controlled_injection: {public_seams: [QQC2CHost.tick, QQC2CHost.drain], upstream_material: [real accepted Activity, logical Clock advance]}
+    expected_path: [Life Ecology wake, CharacterInterior activity choice, typed proposal, acceptance or no-change]
+    legal_terminals: [transitioned, no-change, blocked, superseded, technical failure]
+    visible_effect: conditional
+    observability: [health, causal lineage, ModelResult, lifecycle state, latency, ledger refs]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, late result, source revision drift]
+    vertical_lanes: [life_ecology]
+    closure_mechanisms: [life-npc-outcome-continuity]
+    projection_due_fields: []
+    model_contract: {purpose: activity_lifecycle_choice, contract_identity: character-interior-activity-lifecycle-choice.1}
+    retry_policy: {policy_id: technical-retry-10-30-120.1, seconds: [600, 1800, 7200]}
+    activation_note: Active only for the installed ActivityLifecycleWorker followup.
+
+  - mechanism_id: life.aftermath_outcome
+    purpose: Character selection of one sourced outcome after a due occurrence
+    release_status: active
+    trigger_mode: event_triggered
+    upstream_authority: [committed WorldOccurrence due for settlement]
+    due_identity: {coordinates: [world_id, actor_ref, occurrence_id, revision, wake_event_ref], logical_deadline: accepted occurrence wake, merge_dedup_key: occurrence_outcome_revision}
+    controlled_injection: {public_seams: [QQC2CHost.tick, QQC2CHost.drain], upstream_material: [real committed occurrence, logical Clock advance]}
+    expected_path: [Life Ecology wake, CharacterInterior outcome selection, typed settlement, aftermath]
+    legal_terminals: [settled, no-change, superseded, technical failure]
+    visible_effect: conditional
+    observability: [health, causal lineage, ModelResult, occurrence state, latency, ledger refs]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, late result, source revision drift]
+    vertical_lanes: [life_ecology, outcome]
+    closure_mechanisms: [life-npc-outcome-continuity, open-world-temporary-events]
+    projection_due_fields: []
+    model_contract: {purpose: outcome_selection, contract_identity: character-interior-outcome-selection-decision.1}
+    retry_policy: {policy_id: technical-retry-10-30-120.1, seconds: [600, 1800, 7200]}
+    activation_note: Active exact outcome-selection phase; it does not imply memory retention or life development.
+
+  - mechanism_id: life.aftermath_memory
+    purpose: Character retention decision for one settled sourced experience
+    release_status: limited
+    trigger_mode: event_triggered
+    upstream_authority: [settled sourced Experience]
+    due_identity: {coordinates: [world_id, actor_ref, experience_id, source_event_ref, retry_ordinal], logical_deadline: settled experience or durable retry, merge_dedup_key: experience_memory_source_retry}
+    controlled_injection: {public_seams: [QQC2CHost.tick, QQC2CHost.drain], upstream_material: [real settled occurrence and Experience, logical Clock advance]}
+    expected_path: [Life aftermath, CharacterInterior retention decision, MemoryCandidate transition or no-change]
+    legal_terminals: [retained, not retained, superseded, technical failure/retry]
+    visible_effect: none
+    observability: [health, causal lineage, ModelResult, memory candidate, retry state, ledger refs]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, late result, source revision drift]
+    vertical_lanes: [life_ecology]
+    closure_mechanisms: [source-bound-fact-experience-memory-core, life-npc-outcome-continuity]
+    projection_due_fields: []
+    model_contract: {purpose: experience_memory_retention, contract_identity: character-interior-experience-memory-retention.1}
+    retry_policy: {policy_id: technical-retry-10-30-120.1, seconds: [600, 1800, 7200]}
+    activation_note: Limited because character memory is deployment-optional and its retry authority is source/lane scoped.
+
+  - mechanism_id: life.development
+    purpose: Open-life development choice and world-author followup
+    release_status: limited
+    trigger_mode: event_triggered
+    upstream_authority: [owned Life Ecology wake and current sourced life context]
+    due_identity: {coordinates: [world_id, actor_ref, wake_event_ref, development_epoch, retry_ordinal], logical_deadline: owned Life Ecology wake, merge_dedup_key: life_development_wake_epoch}
+    controlled_injection: {public_seams: [QQC2CHost.tick, QQC2CHost.drain], upstream_material: [real accepted World source, logical Clock advance]}
+    expected_path: [Life Ecology wake, CharacterInterior life choice, world-author adjudication, source review, typed acceptance]
+    legal_terminals: [accepted, no-change, superseded, technical failure]
+    visible_effect: conditional
+    observability: [health, causal lineage, ModelResult, development attempt, usage/cost, ledger refs]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, late result, source closure rejection]
+    vertical_lanes: [life_ecology]
+    closure_mechanisms: [life-npc-outcome-continuity, open-world-temporary-events]
+    projection_due_fields: []
+    model_contract: {purpose: life_development_choice, contract_identity: character-interior-life-development-choice.1}
+    retry_policy: {policy_id: technical-retry-10-30-120.1, seconds: [600, 1800, 7200]}
+    activation_note: Limited because the installed world-author and source-review stages are custom model contracts without independent host evidence.
+
+  - mechanism_id: life.open_world_generation
+    purpose: Legacy bounded open-world event generation followup
+    release_status: limited
+    trigger_mode: event_triggered
+    upstream_authority: [owned Life Ecology wake and active Plan context]
+    due_identity: {coordinates: [world_id, actor_ref, wake_event_ref, event_epoch], logical_deadline: owned Life Ecology wake, merge_dedup_key: open_world_wake_epoch}
+    controlled_injection: {public_seams: [QQC2CHost.tick, QQC2CHost.drain], upstream_material: [real active Plan, logical Clock advance]}
+    expected_path: [Life Ecology wake, custom open-world model, typed proposal or no-change]
+    legal_terminals: [accepted, no-change, superseded, technical failure]
+    visible_effect: conditional
+    observability: [health, causal lineage, model attempt, usage/cost, ledger refs]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, late result, source closure rejection]
+    vertical_lanes: [life_ecology]
+    closure_mechanisms: [open-world-temporary-events]
+    projection_due_fields: []
+    activation_note: Limited and mutually exclusive with open-life development; its custom model protocol has no installed StructuredRole contract.
+
+  - mechanism_id: affect.decay
+    purpose: Logical-time decay and terminal resolution of Affect episodes
+    release_status: active
+    upstream_authority: [AffectEpisode accepted with decay profile]
+    due_identity: {coordinates: [world_id, actor_ref, affect_episode_id, revision], logical_deadline: AffectComponentProjection.decay_not_before, merge_dedup_key: affect_episode_revision}
+    controlled_injection: {public_seams: [QQC2CHost.inbound_text, QQC2CHost.inbound_fragment, QQC2CHost.tick, QQC2CHost.drain], upstream_material: [real accepted AffectEpisode, logical Clock advance]}
+    expected_path: [Clock-derived discovery, deterministic decay projection, terminal or residue]
+    legal_terminals: [active residue, resolved, superseded]
+    visible_effect: none
+    observability: [health, causal lineage, Affect revision, decay latency, ledger refs]
+    fault_matrix: [CAS conflict, restart, same-deadline concurrency, stale revision, correction/withdrawal, time boundary, bad-trigger starvation]
+    vertical_lanes: [affect, clock]
+    closure_mechanisms: [appraisal-affect-relationship-impression]
+    projection_due_fields: [AffectComponentProjection.decay_not_before]
+    activation_note: Active deterministic time projection; decay does not decide expression or mood wording.
+
+  - mechanism_id: relationship.silence_aftermath
+    purpose: Character appraisal opportunity after delivered outreach remains unanswered
+    release_status: active
+    trigger_mode: derived_formula
+    upstream_authority: [delivered Expression receipt and elapsed silence window]
+    due_identity: {coordinates: [world_id, actor_ref, delivered_action_id, silence_epoch], logical_deadline: delivered receipt anchor plus configured idle_seconds, merge_dedup_key: delivered_action_silence_epoch}
+    controlled_injection: {public_seams: [QQC2CHost.tick, QQC2CHost.drain, WorldV2PlatformHost.receipt], upstream_material: [formal delivered receipt, logical Clock advance]}
+    expected_path: [scheduler discovery, TriggerProcess claim/CAS, CharacterInterior appraisal, typed Affect/relationship proposal, terminal]
+    legal_terminals: [accepted transition, role no-change, superseded, technical failure/retry]
+    visible_effect: none
+    observability: [health, causal lineage, ModelResult, relationship/Affect refs, latency, ledger refs]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, lease expiry, late result, user reply supersession, bad-trigger starvation]
+    vertical_lanes: [silence_appraisal]
+    closure_mechanisms: [appraisal-affect-relationship-impression]
+    projection_due_fields: []
+    model_contract: {purpose: world_stimulus_appraisal, contract_identity: character-interior-world-stimulus-appraisal-decision.1}
+    activation_note: Active opportunity only; the system never decides disappointment or withdrawal.
+
+  - mechanism_id: goal.expiry
+    purpose: Replay-compatible expiry of existing V2 Goal heads
+    release_status: dormant
+    trigger_mode: replay_only
+    upstream_authority: [historical V2GoalOpened]
+    due_identity: {coordinates: [world_id, actor_ref, goal_id, revision], logical_deadline: goal_expires_at, merge_dedup_key: goal_revision}
+    controlled_injection: {public_seams: [QQC2CHost.tick], upstream_material: [historical replay fixture only]}
+    expected_path: [cold replay, compatibility reducer, no new producer]
+    legal_terminals: [expired, superseded, compatibility no-op]
+    visible_effect: none
+    observability: [replay report, mechanism closure status, ledger refs]
+    fault_matrix: [restart, replay drift, stale revision, time boundary]
+    vertical_lanes: [clock]
+    closure_mechanisms: [v16-situation-constituents]
+    projection_due_fields: [V2GoalValues.due_window]
+    activation_note: Dormant because production has no Goal producer; a future host scenario must not create one.
+
+  - mechanism_id: perception.refresh_attention
+    purpose: Refresh external sources and offer an actor attention opportunity
+    release_status: limited
+    upstream_authority: [configured external perception source]
+    due_identity: {coordinates: [world_id, source_id, source_revision, actor_ref, epoch], logical_deadline: refresh_or_attention_due_at, merge_dedup_key: source_actor_window}
+    controlled_injection: {public_seams: [QQC2CHost.tick, QQC2CHost.drain], upstream_material: [configured production source only; no approved test injection seam, logical Clock advance]}
+    expected_path: [source acquisition, dedup/correction, actor attention claim/CAS, CharacterInterior choice, ExternalPerception acceptance]
+    legal_terminals: [not offered, role did not attend, perception accepted, expired, technical failure/retry]
+    visible_effect: conditional
+    observability: [health, causal lineage, provider/source refs, ModelResult, usage/cost, latency]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, lease expiry, late result, permission change, bad-trigger starvation]
+    vertical_lanes: []
+    closure_mechanisms: [external-world-perception-attention]
+    projection_due_fields: [SourceHealthSnapshot.next_refresh_at]
+    model_contract: {purpose: external_perception_attention, contract_identity: external-perception-attention-decision.1}
+    retry_policy: {policy_id: technical-retry-10-30-120.1, seconds: [600, 1800, 7200]}
+    activation_note: Limited declaration; no approved public provider-injection host scenario exists yet.
+
+  - mechanism_id: media.planning
+    purpose: Execute one already-authorized frozen media-planning Action
+    release_status: limited
+    upstream_authority: [MediaOpportunity frozen and explicit provider grants]
+    due_identity: {coordinates: [world_id, action_id, opportunity_id], logical_deadline: Action.not_before, merge_dedup_key: media_planning_action}
+    controlled_injection: {public_seams: [QQC2CHost.tick, QQC2CHost.drain], upstream_material: [real frozen MediaOpportunity and authorized planning Action]}
+    expected_path: [planning worker discovery, Action claim/CAS, planner result, atomic plan or not-renderable settlement]
+    legal_terminals: [planned, not renderable, unavailable, failed, cancelled, expired, unknown]
+    visible_effect: none
+    observability: [health, causal lineage, ExternalGeneration, usage/cost, Action refs]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, lease expiry, late result, withdrawal/permission change, bad-trigger starvation]
+    vertical_lanes: []
+    closure_mechanisms: [media-preview-and-approval]
+    projection_due_fields: [Action.not_before, Action.expires_at, MediaOpportunity.expires_at]
+    action_kinds: [media_planning]
+    activation_note: Limited declaration owned only by MediaPlanningWorker; no host execution qualification is implied.
+
+  - mechanism_id: media.execution
+    purpose: Execute authorized media render, inspection and single repair Actions
+    release_status: limited
+    upstream_authority: [accepted MediaPlan and explicit provider grants]
+    due_identity: {coordinates: [world_id, action_id, media_plan_id, stage, attempt_ordinal], logical_deadline: Action.not_before, merge_dedup_key: media_execution_action}
+    controlled_injection: {public_seams: [QQC2CHost.tick, QQC2CHost.drain, WorldV2PlatformHost.receipt], upstream_material: [real accepted MediaPlan, provider result, formal receipt]}
+    expected_path: [execution worker discovery, Action claim/CAS, provider stage, artifact or inspection settlement]
+    legal_terminals: [rendered, inspected, repair authorized, failed, cancelled, expired, unknown]
+    visible_effect: none
+    observability: [health, causal lineage, ExternalGeneration, usage/cost, Action/receipt refs]
+    fault_matrix: [provider timeout/invalid, CAS conflict, restart, lease expiry, late result, grant withdrawal, bad-trigger starvation]
+    vertical_lanes: [media_continuation, media_repair, settlement]
+    closure_mechanisms: [media-preview-and-approval]
+    projection_due_fields: [Action.not_before, Action.expires_at]
+    action_kinds: [media_render, media_inspection, media_repair]
+    activation_note: Limited declaration owned only by MediaExecutionWorker; delivery is a separate responsibility.
+
+  - mechanism_id: media.delivery
+    purpose: Authorize one approved media-delivery Action and settle its formal receipt
+    release_status: limited
+    upstream_authority: [passed immutable artifact and current operator approval]
+    due_identity: {coordinates: [world_id, approval_id, approval_revision, action_id], logical_deadline: Action.not_before, merge_dedup_key: media_delivery_approval_revision}
+    controlled_injection: {public_seams: [QQC2CHost.tick, QQC2CHost.drain, WorldV2PlatformHost.receipt], upstream_material: [current operator approval, authorized delivery Action, formal receipt]}
+    expected_path: [delivery authorization, Action claim/CAS, transport, formal receipt, MediaDeliveryShared settlement]
+    legal_terminals: [delivered, failed, cancelled, expired, unknown]
+    visible_effect: media
+    observability: [health, causal lineage, approval revision, Action/receipt refs]
+    fault_matrix: [CAS conflict, restart, lease expiry, late result, approval withdrawal, recipient mismatch, bad-trigger starvation]
+    vertical_lanes: [settlement]
+    closure_mechanisms: [media-preview-and-approval]
+    projection_due_fields: [Action.not_before, Action.expires_at]
+    action_kinds: [media_delivery]
+    activation_note: Limited declaration jointly owned by delivery authorization and receipt lifecycle callables; automatic delivery remains deployment-gated.

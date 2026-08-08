@@ -17,6 +17,8 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 
+from ..delayed_trigger_policies import TECHNICAL_RETRY_BACKOFF_SECONDS
+
 from .contracts import (
     CharacterAttentionContext,
     CharacterAttentionRequest,
@@ -34,7 +36,7 @@ from .contracts import (
 )
 
 
-_FAILURE_BACKOFF_SECONDS = (600, 1_800, 7_200)
+_FAILURE_BACKOFF_SECONDS = TECHNICAL_RETRY_BACKOFF_SECONDS
 _MAX_RECORDED_RESULT_BYTES = 65_536
 
 

@@ -14,6 +14,7 @@ from .contextual_life_retry import (
     record_technical_failure as record_contextual_life_technical_failure,
     retry_for as contextual_life_retry_for,
 )
+from .delayed_trigger_policies import TECHNICAL_RETRY_BACKOFF_SECONDS
 from .event_identity import domain_idempotency_key
 from .errors import ConcurrencyConflict, IdempotencyConflict
 from .experience_memory_candidate_lifecycle import ExperienceMemoryCandidateLifecycle
@@ -1679,7 +1680,7 @@ class LifeAftermathRuntime:
             failed_at = terminal[0].logical_time
         if failed_at is None:
             return 0, None
-        delay_seconds = (600, 1_800, 7_200)[min(ordinal - 1, 2)]
+        delay_seconds = TECHNICAL_RETRY_BACKOFF_SECONDS[min(ordinal - 1, 2)]
         return ordinal, failed_at + timedelta(seconds=delay_seconds)
 
     def _record_outcome_model_failure(

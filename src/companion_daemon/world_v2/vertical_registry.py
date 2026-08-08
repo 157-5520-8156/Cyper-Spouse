@@ -67,6 +67,9 @@ class VerticalRegistration:
     runtime_drain_markers: tuple[str, ...] = ()
     composition_markers: tuple[str, ...] = ()
     drain_site: str = ""
+    # Stable identities in configs/delayed_trigger_qualification.v1.yaml.
+    # These are declarations only; the catalog has no execution authority.
+    delayed_trigger_ids: tuple[str, ...] = ()
     # For framework-backed verticals: where the frozen VerticalSpec lives.
     spec_module: str | None = None
     spec_builder: str | None = None
@@ -105,6 +108,10 @@ VERTICAL_REGISTRY: tuple[VerticalRegistration, ...] = (
         runtime_drain_markers=("self._claim_expression_episode",),
         composition_markers=("expression_episode_mode=config.expression_episode_mode",),
         drain_site="WorldRuntime.ingest (inline, around visible reply)",
+        delayed_trigger_ids=(
+            "expression.deferred_reply",
+            "expression.multibeat",
+        ),
     ),
     # ------------------------------------------------------------------
     # Hand-rolled A-shape wells (event-anchored durable triggers)
@@ -127,6 +134,7 @@ VERTICAL_REGISTRY: tuple[VerticalRegistration, ...] = (
             "silence_appraisal_idle_seconds=config.silence_appraisal_idle_seconds",
         ),
         drain_site="WorldRuntime.drain_background_once",
+        delayed_trigger_ids=("relationship.silence_aftermath",),
     ),
     VerticalRegistration(
         lane_id="plan_disruption_appraisal",
@@ -230,6 +238,7 @@ VERTICAL_REGISTRY: tuple[VerticalRegistration, ...] = (
         runtime_drain_markers=("self._immediate_emotion_worker.process",),
         composition_markers=("immediate_emotion_worker=",),
         drain_site="WorldRuntime.ingest and CharacterInterior world-stimulus settlement",
+        delayed_trigger_ids=("affect.decay",),
         notes=(
             "The CharacterInterior audit owns appraisal and Affect together; "
             "the worker compiles and settles those exact bytes without a second role call.",
@@ -308,6 +317,7 @@ VERTICAL_REGISTRY: tuple[VerticalRegistration, ...] = (
         runtime_drain_markers=("OutcomeTriggerRuntime(",),
         composition_markers=("outcome_deliberation_turn=",),
         drain_site="WorldRuntime.drain_background_once",
+        delayed_trigger_ids=("life.aftermath_outcome",),
     ),
     VerticalRegistration(
         lane_id="interaction_bid",
@@ -341,6 +351,7 @@ VERTICAL_REGISTRY: tuple[VerticalRegistration, ...] = (
         runtime_drain_markers=("drain_reconsideration_once",),
         composition_markers=("expression_reconsideration_owner=",),
         drain_site="WorldRuntime.drain_background_once",
+        delayed_trigger_ids=("expression.reconsideration",),
     ),
     VerticalRegistration(
         lane_id="external_result",
@@ -442,6 +453,12 @@ VERTICAL_REGISTRY: tuple[VerticalRegistration, ...] = (
         runtime_drain_markers=("drain_proactive_once",),
         composition_markers=("proactive_worker_owner=",),
         drain_site="WorldRuntime.drain_background_once",
+        delayed_trigger_ids=(
+            "proactive.event_driven",
+            "proactive.ambient",
+            "proactive.post_silent",
+            "proactive.technical_retry",
+        ),
     ),
     VerticalRegistration(
         lane_id="life_ecology",
@@ -457,6 +474,15 @@ VERTICAL_REGISTRY: tuple[VerticalRegistration, ...] = (
         may_carry_source_evidence=("life_ecology",),
         composition_markers=("LifeEcologyRuntime(", "advance_life_ecology_once"),
         drain_site="WorldV2TurnApplication.tick -> advance_life_ecology_once",
+        delayed_trigger_ids=(
+            "life.ecology",
+            "life.activity_occurrence",
+            "life.activity_lifecycle",
+            "life.aftermath_outcome",
+            "life.aftermath_memory",
+            "life.development",
+            "life.open_world_generation",
+        ),
     ),
     VerticalRegistration(
         lane_id="life_reflection",
@@ -472,6 +498,7 @@ VERTICAL_REGISTRY: tuple[VerticalRegistration, ...] = (
         may_carry_source_evidence=("life_reflection",),
         composition_markers=("ReflectionScheduler(",),
         drain_site="WorldV2TurnApplication -> ReflectionScheduler.open_once",
+        delayed_trigger_ids=("reflection.life",),
     ),
     VerticalRegistration(
         lane_id="media_continuation",
@@ -484,6 +511,7 @@ VERTICAL_REGISTRY: tuple[VerticalRegistration, ...] = (
         may_carry_source_evidence=("media_continuation",),
         composition_markers=("MediaContinuationWorker(",),
         drain_site="WorldV2TurnApplication.drain_media_continuation_once",
+        delayed_trigger_ids=("media.execution",),
     ),
     VerticalRegistration(
         lane_id="media_repair",
@@ -496,6 +524,7 @@ VERTICAL_REGISTRY: tuple[VerticalRegistration, ...] = (
         may_carry_source_evidence=("media_repair",),
         composition_markers=("MediaExecutionWorker(",),
         drain_site="WorldV2TurnApplication.drain_media_results_once",
+        delayed_trigger_ids=("media.execution",),
     ),
     # ------------------------------------------------------------------
     # Hand-rolled B-shape wells (clock checks, no TriggerProcess)
@@ -508,6 +537,7 @@ VERTICAL_REGISTRY: tuple[VerticalRegistration, ...] = (
         module="npc_ecology.py",
         composition_markers=("NpcEcology(", "npc_initiative_followup="),
         drain_site="LifeEcologyRuntime followup on clock wake",
+        delayed_trigger_ids=("npc.ecology",),
     ),
     # ------------------------------------------------------------------
     # Infrastructure process kinds (not decision verticals)
@@ -533,6 +563,16 @@ VERTICAL_REGISTRY: tuple[VerticalRegistration, ...] = (
         process_kinds=("clock",),
         runtime_drain_markers=("async def advance",),
         drain_site="WorldRuntime.advance",
+        delayed_trigger_ids=(
+            "action.authorized_due",
+            "expression.deferred_reply",
+            "expression.multibeat",
+            "conversation.commitment_due",
+            "conversation.expectation_expiry",
+            "life.activity_occurrence",
+            "affect.decay",
+            "goal.expiry",
+        ),
     ),
     VerticalRegistration(
         lane_id="settlement",
@@ -543,6 +583,13 @@ VERTICAL_REGISTRY: tuple[VerticalRegistration, ...] = (
         process_kinds=("settlement",),
         runtime_drain_markers=("SettlementPlanner(",),
         drain_site="WorldRuntime.settle",
+        delayed_trigger_ids=(
+            "action.authorized_due",
+            "expression.deferred_reply",
+            "expression.multibeat",
+            "media.execution",
+            "media.delivery",
+        ),
     ),
     VerticalRegistration(
         lane_id="recovery",
@@ -552,6 +599,7 @@ VERTICAL_REGISTRY: tuple[VerticalRegistration, ...] = (
         module="action_lifecycle.py",
         process_kinds=("recovery",),
         drain_site="WorldRuntime recovery paths",
+        delayed_trigger_ids=("action.authorized_due",),
     ),
 )
 

@@ -12,6 +12,7 @@ from typing import Any
 from pydantic import ValidationInfo, model_validator
 
 from .action_lifecycle import TERMINAL_ACTION_STATES, transition_action
+from .delayed_trigger_policies import TECHNICAL_RETRY_BACKOFF_SECONDS
 from .affect_events import (
     AFFECT_PAYLOAD_MODELS,
     AffectBaselineAdjustedPayload,
@@ -9351,7 +9352,7 @@ def _trigger_process_completed(state: ReducerState, event: WorldEvent) -> Reduce
             else None
         )
         delay_seconds = (
-            (600, 1800, 7200)[min(max(failures, 1), 3) - 1]
+            TECHNICAL_RETRY_BACKOFF_SECONDS[min(max(failures, 1), 3) - 1]
             if failures
             else cadence_delay_seconds
             if isinstance(cadence_delay_seconds, int)

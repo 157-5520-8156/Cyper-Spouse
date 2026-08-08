@@ -27,6 +27,9 @@ from .schemas import (
 )
 
 
+MEDIA_DELIVERY_ACTION_KIND = "media_delivery"
+
+
 class MediaDeliveryError(ValueError):
     pass
 
@@ -122,7 +125,7 @@ class MediaDeliveryRuntime:
             schema_version="world-v2.1", action_id=action_id, world_id=self._ledger.world_id,
             logical_time=logical_time, created_at=logical_time, trace_id=trace_id,
             causation_id=_event_id("MediaAutomaticDeliveryApproved", f"{approval_id}:{approval_revision}"),
-            correlation_id=correlation_id, kind="media_delivery", layer="external_action",
+            correlation_id=correlation_id, kind=MEDIA_DELIVERY_ACTION_KIND, layer="external_action",
             intent_ref=approval.inspection_id, actor=actor, target=target,
             payload_ref=artifact.artifact_ref, payload_hash=artifact.artifact_hash,
             media_delivery_approval=MediaDeliveryApprovalBinding(
@@ -179,7 +182,7 @@ class MediaDeliveryReceiptLifecycle:
     def events_for_terminal_receipt(
         self, *, projection: LedgerProjection, action: Action, receipt: ExecutionReceipt,
     ) -> tuple[tuple[str, str, dict[str, object]], ...]:
-        if action.kind != "media_delivery" or receipt.observed_state != "delivered":
+        if action.kind != MEDIA_DELIVERY_ACTION_KIND or receipt.observed_state != "delivered":
             return ()
         binding = action.media_delivery_approval
         if binding is None:
@@ -210,7 +213,7 @@ def require_current_media_delivery_approval(*, action: Action, projection: Ledge
     """Final ActionPump gate: revisions and expiry invalidate pre-dispatch work."""
 
     binding = action.media_delivery_approval
-    if action.kind != "media_delivery" or binding is None:
+    if action.kind != MEDIA_DELIVERY_ACTION_KIND or binding is None:
         raise MediaDeliveryError("delivery authority verifier received a non-media-delivery Action")
     approvals = tuple(item for item in projection.media_delivery_approvals if item.approval_id == binding.approval_id)
     exact = next((item for item in approvals if item.entity_revision == binding.approval_revision), None)
@@ -222,6 +225,7 @@ def require_current_media_delivery_approval(*, action: Action, projection: Ledge
 
 
 __all__ = [
+    "MEDIA_DELIVERY_ACTION_KIND",
     "MediaDeliveryError", "MediaDeliveryReceiptLifecycle", "MediaDeliveryRuntime",
     "require_current_media_delivery_approval",
 ]

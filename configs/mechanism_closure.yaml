@@ -93,6 +93,7 @@ mechanisms:
       - tests/world_v2/test_scenario_runner.py::test_runner_executes_a_real_v2_turn_then_exports_verified_replay
 
   - id: source-bound-fact-experience-memory-core
+    delayed_trigger_ids: [memory.candidate_consolidation, life.aftermath_memory]
     phase: 2
     status: closed
     runtime_activation: limited-production
@@ -139,6 +140,7 @@ mechanisms:
   # Activating any of these requires a new producer verdict recorded here
   # first; see Producer-First Authority in CONTEXT.md.
   - id: v16-situation-constituents
+    delayed_trigger_ids: [goal.expiry]
     phase: 2
     status: closed
     runtime_activation: harness
@@ -158,6 +160,7 @@ mechanisms:
       - tests/world_v2/test_attention_authority_v16.py::test_replay_state_validator_requires_exact_committed_event_and_head
 
   - id: situation-context-and-advisory
+    delayed_trigger_ids: [conversation.commitment_due, conversation.thread_expiry, conversation.expectation_expiry]
     phase: 3
     status: closed
     runtime_activation: default
@@ -178,6 +181,7 @@ mechanisms:
       - tests/world_v2/test_ledger_context_resolver.py::test_nonempty_context_is_byte_equivalent_across_memory_and_sqlite
 
   - id: appraisal-affect-relationship-impression
+    delayed_trigger_ids: [reflection.life, affect.decay, relationship.silence_aftermath]
     phase: 3
     status: closed
     runtime_activation: default
@@ -197,6 +201,7 @@ mechanisms:
       - tests/world_v2/test_affect_module.py::test_resolve_is_explicit_sourced_and_terminal
 
   - id: life-npc-outcome-continuity
+    delayed_trigger_ids: [life.ecology, npc.ecology, life.activity_occurrence, life.activity_lifecycle, life.aftermath_outcome, life.aftermath_memory, life.development]
     phase: 2
     status: closed
     runtime_activation: default
@@ -216,6 +221,7 @@ mechanisms:
       - tests/world_v2/test_character_interior_world_stimulus.py::test_settled_world_change_crosses_one_eight_facet_character_interior_turn
 
   - id: open-world-temporary-events
+    delayed_trigger_ids: [life.activity_occurrence, life.aftermath_outcome, life.development, life.open_world_generation]
     phase: 2
     status: closed
     runtime_activation: default
@@ -252,6 +258,7 @@ mechanisms:
       - tests/world_v2/test_accepted_ledger_batch.py::test_issuer_requires_a_v3_acceptance_followed_by_effects
 
   - id: expression-beats-deferred-replies
+    delayed_trigger_ids: [proactive.event_driven, proactive.ambient, proactive.post_silent, expression.deferred_reply, expression.multibeat, expression.reconsideration, conversation.commitment_due]
     phase: 5
     status: closed
     runtime_activation: default
@@ -311,6 +318,7 @@ mechanisms:
       - tests/world_v2/test_production_turn_application.py::test_production_reply_does_not_open_the_retired_afterthought_side_lane
 
   - id: action-budget-receipt-recovery
+    delayed_trigger_ids: [proactive.technical_retry, action.authorized_due, conversation.commitment_due]
     phase: 5
     status: closed
     runtime_activation: limited-production
@@ -364,7 +372,27 @@ mechanisms:
       - tests/world_v2/test_perception_production_composition.py::test_sqlite_attachment_reaches_provider_and_next_turn_context_exactly_once
       - tests/world_v2/test_perception_production_composition.py::test_selected_attachment_without_enforcement_authority_fails_closed
 
+  - id: external-world-perception-attention
+    delayed_trigger_ids: [perception.refresh_attention]
+    phase: 5
+    status: partial
+    runtime_activation: limited-production
+    limitations: [requires-configured-source-registry-and-explicit-live-attention-mode, provider-injection-is-not-a-public-qualification-seam]
+    sources: [configured-external-source, source-cursor, actor-attention-authority]
+    events: [ModelResultRecorded, ExternalSignalSnapshotAdopted, ExternalPerceptionRecorded, AcceptanceRecorded]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [external-perceptions, source-health, actor-attention]
+    decision_consumers: [SQLiteWorldPerceptionHub, LiveExternalPerceptionAttention, ExternalPerceptionAcceptanceRuntime, LifeEcologyRuntime]
+    actions: []
+    terminal_states: [accepted, not-attended, expired, technical-failure]
+    adapters: [rsshub, rss, authorized-search, configured-domestic-social-sources]
+    tests:
+      - tests/world_v2/test_external_world_live_attention.py
+      - tests/world_v2/test_external_perception_life_wake_bridge.py
+      - tests/world_v2/test_external_world_perception_scheduler.py
+
   - id: media-preview-and-approval
+    delayed_trigger_ids: [media.planning, media.execution, media.delivery]
     phase: 6
     status: closed
     runtime_activation: limited-production

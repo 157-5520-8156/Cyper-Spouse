@@ -70,6 +70,7 @@ from .proposal_envelope import (
     validate_proposal_envelope,
 )
 from .schema_core import FrozenModel
+from .delayed_trigger_policies import TECHNICAL_RETRY_BACKOFF_SECONDS
 from .schemas import ClaimLease, ProjectionCursor, TriggerProcess, WorldEvent
 from .shared_private_invitation import pending_shared_private_invitation_advisories
 from .social_initiative import (
@@ -1231,7 +1232,7 @@ class ProactiveActionRuntime:
     """Recovery-safe opportunity -> deliberation -> accepted Action worker."""
 
     PROCESS_KIND = "proactive_action_deliberation"
-    FAILURE_BACKOFF_SECONDS = (600, 1_800, 7_200)
+    FAILURE_BACKOFF_SECONDS = TECHNICAL_RETRY_BACKOFF_SECONDS
     # Adapter-v1 instances emitted these codes through the retired production
     # post-authorship binder. Keeping their old 10/30/120 delay after the
     # dependency is removed would leave the exact outage waiting for hours.

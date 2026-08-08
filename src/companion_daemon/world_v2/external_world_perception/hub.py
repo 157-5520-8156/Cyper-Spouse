@@ -20,6 +20,7 @@ import unicodedata
 from urllib.parse import urlsplit, urlunsplit
 
 from ..sqlite_coordination import configure_shared_sqlite_connection, sqlite_write_lock
+from ..delayed_trigger_policies import TECHNICAL_RETRY_BACKOFF_SECONDS
 from .attention import SQLiteShadowAttentionCoordinator
 from .live_attention import SQLiteLiveAttentionCoordinator
 from .contracts import (
@@ -39,7 +40,7 @@ from .contracts import (
 )
 
 
-_FAILURE_BACKOFF_SECONDS = (600, 1_800, 7_200)
+_FAILURE_BACKOFF_SECONDS = TECHNICAL_RETRY_BACKOFF_SECONDS
 
 
 def _canonical_json(value: object) -> str:
