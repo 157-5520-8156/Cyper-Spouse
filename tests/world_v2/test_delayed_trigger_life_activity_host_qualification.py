@@ -93,6 +93,9 @@ class _LifeSourceReviewer:
     model = "fixture:life-activity-source-reviewer"
     semantic_authority_id = "semantic-authority:fixture:life-activity-source-reviewer"
 
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def complete(
         self,
         messages: list[dict[str, str]],
@@ -100,6 +103,7 @@ class _LifeSourceReviewer:
         temperature: float = 0.0,
     ) -> str:
         del temperature
+        self.calls += 1
         if messages and "focused novel-origin critic" in messages[0].get("content", ""):
             return json.dumps(
                 {
@@ -253,6 +257,7 @@ async def test_public_host_activity_lifecycle_is_role_owned_and_effect_once(
 
     world_author = _PlanWorldAuthor()
     character_model = _CharacterModel()
+    source_reviewer = _LifeSourceReviewer()
 
     def build():
         return build_qq_c2c_host(
@@ -261,11 +266,12 @@ async def test_public_host_activity_lifecycle_is_role_owned_and_effect_once(
             bootstrap_at=started_at,
             model=character_model,
             world_support_model=world_author,
-            life_source_closure_model=_LifeSourceReviewer(),
+            life_source_closure_model=source_reviewer,
             delivery=_Delivery(),
             ingress_now=lambda: scheduler_clock["now"],
             ingress_sleep=skip_pacing,
             action_due_now=lambda: scheduler_clock["now"],
+            use_configured_recall_embedding=False,
         )
 
     host = build()
@@ -298,14 +304,72 @@ async def test_public_host_activity_lifecycle_is_role_owned_and_effect_once(
         occurrence = chosen.projection.world_occurrences[0]
         assert occurrence.status == "active"
         assert len(character_model.calls) >= 2
-        assert any(
-            item.event.event_type == "ActivityLifecycleProposalRecorded"
-            for item in chosen.events
+        assert source_reviewer.calls >= 1
+        proposal_events = tuple(
+            item for item in chosen.events if item.event.event_type == "ActivityLifecycleProposalRecorded"
         )
-        assert any(
-            item.event.event_type == "WorldOccurrenceActivated"
-            for item in chosen.events
+        acceptance_events = tuple(
+            item for item in chosen.events if item.event.event_type == "AcceptanceRecorded"
         )
+        effect_events = tuple(
+            item for item in chosen.events if item.event.event_type == "ActivityStarted"
+        )
+        activation_events = tuple(
+            item for item in chosen.events if item.event.event_type == "WorldOccurrenceActivated"
+        )
+        assert len(proposal_events) == len(acceptance_events) == len(effect_events) == 1
+        assert len(activation_events) == 1
+        proposal = proposal_events[0].event.payload()
+        acceptance = acceptance_events[0].event.payload()
+        effect = effect_events[0].event.payload()
+        activation = activation_events[0].event.payload()
+        assert acceptance["proposal_id"] == proposal["proposal_id"]
+        assert effect["activity_lifecycle_proposal_id"] == proposal["proposal_id"]
+        assert effect["plan_id"] == proposal["plan_id"]
+        assert effect["accepted_change_hash"] == proposal["proposed_change_hash"]
+        assert occurrence.occurrence_id == activation["occurrence_id"]
+        before_repeat = chosen
+        character_calls_before_repeat = len(character_model.calls)
+        effect_event_types = {
+            "ActivityLifecycleProposalRecorded",
+            "AcceptanceRecorded",
+            "ActivityStarted",
+            "WorldOccurrenceActivated",
+        }
+        effect_event_ids_before = tuple(
+            item.event.event_id
+            for item in before_repeat.events
+            if item.event.event_type in effect_event_types
+        )
+        await host.tick(
+            tick_id="life-activity-public-choice",
+            logical_time_from=first_due,
+            logical_time_to=second_due,
+            observed_at=second_due,
+            reason="life_activity_public_choice",
+            run_life_ecology=True,
+        )
+        await host.drain(max_action_units=8, max_background_units=16)
+        repeated = host.export_replay_evidence()
+        assert tuple(
+            item.event.event_id
+            for item in repeated.events
+            if item.event.event_type in effect_event_types
+        ) == effect_event_ids_before
+        assert len(character_model.calls) == character_calls_before_repeat
+        await host.aclose()
+        host = build()
+        await host.drain(max_action_units=8, max_background_units=16)
+        cold = host.export_replay_evidence()
+        assert cold.cursor == repeated.cursor
+        assert cold.projection.semantic_hash == repeated.projection.semantic_hash
+        assert len(cold.events) == len(repeated.events)
+        assert tuple(
+            item.event.event_id
+            for item in cold.events
+            if item.event.event_type in effect_event_types
+        ) == effect_event_ids_before
+        assert len(character_model.calls) == character_calls_before_repeat
         health = await host.world_health_diagnostics()
         assert health["mechanisms"]["life_ecology"]["schedule"]["last_outcome_ref"] == (
             "life-ecology:aftermath_occurrence_opened"
