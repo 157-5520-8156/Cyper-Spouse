@@ -34,13 +34,20 @@ from pydantic_core import to_jsonable_python
 from .batch_invariants import private_impression_trigger_identity
 from .companion_identity import CompanionIdentityFrame
 from .character_interior import CharacterInterior, InteriorStimulus
-from .character_interior.audit import recorded_character_interior_model_result
+from .character_interior.audit import (
+    causal_opportunity_lineage_fields,
+    recorded_character_interior_model_result,
+)
 from .character_interior.contracts import (
     _InteriorAuthorLineage,
     _InteriorCapabilityManifest,
 )
 from .character_interior.ports import _AuthorityRequest
-from .character_interior.run_result import CausalOpportunityIdentity
+from .character_interior.run_result import (
+    CAUSAL_OPPORTUNITY_CONTRACT_VERSION,
+    CausalOpportunityHealth,
+    CausalOpportunityIdentity,
+)
 from .event_identity import domain_idempotency_key
 from .ledger import LedgerPort
 from .model_json import extract_json_object_text
@@ -82,6 +89,7 @@ EXPIRY_CONDITIONS = (
     "until_relationship_stage_changes",
     "one_month_without_support",
 )
+PRIVATE_IMPRESSION_PURPOSE = "private_impression_reflection"
 
 # Bound the number of times one private-reflection trigger may be reclaimed
 # after its model output failed authority validation.  Lease expiry alone
@@ -601,12 +609,52 @@ class PrivateImpressionTriggerOpener:
 class PrivateImpressionRunResult(FrozenModel):
     trigger_id: str
     status: Literal["idle", "owned_elsewhere", "processed"]
-    work_status: Literal["no_change", "accepted", "technical_failure"] | None = None
+    work_status: Literal["no_change", "ignored", "accepted", "technical_failure"] | None = None
+    opportunity_ref: str | None = None
+    source_refs: tuple[str, ...] = ()
+    epoch: str | None = None
+    contract_version: str | None = None
+
+
+def _private_impression_opportunity_identity(
+    *,
+    world_id: str,
+    actor_ref: str,
+    source_ref: str,
+) -> CausalOpportunityIdentity:
+    return CausalOpportunityIdentity.from_source_refs(
+        world_id=world_id,
+        actor_ref=actor_ref,
+        purpose=PRIVATE_IMPRESSION_PURPOSE,
+        source_refs=(source_ref,),
+        epoch=source_ref,
+        contract_version=CAUSAL_OPPORTUNITY_CONTRACT_VERSION,
+    )
 
 
 def _private_impression_capability(
     capsule: PrivateImpressionReflectionCapsule,
+    *,
+    opportunity_identity: CausalOpportunityIdentity | None = None,
 ) -> _InteriorCapabilityManifest:
+    if opportunity_identity is None:
+        anchor_source_ref = next(
+            (
+                item.source_ref
+                for item in capsule.sources
+                if item.source_kind == "appraisal"
+                and json.loads(item.value_json).get("appraisal_id")
+                == capsule.anchor_appraisal_id
+            ),
+            None,
+        )
+        if anchor_source_ref is None:
+            raise ValueError("private impression capability lacks an anchor source")
+        opportunity_identity = _private_impression_opportunity_identity(
+            world_id=capsule.world_id,
+            actor_ref="actor:companion",
+            source_ref=anchor_source_ref,
+        )
     anchor_source_refs = [
         item.source_ref
         for item in capsule.sources
@@ -633,6 +681,7 @@ def _private_impression_capability(
     }
     payload = {
         "contract": "character-interior-private-impression-capability.1",
+        "causal_opportunity": opportunity_identity.model_dump(mode="json"),
         "reflection_capsule": capsule.model_dump(mode="json"),
         "reflection_sources": [
             {
@@ -709,6 +758,15 @@ class PrivateImpressionTriggerRuntime:
         self._source = source
 
     async def drain_one(self) -> PrivateImpressionRunResult:
+        result = await self._drain_one_impl()
+        return await self._attach_opportunity_lineage(result)
+
+    async def advance_due_once(self) -> PrivateImpressionRunResult:
+        """Route one due private-impression opportunity through this seam."""
+
+        return await self.drain_one()
+
+    async def _drain_one_impl(self) -> PrivateImpressionRunResult:
         projection = await _project(self._ledger)
         pending = tuple(
             item
@@ -762,7 +820,7 @@ class PrivateImpressionTriggerRuntime:
                 outcome_ref=f"outcome:{active.trigger_id}:no-source",
             )
             return PrivateImpressionRunResult(
-                trigger_id=active.trigger_id, status="processed", work_status="no_change"
+                trigger_id=active.trigger_id, status="processed", work_status="ignored"
             )
         capsule = compile_private_impression_reflection_capsule(
             projection=before,
@@ -772,13 +830,14 @@ class PrivateImpressionTriggerRuntime:
             content_reader=self._content_reader,
         )
         attempt_id = active.claim_lease.attempt_id
-        capability_manifest = _private_impression_capability(capsule)
-        opportunity_identity = CausalOpportunityIdentity(
+        opportunity_identity = _private_impression_opportunity_identity(
             world_id=self._ledger.world_id,
             actor_ref=self._companion_actor_ref,
-            purpose="private_impression_reflection",
-            source_refs=(source_event.event_id,),
-            epoch=source_event.event_id,
+            source_ref=source_event.event_id,
+        )
+        capability_manifest = _private_impression_capability(
+            capsule,
+            opportunity_identity=opportunity_identity,
         )
         transition = await self._character_interior.experience(
             InteriorStimulus(
@@ -789,7 +848,7 @@ class PrivateImpressionTriggerRuntime:
                 trigger_ref=source_event.event_id,
                 cursor=cursor,
                 logical_time=before.logical_time or source_event.logical_time,
-                purpose="private_impression_reflection",
+                purpose=PRIVATE_IMPRESSION_PURPOSE,
                 source_refs=(source_event.event_id,),
                 capability_manifest=capability_manifest,
                 context_note=(
@@ -808,13 +867,14 @@ class PrivateImpressionTriggerRuntime:
         if transition.status == "model_no_change":
             model_result_audit = recorded_character_interior_model_result(
                 transition,
-                purpose="private_impression_reflection",
+                purpose=PRIVATE_IMPRESSION_PURPOSE,
                 subject_ref=transition.stimulus_ref,
                 trigger_ref=source_event.event_id,
                 capability_ref=capability_manifest.capability_ref,
                 route_tier="thinking",
                 route_reason_code="character_interior_private_impression",
                 router_version="character-interior-private-impression-transition.1",
+                causal_opportunity=opportunity_identity,
             )
             await self._complete(
                 process=active,
@@ -843,6 +903,82 @@ class PrivateImpressionTriggerRuntime:
         )
         return PrivateImpressionRunResult(
             trigger_id=active.trigger_id, status="processed", work_status="accepted"
+        )
+
+    async def _attach_opportunity_lineage(
+        self,
+        result: PrivateImpressionRunResult,
+    ) -> PrivateImpressionRunResult:
+        if not result.trigger_id or result.opportunity_ref is not None:
+            return result
+        projection = await _project(self._ledger)
+        process = next(
+            (
+                item
+                for item in projection.trigger_processes
+                if item.trigger_id == result.trigger_id
+            ),
+            None,
+        )
+        if process is None or process.source_evidence_ref is None:
+            raise RuntimeError("private impression result has no source-bound opportunity")
+        identity = _private_impression_opportunity_identity(
+            world_id=self._ledger.world_id,
+            actor_ref=self._companion_actor_ref,
+            source_ref=process.source_evidence_ref,
+        )
+        return result.model_copy(
+            update={
+                "opportunity_ref": identity.opportunity_ref,
+                "source_refs": identity.source_refs,
+                "epoch": identity.epoch,
+                "contract_version": identity.contract_version,
+            }
+        )
+
+    def health_snapshot(self, world_id: str) -> CausalOpportunityHealth:
+        if world_id != self._ledger.world_id:
+            raise ValueError("private impression health world does not match the ledger")
+        processes = tuple(
+            item
+            for item in self._ledger.project().trigger_processes
+            if item.process_kind == "private_impression_deliberation"
+            and item.source_evidence_ref is not None
+        )
+        identities = tuple(
+            _private_impression_opportunity_identity(
+                world_id=world_id,
+                actor_ref=self._companion_actor_ref,
+                source_ref=item.source_evidence_ref,
+            )
+            for item in processes
+        )
+        outcomes = tuple(item.runtime_outcome_ref or "" for item in processes)
+        last = processes[-1] if processes else None
+        last_identity = identities[-1] if identities else None
+        return CausalOpportunityHealth(
+            world_id=world_id,
+            actor_ref=self._companion_actor_ref,
+            purpose=PRIVATE_IMPRESSION_PURPOSE,
+            open_count=sum(item.state == "open" for item in processes),
+            claimed_count=sum(item.state == "claimed" for item in processes),
+            terminal_count=sum(item.state == "terminal" for item in processes),
+            deferred_count=0,
+            opportunity_count=len({item.opportunity_ref for item in identities}),
+            last_source_ref=last.source_evidence_ref if last is not None else None,
+            last_opportunity_ref=last_identity.opportunity_ref if last_identity else None,
+            no_change_count=sum(item.endswith(":no-change") for item in outcomes),
+            ignored_count=sum(":ignored" in item or ":no-source" in item for item in outcomes),
+            expired_count=sum(":expired:" in item for item in outcomes),
+            accepted_count=sum(
+                process.state == "terminal"
+                and not outcome.endswith(":no-change")
+                and ":ignored" not in outcome
+                and ":no-source" not in outcome
+                and ":expired:" not in outcome
+                for process, outcome in zip(processes, outcomes, strict=True)
+            ),
+            technical_failure_count=0,
         )
 
     async def _accept(
@@ -1463,6 +1599,25 @@ class _PrivateImpressionInteriorAuthorityHandler:
             or proposal.get("source_refs") != list(manifest.source_refs)
         ):
             raise ValueError("private impression proposal authority binding is invalid")
+        raw_identity = manifest.payload.get("causal_opportunity")
+        try:
+            if isinstance(raw_identity, dict) and isinstance(raw_identity.get("source_refs"), list):
+                raw_identity = {
+                    **raw_identity,
+                    "source_refs": tuple(raw_identity["source_refs"]),
+                }
+            opportunity_identity = CausalOpportunityIdentity.model_validate(raw_identity)
+        except ValueError as exc:
+            raise ValueError("private impression capability lacks a valid causal opportunity") from exc
+        if (
+            opportunity_identity.world_id != request.world_id
+            or opportunity_identity.actor_ref != request.actor_ref
+            or opportunity_identity.purpose != request.purpose
+            or opportunity_identity.opportunity_ref != request.subject_ref
+            or opportunity_identity.source_refs != request.subject_source_refs
+            or request.trigger_ref not in opportunity_identity.source_refs
+        ):
+            raise ValueError("private impression InnerTurn is not actor-bound to its opportunity")
         raw_capsule = manifest.payload.get("reflection_capsule")
         if not isinstance(raw_capsule, dict):
             raise ValueError("private impression capability lacks its reflection capsule")
@@ -1550,6 +1705,10 @@ class _PrivateImpressionInteriorAuthorityHandler:
                 inner_turn_id=request.inner_turn_id,
                 purpose=request.purpose,
                 opportunity_ref=request.subject_ref,
+                **causal_opportunity_lineage_fields(
+                    opportunity_identity,
+                    subject_ref=request.subject_ref,
+                ),
                 snapshot_id=request.snapshot_id,
                 snapshot_hash=request.snapshot_hash,
                 capability_ref=manifest.capability_ref,

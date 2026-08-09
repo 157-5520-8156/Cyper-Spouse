@@ -511,6 +511,10 @@ async def test_character_interior_accepts_one_source_bound_private_impression() 
     result = await runtime.drain_one()
 
     assert result.work_status == "accepted"
+    assert result.opportunity_ref is not None
+    assert result.source_refs == ("interaction-appraisal-accepted",)
+    assert result.epoch == "interaction-appraisal-accepted"
+    assert result.contract_version == "causal-opportunity.1"
     projection = ledger.project()
     assert len(projection.private_impressions) == 1
     impression = projection.private_impressions[0]
@@ -520,6 +524,22 @@ async def test_character_interior_accepts_one_source_bound_private_impression() 
     assert projection.trigger_processes[-1].state == "terminal"
     assert len(model.calls) == 1
     assert projection.model_result_audits[-1].audit_contract == "model-result-audit.7"
+    lineage = next(
+        json.loads(item.audit_json)["character_interior_lineage"]
+        for item in projection.model_result_audits
+        if "character_interior_lineage" in json.loads(item.audit_json)
+        and json.loads(item.audit_json)["character_interior_lineage"]["purpose"]
+        == "private_impression_reflection"
+    )
+    assert lineage["opportunity_ref"] == result.opportunity_ref
+    assert lineage["causal_source_refs"] == ["interaction-appraisal-accepted"]
+    assert lineage["causal_epoch"] == "interaction-appraisal-accepted"
+    assert lineage["causal_actor_ref"] == "actor:companion"
+    health = runtime.health_snapshot(WORLD_ID)
+    assert health.terminal_count == 1
+    assert health.accepted_count == 1
+    assert health.opportunity_count == 1
+    assert (await runtime.drain_one()).status == "idle"
 
 
 @pytest.mark.asyncio

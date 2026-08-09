@@ -711,7 +711,7 @@ class _CharacterInteriorBackgroundDriver:
             # appraisal. Losing this cursor race is ordinary effect-once
             # scheduling, not a new character decision.
             pass
-        result = await self._private_impression.drain_one()
+        result = await self._private_impression.advance_due_once()
         return None if result.status in {"idle", "owned_elsewhere"} else result
 
 

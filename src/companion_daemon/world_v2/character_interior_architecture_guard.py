@@ -1212,14 +1212,14 @@ def _scan_causal_opportunity_bypasses(
         if (
             node.func.attr == "drain_one"
             and isinstance(target, ast.Attribute)
-            and target.attr == "_world_stimulus"
+            and target.attr in {"_world_stimulus", "_private_impression"}
         ):
             violations.append(
                 CharacterInteriorArchitectureViolation(
                     path,
                     node.lineno,
                     "scattered_causal_opportunity_bypass",
-                    "_world_stimulus.drain_one",
+                    f"{target.attr}.drain_one",
                 )
             )
     return tuple(dict.fromkeys(violations))
