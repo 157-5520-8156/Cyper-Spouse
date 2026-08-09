@@ -50,6 +50,55 @@ class _InjectedModel:
         self.closed = True
 
 
+class _MeasuredLatencyReview:
+    def __init__(self, *, model: str, delay_seconds: float, fail: bool = False) -> None:
+        self.model = model
+        self.provider = "openrouter" if model.startswith("qwen/") else "openai"
+        self.delay_seconds = delay_seconds
+        self.fail = fail
+        self.calls = 0
+
+    async def complete_json_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.0,
+    ) -> tuple[str, object]:
+        del messages, temperature
+        self.calls += 1
+        if self.fail:
+            raise AssertionError("the reserve reviewer must not be selected")
+        await asyncio.sleep(self.delay_seconds)
+        return "{}", {"provider": self.provider}
+
+
+@pytest.mark.asyncio
+async def test_source_review_primary_budget_covers_the_observed_qualified_rtt() -> None:
+    settings = Settings(_env_file=None)
+    primary = _MeasuredLatencyReview(model="qwen/qwen-plus", delay_seconds=4.25)
+    secondary = _MeasuredLatencyReview(
+        model="gpt-4.1-mini",
+        delay_seconds=0.0,
+        fail=True,
+    )
+    authority = SourceReviewAuthority(
+        primary=primary,  # type: ignore[arg-type]
+        secondary=secondary,  # type: ignore[arg-type]
+        hedge_after_seconds=settings.world_v2_source_review_hedge_after_seconds,
+        deadline_seconds=10.0,
+        caller_timeout_seconds=10.0,
+    )
+
+    raw, _usage = await authority.complete_json_with_usage(
+        [{"role": "user", "content": "review"}],
+        temperature=0.0,
+    )
+
+    assert raw == "{}"
+    assert primary.calls == 1
+    assert secondary.calls == 0
+
+
 class _ForkableInjectedReviewer(_InjectedModel):
     def __init__(self, model: str) -> None:
         super().__init__(model)
@@ -1522,7 +1571,7 @@ def test_world_v2_has_no_configured_backup_character_model() -> None:
     assert settings.world_v2_source_inventory_model == "openai/gpt-5.4-nano"
     assert settings.world_v2_source_inventory_fallback_model == "openai/gpt-5.4-mini"
     assert settings.world_v2_source_inventory_timeout_seconds == 10.0
-    assert settings.world_v2_source_review_hedge_after_seconds == 4.0
+    assert settings.world_v2_source_review_hedge_after_seconds == 6.0
     assert settings.world_v2_source_review_deadline_seconds == 30.0
 
 
