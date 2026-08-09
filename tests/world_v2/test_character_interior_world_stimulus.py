@@ -936,6 +936,75 @@ async def test_open_world_stimulus_processes_merge_before_the_character_turn_and
 
 
 @pytest.mark.asyncio
+async def test_drain_and_health_share_deterministic_chain_grouping() -> None:
+    runtime, ledger, _projection = _runtime(model=_RoleModel(decision="no_change"))
+    first = next(
+        item
+        for item in ledger.project().trigger_processes
+        if item.process_kind == "npc_world_appraisal"
+    )
+    first_located = ledger.lookup_event_commit(SOURCE_REF)
+    assert first_located is not None
+    first_event = first_located[0]
+    refs_and_offsets = (
+        ("occurrence-settled-2", 240),
+        ("occurrence-settled-3", 480),
+    )
+    processes = [first]
+    source_events = {SOURCE_REF: first_event}
+    for index, (source_ref, offset_seconds) in enumerate(refs_and_offsets, start=2):
+        processes.append(
+            first.model_copy(
+                update={
+                    "trigger_id": f"appraisal:synthetic:{index}",
+                    "trigger_ref": f"appraisal:synthetic:{index}",
+                    "source_evidence_ref": source_ref,
+                }
+            )
+        )
+        source_events[source_ref] = first_event.model_copy(
+            update={
+                "event_id": source_ref,
+                "logical_time": first_event.logical_time + timedelta(seconds=offset_seconds),
+            }
+        )
+    real_projection = ledger.project()
+
+    async def source_event(process, *, cursor):  # type: ignore[no-untyped-def]
+        del cursor
+        return source_events[process.source_evidence_ref]
+
+    runtime._source_event = source_event  # type: ignore[method-assign]  # noqa: SLF001
+    runtime._health_source_event = lambda ref: source_events.get(ref)  # type: ignore[method-assign]  # noqa: SLF001
+
+    def projection_in(order):  # type: ignore[no-untyped-def]
+        return SimpleNamespace(
+            trigger_processes=tuple(processes[index] for index in order),
+            model_result_audits=(),
+            world_revision=real_projection.world_revision,
+            deliberation_revision=real_projection.deliberation_revision,
+            ledger_sequence=real_projection.ledger_sequence,
+        )
+
+    expected_groups = ((SOURCE_REF, "occurrence-settled-2"), ("occurrence-settled-3",))
+    for order in ((0, 1, 2), (2, 1, 0)):
+        projected = projection_in(order)
+        batch = await runtime._opportunity_batch(  # noqa: SLF001 - grouping seam
+            process=processes[1],
+            projection=projected,
+        )
+        identities = runtime._health_opportunity_identities(  # noqa: SLF001 - grouping seam
+            projection=projected,
+            processes=projected.trigger_processes,
+        )
+
+        assert batch.identity.source_refs == expected_groups[0]
+        assert identities[processes[0].trigger_id].source_refs == expected_groups[0]
+        assert identities[processes[1].trigger_id].source_refs == expected_groups[0]
+        assert identities[processes[2].trigger_id].source_refs == expected_groups[1]
+
+
+@pytest.mark.asyncio
 async def test_merged_opportunity_replay_finds_a_durable_audit_from_any_source_ref() -> None:
     runtime, ledger, _projection = _runtime(model=_RoleModel(decision="no_change"))
     await runtime.drain_one()

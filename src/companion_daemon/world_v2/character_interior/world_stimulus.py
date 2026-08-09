@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 import logging
@@ -296,6 +296,56 @@ class _WorldStimulusOpportunityBatch:
     processes: tuple[TriggerProcess, ...]
     source_events: tuple[WorldEvent, ...]
     identity: CausalOpportunityIdentity
+
+
+@dataclass(frozen=True, slots=True)
+class _WorldStimulusLocatedSource:
+    process: TriggerProcess
+    source_event: WorldEvent
+
+
+def _group_world_stimulus_sources(
+    located_sources: tuple[_WorldStimulusLocatedSource, ...],
+    *,
+    merge_window_seconds: int,
+) -> tuple[tuple[_WorldStimulusLocatedSource, ...], ...]:
+    """Group sources with one deterministic earliest-source anchor.
+
+    The window is measured from the earliest source in each group rather than
+    transitively across a chain.  Thus 0, 240, 480 with a 300-second window
+    becomes (0, 240) and (480), independent of projection/input order.
+    """
+
+    if merge_window_seconds < 0:
+        raise ValueError("causal opportunity merge window cannot be negative")
+    remaining = sorted(
+        located_sources,
+        key=lambda item: (
+            item.source_event.logical_time,
+            item.source_event.event_id,
+            item.process.trigger_id,
+        ),
+    )
+    groups: list[tuple[_WorldStimulusLocatedSource, ...]] = []
+    while remaining:
+        anchor = remaining.pop(0)
+        group = [anchor]
+        retained: list[_WorldStimulusLocatedSource] = []
+        for candidate in remaining:
+            if (
+                candidate.process.process_kind == anchor.process.process_kind
+                and abs(
+                    (candidate.source_event.logical_time - anchor.source_event.logical_time)
+                    .total_seconds()
+                )
+                <= merge_window_seconds
+            ):
+                group.append(candidate)
+            else:
+                retained.append(candidate)
+        remaining = retained
+        groups.append(tuple(group))
+    return tuple(groups)
 
 
 class _WorldStimulusRelationshipSettlement(Protocol):
@@ -1269,9 +1319,15 @@ class CharacterInteriorWorldStimulusRuntime:
             raise ValueError("causal opportunity health world does not match the ledger")
         projection = self._ledger.project()
         processes = tuple(
-            item
-            for item in projection.trigger_processes
-            if item.process_kind in _PROCESS_PRIORITY and item.source_evidence_ref is not None
+            sorted(
+                (
+                    item
+                    for item in projection.trigger_processes
+                    if item.process_kind in _PROCESS_PRIORITY
+                    and item.source_evidence_ref is not None
+                ),
+                key=self._health_process_sort_key,
+            )
         )
         identity_by_trigger = self._health_opportunity_identities(
             projection=projection,
@@ -1318,50 +1374,39 @@ class CharacterInteriorWorldStimulusRuntime:
         """Project merged open work and durable lineage as one health view."""
 
         identities: dict[str, CausalOpportunityIdentity] = {}
-        unassigned = {item.trigger_id for item in processes}
-        by_id = {item.trigger_id: item for item in processes}
-        while unassigned:
-            trigger_id = next(iter(unassigned))
-            process = by_id[trigger_id]
+        unresolved: list[_WorldStimulusLocatedSource] = []
+        for process in sorted(processes, key=self._health_process_sort_key):
             durable = self._durable_opportunity_identity(projection, process.source_evidence_ref)
             if durable is not None:
-                identities[trigger_id] = durable
-                unassigned.remove(trigger_id)
+                identities[process.trigger_id] = durable
                 continue
             if process.state == "terminal":
-                identities[trigger_id] = self._opportunity_identity(
+                identities[process.trigger_id] = self._opportunity_identity(
                     process=process,
                     source_refs=(process.source_evidence_ref,),
                 )
-                unassigned.remove(trigger_id)
                 continue
             located = self._health_source_event(process.source_evidence_ref)
             if located is None:
-                identities[trigger_id] = self._opportunity_identity(
+                identities[process.trigger_id] = self._opportunity_identity(
                     process=process,
                     source_refs=(process.source_evidence_ref,),
                 )
-                unassigned.remove(trigger_id)
                 continue
-            anchor_time = located.logical_time
-            grouped: list[TriggerProcess] = []
-            for candidate_id in tuple(unassigned):
-                candidate = by_id[candidate_id]
-                if candidate.process_kind != process.process_kind or candidate.state == "terminal":
-                    continue
-                candidate_event = self._health_source_event(candidate.source_evidence_ref)
-                if candidate_event is None:
-                    continue
-                if (
-                    abs((candidate_event.logical_time - anchor_time).total_seconds())
-                    <= self._merge_window_seconds
-                ):
-                    grouped.append(candidate)
-            refs = tuple(item.source_evidence_ref for item in grouped)
-            identity = self._opportunity_identity(process=process, source_refs=refs)
-            for candidate in grouped:
-                identities[candidate.trigger_id] = identity
-                unassigned.remove(candidate.trigger_id)
+            unresolved.append(
+                _WorldStimulusLocatedSource(process=process, source_event=located)
+            )
+        for group in _group_world_stimulus_sources(
+            tuple(unresolved),
+            merge_window_seconds=self._merge_window_seconds,
+        ):
+            anchor = group[0].process
+            identity = self._opportunity_identity(
+                process=anchor,
+                source_refs=tuple(item.source_event.event_id for item in group),
+            )
+            for item in group:
+                identities[item.process.trigger_id] = identity
         return identities
 
     def _durable_opportunity_identity(
@@ -1408,6 +1453,17 @@ class CharacterInteriorWorldStimulusRuntime:
             return None
         located = self._ledger.lookup_event_commit(source_ref)
         return located[0] if located is not None else None
+
+    def _health_process_sort_key(
+        self,
+        process: TriggerProcess,
+    ) -> tuple[datetime, str, str]:
+        source_event = self._health_source_event(process.source_evidence_ref)
+        return (
+            source_event.logical_time if source_event is not None else datetime.min.replace(tzinfo=UTC),
+            source_event.event_id if source_event is not None else "",
+            process.trigger_id,
+        )
 
     async def _run_one(
         self,
@@ -1733,22 +1789,27 @@ class CharacterInteriorWorldStimulusRuntime:
                     await self._source_event(candidate, cursor=_cursor(projection)),
                 )
             )
-        located.sort(key=lambda item: (item[1].logical_time, item[1].event_id))
-        anchor_time = next(
-            event.logical_time
-            for candidate, event in located
-            if candidate.trigger_id == process.trigger_id
+        groups = _group_world_stimulus_sources(
+            tuple(
+                _WorldStimulusLocatedSource(process=candidate, source_event=source_event)
+                for candidate, source_event in located
+            ),
+            merge_window_seconds=self._merge_window_seconds,
         )
-        selected = tuple(
-            item
-            for item in located
-            if abs((item[1].logical_time - anchor_time).total_seconds())
-            <= self._merge_window_seconds
+        selected_group = next(
+            (
+                group
+                for group in groups
+                if any(item.process.trigger_id == process.trigger_id for item in group)
+            ),
+            None,
         )
-        selected_processes = tuple(item[0] for item in selected)
-        selected_events = tuple(item[1] for item in selected)
+        if selected_group is None:
+            raise ValueError("causal opportunity process is absent from its source groups")
+        selected_processes = tuple(item.process for item in selected_group)
+        selected_events = tuple(item.source_event for item in selected_group)
         identity = self._opportunity_identity(
-            process=process,
+            process=selected_processes[0],
             source_refs=tuple(item.event_id for item in selected_events),
         )
         return _WorldStimulusOpportunityBatch(
