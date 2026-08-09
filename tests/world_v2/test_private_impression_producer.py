@@ -18,7 +18,11 @@ from companion_daemon.world_v2.character_interior.authority import (
     _DeferredInteriorAuthority,
 )
 from companion_daemon.world_v2.character_interior.contracts import FACET_NAMES
-from companion_daemon.world_v2.character_interior.run_result import CausalOpportunityIdentity
+from companion_daemon.world_v2.character_interior.run_result import (
+    CausalOpportunityIdentity,
+    CausalOpportunityPolicy,
+    causal_opportunity_policy_from_attempt_id,
+)
 from companion_daemon.world_v2.character_interior.structured_role import (
     StructuredCharacterRoleFaculty,
 )
@@ -378,7 +382,9 @@ class _PrivateInteriorWireModel:
         if decision is None and isinstance(value.get("retain"), bool):
             decision = "retain" if value["retain"] else "no_change"
         request = json.loads(messages[-1]["content"])
-        source_refs = request["capability_manifest"]["source_refs"]
+        # The manifest may offer older appraisals as optional evidence, while
+        # this turn's pinned snapshot is the actor's actually attended set.
+        source_refs = request["inner_life_snapshot"]["source_refs"]
         if decision == "no_change":
             result = {
                 "status": "no_change",
@@ -438,6 +444,8 @@ def _private_runtime(
     model,
     *,
     owner_id: str = OWNER,
+    merge_window_seconds: int = 300,
+    expiry_seconds: int = 7 * 24 * 60 * 60,
 ) -> tuple[PrivateImpressionTriggerRuntime, CharacterInterior]:
     authority = _DeferredInteriorAuthority()
     interior = CharacterInterior(
@@ -453,6 +461,8 @@ def _private_runtime(
         character_interior=interior,
         companion_actor_ref="actor:companion",
         owner_id=owner_id,
+        merge_window_seconds=merge_window_seconds,
+        expiry_seconds=expiry_seconds,
     )
     authority.bind((_PrivateImpressionInteriorAuthorityHandler(runtime),))
     return runtime, interior
@@ -540,6 +550,156 @@ async def test_character_interior_accepts_one_source_bound_private_impression() 
     assert health.accepted_count == 1
     assert health.opportunity_count == 1
     assert (await runtime.drain_one()).status == "idle"
+
+
+@pytest.mark.asyncio
+async def test_private_impression_merges_sources_and_replays_one_interior_turn() -> None:
+    ledger = _ledger_with_active_appraisal()
+    _append_second_appraisal(ledger)
+    opener = PrivateImpressionTriggerOpener(ledger=ledger, owner_id=OWNER)
+    assert await opener.open_once() is not None
+    assert await opener.open_once() is not None
+
+    model = _Model(
+        [_retain(["appraisal:appraisal:interaction:1:meaning:disappointment"])]
+    )
+    runtime, _interior = _private_runtime(ledger, model)
+
+    result = await runtime.drain_one()
+
+    source_refs = (
+        "interaction-appraisal-accepted",
+        "interaction-appraisal-accepted:2",
+    )
+    expected = CausalOpportunityIdentity.from_source_refs(
+        world_id=WORLD_ID,
+        actor_ref="actor:companion",
+        purpose="private_impression_reflection",
+        source_refs=source_refs,
+        epoch=source_refs[0],
+    )
+    assert result.work_status == "accepted"
+    assert result.opportunity_ref == expected.opportunity_ref
+    assert result.source_refs == source_refs
+    assert len(model.calls) == 1
+    processes = tuple(
+        item
+        for item in ledger.project().trigger_processes
+        if item.process_kind == "private_impression_deliberation"
+    )
+    assert len(processes) == 2
+    assert all(item.state == "terminal" for item in processes)
+    lineage = next(
+        json.loads(item.audit_json)["character_interior_lineage"]
+        for item in ledger.project().model_result_audits
+        if "character_interior_lineage" in json.loads(item.audit_json)
+        and json.loads(item.audit_json)["character_interior_lineage"]["purpose"]
+        == "private_impression_reflection"
+    )
+    assert lineage["causal_source_refs"] == list(source_refs)
+    health = runtime.health_snapshot(WORLD_ID)
+    assert health.opportunity_count == 1
+    assert health.accepted_count == 2
+
+
+@pytest.mark.asyncio
+async def test_new_accepted_appraisal_opens_a_new_private_impression_epoch() -> None:
+    ledger = _ledger_with_active_appraisal()
+    opener = PrivateImpressionTriggerOpener(ledger=ledger, owner_id=OWNER)
+    assert await opener.open_once() is not None
+
+    first_runtime, _interior = _private_runtime(
+        ledger,
+        _Model([_retain(["appraisal:appraisal:interaction:1:meaning:disappointment"])]),
+    )
+    first = await first_runtime.drain_one()
+    assert first.work_status == "accepted"
+
+    _append_second_appraisal(ledger)
+    assert await opener.open_once() is not None
+    second_runtime, _interior = _private_runtime(
+        ledger,
+        _Model([_retain(["appraisal:appraisal:interaction:2:meaning:disappointment"])]),
+    )
+    second = await second_runtime.drain_one()
+
+    assert second.work_status == "accepted"
+    assert second.source_refs == ("interaction-appraisal-accepted:2",)
+    assert second.epoch == "interaction-appraisal-accepted:2"
+    assert second.opportunity_ref != first.opportunity_ref
+
+
+@pytest.mark.asyncio
+async def test_private_impression_policy_survives_cold_replay() -> None:
+    ledger = _ledger_with_active_appraisal()
+    await PrivateImpressionTriggerOpener(ledger=ledger, owner_id=OWNER).open_once()
+    old_policy = CausalOpportunityPolicy(merge_window_seconds=240, expiry_seconds=900)
+    runtime, _interior = _private_runtime(
+        ledger,
+        _Model(['{"decision":"no_change"}']),
+        merge_window_seconds=old_policy.merge_window_seconds,
+        expiry_seconds=old_policy.expiry_seconds,
+    )
+
+    result = await runtime.drain_one()
+    process = next(
+        item
+        for item in ledger.project().trigger_processes
+        if item.process_kind == "private_impression_deliberation"
+    )
+    restarted, _interior = _private_runtime(
+        ledger,
+        _Model(['{"decision":"no_change"}']),
+    )
+    health = restarted.health_snapshot(WORLD_ID)
+    changed_identity = CausalOpportunityIdentity.from_source_refs(
+        world_id=WORLD_ID,
+        actor_ref="actor:companion",
+        purpose="private_impression_reflection",
+        source_refs=(process.source_evidence_ref,),
+        epoch=process.source_evidence_ref,
+        policy=CausalOpportunityPolicy(merge_window_seconds=240, expiry_seconds=901),
+    )
+
+    assert process.claim_lease is not None
+    assert causal_opportunity_policy_from_attempt_id(process.claim_lease.attempt_id) == old_policy
+    assert result.opportunity_ref == health.last_opportunity_ref
+    assert result.opportunity_ref != changed_identity.opportunity_ref
+    assert health.technical_failure_count == 0
+
+
+@pytest.mark.asyncio
+async def test_expired_private_impression_is_not_character_no_change() -> None:
+    ledger = _ledger_with_active_appraisal()
+    await PrivateImpressionTriggerOpener(ledger=ledger, owner_id=OWNER).open_once()
+    runtime, _interior = _private_runtime(
+        ledger,
+        _Model(['{"decision":"no_change"}']),
+        expiry_seconds=1,
+    )
+    current = ledger.project().logical_time
+    assert current is not None
+    later = current + timedelta(seconds=2)
+    commit(
+        ledger,
+        [
+            event(
+                "private-impression-clock-advanced",
+                "ClockAdvanced",
+                {
+                    "logical_time_from": current.isoformat(),
+                    "logical_time_to": later.isoformat(),
+                },
+                at=later,
+            )
+        ],
+    )
+
+    result = await runtime.drain_one()
+
+    assert result.work_status == "expired"
+    assert runtime.health_snapshot(WORLD_ID).expired_count == 1
+    assert runtime.health_snapshot(WORLD_ID).no_change_count == 0
 
 
 @pytest.mark.asyncio

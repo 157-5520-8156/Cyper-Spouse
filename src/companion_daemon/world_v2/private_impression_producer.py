@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 from typing import Any, Callable, Literal
@@ -37,6 +37,7 @@ from .character_interior import CharacterInterior, InteriorStimulus
 from .character_interior.audit import (
     causal_opportunity_lineage_fields,
     recorded_character_interior_model_result,
+    technical_character_interior_model_result,
 )
 from .character_interior.contracts import (
     _InteriorAuthorLineage,
@@ -47,6 +48,11 @@ from .character_interior.run_result import (
     CAUSAL_OPPORTUNITY_CONTRACT_VERSION,
     CausalOpportunityHealth,
     CausalOpportunityIdentity,
+    CausalOpportunityPolicy,
+    CausalOpportunityWindow,
+    DEFAULT_CAUSAL_OPPORTUNITY_POLICY,
+    causal_opportunity_policy_from_attempt_id,
+    merge_causal_opportunity_identities,
 )
 from .event_identity import domain_idempotency_key
 from .ledger import LedgerPort
@@ -95,8 +101,8 @@ PRIVATE_IMPRESSION_PURPOSE = "private_impression_reflection"
 # after its model output failed authority validation.  Lease expiry alone
 # would otherwise retry the same failing provider call forever, burning
 # unbounded tokens on a reflection that never succeeds; after this many
-# attempts the process is terminal and the next opener pass derives a fresh
-# trigger if the appraisal is still meaningful.
+# attempts the process is terminal. A fresh epoch requires new accepted
+# appraisal evidence; the opener does not re-derive the same source trigger.
 _PRIVATE_IMPRESSION_MAX_ATTEMPTS = 4
 
 
@@ -609,26 +615,111 @@ class PrivateImpressionTriggerOpener:
 class PrivateImpressionRunResult(FrozenModel):
     trigger_id: str
     status: Literal["idle", "owned_elsewhere", "processed"]
-    work_status: Literal["no_change", "ignored", "accepted", "technical_failure"] | None = None
+    work_status: Literal[
+        "no_change", "ignored", "expired", "accepted", "technical_failure"
+    ] | None = None
     opportunity_ref: str | None = None
     source_refs: tuple[str, ...] = ()
     epoch: str | None = None
     contract_version: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _PrivateImpressionLocatedSource:
+    process: TriggerProcess
+    source_event: WorldEvent
+    policy: CausalOpportunityPolicy
+
+
+@dataclass(frozen=True, slots=True)
+class _PrivateImpressionOpportunityBatch:
+    processes: tuple[TriggerProcess, ...]
+    source_events: tuple[WorldEvent, ...]
+    identity: CausalOpportunityIdentity
+
+
+def _group_private_impression_sources(
+    located_sources: tuple[_PrivateImpressionLocatedSource, ...],
+    *,
+    merge_window_seconds: int,
+) -> tuple[tuple[_PrivateImpressionLocatedSource, ...], ...]:
+    """Group appraisal sources around deterministic, non-transitive anchors."""
+
+    if merge_window_seconds < 0:
+        raise ValueError("causal opportunity merge window cannot be negative")
+    remaining = sorted(
+        located_sources,
+        key=lambda item: (
+            item.source_event.logical_time,
+            item.source_event.event_id,
+            item.process.trigger_id,
+        ),
+    )
+    groups: list[tuple[_PrivateImpressionLocatedSource, ...]] = []
+    while remaining:
+        anchor = remaining.pop(0)
+        group = [anchor]
+        retained: list[_PrivateImpressionLocatedSource] = []
+        for candidate in remaining:
+            if (
+                candidate.process.process_kind == anchor.process.process_kind
+                and candidate.policy.policy_ref == anchor.policy.policy_ref
+                and abs(
+                    (candidate.source_event.logical_time - anchor.source_event.logical_time)
+                    .total_seconds()
+                )
+                <= merge_window_seconds
+            ):
+                group.append(candidate)
+            else:
+                retained.append(candidate)
+        remaining = retained
+        groups.append(tuple(group))
+    return tuple(groups)
+
+
 def _private_impression_opportunity_identity(
     *,
     world_id: str,
     actor_ref: str,
-    source_ref: str,
+    source_ref: str | None = None,
+    source_refs: tuple[str, ...] = (),
+    epoch: str | None = None,
+    policy: CausalOpportunityPolicy | None = None,
 ) -> CausalOpportunityIdentity:
-    return CausalOpportunityIdentity.from_source_refs(
+    refs = tuple(source_refs)
+    if source_ref:
+        refs += (source_ref,)
+    refs = tuple(dict.fromkeys(refs))
+    canonical_refs = tuple(sorted(refs))
+    if not canonical_refs:
+        raise ValueError("private impression opportunity requires source refs")
+    selected_policy = policy or DEFAULT_CAUSAL_OPPORTUNITY_POLICY
+    identity = CausalOpportunityIdentity.from_source_refs(
         world_id=world_id,
         actor_ref=actor_ref,
         purpose=PRIVATE_IMPRESSION_PURPOSE,
-        source_refs=(source_ref,),
-        epoch=source_ref,
+        source_refs=(canonical_refs[0],),
+        epoch=epoch or canonical_refs[0],
         contract_version=CAUSAL_OPPORTUNITY_CONTRACT_VERSION,
+        policy=selected_policy,
+    )
+    return merge_causal_opportunity_identities(
+        [
+            identity,
+            *(
+                CausalOpportunityIdentity.from_source_refs(
+                    world_id=world_id,
+                    actor_ref=actor_ref,
+                    purpose=PRIVATE_IMPRESSION_PURPOSE,
+                    source_refs=(ref,),
+                    epoch=identity.epoch,
+                    contract_version=CAUSAL_OPPORTUNITY_CONTRACT_VERSION,
+                    policy=selected_policy,
+                )
+                for ref in canonical_refs[1:]
+            ),
+        ]
     )
 
 
@@ -734,9 +825,11 @@ class PrivateImpressionTriggerRuntime:
         content_reader: Callable[[str], str | None] | None = None,
         owner_id: str,
         lease_seconds: int = 120,
+        merge_window_seconds: int = DEFAULT_CAUSAL_OPPORTUNITY_POLICY.merge_window_seconds,
+        expiry_seconds: int = DEFAULT_CAUSAL_OPPORTUNITY_POLICY.expiry_seconds,
         source: str = "world-v2:private-impression-trigger-runtime",
     ) -> None:
-        if not owner_id or lease_seconds <= 0:
+        if not owner_id or lease_seconds <= 0 or merge_window_seconds < 0 or expiry_seconds <= 0:
             raise ValueError("private impression runtime needs an owner and positive lease")
         if not isinstance(character_interior, CharacterInterior):
             raise TypeError("private impression runtime requires CharacterInterior")
@@ -755,8 +848,11 @@ class PrivateImpressionTriggerRuntime:
         self._content_reader = content_reader
         self._owner_id = owner_id
         self._lease_seconds = lease_seconds
+        self._policy = CausalOpportunityPolicy(
+            merge_window_seconds=merge_window_seconds,
+            expiry_seconds=expiry_seconds,
+        )
         self._source = source
-        self._technical_failure_trigger_ids: set[str] = set()
 
     async def advance_due_once(self) -> PrivateImpressionRunResult:
         """Route one due private-impression opportunity through this seam."""
@@ -772,60 +868,134 @@ class PrivateImpressionTriggerRuntime:
     async def _drain_one_impl(self) -> PrivateImpressionRunResult:
         projection = await _project(self._ledger)
         pending = tuple(
-            item
-            for item in projection.trigger_processes
-            if item.process_kind == "private_impression_deliberation"
-            and item.state != "terminal"
+            sorted(
+                (
+                    item
+                    for item in projection.trigger_processes
+                    if item.process_kind == "private_impression_deliberation"
+                    and item.state != "terminal"
+                ),
+                key=self._health_process_sort_key,
+            )
         )
         if not pending:
             return PrivateImpressionRunResult(trigger_id="", status="idle")
-        active = None
-        source_event = None
-        for process in pending:
-            candidate_source = await self._source_event(process)
-            candidate = await self._claim_or_reclaim(
-                process=process,
-                source_event=candidate_source,
-                projection=projection,
+        process = pending[0]
+        batch = await self._opportunity_batch(process=process, projection=projection)
+        opportunity_identity = batch.identity
+        source_events_by_trigger = {
+            candidate.trigger_id: source_event
+            for candidate, source_event in zip(
+                batch.processes,
+                batch.source_events,
+                strict=True,
             )
-            if candidate is not None:
-                active = candidate
-                source_event = candidate_source
-                break
-        if active is None or source_event is None:
+        }
+        source_event = source_events_by_trigger[process.trigger_id]
+
+        def result(
+            *,
+            work_status: str | None = None,
+            status: str = "processed",
+        ) -> PrivateImpressionRunResult:
             return PrivateImpressionRunResult(
-                trigger_id=pending[0].trigger_id, status="owned_elsewhere"
+                trigger_id=process.trigger_id,
+                status=status,
+                work_status=work_status,  # type: ignore[arg-type]
+                opportunity_ref=opportunity_identity.opportunity_ref,
+                source_refs=opportunity_identity.source_refs,
+                epoch=opportunity_identity.epoch,
+                contract_version=opportunity_identity.contract_version,
             )
 
+        active_processes: list[TriggerProcess] = []
+        for candidate in batch.processes:
+            current_projection = await _project(self._ledger)
+            current_process = next(
+                item
+                for item in current_projection.trigger_processes
+                if item.trigger_id == candidate.trigger_id
+            )
+            active_candidate = await self._claim_or_reclaim(
+                process=current_process,
+                source_event=source_events_by_trigger[candidate.trigger_id],
+                projection=current_projection,
+            )
+            if active_candidate is None:
+                return result(status="owned_elsewhere")
+            active_processes.append(active_candidate)
+        active = next(
+            item for item in active_processes if item.trigger_id == process.trigger_id
+        )
         before = await _project(self._ledger)
         cursor = _cursor(before)
-        appraisal = next(
-            (
-                item
-                for item in before.appraisals
-                if item.origin.accepted_event_ref == source_event.event_id
-            ),
-            None,
+        policy = opportunity_identity.opportunity_policy
+        durable_identity = self._durable_opportunity_identity(
+            before,
+            source_ref=source_event.event_id,
         )
-        already_interpreted = appraisal is not None and any(
-            impression.status == "active"
+        if durable_identity is not None:
+            accepted = any(
+                impression.status == "active"
+                and set(impression.source_refs).intersection(durable_identity.source_refs)
+                for impression in before.private_impressions
+            )
+            await self._complete_opportunity_processes(
+                processes=active_processes,
+                source_events=source_events_by_trigger,
+                outcome_ref=(
+                    f"outcome:{process.trigger_id}:replay:"
+                    f"{('accepted' if accepted else 'no-change')}"
+                ),
+            )
+            return result(work_status="accepted" if accepted else "no_change")
+        if CausalOpportunityWindow(
+            expires_at=min(item.logical_time for item in batch.source_events)
+            + timedelta(seconds=policy.expiry_seconds)
+        ).is_expired(before.logical_time or source_event.logical_time):
+            await self._complete_opportunity_processes(
+                processes=active_processes,
+                source_events=source_events_by_trigger,
+                outcome_ref=(
+                    f"outcome:{process.trigger_id}:expired:{opportunity_identity.opportunity_ref}"
+                ),
+            )
+            return result(work_status="expired")
+        appraisals = tuple(
+            next(
+                (
+                    item
+                    for item in before.appraisals
+                    if item.origin.accepted_event_ref == source_event_item.event_id
+                ),
+                None,
+            )
+            for source_event_item in batch.source_events
+        )
+        already_interpreted = any(
+            appraisal is not None
             and any(
-                ref.startswith(f"appraisal:{appraisal.appraisal_id}:")
-                for ref in impression.interpretation_refs
+                impression.status == "active"
+                and any(
+                    ref.startswith(f"appraisal:{appraisal.appraisal_id}:")
+                    for ref in impression.interpretation_refs
+                )
+                for impression in before.private_impressions
             )
-            for impression in before.private_impressions
+            for appraisal in appraisals
         )
-        if appraisal is None or appraisal.status != "active" or already_interpreted:
-            self._technical_failure_trigger_ids.discard(active.trigger_id)
-            await self._complete(
-                process=active,
-                source_event=source_event,
-                cursor=cursor,
-                outcome_ref=f"outcome:{active.trigger_id}:no-source",
+        if (
+            any(appraisal is None or appraisal.status != "active" for appraisal in appraisals)
+            or already_interpreted
+        ):
+            await self._complete_opportunity_processes(
+                processes=active_processes,
+                source_events=source_events_by_trigger,
+                outcome_ref=f"outcome:{process.trigger_id}:ignored",
             )
-            return PrivateImpressionRunResult(
-                trigger_id=active.trigger_id, status="processed", work_status="ignored"
-            )
+            return result(work_status="ignored")
+        appraisal = appraisals[0]
+        assert appraisal is not None
         capsule = compile_private_impression_reflection_capsule(
             projection=before,
             appraisal=appraisal,
@@ -834,11 +1004,6 @@ class PrivateImpressionTriggerRuntime:
             content_reader=self._content_reader,
         )
         attempt_id = active.claim_lease.attempt_id
-        opportunity_identity = _private_impression_opportunity_identity(
-            world_id=self._ledger.world_id,
-            actor_ref=self._companion_actor_ref,
-            source_ref=source_event.event_id,
-        )
         capability_manifest = _private_impression_capability(
             capsule,
             opportunity_identity=opportunity_identity,
@@ -853,24 +1018,22 @@ class PrivateImpressionTriggerRuntime:
                 cursor=cursor,
                 logical_time=before.logical_time or source_event.logical_time,
                 purpose=PRIVATE_IMPRESSION_PURPOSE,
-                source_refs=(source_event.event_id,),
+                source_refs=opportunity_identity.source_refs,
                 capability_manifest=capability_manifest,
                 context_note=(
-                    "One accepted appraisal is available for private, defeasible "
+                    "One or more accepted appraisals are available for private, defeasible "
                     "reflection; durable interpretation remains optional."
                 ),
             )
         )
         if transition.status == "technical_failure":
-            self._technical_failure_trigger_ids.add(active.trigger_id)
-            return PrivateImpressionRunResult(
-                trigger_id=active.trigger_id,
-                status="processed",
-                work_status="technical_failure",
+            await self._record_technical_failure(
+                process=active,
+                source_event=source_event,
+                failure_code=transition.failure_code or "interior_technical_failure",
             )
-        after_interior = await _project(self._ledger)
+            return result(work_status="technical_failure")
         if transition.status == "model_no_change":
-            self._technical_failure_trigger_ids.discard(active.trigger_id)
             model_result_audit = recorded_character_interior_model_result(
                 transition,
                 purpose=PRIVATE_IMPRESSION_PURPOSE,
@@ -882,36 +1045,205 @@ class PrivateImpressionTriggerRuntime:
                 router_version="character-interior-private-impression-transition.1",
                 causal_opportunity=opportunity_identity,
             )
-            await self._complete(
-                process=active,
-                source_event=source_event,
-                cursor=_cursor(after_interior),
-                outcome_ref=f"outcome:{active.trigger_id}:no-change",
+            await self._complete_opportunity_processes(
+                processes=active_processes,
+                source_events=source_events_by_trigger,
+                outcome_ref=f"outcome:{process.trigger_id}:no-change",
                 model_result_audit=model_result_audit,
             )
-            return PrivateImpressionRunResult(
-                trigger_id=active.trigger_id, status="processed", work_status="no_change"
-            )
+            return result(work_status="no_change")
         if len(transition.proposal_refs) != 1:
             # A transitioned result without exactly one accepted typed
             # proposal is an authority failure, never model no-change.
-            self._technical_failure_trigger_ids.add(active.trigger_id)
-            return PrivateImpressionRunResult(
-                trigger_id=active.trigger_id,
-                status="processed",
-                work_status="technical_failure",
+            await self._record_technical_failure(
+                process=active,
+                source_event=source_event,
+                failure_code="invalid_proposal_count",
             )
+            return result(work_status="technical_failure")
         accepted_ref = transition.proposal_refs[0]
-        self._technical_failure_trigger_ids.discard(active.trigger_id)
-        await self._complete(
-            process=active,
-            source_event=source_event,
-            cursor=_cursor(after_interior),
-            outcome_ref=f"outcome:{active.trigger_id}:accepted:{accepted_ref}",
+        await self._complete_opportunity_processes(
+            processes=active_processes,
+            source_events=source_events_by_trigger,
+            outcome_ref=f"outcome:{process.trigger_id}:accepted:{accepted_ref}",
         )
-        return PrivateImpressionRunResult(
-            trigger_id=active.trigger_id, status="processed", work_status="accepted"
+        return result(work_status="accepted")
+
+    async def _opportunity_batch(
+        self,
+        *,
+        process: TriggerProcess,
+        projection,
+    ) -> _PrivateImpressionOpportunityBatch:
+        policy = self._policy_for_process(process)
+        candidates = tuple(
+            item
+            for item in projection.trigger_processes
+            if item.process_kind == process.process_kind
+            and item.state != "terminal"
+            and item.source_evidence_ref is not None
+            and self._policy_for_process(item).policy_ref == policy.policy_ref
         )
+        located_items: list[_PrivateImpressionLocatedSource] = []
+        for candidate in candidates:
+            located_items.append(
+                _PrivateImpressionLocatedSource(
+                    process=candidate,
+                    source_event=await self._source_event(candidate),
+                    policy=policy,
+                )
+            )
+        located = tuple(located_items)
+        groups = _group_private_impression_sources(
+            located,
+            merge_window_seconds=policy.merge_window_seconds,
+        )
+        selected = next(
+            (
+                group
+                for group in groups
+                if any(item.process.trigger_id == process.trigger_id for item in group)
+            ),
+            None,
+        )
+        if selected is None:
+            raise ValueError("private impression process is absent from its source groups")
+        source_refs = tuple(item.source_event.event_id for item in selected)
+        identity = _private_impression_opportunity_identity(
+            world_id=self._ledger.world_id,
+            actor_ref=self._companion_actor_ref,
+            source_refs=source_refs,
+            epoch=source_refs[0],
+            policy=policy,
+        )
+        return _PrivateImpressionOpportunityBatch(
+            processes=tuple(item.process for item in selected),
+            source_events=tuple(item.source_event for item in selected),
+            identity=identity,
+        )
+
+    async def _complete_opportunity_processes(
+        self,
+        *,
+        processes: list[TriggerProcess],
+        source_events: dict[str, WorldEvent],
+        outcome_ref: str,
+        model_result_audit: ModelResultRecordedPayload | None = None,
+    ) -> None:
+        """Terminalize every claimed appraisal source exactly once."""
+
+        for process in processes:
+            current = await _project(self._ledger)
+            current_process = next(
+                item for item in current.trigger_processes if item.trigger_id == process.trigger_id
+            )
+            if current_process.state == "terminal":
+                continue
+            await self._complete(
+                process=current_process,
+                source_event=source_events[process.trigger_id],
+                cursor=_cursor(current),
+                outcome_ref=outcome_ref,
+                model_result_audit=model_result_audit if process is processes[0] else None,
+            )
+
+    def _durable_opportunity_identity(
+        self,
+        projection,
+        *,
+        source_ref: str | None,
+    ) -> CausalOpportunityIdentity | None:
+        if source_ref is None:
+            return None
+        identities: dict[str, CausalOpportunityIdentity] = {}
+        for model_audit in reversed(projection.model_result_audits):
+            try:
+                recorded = RecordedModelResultAudit.model_validate_json(model_audit.audit_json)
+            except ValueError:
+                continue
+            lineage = recorded.character_interior_lineage
+            if (
+                lineage is None
+                or source_ref not in lineage.causal_source_refs
+                or lineage.causal_actor_ref != self._companion_actor_ref
+                or lineage.purpose != PRIVATE_IMPRESSION_PURPOSE
+                or lineage.causal_policy_ref is None
+            ):
+                continue
+            try:
+                policy = CausalOpportunityPolicy.from_ref(lineage.causal_policy_ref)
+                identity = CausalOpportunityIdentity.from_source_refs(
+                    world_id=lineage.causal_world_id,
+                    actor_ref=lineage.causal_actor_ref,
+                    purpose=lineage.purpose,
+                    source_refs=lineage.causal_source_refs,
+                    epoch=lineage.causal_epoch,
+                    contract_version=lineage.causal_contract_version,
+                    policy=policy,
+                )
+            except (TypeError, ValueError):
+                continue
+            if (
+                identity.policy_version != lineage.causal_policy_version
+                or identity.opportunity_ref != lineage.opportunity_ref
+            ):
+                continue
+            identities[identity.opportunity_ref] = identity
+        if len(identities) != 1:
+            return None
+        return next(iter(identities.values()))
+
+    def _health_opportunity_identities(
+        self,
+        projection,
+        processes: tuple[TriggerProcess, ...],
+    ) -> dict[str, CausalOpportunityIdentity]:
+        identities: dict[str, CausalOpportunityIdentity] = {}
+        unresolved: list[_PrivateImpressionLocatedSource] = []
+        for process in processes:
+            source_ref = process.source_evidence_ref
+            durable = self._durable_opportunity_identity(projection, source_ref=source_ref)
+            if durable is not None:
+                identities[process.trigger_id] = durable
+                continue
+            if source_ref is None:
+                continue
+            located = self._ledger.lookup_event_commit(source_ref)
+            if located is None:
+                identities[process.trigger_id] = _private_impression_opportunity_identity(
+                    world_id=self._ledger.world_id,
+                    actor_ref=self._companion_actor_ref,
+                    source_ref=source_ref,
+                    policy=self._policy_for_process(process),
+                )
+                continue
+            unresolved.append(
+                _PrivateImpressionLocatedSource(
+                    process=process,
+                    source_event=located[0],
+                    policy=self._policy_for_process(process),
+                )
+            )
+        by_policy: dict[str, list[_PrivateImpressionLocatedSource]] = {}
+        for item in unresolved:
+            by_policy.setdefault(item.policy.policy_ref, []).append(item)
+        for policy_ref in sorted(by_policy):
+            policy_sources = tuple(by_policy[policy_ref])
+            for group in _group_private_impression_sources(
+                policy_sources,
+                merge_window_seconds=policy_sources[0].policy.merge_window_seconds,
+            ):
+                source_refs = tuple(item.source_event.event_id for item in group)
+                identity = _private_impression_opportunity_identity(
+                    world_id=self._ledger.world_id,
+                    actor_ref=self._companion_actor_ref,
+                    source_refs=source_refs,
+                    epoch=source_refs[0],
+                    policy=group[0].policy,
+                )
+                for item in group:
+                    identities[item.process.trigger_id] = identity
+        return identities
 
     async def _attach_opportunity_lineage(
         self,
@@ -930,11 +1262,11 @@ class PrivateImpressionTriggerRuntime:
         )
         if process is None or process.source_evidence_ref is None:
             raise RuntimeError("private impression result has no source-bound opportunity")
-        identity = _private_impression_opportunity_identity(
-            world_id=self._ledger.world_id,
-            actor_ref=self._companion_actor_ref,
-            source_ref=process.source_evidence_ref,
+        identity = self._health_opportunity_identities(projection, (process,)).get(
+            process.trigger_id
         )
+        if identity is None:
+            raise RuntimeError("private impression result has no recoverable opportunity")
         return result.model_copy(
             update={
                 "opportunity_ref": identity.opportunity_ref,
@@ -947,23 +1279,21 @@ class PrivateImpressionTriggerRuntime:
     def health_snapshot(self, world_id: str) -> CausalOpportunityHealth:
         if world_id != self._ledger.world_id:
             raise ValueError("private impression health world does not match the ledger")
+        projection = self._ledger.project()
         processes = tuple(
-            item
-            for item in self._ledger.project().trigger_processes
-            if item.process_kind == "private_impression_deliberation"
-            and item.source_evidence_ref is not None
-        )
-        identities = tuple(
-            _private_impression_opportunity_identity(
-                world_id=world_id,
-                actor_ref=self._companion_actor_ref,
-                source_ref=item.source_evidence_ref,
+            sorted(
+                (
+                    item
+                    for item in projection.trigger_processes
+                    if item.process_kind == "private_impression_deliberation"
+                    and item.source_evidence_ref is not None
+                ),
+                key=self._health_process_sort_key,
             )
-            for item in processes
         )
+        identity_by_trigger = self._health_opportunity_identities(projection, processes)
+        identities = tuple(identity_by_trigger[item.trigger_id] for item in processes)
         outcomes = tuple(item.runtime_outcome_ref or "" for item in processes)
-        process_ids = {item.trigger_id for item in processes}
-        self._technical_failure_trigger_ids.intersection_update(process_ids)
         last = processes[-1] if processes else None
         last_identity = identities[-1] if identities else None
         return CausalOpportunityHealth(
@@ -986,11 +1316,46 @@ class PrivateImpressionTriggerRuntime:
                 for process, outcome in zip(processes, outcomes, strict=True)
             ),
             technical_failure_count=sum(
-                item.trigger_id in self._technical_failure_trigger_ids
-                or ":attempts-exhausted" in outcome
-                for item, outcome in zip(processes, outcomes, strict=True)
+                self._process_has_technical_failure(projection, item)
+                for item in processes
             ),
         )
+
+    def _health_process_sort_key(
+        self,
+        process,
+    ) -> tuple[datetime, str, str]:
+        source_event = self._ledger.lookup_event_commit(process.source_evidence_ref)
+        event = source_event[0] if source_event is not None else None
+        return (
+            event.logical_time if event is not None else datetime.min.replace(tzinfo=UTC),
+            event.event_id if event is not None else "",
+            process.trigger_id,
+        )
+
+    def _policy_for_process(self, process) -> CausalOpportunityPolicy:
+        lease = process.claim_lease
+        if lease is None:
+            return self._policy
+        try:
+            persisted = causal_opportunity_policy_from_attempt_id(lease.attempt_id)
+        except ValueError as exc:
+            raise ValueError("private impression claim has an invalid durable policy") from exc
+        return persisted or self._policy
+
+    @staticmethod
+    def _process_has_technical_failure(projection, process) -> bool:  # type: ignore[no-untyped-def]
+        attempt_ids = set(process.attempt_ids)
+        for item in projection.model_result_audits:
+            if item.trigger_ref != process.source_evidence_ref or item.attempt_id not in attempt_ids:
+                continue
+            try:
+                audit = RecordedModelResultAudit.model_validate_json(item.audit_json)
+            except ValueError:
+                continue
+            if audit.failure_code is not None:
+                return True
+        return False
 
     async def _accept(
         self,
@@ -1400,12 +1765,16 @@ class PrivateImpressionTriggerRuntime:
         if len(process.attempt_ids) >= _PRIVATE_IMPRESSION_MAX_ATTEMPTS:
             # A reflection whose model output repeatedly fails authority
             # validation must not burn unbounded provider calls.  Terminal the
-            # process after a bounded number of attempts; the next opener pass
-            # derives a fresh trigger if the appraisal is still meaningful.
+            # process after a bounded number of attempts. A new epoch can only
+            # come from a later accepted appraisal source, not from retrying
+            # this same source or advancing the clock.
             # Completion requires a live claim lease, so first reclaim with a
             # fresh lease at the current logical time, then complete it.
-            exhausted_attempt_id = "attempt:private-impression:exhausted:" + _digest(
-                process.trigger_id
+            exhausted_attempt_id = (
+                "attempt:private-impression:exhausted:"
+                + _digest(process.trigger_id)
+                + ":policy="
+                + self._policy_for_process(process).policy_ref
             )
             exhausted = process.model_copy(
                 update={
@@ -1470,8 +1839,11 @@ class PrivateImpressionTriggerRuntime:
                 outcome_ref=f"outcome:{process.trigger_id}:attempts-exhausted",
             )
             return None
-        attempt_id = "attempt:private-impression:" + _digest(
-            {"trigger_id": process.trigger_id, "attempt": len(process.attempt_ids) + 1}
+        attempt_id = (
+            "attempt:private-impression:"
+            + _digest({"trigger_id": process.trigger_id, "attempt": len(process.attempt_ids) + 1})
+            + ":policy="
+            + self._policy_for_process(process).policy_ref
         )
         claimed = process.model_copy(
             update={
@@ -1523,6 +1895,57 @@ class PrivateImpressionTriggerRuntime:
             + _digest([process.trigger_id, attempt_id]),
         )
         return claimed
+
+    async def _record_technical_failure(
+        self,
+        *,
+        process,
+        source_event: WorldEvent,
+        failure_code: str,
+    ) -> None:
+        if process.claim_lease is None:
+            raise ValueError("private impression technical audit requires a claim")
+        current = await _project(self._ledger)
+        model_payload = technical_character_interior_model_result(
+            purpose=PRIVATE_IMPRESSION_PURPOSE,
+            trigger_ref=source_event.event_id,
+            attempt_id=process.claim_lease.attempt_id,
+            evaluated_world_revision=current.world_revision,
+            failure_code=failure_code,
+        )
+        if any(
+            item.model_result_ref == model_payload.model_result_ref
+            for item in current.model_result_audits
+        ):
+            return
+        at = current.logical_time or source_event.logical_time
+        payload = model_payload.model_dump(mode="json")
+        identity = domain_idempotency_key(
+            event_type="ModelResultRecorded",
+            world_id=self._ledger.world_id,
+            payload=payload,
+        )
+        event = WorldEvent.from_payload(
+            schema_version="world-v2.1",
+            event_id="event:private-impression:technical:" + model_payload.model_result_ref,
+            world_id=self._ledger.world_id,
+            event_type="ModelResultRecorded",
+            logical_time=at,
+            created_at=max(source_event.created_at, at),
+            actor=self._owner_id,
+            source=self._source,
+            trace_id=source_event.trace_id,
+            causation_id=source_event.event_id,
+            correlation_id=source_event.correlation_id,
+            idempotency_key=identity or "world-v2:private-impression:technical:" + model_payload.model_result_ref,
+            payload=payload,
+        )
+        await _commit_at_cursor(
+            self._ledger,
+            (event,),
+            cursor=_cursor(current),
+            commit_id="commit:private-impression:technical:" + model_payload.model_result_ref,
+        )
 
     async def _complete(
         self,
@@ -1627,6 +2050,7 @@ class _PrivateImpressionInteriorAuthorityHandler:
             or opportunity_identity.opportunity_ref != request.subject_ref
             or opportunity_identity.source_refs != request.subject_source_refs
             or request.trigger_ref not in opportunity_identity.source_refs
+            or any(source_ref not in manifest.source_refs for source_ref in opportunity_identity.source_refs)
         ):
             raise ValueError("private impression InnerTurn is not actor-bound to its opportunity")
         raw_capsule = manifest.payload.get("reflection_capsule")
@@ -1683,6 +2107,10 @@ class _PrivateImpressionInteriorAuthorityHandler:
         if source is None or source[0].event_type != "AppraisalAccepted":
             raise ValueError("private impression trigger authority is unavailable")
         before = await _project_at(self._runtime._ledger, request.cursor)  # noqa: SLF001
+        for source_ref in opportunity_identity.source_refs:
+            located = await _lookup(self._runtime._ledger, source_ref)  # noqa: SLF001
+            if located is None or located[0].event_type != "AppraisalAccepted":
+                raise ValueError("private impression merged appraisal authority is unavailable")
         appraisal = next(
             (
                 item
