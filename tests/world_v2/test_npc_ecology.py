@@ -261,6 +261,40 @@ def test_npc_snapshot_can_compile_one_explicit_actor_capsule() -> None:
     assert focused.available_npc_refs == ("npc:lin",)
 
 
+def test_npc_focused_snapshot_omits_unrelated_occurrence_refs(monkeypatch) -> None:
+    ledger, _store, _actor_model, _world_model, runtime = _runtime(
+        _actor("no_op"), {"decision": "no_op"}
+    )
+    projection = ledger.project()
+    assert projection.world_occurrences
+    anchor = projection.world_occurrences[0]
+    unrelated = anchor.model_copy(
+        update={
+            "occurrence_id": "occurrence:mei",
+            "participant_refs": ("npc:mei",),
+        }
+    )
+    focused_projection = projection.model_copy(
+        update={"world_occurrences": (anchor, unrelated)}
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_ledger",
+        SimpleNamespace(project_at=lambda _cursor: focused_projection),
+    )
+
+    focused = runtime.snapshot(
+        ProjectionCursor(
+            world_revision=projection.world_revision,
+            deliberation_revision=projection.deliberation_revision,
+            ledger_sequence=projection.ledger_sequence,
+        ),
+        focus_npc_ref="npc:lin",
+    )
+
+    assert focused.recent_occurrence_refs == (anchor.occurrence_id,)
+
+
 def test_npc_snapshot_rejects_an_unknown_explicit_actor_capsule() -> None:
     ledger, _store, _actor_model, _world_model, runtime = _runtime(
         _actor("no_op"), {"decision": "no_op"}

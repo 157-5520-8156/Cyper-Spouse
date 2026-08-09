@@ -334,10 +334,27 @@ class NpcEcology:
                 for item in self._catalog.reviewed_locations
                 if item.eligible_in_context(biography) and item.available_at(local)
             )
+        occurrence_projection = projection.world_occurrences
+        if focus_npc_ref is not None:
+            focused_npc = next(
+                item
+                for item in projection.npcs
+                if f"npc:{item.npc_id}" == focus_npc_ref
+            )
+            focused_participant_refs = {focus_npc_ref}
+            if focused_npc.promotion_edge is not None:
+                focused_participant_refs.add(
+                    focused_npc.promotion_edge.provisional_entity_ref
+                )
+            occurrence_projection = tuple(
+                item
+                for item in occurrence_projection
+                if focused_participant_refs.intersection(item.participant_refs)
+            )
         recent_occurrences = tuple(
             item.occurrence_id
             for item in sorted(
-                projection.world_occurrences,
+                occurrence_projection,
                 key=lambda value: value.settled_at or value.time_window.opens_at,
                 reverse=True,
             )[:16]
