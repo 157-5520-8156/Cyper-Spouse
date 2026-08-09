@@ -93,6 +93,32 @@ class RecordedCharacterInteriorTurnLineage(FrozenModel):
     inner_turn_id: str = Field(min_length=1, max_length=256)
     purpose: str = Field(min_length=1, max_length=128)
     opportunity_ref: str = Field(min_length=1, max_length=512)
+    # Optional for historical audit.  New L4 producers persist the complete
+    # canonical identity here so a cold replay can recover a merged source set
+    # without asking the character model to author it again.
+    causal_source_refs: tuple[str, ...] = Field(
+        default=(),
+        max_length=64,
+        exclude_if=lambda value: not value,
+    )
+    causal_epoch: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        exclude_if=lambda value: value is None,
+    )
+    causal_actor_ref: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        exclude_if=lambda value: value is None,
+    )
+    causal_contract_version: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        exclude_if=lambda value: value is None,
+    )
     snapshot_id: str = Field(min_length=1, max_length=128)
     snapshot_hash: str = Field(pattern=_HASH)
     capability_ref: str = Field(min_length=1, max_length=512)
@@ -121,6 +147,21 @@ class RecordedCharacterInteriorTurnLineage(FrozenModel):
             raise ValueError("CharacterInterior correction parent lineage is incomplete")
         if self.author_parent_model_call_id == self.author_model_call_id:
             raise ValueError("CharacterInterior author cannot be its own correction parent")
+        causal_fields = (
+            self.causal_epoch,
+            self.causal_actor_ref,
+            self.causal_contract_version,
+        )
+        if not self.causal_source_refs:
+            if any(value is not None for value in causal_fields):
+                raise ValueError("causal opportunity lineage is incomplete")
+        else:
+            if tuple(sorted(set(self.causal_source_refs))) != self.causal_source_refs:
+                raise ValueError("causal opportunity lineage source refs are not canonical")
+            if any(value is None for value in causal_fields):
+                raise ValueError("causal opportunity lineage is incomplete")
+            if self.causal_contract_version != "causal-opportunity.1":
+                raise ValueError("unsupported causal opportunity lineage contract")
         return self
 
 

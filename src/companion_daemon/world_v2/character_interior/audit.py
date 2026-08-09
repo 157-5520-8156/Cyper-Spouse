@@ -17,6 +17,7 @@ from ..proposal_audit_schemas import (
 )
 from ..schema_core import canonicalize_json_value
 from .contracts import InnerDecision, InnerTransition
+from .run_result import CausalOpportunityIdentity
 
 
 def _canonical(value: object) -> str:
@@ -33,12 +34,30 @@ def _sha256(value: object) -> str:
     return "sha256:" + hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 
+def causal_opportunity_lineage_fields(
+    identity: CausalOpportunityIdentity,
+    *,
+    subject_ref: str,
+) -> dict[str, object]:
+    """Return the durable identity fields for a CharacterInterior audit."""
+
+    if subject_ref != identity.opportunity_ref:
+        raise ValueError("CharacterInterior subject is not the causal opportunity")
+    return {
+        "causal_source_refs": identity.source_refs,
+        "causal_epoch": identity.epoch,
+        "causal_actor_ref": identity.actor_ref,
+        "causal_contract_version": identity.contract_version,
+    }
+
+
 def recorded_character_interior_lineage(
     result: InnerDecision | InnerTransition,
     *,
     purpose: str,
     subject_ref: str,
     capability_ref: str,
+    causal_opportunity: CausalOpportunityIdentity | None = None,
 ) -> RecordedCharacterInteriorTurnLineage:
     """Close a successful turn over its snapshot, author and private state.
 
@@ -56,10 +75,16 @@ def recorded_character_interior_lineage(
         or private is None
     ):
         raise ValueError("successful CharacterInterior turn lacks durable lineage")
+    causal_fields = (
+        causal_opportunity_lineage_fields(causal_opportunity, subject_ref=subject_ref)
+        if causal_opportunity is not None
+        else {}
+    )
     return RecordedCharacterInteriorTurnLineage(
         inner_turn_id=result.inner_turn_id,
         purpose=purpose,
         opportunity_ref=subject_ref,
+        **causal_fields,
         snapshot_id=result.snapshot_id,
         snapshot_hash=result.snapshot_hash,
         capability_ref=capability_ref,
@@ -86,6 +111,7 @@ def recorded_character_interior_model_result(
     route_reason_code: str,
     router_version: str,
     proposal_hash: str | None = None,
+    causal_opportunity: CausalOpportunityIdentity | None = None,
 ) -> ModelResultRecordedPayload:
     """Materialize the canonical durable audit for one completed inner turn.
 
@@ -101,6 +127,7 @@ def recorded_character_interior_model_result(
         purpose=purpose,
         subject_ref=subject_ref,
         capability_ref=capability_ref,
+        causal_opportunity=causal_opportunity,
     )
     author = result.author_lineage
     if author is None or result.snapshot_hash is None:
@@ -168,4 +195,8 @@ def recorded_character_interior_model_result(
     )
 
 
-__all__: list[str] = []
+__all__ = [
+    "causal_opportunity_lineage_fields",
+    "recorded_character_interior_lineage",
+    "recorded_character_interior_model_result",
+]

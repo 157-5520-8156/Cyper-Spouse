@@ -78,6 +78,7 @@ from .contracts import (
     _InteriorCapabilityManifest,
     InteriorStimulus,
 )
+from .audit import causal_opportunity_lineage_fields
 from .run_result import (
     CAUSAL_OPPORTUNITY_CONTRACT_VERSION,
     CausalOpportunityHealth,
@@ -277,6 +278,7 @@ class _PreparedWorldStimulusAudit:
     source_event: WorldEvent
     decision: DecisionProposal
     lineage: _InteriorAuthorLineage
+    opportunity_identity: CausalOpportunityIdentity
 
 
 class _WorldStimulusRelationshipSettlement(Protocol):
@@ -533,6 +535,25 @@ class _WorldStimulusInteriorAuthorityHandler:
         raw.pop("contract")
         raw["proposal_type"] = PROPOSAL_TYPE
         result = _WorldStimulusAppraisalResult.model_validate(raw)
+        raw_identity = manifest.payload.get("causal_opportunity")
+        try:
+            if isinstance(raw_identity, dict) and isinstance(raw_identity.get("source_refs"), list):
+                raw_identity = {
+                    **raw_identity,
+                    "source_refs": tuple(raw_identity["source_refs"]),
+                }
+            opportunity_identity = CausalOpportunityIdentity.model_validate(raw_identity)
+        except ValueError as exc:
+            raise ValueError("world stimulus capability lacks a valid causal opportunity") from exc
+        if (
+            opportunity_identity.world_id != request.world_id
+            or opportunity_identity.actor_ref != request.actor_ref
+            or opportunity_identity.purpose != request.purpose
+            or opportunity_identity.opportunity_ref != request.subject_ref
+            or opportunity_identity.source_refs != tuple(manifest.source_refs)
+            or request.subject_source_refs != tuple(manifest.source_refs)
+        ):
+            raise ValueError("world stimulus InnerTurn is not actor-bound to its opportunity")
         if len(manifest.source_refs) != 1:
             raise ValueError("world stimulus capability must bind one source event")
         source_ref = manifest.source_refs[0]
@@ -913,6 +934,7 @@ class _WorldStimulusInteriorAuthorityHandler:
             source_event=source_event,
             decision=decision,
             lineage=lineage,
+            opportunity_identity=opportunity_identity,
         )
 
     async def submit(
@@ -965,6 +987,10 @@ class _WorldStimulusInteriorAuthorityHandler:
                 inner_turn_id=request.inner_turn_id,
                 purpose=request.purpose,
                 opportunity_ref=request.subject_ref,
+                **causal_opportunity_lineage_fields(
+                    item.opportunity_identity,
+                    subject_ref=request.subject_ref,
+                ),
                 snapshot_id=request.snapshot_id,
                 snapshot_hash=request.snapshot_hash,
                 capability_ref=(
@@ -1150,7 +1176,12 @@ class CharacterInteriorWorldStimulusRuntime:
     async def drain_one(self) -> CharacterInteriorRunResult:
         return await self._run_one()
 
-    async def advance_once(self, wake_event_ref: str) -> CharacterInteriorRunResult:
+    async def advance_once(
+        self,
+        wake_event_ref: str,
+        *,
+        actor_ref: str | None = None,
+    ) -> CharacterInteriorRunResult:
         """Advance only the opportunity opened by one accepted source event.
 
         This is a source-bound scheduler seam, not a second semantic author:
@@ -1162,6 +1193,8 @@ class CharacterInteriorWorldStimulusRuntime:
 
         if not isinstance(wake_event_ref, str) or not wake_event_ref:
             raise ValueError("causal opportunity wake event ref is required")
+        if actor_ref is not None and actor_ref != self._companion_actor_ref:
+            raise ValueError("causal opportunity actor does not match this consumer")
         return await self._run_one(wake_event_ref=wake_event_ref)
 
     def health_snapshot(self, world_id: str) -> CausalOpportunityHealth:
@@ -1275,6 +1308,7 @@ class CharacterInteriorWorldStimulusRuntime:
                 process=active,
                 source_event=source_event,
                 projection=current,
+                opportunity_identity=opportunity_identity,
             )
             transition = await self._interior.experience(
                 InteriorStimulus(
@@ -1519,7 +1553,7 @@ class CharacterInteriorWorldStimulusRuntime:
         canonical_refs = tuple(sorted(set(source_refs)))
         if not canonical_refs:
             raise ValueError("causal opportunity requires source refs")
-        return CausalOpportunityIdentity(
+        return CausalOpportunityIdentity.from_source_refs(
             world_id=self._ledger.world_id,
             actor_ref=self._companion_actor_ref,
             purpose=PURPOSE,
@@ -2018,13 +2052,21 @@ class CharacterInteriorWorldStimulusRuntime:
                     refs.append(exp.origin.accepted_event_ref)
         return tuple(dict.fromkeys(refs))
 
-    async def _manifest(self, *, process, source_event, projection):
+    async def _manifest(
+        self,
+        *,
+        process,
+        source_event,
+        projection,
+        opportunity_identity: CausalOpportunityIdentity,
+    ):
         logical_time = projection.logical_time or source_event.logical_time
         payload = {
             "contract": "character-interior-world-stimulus-capability.1",
             "process_kind": process.process_kind,
             "stimulus_kind": _STIMULUS_KIND[process.process_kind],
             "considered_at": logical_time.isoformat(),
+            "causal_opportunity": opportunity_identity.model_dump(mode="json"),
             "source_event": {
                 "event_id": source_event.event_id,
                 "event_type": source_event.event_type,

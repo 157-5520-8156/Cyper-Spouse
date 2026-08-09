@@ -26,6 +26,7 @@ from companion_daemon.world_v2.character_interior.world_stimulus import (
     _WorldStimulusRelationshipSignalSettlement,
 )
 from companion_daemon.world_v2.character_interior.run_result import (
+    CausalOpportunityWindow,
     CausalOpportunityIdentity,
 )
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
@@ -101,6 +102,45 @@ def test_causal_opportunity_identity_is_canonical_and_actor_bound() -> None:
             source_refs=("source:b", "source:a"),
             epoch="epoch:1",
         )
+
+
+def test_causal_opportunity_merge_preserves_the_complete_source_set() -> None:
+    first = CausalOpportunityIdentity(
+        world_id=WORLD_ID,
+        actor_ref="actor:companion",
+        purpose="world_stimulus_appraisal",
+        source_refs=("source:a",),
+        epoch="epoch:1",
+    )
+    second = first.model_copy(update={"source_refs": ("source:b",)})
+
+    merged = first.merge(second)
+
+    assert merged.source_refs == ("source:a", "source:b")
+    assert merged.epoch == "epoch:1"
+    assert merged.opportunity_ref not in {first.opportunity_ref, second.opportunity_ref}
+    with pytest.raises(ValueError, match="same actor"):
+        first.merge(first.model_copy(update={"actor_ref": "actor:other"}))
+    with pytest.raises(ValueError, match="same epoch"):
+        first.merge(first.model_copy(update={"epoch": "epoch:2"}))
+
+
+def test_causal_opportunity_window_expiry_is_explicit_and_clock_only_is_not_an_epoch() -> None:
+    window = CausalOpportunityWindow(
+        due_at=datetime(2026, 8, 4, 18, 0, tzinfo=UTC),
+        expires_at=datetime(2026, 8, 4, 19, 0, tzinfo=UTC),
+    )
+
+    assert not window.is_expired(datetime(2026, 8, 4, 18, 59, tzinfo=UTC))
+    assert window.is_expired(datetime(2026, 8, 4, 19, 0, tzinfo=UTC))
+    identity = CausalOpportunityIdentity(
+        world_id=WORLD_ID,
+        actor_ref="actor:companion",
+        purpose="world_stimulus_appraisal",
+        source_refs=(SOURCE_REF,),
+        epoch=SOURCE_REF,
+    )
+    assert identity.model_copy().epoch == SOURCE_REF
 
 
 class _Projection:
@@ -733,11 +773,26 @@ async def test_source_bound_opportunity_advance_and_health_are_one_causal_view()
     assert audit_json["character_interior_lineage"]["opportunity_ref"] == (
         result.opportunity_ref
     )
+    assert audit_json["character_interior_lineage"]["causal_source_refs"] == [SOURCE_REF]
+    assert audit_json["character_interior_lineage"]["causal_epoch"] == SOURCE_REF
+    assert audit_json["character_interior_lineage"]["causal_actor_ref"] == "actor:companion"
+    assert (
+        audit_json["character_interior_lineage"]["causal_contract_version"]
+        == "causal-opportunity.1"
+    )
 
     replay = await runtime.advance_once(SOURCE_REF)
     assert replay.status == "idle"
     assert model.calls == 1
     assert runtime.health_snapshot(WORLD_ID).opportunity_count == 1
+
+
+@pytest.mark.asyncio
+async def test_source_bound_opportunity_rejects_a_different_actor() -> None:
+    runtime, _ledger, _projection = _runtime(model=_RoleModel(decision="no_change"))
+
+    with pytest.raises(ValueError, match="actor"):
+        await runtime.advance_once(SOURCE_REF, actor_ref="actor:other")
 
 
 @pytest.mark.asyncio
