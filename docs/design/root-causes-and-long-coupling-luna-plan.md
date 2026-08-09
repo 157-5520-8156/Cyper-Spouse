@@ -1509,3 +1509,15 @@ commit：hash
   取消了仍在关闭的宿主任务。单测独立运行也接近该窗口，证明它不是可以忽略的偶发日志。
 - 将该测试专用窗口调为 60 秒，并明确它只是“卡住的恢复循环”上限，不是延迟资格或成功率放宽；没有减少重复 tick、drain、重启、回执、冷重放或 effect-once 断言。修复后公开宿主 + Matrix 为 `48 passed`，静态 verifier 仍为 `28 delayed trigger mechanisms`。
 - 同一最终源码的临时 real-provider 24 小时 supervisor 已重新启动，使用临时 SQLite、OneBot loopback、隔离端口，不触碰旧生产 daemon。首轮为 HTTP 200、`action_authorized`、roundtrip `3367.027 ms`；最终报告尚未生成，故资格仍是 `manual_only`/`qualification_incomplete`，不能据此上线。
+
+### 2026-08-09：真实 stream 间隔采样（补充证据，不升级资格）
+
+- 使用 `chat_with_world_v2.py` 的默认生产 `stream` 模式、临时 SQLite、关闭 semantic recall embedding，连续两轮真实
+  `deepseek-v4-flash` 对话均为 `action_authorized`，`replay_matches_live=true`；间隔足够长的样本耗时
+  `5603.576/10144.070 ms`，累计成本约 `¥0.03`。未观察到失声、重复 Action 或冷重放分歧。
+- 另一组三轮快速输入中，首轮出现一次 `world claim source has ambiguous authority binding`，但最终由已有有界路径完成
+  授权；快速新输入还会使未发送的 stream tail 按设计 supersede。该样本不能计作首次合法率通过，已保留为质量/来源闭包观察项。
+- 真实 stream 的物理 provider audit 会派生 head/tail 语义记录；usage 在多语义调用下仍有
+  `multi-call provider metering is partial` 诊断，需在 100 轮报告中按物理 provider usage 复核，不能用可见成功数替代。
+  本采样只补充 stream 行为证据，不证明真实 QQ 回执、100 次首次成功率或 24 小时 soak；发布状态继续为
+  `manual_only`/`qualification_incomplete`。
