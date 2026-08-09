@@ -1675,3 +1675,17 @@ commit：hash
   `162 passed`；ruff 与 `git diff --check` 通过。L4 的 user/Life/NPC/Memory/Perception/Plan 全源统一、
   merge/expiry/epoch 全矩阵仍未完成，故 Matrix 和发布状态不升级，继续保持
   `declaration_only`/`manual_only`/`qualification_incomplete`。
+
+### 2026-08-09：当前 HEAD 最终回归基线（不改变资格边界）
+
+- 提交 `0e5f07b9` 后的源码全量回归为 `4947 passed, 1 warning`；`uv run ruff check .`、
+  `git diff --check` 和 Delayed Trigger Matrix 静态 verifier 均通过，后者仍仅报告
+  `declaration_only` 的 28 条声明。该回归数字只证明本地源码、typed/fixture、公开宿主和冷重放测试链，
+  不等于真实 DeepSeek/QQ 生产资格。
+- 公共延迟触发宿主与矩阵定向套件为 `48 passed`。正在运行的隔离 real-provider 24 小时 supervisor
+  仍没有终态报告；其临时 SQLite/OneBot loopback 与旧 production daemon 分离，不能提前计入资格，也不触发
+  §20 的重启/替换人工门。
+- 本次 private-impression 两个薄片只闭合 provider 可执行 token 集合和 source→opportunity 持久 lineage；
+  L4 的 user/Life/NPC/Memory/Perception/Plan 全源统一、merge/expiry/epoch 矩阵，以及真实 provider 首次
+  成功率、正式 QQ 回执、自由对聊质量和 24 小时 soak 仍保持
+  `declaration_only`/`manual_only`/`qualification_incomplete`。
