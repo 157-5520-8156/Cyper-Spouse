@@ -506,6 +506,9 @@ class _FixedCharacterInteriorScenarioModel(FakeCompanionModel):
                     "character_role_world_stimulus_appraisal_v1"
                 ),
                 "outcome_selection": "character_role_outcome_selection_v1",
+                "expression_reconsideration": (
+                    "character_role_expression_reconsideration_v1"
+                ),
             }.get(purpose)
             if tool_choice != {
                 "type": "function",
@@ -524,6 +527,8 @@ class _FixedDelayedExpressionModel:
     author.  The fixture returns only the current wire contract; it never builds
     DecisionProposal, Action, ExpressionPlan or receipt authority itself.
     """
+
+    supports_required_tool_choice = True
 
     def __init__(self, *, scenario_turn_id: str) -> None:
         self._scenario_turn_id = scenario_turn_id
@@ -610,6 +615,27 @@ class _FixedDelayedExpressionModel:
             },
             ensure_ascii=False,
         )
+
+    async def complete_json(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        tools: object | None = None,
+        tool_choice: object | None = None,
+    ) -> str:
+        if tools is not None:
+            payload = json.loads(messages[-1]["content"])
+            purpose = payload.get("inner_turn", {}).get("purpose")
+            expected_tool = "character_role_expression_reconsideration_v1"
+            if purpose != "expression_reconsideration" or tool_choice != {
+                "type": "function",
+                "function": {"name": expected_tool},
+            }:
+                raise ScenarioVerificationError(
+                    "delayed expression fixture received an unexpected required-tool choice"
+                )
+        return await self.complete(messages, temperature=temperature)
 
 
 @dataclass(frozen=True, slots=True)

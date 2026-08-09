@@ -1390,3 +1390,23 @@ commit：hash
 - 这只是 scheduler 诊断一致性修复，不是旧生产 daemon 已部署的证明。旧 PID 仍未重启/替换；真实 DeepSeek
   100 次 forced-tool/stream、真实 QQ 回执、自由对聊质量与 24 小时 wall-clock soak 仍需 §20 人工授权，发布状态
   继续保持 `manual_only`/`qualification_incomplete`。
+
+### 2026-08-09：expression reconsideration required-tool 薄片
+
+- `expression_reconsideration` 已接入 CharacterInterior 的统一 required-tool 编译器，使用版本化工具
+  `character_role_expression_reconsideration_v1`。参数由新的 `_ExpressionReconsiderationPayload`、通用
+  `_WireDecision`/`_WireRoleResult` envelope 派生；`allowed_dispositions` 由当前打断 capability 原样专门化，
+  角色仍自行选择 `continue|cancel|defer|merge|supersede|new_beat`，系统不替它挑 disposition。
+- source refs、capability payload hash、tool/schema/contract identity 继续进入 CharacterInterior request hash；外层
+  selective recall 仍按原来的 `recall_completed` 状态保留，after-recall contract 不再允许再次 recall。声明支持
+  required tool 的 provider 不再走普通 JSON；能力缺失保持精确的 `required_tool_choice_unsupported`，不补 continue、
+  cancel 或静默。
+- 本薄片的回归覆盖：工具名与 `tool_choice`、Draft 2020-12 schema、能力外 disposition 拒绝、无 required-tool
+  provider 的 fail-closed，以及现有 expression reconsideration runtime；定向 CharacterInterior 相关套件为
+  `862 passed`，ruff 与 `git diff --check` 通过。该数字只代表本地 typed/fixture/public seam 证据，不能替代真实
+  DeepSeek 首次成功率、QQ 回执、自由多轮对聊或 24 小时 soak；Delayed Trigger Matrix 仍为 `declaration_only`，
+  发布状态继续是 `manual_only`/`qualification_incomplete`。
+- 接线后发现并修复了三个既有 fixture 兼容点：expression public-host scripted model、冻结 scenario runner 的
+  delayed-expression model，以及 scenario runner 的 required-tool purpose 校验；它们现在都显式传递唯一
+  `tool_choice`，没有把 fixture 改回普通 JSON。修复后的源码全量回归为 `4917 passed, 1 warning`；这仍只证明
+  本地和隔离公开宿主链路，不改变真实 provider/QQ/24 小时资格门。

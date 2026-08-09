@@ -116,6 +116,7 @@ class _ScriptedRoleModel:
     """
 
     model = "fixture:host-qualification-multibeat-and-reconsideration"
+    supports_required_tool_choice = True
 
     def __init__(self) -> None:
         self.reconsideration_calls = 0
@@ -199,6 +200,29 @@ class _ScriptedRoleModel:
         else:
             raise AssertionError(f"unknown expression fixture route: {route!r}")
         return _expression_response(messages, expression)
+
+    async def complete_json(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        tools: object | None = None,
+        tool_choice: object | None = None,
+    ) -> str:
+        if tools is not None:
+            material = _json_material(messages)
+            purpose = material.get("inner_turn", {}).get("purpose")
+            expected = {
+                "expression_reconsideration": (
+                    "character_role_expression_reconsideration_v1"
+                ),
+            }.get(purpose)
+            if tool_choice != {
+                "type": "function",
+                "function": {"name": expected},
+            }:
+                raise AssertionError("unexpected expression reconsideration required-tool choice")
+        return await self.complete(messages, temperature=temperature)
 
 
 class _ProductionDeliveryInterceptor:

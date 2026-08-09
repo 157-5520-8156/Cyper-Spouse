@@ -68,6 +68,10 @@ _FACET_NAMES = (
     "expression_stance",
 )
 
+_EXPRESSION_RECONSIDERATION_DISPOSITIONS = frozenset(
+    {"continue", "cancel", "defer", "merge", "supersede", "new_beat"}
+)
+
 
 def _canonical(value: object) -> str:
     return json.dumps(
@@ -159,17 +163,27 @@ def _validate_media_selection_payload(
 
 def _validate_reconsideration_payload(
     payload: Mapping[str, object],
-    _offered_tokens: frozenset[str],
+    offered_tokens: frozenset[str],
 ) -> None:
-    if set(payload) != {"disposition"} or payload.get("disposition") not in {
+    if set(payload) != {"disposition"} or payload.get("disposition") not in offered_tokens:
+        raise ValueError("expression reconsideration disposition is outside the offered capability")
+    if payload.get("disposition") not in _EXPRESSION_RECONSIDERATION_DISPOSITIONS:
+        raise ValueError("expression reconsideration needs one supported disposition")
+
+
+class _ExpressionReconsiderationPayload(BaseModel):
+    """Canonical role-authored disposition for an interrupted expression."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    disposition: Literal[
         "continue",
         "cancel",
         "defer",
         "merge",
         "supersede",
         "new_beat",
-    }:
-        raise ValueError("expression reconsideration needs one supported disposition")
+    ]
 
 
 def _validate_proactive_payload(
@@ -588,6 +602,7 @@ _BUILTIN_CONTRACTS = (
         purpose="expression_reconsideration",
         payload_contract="character-interior-expression-reconsideration-decision.1",
         capability_kind="expression_reconsideration",
+        offered_token_fields=("allowed_dispositions",),
         proposals_allowed=False,
         validator=_validate_reconsideration_payload,
     ),
@@ -979,6 +994,7 @@ class StructuredCharacterRoleFaculty:
             "outcome_selection",
             "activity_lifecycle_choice",
             "life_development_choice",
+            "expression_reconsideration",
         }:
             return None
         if not bool(getattr(self._model, "supports_required_tool_choice", False)):
@@ -1017,6 +1033,12 @@ class StructuredCharacterRoleFaculty:
                 )
             if request.purpose == "life_development_choice":
                 return compiler.life_development_choice(
+                    capability_payload=manifest.payload,
+                    source_refs=manifest.source_refs,
+                    recall_allowed=not request.recall_completed,
+                )
+            if request.purpose == "expression_reconsideration":
+                return compiler.expression_reconsideration(
                     capability_payload=manifest.payload,
                     source_refs=manifest.source_refs,
                     recall_allowed=not request.recall_completed,

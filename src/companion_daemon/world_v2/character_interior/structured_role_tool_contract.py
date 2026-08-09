@@ -24,6 +24,7 @@ _PRIVATE_IMPRESSION_TOOL_NAME = "character_role_private_impression_reflection_v1
 _OUTCOME_SELECTION_TOOL_NAME = "character_role_outcome_selection_v1"
 _ACTIVITY_LIFECYCLE_TOOL_NAME = "character_role_activity_lifecycle_choice_v1"
 _LIFE_DEVELOPMENT_TOOL_NAME = "character_role_life_development_choice_v1"
+_EXPRESSION_RECONSIDERATION_TOOL_NAME = "character_role_expression_reconsideration_v1"
 
 
 def _canonical_json(value: object) -> str:
@@ -557,6 +558,7 @@ class StructuredRoleToolContracts:
         from ..expression_draft import ExpressionDraft
         from .structured_role import (
             _ActivityLifecyclePayload,
+            _ExpressionReconsiderationPayload,
             _PrivateImpressionProposal,
             _OutcomeSelectionPayload,
             _WorldStimulusAppraisalResult,
@@ -569,6 +571,7 @@ class StructuredRoleToolContracts:
 
         _compiled_provider_schema(ExpressionDraft)
         _compiled_provider_schema(_ActivityLifecyclePayload)
+        _compiled_provider_schema(_ExpressionReconsiderationPayload)
         _compiled_provider_schema(_WorldStimulusAppraisalResult)
         _compiled_provider_schema(_PrivateImpressionProposal)
         _compiled_provider_schema(_OutcomeSelectionPayload)
@@ -696,6 +699,21 @@ class StructuredRoleToolContracts:
         """Compile the role's accept/no-op choice over one offered life opportunity."""
 
         return self._cached_life_development_choice(
+            _canonical_json(capability_payload),
+            _canonical_json(source_refs),
+            recall_allowed,
+        )
+
+    def expression_reconsideration(
+        self,
+        *,
+        capability_payload: Mapping[str, object],
+        source_refs: tuple[str, ...] = (),
+        recall_allowed: bool,
+    ) -> StructuredRoleToolContract:
+        """Compile the source-bound disposition for an interrupted beat."""
+
+        return self._cached_expression_reconsideration(
             _canonical_json(capability_payload),
             _canonical_json(source_refs),
             recall_allowed,
@@ -1281,6 +1299,56 @@ class StructuredRoleToolContracts:
                 "Return the complete source-bound activity lifecycle choice. The "
                 "character may select one offered opening or explicitly choose no_op; "
                 "the function constrains capability and transport shape only."
+            ),
+        )
+
+    @staticmethod
+    @lru_cache(maxsize=32)
+    def _cached_expression_reconsideration(
+        capability_payload_json: str,
+        source_refs_json: str,
+        recall_allowed: bool,
+    ) -> StructuredRoleToolContract:
+        from .structured_role import (
+            _EXPRESSION_RECONSIDERATION_DISPOSITIONS,
+            _ExpressionReconsiderationPayload,
+        )
+
+        capability_payload = json.loads(capability_payload_json)
+        if not isinstance(capability_payload, dict):
+            raise ValueError("expression reconsideration capability must be one object")
+        allowed = capability_payload.get("allowed_dispositions")
+        if (
+            not isinstance(allowed, list)
+            or not allowed
+            or any(not isinstance(item, str) or not item for item in allowed)
+            or len(allowed) != len(set(allowed))
+            or not set(allowed) <= _EXPRESSION_RECONSIDERATION_DISPOSITIONS
+        ):
+            raise ValueError("expression reconsideration dispositions are malformed")
+        source_refs = json.loads(source_refs_json)
+        if not isinstance(source_refs, list):
+            raise ValueError("expression reconsideration source refs are malformed")
+        payload_schema = _provider_schema(_ExpressionReconsiderationPayload)
+        properties = _required_object_properties(payload_schema)
+        disposition = properties.get("disposition")
+        if not isinstance(disposition, dict):
+            raise ValueError("expression reconsideration disposition schema is incomplete")
+        properties["disposition"] = {
+            **deepcopy(disposition),
+            "enum": list(allowed),
+        }
+        return _compile_generic_decision_contract(
+            purpose="expression_reconsideration",
+            tool_name=_EXPRESSION_RECONSIDERATION_TOOL_NAME,
+            payload_schema=payload_schema,
+            capability_identity=capability_payload,
+            source_refs=tuple(source_refs),
+            recall_allowed=recall_allowed,
+            description=(
+                "Return the complete source-bound expression reconsideration choice. "
+                "Choose one disposition from the supplied capability; the function "
+                "constrains transport shape only and does not choose for the character."
             ),
         )
 

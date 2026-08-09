@@ -183,6 +183,8 @@ class _ForbiddenFallback:
 
 def _manifest(*tokens: str, kind: str = "media_selection") -> _InteriorCapabilityManifest:
     payload: dict[str, object] = {"offered_tokens": list(tokens)}
+    if kind == "expression_reconsideration":
+        payload["allowed_dispositions"] = list(tokens)
     if kind == "private_impression_reflection":
         payload.update(
             {
@@ -2323,7 +2325,7 @@ async def test_proactive_request_audit_binds_exact_tool_schema_and_identity() ->
 @pytest.mark.asyncio
 async def test_expression_reconsideration_requires_an_explicit_role_disposition() -> None:
     manifest = _manifest("continue", "cancel", kind="expression_reconsideration")
-    model = _QueueModel(
+    model = _RequiredToolQueueModel(
         _result(
             status="decision",
             decision={
@@ -2345,6 +2347,100 @@ async def test_expression_reconsideration_requires_an_explicit_role_disposition(
         "contract": "character-interior-expression-reconsideration-decision.1",
         "disposition": "cancel",
     }
+    assert len(model.tool_calls) == 1
+    tools, tool_choice = model.tool_calls[0]
+    assert tools[0]["function"]["name"] == "character_role_expression_reconsideration_v1"
+    assert tool_choice == {
+        "type": "function",
+        "function": {"name": "character_role_expression_reconsideration_v1"},
+    }
+    parameters = tools[0]["function"]["parameters"]
+    Draft202012Validator.check_schema(parameters)
+    decision_branch = parameters["anyOf"][0]
+    payload_schema = decision_branch["properties"]["decision"]["properties"]["payload"]
+    assert payload_schema["properties"]["disposition"]["enum"] == ["continue", "cancel"]
+    Draft202012Validator(parameters).validate(
+        json.loads(
+            _result(
+                status="decision",
+                decision={
+                    "source_refs": ["source:private_self"],
+                    "payload": {"disposition": "cancel"},
+                },
+            )
+        )
+    )
+    assert parameters["anyOf"][1]["properties"]["status"]["enum"] == ["recall_request"]
+
+
+@pytest.mark.asyncio
+async def test_expression_reconsideration_has_no_plain_provider_fallback() -> None:
+    manifest = _manifest("continue", "cancel", kind="expression_reconsideration")
+    model = _QueueModel(
+        _result(
+            status="decision",
+            decision={
+                "source_refs": ["source:private_self"],
+                "payload": {"disposition": "cancel"},
+            },
+        )
+    )
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-chat-v4")
+
+    with pytest.raises(StructuredRoleResultError) as raised:
+        await role.consider(
+            await _request(
+                purpose="expression_reconsideration",
+                capability_manifest=manifest,
+            )
+        )
+
+    assert raised.value.code == "required_tool_choice_unsupported"
+    assert model.calls == []
+
+
+@pytest.mark.asyncio
+async def test_expression_reconsideration_rejects_disposition_outside_capability() -> None:
+    manifest = _manifest("continue", "cancel", kind="expression_reconsideration")
+    model = _RequiredToolQueueModel(
+        _result(
+            status="decision",
+            decision={
+                "source_refs": ["source:private_self"],
+                "payload": {"disposition": "merge"},
+            },
+        )
+    )
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-chat-v4")
+
+    with pytest.raises(StructuredRoleResultError) as raised:
+        await role.consider(
+            await _request(
+                purpose="expression_reconsideration",
+                capability_manifest=manifest,
+            )
+        )
+
+    assert raised.value.code == "role_result_schema_invalid"
+    assert len(model.tool_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_expression_reconsideration_rejects_malformed_capability_before_provider() -> None:
+    manifest = _manifest("not-a-disposition", kind="expression_reconsideration")
+    model = _RequiredToolQueueModel(_result(status="silent"))
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-chat-v4")
+
+    with pytest.raises(StructuredRoleResultError) as raised:
+        await role.consider(
+            await _request(
+                purpose="expression_reconsideration",
+                capability_manifest=manifest,
+            )
+        )
+
+    assert raised.value.code == "role_result_schema_invalid"
+    assert model.calls == []
 
 
 @pytest.mark.asyncio

@@ -535,9 +535,9 @@ RSS/NWS/USGS → hub 采集/去重/嵌入/聚类 → attention 影子/实时注�
 | 延迟注意力回复接口 | 保留的"错过没看到"能力 | **[disconnected]**：disabled，生产路由不选择它（CONTEXT.md 明示） | `expression_episode.py` 引用 |
 
 > `active` 只表示该机制在当前设计和生产组合中有真实入口，不等于“模型首次输出、真实 provider、回执和长时间
-> soak 已经资格化”。截至 2026-08-09，主动联系已使用 capability 派生的 required tool，并保留角色对
-> `now/later/silent`、多气泡和模态的决定权；真实 DeepSeek 首次成功率、真实 QQ 回执和 24 小时成本/延迟仍为
-> `qualification_incomplete`。延迟触发 Matrix 也是 `declaration_only`，不会把测试声明升级为运行时许可。
+> soak 已经资格化”。截至 2026-08-09，主动联系和表达重考虑已使用 capability 派生的 required tool，并保留角色对
+> `now/later/silent`、多气泡、模态以及打断 disposition 的决定权；真实 DeepSeek 首次成功率、真实 QQ 回执和 24 小时
+> 成本/延迟仍为 `qualification_incomplete`。延迟触发 Matrix 也是 `declaration_only`，不会把测试声明升级为运行时许可。
 
 ### 4.7 平台与宿主层（迁移中的新架构）——[active]
 
