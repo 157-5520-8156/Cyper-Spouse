@@ -6822,7 +6822,21 @@ async def _inventory_source_declaration_guard(
         effect_bearing_only=effect_bearing_only,
     )
     if material.source_evidence is None:
-        raise ValidationTechnicalFailure("inventory_invalid")
+        # A silent/action-only candidate has no visible text or declared
+        # World claim to decompose. This is an empty semantic inventory, not
+        # an invalid provider response; the separate V7 authority still owns
+        # the source verdict for any candidate with reviewable material.
+        return _InventorySourceDeclarationGuardResult(
+            inventory=_CandidateExternalPropositionInventory(
+                propositions=(),
+                external_locators=(),
+                review_propositions=(),
+                legacy_wire=False,
+                visible_authority_exhaustive=True,
+                wire_contract="candidate-external-proposition-inventory.5",
+            ),
+            usage=None,
+        )
 
     invalid_wire: _InvalidCandidateExternalInventoryWire | None = None
     wire_failure: _CandidateExternalInventoryWireError | None = None

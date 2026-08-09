@@ -18257,6 +18257,35 @@ async def test_production_review_audits_claim_free_external_expression_without_i
 
 
 @pytest.mark.asyncio
+async def test_inventory_guard_treats_an_empty_terminal_expression_as_empty_inventory() -> None:
+    inventory = _StrictInventorySequenceJsonModel([])
+    reviewer = _FullSourceReviewSequenceJsonModel([])
+    raw = json.dumps(
+        {
+            "timing_choice": "silent",
+            "beats": [],
+            "stance": "withdraw",
+            "brief_rationale": "The role chose not to emit a visible beat.",
+            "confidence": 7000,
+            "world_claims": [],
+        },
+        ensure_ascii=False,
+    )
+
+    result = await review_expression_with_candidate_external_coverage(
+        reviewer=reviewer,
+        inventory_model=inventory,
+        request=_qq_request(),
+        raw=raw,
+        identity_frame=None,
+    )
+
+    assert result.review is None
+    assert inventory.calls == []
+    assert reviewer.calls == []
+
+
+@pytest.mark.asyncio
 async def test_production_full_review_keeps_report_relative_stage_without_inventory() -> None:
     """Inventory outage must not remove the exact-current-report authority."""
 
