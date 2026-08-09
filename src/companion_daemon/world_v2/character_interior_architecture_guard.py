@@ -401,7 +401,9 @@ _PROVIDER_CONTRACT_POLICY_MODULE = "world_v2/character_interior_architecture_gua
 # runtime seam.
 _CAUSAL_IDENTITY_HANDOFF = "world_v2/character_interior/inbound_turn.py"
 _CAUSAL_OPPORTUNITY_RUNTIME_MODULE = "world_v2/character_interior/run_result.py"
-_CAUSAL_OPPORTUNITY_LANES = frozenset({"_world_stimulus", "_private_impression"})
+_CAUSAL_OPPORTUNITY_LANES = frozenset(
+    {"_world_stimulus", "_private_impression", "_proactive"}
+)
 
 _INBOUND_PRIVATE_AUTHOR = "_InboundCharacterAuthor"
 _INBOUND_PRIVATE_WIRES = frozenset(

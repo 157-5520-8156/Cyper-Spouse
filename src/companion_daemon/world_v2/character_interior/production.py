@@ -697,7 +697,7 @@ class _CharacterInteriorBackgroundDriver:
     async def drain_proactive_once(self) -> object | None:
         if self._proactive is None:
             return None
-        result = await self._proactive.drain_one()
+        result = await self._proactive.advance_due_once()
         return None if result.status in {"idle", "retry_wait"} else result
 
     async def drain_private_impression_once(self) -> object | None:

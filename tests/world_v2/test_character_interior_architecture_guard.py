@@ -831,6 +831,29 @@ class Driver:
     )
 
 
+def test_guard_rejects_a_proactive_drain_bypass_in_production_driver(
+    tmp_path: Path,
+) -> None:
+    path = _write_production(
+        tmp_path,
+        "world_v2/character_interior/production.py",
+        """
+class Driver:
+    def run(self):
+        return self._proactive.drain_one()
+""",
+    )
+
+    violations = scan_character_interior_architecture(tmp_path)
+
+    assert any(
+        item.path == path
+        and item.rule == "scattered_causal_opportunity_bypass"
+        and item.detail == "_proactive.drain_one"
+        for item in violations
+    )
+
+
 @pytest.mark.parametrize(
     "source",
     (

@@ -1453,7 +1453,7 @@ class ProactiveActionRuntime:
         self._lease_seconds = lease_seconds
         self._social_initiative = social_initiative
 
-    async def drain_one(self) -> ProactiveActionRunResult:
+    async def advance_due_once(self) -> ProactiveActionRunResult:
         projection = await self._project()
         opportunity = await self._next_opportunity(projection)
         if opportunity is None:
@@ -1737,6 +1737,11 @@ class ProactiveActionRuntime:
             proposal_id=proposal.proposal_id,
             action_id=action_id,
         )
+
+    async def drain_one(self) -> ProactiveActionRunResult:
+        """Compatibility entry point for replay and legacy direct callers."""
+
+        return await self.advance_due_once()
 
     def _validate_event_share_acceptance(
         self,
