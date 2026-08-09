@@ -18,6 +18,7 @@ from companion_daemon.world_v2.character_interior.contracts import (
     _InteriorAuthorLineage,
     _PrivateSelfLineage,
 )
+from companion_daemon.world_v2.character_interior.run_result import CausalOpportunityIdentity
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.life_ecology_activity import ActivityOpeningCatalog
@@ -341,6 +342,13 @@ async def test_worker_turns_one_claimed_wake_into_one_accepted_transition() -> N
     assert [item.event_type for item in ledger.accepted] == ["AcceptanceRecorded", "ActivityStarted"]
     assert len(interior.opportunities) == 1
     assert interior.opportunities[0].purpose == "activity_lifecycle_choice"
+    assert interior.opportunities[0].opportunity_ref == CausalOpportunityIdentity(
+        world_id=ledger.world_id,
+        actor_ref="actor:companion",
+        purpose="activity_lifecycle_choice",
+        source_refs=("event:clock:opening",),
+        epoch="event:clock:opening",
+    ).opportunity_ref
     capability = interior.opportunities[0].capability_manifest.payload
     assert capability["contract"] == (
         "character-interior-activity-lifecycle-capability.2"
