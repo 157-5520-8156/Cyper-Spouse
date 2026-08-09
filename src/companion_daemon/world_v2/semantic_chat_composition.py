@@ -432,9 +432,9 @@ class ProactiveSourceAuthorityDeployment:
     """Auditable deployment state for proactive visible-fact closure.
 
     Missing independent authority does not decide that the character must stay
-    silent.  Source-free subjective expression remains available; only a
-    candidate containing an external proposition fails closed after semantic
-    inventory locates it.
+    silent.  Source-free subjective expression remains available; visible
+    external propositions fail closed through the full review route when the
+    optional semantic inventory is unavailable.
     """
 
     status: Literal["ready", "fact_effects_fail_closed"]

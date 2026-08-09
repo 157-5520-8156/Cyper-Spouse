@@ -18067,6 +18067,72 @@ async def test_production_review_audits_claim_free_external_expression_without_i
 
 
 @pytest.mark.asyncio
+async def test_production_full_review_keeps_report_relative_stage_without_inventory() -> None:
+    """Inventory outage must not remove the exact-current-report authority."""
+
+    current_report = "今天学校门口那个摊贩把价格说得乱七八糟，我跟他争了半天。"
+    visible_span = "最后争赢了吗？"
+    request = _qq_request().model_copy(
+        update={
+            "trigger_message": _qq_request().trigger_message.model_copy(
+                update={"text": current_report}
+            )
+        }
+    )
+    raw = json.dumps(
+        {
+            "timing_choice": "now",
+            "beats": [{"modality": "text", "text": f"哈哈，你也是够较真的。{visible_span}"}],
+            "stance": "react_then_ask",
+            "brief_rationale": "Ask for an unknown outcome without asserting one.",
+            "world_claims": [],
+        },
+        ensure_ascii=False,
+    )
+    primary = _SequenceJsonModel(
+        [
+            _source_closure_review(
+                unsupported_boundaries=("visible_text",),
+                visible_span=visible_span,
+            )
+        ]
+    )
+    report_relative = _SequenceJsonModel(
+        [
+            json.dumps(
+                {
+                    "contract": "report-relative-entailment-adjudication.2",
+                    "findings": [
+                        {
+                            "finding_index": 0,
+                            "decision": "not_external_proposition",
+                            "failure_dimensions": [],
+                        }
+                    ],
+                    "r": "The span asks for an unknown outcome and asserts no answer.",
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+
+    result = await review_expression_with_candidate_external_coverage(
+        reviewer=primary,
+        inventory_model=None,
+        report_relative_reviewer=report_relative,
+        request=request,
+        raw=raw,
+        identity_frame=None,
+        review_claim_free_candidates=True,
+    )
+
+    assert result.review is not None
+    assert result.review.decision == "supported"
+    assert len(primary.calls) == 1
+    assert len(report_relative.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_v8_lane_supported_declared_claim_passes_with_one_reviewer_call() -> None:
     reviewer = _SequenceJsonModel([_source_closure_review()])
     output = await _ExpressionDraftWire(

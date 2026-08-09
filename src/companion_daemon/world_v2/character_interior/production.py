@@ -930,7 +930,7 @@ def compose_production_character_interior(
     thinking_model_id: str | None,
     expression_capabilities: ExpressionDraftCapabilities,
     identity_frame: CompanionIdentityFrame,
-    review_claim_free_candidates: bool = False,
+    review_claim_free_candidates: bool = True,
     turn_store: _CharacterInteriorTurnStore | None = None,
     turn_owner_id: str = "character-interior:production",
 ) -> CharacterInterior:

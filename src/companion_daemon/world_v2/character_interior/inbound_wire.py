@@ -6817,7 +6817,13 @@ async def review_expression_with_candidate_external_coverage(
     effect_bearing_only: bool = False,
     review_claim_free_candidates: bool = False,
 ) -> SourceClosureReviewResult:
-    """Use one visible authority, then audit only declared claim coordinates."""
+    """Use one visible authority, optionally auditing claim-free visible text.
+
+    Inventory V5 narrows the review packet when available.  The production
+    fallback keeps the same full V7 authority, including the independent
+    report-relative stage; only historical fixtures may opt back into
+    declared-claims-only behavior.
+    """
 
     if inventory_model is None:
         # Inventory V5 is an optional semantic decomposition optimization.  A
@@ -6828,7 +6834,7 @@ async def review_expression_with_candidate_external_coverage(
         # leaving the explicit production switch off.
         return await review_expression_source_closure(
             reviewer=reviewer,
-            report_relative_reviewer=None,
+            report_relative_reviewer=report_relative_reviewer,
             request=request,
             raw=raw,
             identity_frame=identity_frame,

@@ -1363,13 +1363,11 @@ class _InboundCharacterAuthor:
         self._capabilities = expression_capabilities
         self._require_explicit_authored_decision_fields = require_explicit_authored_decision_fields
         self._identity_frame = identity_frame
-        # Semantic source-closure review is an explicit deployment capability,
-        # not an implicit consequence of installing a local appraisal model.
-        # A synchronous reviewer on every ordinary turn doubled provider
-        # latency and converted otherwise valid replies into deadline misses.
-        # The normal source-token/materializer boundary remains active; an
-        # explicitly installed reviewer can still run the bounded correction
-        # path for experiments or higher-risk lanes.
+        # Semantic source-closure review is an explicit production boundary,
+        # independent of the character author.  Historical fixtures may omit
+        # it, but the production composition installs it and propagates the
+        # claim-free audit switch so an Inventory outage cannot create a
+        # zero-call visible-fact bypass.
         resolved_source_closure_model = source_closure_model
         self._source_closure_reviewer = resolved_source_closure_model
         self._report_relative_reviewer = report_relative_source_closure_model

@@ -61,12 +61,14 @@ class InteractiveTurnBudgetPolicy:
     # above 8s. This window opens only after a real author failure, so raising
     # the ceiling does not slow an ordinary successful turn.
     technical_recovery_seconds: float = 12.0
-    # One bounded re-authorization after a real author failure: a single
-    # recovery call and one retry fit in this window.
-    validation_recovery_seconds: float = 8.0
-    # A same-role re-selection plus one fresh materialization; the old 100s
-    # chain budgeted inventory/coverage review branches that no longer run.
-    validation_reselection_seconds: float = 20.0
+    # One candidate-level source-review validation phase.  The independent
+    # reviewer has a 22s call ceiling and may retry one real transport/wire
+    # failure, so the default window must not collapse the second attempt.
+    validation_recovery_seconds: float = 46.0
+    # A rejected candidate receives one same-role re-selection plus its final
+    # source review.  This is the fixed 100s window from ADR0014; it is a
+    # ceiling opened only after a real semantic rejection, not normal latency.
+    validation_reselection_seconds: float = 100.0
     clock: Clock = time.monotonic
     sleep: Sleeper = __import__("asyncio").sleep
     wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC)

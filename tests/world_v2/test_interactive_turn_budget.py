@@ -20,11 +20,11 @@ class _Clock:
 def test_default_validation_window_contains_bounded_author_recovery() -> None:
     policy = InteractiveTurnBudgetPolicy()
 
-    # Interactive source review is retired (2026-08-07): the author call is
-    # the only semantic provider, so recovery windows cover one re-author
-    # call plus a retry instead of review retry chains.
-    assert policy.validation_recovery_seconds >= 8.0
-    assert policy.validation_reselection_seconds >= 20.0
+    # ADR0014: one 22s reviewer call plus one retry must fit the candidate
+    # validation phase, and a rejected candidate receives the fixed
+    # same-role reselection/final-review window.
+    assert policy.validation_recovery_seconds == pytest.approx(46.0)
+    assert policy.validation_reselection_seconds == pytest.approx(100.0)
 
 
 def test_first_provider_entry_budget_starts_at_ingress_not_after_coalescing() -> None:

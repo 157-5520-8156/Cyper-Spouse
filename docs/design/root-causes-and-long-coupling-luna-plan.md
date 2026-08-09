@@ -1632,3 +1632,8 @@ commit：hash
   或自然对话质量已资格化。真实 DeepSeek 100 次 forced-tool/stream、正式 QQ 回执、24 小时
   soak 与自由对聊质量门仍保持 `manual_only`/`qualification_incomplete`；旧 production daemon
   的 §20 重启/替换人工门不变。
+- 提交前审查又发现并修正了两个接线问题：source review 的候选 validation/reselection 窗口恢复为
+  ADR0014 的默认 `46s/100s`（不再用退役 review 路径的 `8s/20s`），且 Inventory 缺失时仍保留
+  同一独立 report-relative authority；生产构造函数默认启用 claim-free 审查，历史低层 fixture
+  仍可显式 opt out。预算/报告相对路径/来源闭包相关回归为 `617 passed`；这只证明边界与预算契约，
+  不把真实 provider 的首次成功率或延迟目标升级为资格。
