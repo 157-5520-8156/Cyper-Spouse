@@ -940,7 +940,11 @@ class StructuredCharacterRoleFaculty:
         self,
         request: _InteriorRoleRequest,
     ) -> StructuredRoleToolContract | None:
-        if request.purpose not in {"proactive_contact", "world_stimulus_appraisal"}:
+        if request.purpose not in {
+            "proactive_contact",
+            "world_stimulus_appraisal",
+            "private_impression_reflection",
+        }:
             return None
         if not bool(getattr(self._model, "supports_required_tool_choice", False)):
             raise StructuredRoleResultError(
@@ -960,7 +964,12 @@ class StructuredCharacterRoleFaculty:
                     capability_payload=manifest.payload,
                     recall_allowed=not request.recall_completed,
                 )
-            return compiler.world_stimulus_appraisal(
+            if request.purpose == "world_stimulus_appraisal":
+                return compiler.world_stimulus_appraisal(
+                    capability_payload=manifest.payload,
+                    recall_allowed=not request.recall_completed,
+                )
+            return compiler.private_impression_reflection(
                 capability_payload=manifest.payload,
                 recall_allowed=not request.recall_completed,
             )

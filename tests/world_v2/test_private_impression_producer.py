@@ -359,6 +359,8 @@ class _PrivateInteriorProjection:
 class _PrivateInteriorWireModel:
     """Test-only old response fixtures translated into the unified role wire."""
 
+    supports_required_tool_choice = True
+
     def __init__(self, delegate: _Model) -> None:
         self._delegate = delegate
         self.model = delegate.model
@@ -406,6 +408,28 @@ class _PrivateInteriorWireModel:
         else:
             return raw
         return json.dumps(result, ensure_ascii=False)
+
+    async def complete_json(
+        self,
+        messages,
+        *,
+        temperature: float = 0.8,
+        tools,
+        tool_choice,
+    ) -> str:  # type: ignore[no-untyped-def]
+        if not isinstance(tools, list) or len(tools) != 1:
+            raise AssertionError("private impression must use exactly one required tool")
+        function = tools[0].get("function")
+        if not isinstance(function, dict) or function.get("name") != (
+            "character_role_private_impression_reflection_v1"
+        ):
+            raise AssertionError("private impression used the wrong tool")
+        if tool_choice != {
+            "type": "function",
+            "function": {"name": "character_role_private_impression_reflection_v1"},
+        }:
+            raise AssertionError("private impression tool choice was not forced")
+        return await self.complete(messages, temperature=temperature)
 
 
 def _private_runtime(

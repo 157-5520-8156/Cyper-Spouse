@@ -1225,3 +1225,24 @@ commit：hash
   接入同一工具边界，并将机制基线从 `.54` 审计重基线为 `.55`。
 - 合并后的完整套件回归为 `4885 passed, 1 warning`；该数字只记录本次源码回归，不代表真实 provider
   成功率或生产 daemon 健康度。
+
+### 2026-08-09：private impression reflection required-tool 薄片
+
+- `private_impression_reflection` 现在使用独立的版本化 required tool
+  `character_role_private_impression_reflection_v1`。provider 参数由既有
+  `_PrivateImpressionProposal` 与 `_WireRoleResult` typed schema 派生；短 token、锚点 token、候选
+  expiry condition 和 `no_change`/`transition`/可用的 `recall_request` 运输形状来自当前 capability，
+  不复制第二份长期事实。角色仍自行决定是否形成 retain/consolidate/supersede 私密解读、如何概括、何时
+  请求一次回忆；本地只做 token→真实 source ref 映射、来源闭包、CAS 与接受校验。
+- 该 purpose 不再对声明支持 required tool 的 provider 走普通 JSON；缺少能力时保留精确的
+  `required_tool_choice_unsupported` 技术失败，不补 `no_change`、不伪造角色沉默。provider tool、schema、
+  capability 与 contract identity 进入当前 CharacterInterior request identity；原有一次同角色纠正和失败退避
+  语义不变。
+- 验证覆盖了 structured-role public seam、DeepSeek-compatible HTTP body、短 token/expiry schema、生产
+  `PrivateImpressionTriggerRuntime` 的接受链，以及旧 typed-proposal fixture 迁移；本薄片相关回归为
+  `91` 项定向、`315` 项跨 private-impression/CharacterInterior/world-stimulus 测试，本次 revision 的完整
+  套件为 `4888 passed, 1 warning`。这些数字只记录源码回归，不代表真实 provider 成功率或生产 daemon
+  健康度。
+- 这只是一个后台 purpose 的协议可靠性薄片，不代表其他 background purpose 已全部迁移，也不代表真实
+  DeepSeek 首次成功率、QQ 回执、自由对聊或 24 小时 soak 已资格化。Matrix 仍为 `declaration_only`，真实
+  provider/生产 daemon 资格继续标记 `manual_only`/`qualification_incomplete`。

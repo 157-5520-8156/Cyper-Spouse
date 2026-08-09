@@ -20,6 +20,7 @@ from ..schema_core import canonicalize_json_value
 _CONTRACT_VERSION = "1"
 _PROACTIVE_TOOL_NAME = "character_role_proactive_contact_v1"
 _WORLD_STIMULUS_TOOL_NAME = "character_role_world_stimulus_appraisal_v1"
+_PRIVATE_IMPRESSION_TOOL_NAME = "character_role_private_impression_reflection_v1"
 
 
 def _canonical_json(value: object) -> str:
@@ -390,10 +391,15 @@ class StructuredRoleToolContracts:
         """Compile canonical Pydantic wires outside provider-entry budgets."""
 
         from ..expression_draft import ExpressionDraft
-        from .structured_role import _WorldStimulusAppraisalResult, _WireRoleResult
+        from .structured_role import (
+            _PrivateImpressionProposal,
+            _WorldStimulusAppraisalResult,
+            _WireRoleResult,
+        )
 
         _compiled_provider_schema(ExpressionDraft)
         _compiled_provider_schema(_WorldStimulusAppraisalResult)
+        _compiled_provider_schema(_PrivateImpressionProposal)
         _compiled_provider_schema(_WireRoleResult)
 
     @classmethod
@@ -447,6 +453,25 @@ class StructuredRoleToolContracts:
         """
 
         return self._cached_world_stimulus_appraisal(
+            _canonical_json(capability_payload),
+            recall_allowed,
+        )
+
+    def private_impression_reflection(
+        self,
+        *,
+        capability_payload: Mapping[str, object],
+        recall_allowed: bool,
+    ) -> StructuredRoleToolContract:
+        """Compile the source-bound private-impression proposal wire.
+
+        The capability exposes position-stable short tokens rather than long
+        source refs.  The tool constrains those tokens and the offered expiry
+        conditions, while the CharacterInterior materializer still owns the
+        anchor/source closure and the decision to form no proposal.
+        """
+
+        return self._cached_private_impression_reflection(
             _canonical_json(capability_payload),
             recall_allowed,
         )
@@ -736,6 +761,180 @@ class StructuredRoleToolContracts:
             provider_tool_choice={
                 "type": "function",
                 "function": {"name": _WORLD_STIMULUS_TOOL_NAME},
+            },
+            identity=identity,
+        )
+
+    @staticmethod
+    @lru_cache(maxsize=32)
+    def _cached_private_impression_reflection(
+        capability_payload_json: str,
+        recall_allowed: bool,
+    ) -> StructuredRoleToolContract:
+        from .structured_role import _PrivateImpressionProposal, _WireRoleResult
+
+        capability_payload = json.loads(capability_payload_json)
+        if not isinstance(capability_payload, dict):
+            raise ValueError("private impression capability must be one object")
+        short_tokens = capability_payload.get("short_tokens")
+        anchor_short_tokens = capability_payload.get("anchor_short_tokens")
+        expiry_conditions = capability_payload.get("expiry_conditions")
+        if (
+            not isinstance(short_tokens, list)
+            or not short_tokens
+            or any(not isinstance(item, str) or not item for item in short_tokens)
+            or len(short_tokens) != len(set(short_tokens))
+            or not isinstance(anchor_short_tokens, list)
+            or any(
+                not isinstance(item, str) or item not in short_tokens
+                for item in anchor_short_tokens
+            )
+            or not isinstance(expiry_conditions, list)
+            or not expiry_conditions
+            or any(not isinstance(item, str) or not item for item in expiry_conditions)
+            or len(expiry_conditions) != len(set(expiry_conditions))
+        ):
+            raise ValueError("private impression capability token/expiry manifest is malformed")
+
+        role_schema = _provider_schema(_WireRoleResult)
+        role_properties = _required_object_properties(role_schema)
+        proposal_schema = _provider_schema(_PrivateImpressionProposal)
+        proposal_properties = _required_object_properties(proposal_schema)
+        proposal_properties["proposal_type"] = {
+            "type": "string",
+            "enum": ["private_impression_transition"],
+        }
+        for field_name in ("source_refs", "predecessor_refs"):
+            field = proposal_properties.get(field_name)
+            if not isinstance(field, dict) or not isinstance(field.get("items"), dict):
+                raise ValueError(f"private impression {field_name} schema is incomplete")
+            field["items"] = {**deepcopy(field["items"]), "enum": list(short_tokens)}
+        expiry_field = proposal_properties.get("expiry_condition")
+        if not isinstance(expiry_field, dict):
+            raise ValueError("private impression expiry schema is incomplete")
+        proposal_properties["expiry_condition"] = {
+            **deepcopy(expiry_field),
+            "enum": list(expiry_conditions),
+        }
+        proposal_schema["required"] = [
+            "proposal_type",
+            "decision",
+            "predecessor_refs",
+            "source_refs",
+            "reflection_summary",
+            "confidence_bp",
+            "expiry_condition",
+        ]
+
+        common = {
+            key: deepcopy(role_properties[key])
+            for key in ("summary", "attended_source_refs")
+        }
+        required = [
+            "status",
+            "summary",
+            "attended_source_refs",
+            "decision",
+            "recall_query",
+            "proposals",
+        ]
+        transition = {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["transition"]},
+                **common,
+                "decision": {"type": "null"},
+                "recall_query": {"type": "null"},
+                "proposals": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 1,
+                    "items": proposal_schema,
+                },
+            },
+            "required": required,
+            "additionalProperties": False,
+        }
+        no_change = {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["no_change"]},
+                **common,
+                "decision": {"type": "null"},
+                "recall_query": {"type": "null"},
+                "proposals": {"type": "array", "maxItems": 0},
+            },
+            "required": required,
+            "additionalProperties": False,
+        }
+        branches: list[dict[str, object]] = [no_change, transition]
+        if recall_allowed:
+            branches.append(
+                {
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "string", "enum": ["recall_request"]},
+                        **common,
+                        "decision": {"type": "null"},
+                        "recall_query": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1024,
+                        },
+                        "proposals": {"type": "array", "maxItems": 0},
+                    },
+                    "required": required,
+                    "additionalProperties": False,
+                }
+            )
+        parameters = {"type": "object", "anyOf": branches}
+        function = {
+            "name": _PRIVATE_IMPRESSION_TOOL_NAME,
+            "description": (
+                "Return the complete source-bound private impression reflection. "
+                "The character may form one tentative retain/consolidate/supersede "
+                "proposal, make no change, or request one bounded recall. The function "
+                "constrains tokens and transport shape only; the character owns the "
+                "interpretation and whether to form it."
+            ),
+            "parameters": parameters,
+        }
+        provider_tools = ({"type": "function", "function": function},)
+        schema_digest = "sha256:" + sha256(_canonical_json(parameters).encode("utf-8")).hexdigest()
+        capabilities_digest = (
+            "sha256:" + sha256(_canonical_json(capability_payload).encode("utf-8")).hexdigest()
+        )
+        contract_digest = (
+            "sha256:"
+            + sha256(
+                _canonical_json(
+                    {
+                        "purpose": "private_impression_reflection",
+                        "tool_name": _PRIVATE_IMPRESSION_TOOL_NAME,
+                        "version": _CONTRACT_VERSION,
+                        "schema_sha256": schema_digest,
+                        "capabilities_sha256": capabilities_digest,
+                        "recall_allowed": recall_allowed,
+                    }
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        identity = StructuredRoleToolContractIdentity(
+            contract_id="character-role-forced-tool",
+            purpose="private_impression_reflection",
+            tool_name=_PRIVATE_IMPRESSION_TOOL_NAME,
+            version=_CONTRACT_VERSION,
+            schema_sha256=schema_digest,
+            capabilities_sha256=capabilities_digest,
+            contract_sha256=contract_digest,
+            recall_allowed=str(recall_allowed).lower(),
+        )
+        return StructuredRoleToolContract(
+            purpose="private_impression_reflection",
+            provider_tools=provider_tools,
+            provider_tool_choice={
+                "type": "function",
+                "function": {"name": _PRIVATE_IMPRESSION_TOOL_NAME},
             },
             identity=identity,
         )

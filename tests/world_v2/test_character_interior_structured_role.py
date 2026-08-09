@@ -110,6 +110,17 @@ class _QueueModel:
             raise result
         return result
 
+    async def complete_json(
+        self,
+        messages,
+        *,
+        temperature=0.8,
+        tools=None,
+        tool_choice=None,
+    ):
+        del tools, tool_choice
+        return await self.complete(messages, temperature=temperature)
+
 
 class _RequiredToolQueueModel(_QueueModel):
     supports_required_tool_choice = True
@@ -171,8 +182,22 @@ class _ForbiddenFallback:
 
 
 def _manifest(*tokens: str, kind: str = "media_selection") -> _InteriorCapabilityManifest:
+    payload: dict[str, object] = {"offered_tokens": list(tokens)}
+    if kind == "private_impression_reflection":
+        payload.update(
+            {
+                "short_tokens": list(tokens),
+                "anchor_short_tokens": list(tokens[:1]),
+                "expiry_conditions": [
+                    "until_appraisal_contradicted",
+                    "until_counter_evidence",
+                    "until_relationship_stage_changes",
+                    "one_month_without_support",
+                ],
+            }
+        )
     payload_json = json.dumps(
-        {"offered_tokens": list(tokens)},
+        payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -232,6 +257,61 @@ def _world_stimulus_manifest() -> _InteriorCapabilityManifest:
         payload_json=payload_json,
         payload_hash="sha256:" + hashlib.sha256(payload_json.encode()).hexdigest(),
         source_refs=("source:private_self", "source:world-occurrence"),
+    )
+
+
+def _private_impression_manifest() -> _InteriorCapabilityManifest:
+    payload_json = json.dumps(
+        {
+            "contract": "character-interior-private-impression-capability.1",
+            "offered_tokens": ["s0", "s1", "s2"],
+            "short_tokens": ["s0", "s1", "s2"],
+            "anchor_short_tokens": ["s0"],
+            "expiry_conditions": [
+                "until_appraisal_contradicted",
+                "until_counter_evidence",
+                "until_relationship_stage_changes",
+                "one_month_without_support",
+            ],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return _InteriorCapabilityManifest(
+        capability_ref="capability:private-impression:test",
+        capability_kind="private_impression_reflection",
+        payload_json=payload_json,
+        payload_hash="sha256:" + hashlib.sha256(payload_json.encode()).hexdigest(),
+        source_refs=("source:private_self", "source:appraisal"),
+    )
+
+
+def _private_impression_result(*, status: str = "no_change") -> str:
+    if status == "no_change":
+        proposal = []
+    else:
+        proposal = [
+            {
+                "proposal_type": "private_impression_transition",
+                "decision": "retain",
+                "predecessor_refs": [],
+                "source_refs": ["s0"],
+                "reflection_summary": "A tentative interpretation remains revisable.",
+                "confidence_bp": 5_500,
+                "expiry_condition": "until_counter_evidence",
+            }
+        ]
+    return json.dumps(
+        {
+            "status": status,
+            "summary": "The moment has a tentative private meaning." if proposal else "No new private reading formed.",
+            "attended_source_refs": ["source:private_self"],
+            "decision": None,
+            "recall_query": None,
+            "proposals": proposal,
+        },
+        ensure_ascii=False,
     )
 
 
@@ -558,7 +638,7 @@ async def test_bare_decision_payload_without_attended_sources_stays_invalid() ->
 @pytest.mark.asyncio
 async def test_typed_proposal_duplicate_decision_echo_is_not_a_second_choice() -> None:
     manifest = _manifest("appraisal:h1", kind="private_impression_reflection")
-    model = _QueueModel(
+    model = _RequiredToolQueueModel(
         _result(
             status="transition",
             decision=None,
@@ -604,7 +684,7 @@ async def test_typed_proposal_in_generic_slot_keeps_its_authored_semantics() -> 
         "confidence_bp": 5000,
         "expiry_condition": "one_month_without_support",
     }
-    model = _QueueModel(
+    model = _RequiredToolQueueModel(
         json.dumps(
             {
                 "status": "decision",
@@ -803,6 +883,131 @@ async def test_world_stimulus_appraisal_uses_one_versioned_forced_tool() -> None
     }
     assert len(tools) == 1
     assert tools[0]["function"]["name"] == "character_role_world_stimulus_appraisal_v1"
+
+
+@pytest.mark.asyncio
+async def test_private_impression_reflection_uses_one_versioned_forced_tool() -> None:
+    model = _RequiredToolQueueModel(_private_impression_result(status="transition"))
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-v4-flash")
+
+    result = await role.experience(
+        await _request(
+            phase="experience",
+            purpose="private_impression_reflection",
+            capability_manifest=_private_impression_manifest(),
+        )
+    )
+
+    assert result["status"] == "transition"
+    assert result["proposals"][0]["payload"]["source_refs"] == ["s0"]
+    assert len(model.tool_calls) == 1
+    tools, tool_choice = model.tool_calls[0]
+    assert tool_choice == {
+        "type": "function",
+        "function": {"name": "character_role_private_impression_reflection_v1"},
+    }
+    assert len(tools) == 1
+    assert tools[0]["function"]["name"] == "character_role_private_impression_reflection_v1"
+
+
+def test_private_impression_tool_schema_preserves_no_change_tokens_and_expiry() -> None:
+    contract = StructuredRoleToolContracts().private_impression_reflection(
+        capability_payload=_private_impression_manifest().payload,
+        recall_allowed=True,
+    )
+    parameters = contract.provider_tools[0]["function"]["parameters"]
+    Draft202012Validator.check_schema(parameters)
+
+    statuses = {
+        status
+        for branch in parameters["anyOf"]
+        for status in branch["properties"]["status"]["enum"]
+    }
+    assert {"transition", "no_change", "recall_request"} <= statuses
+    transition = next(
+        branch
+        for branch in parameters["anyOf"]
+        if branch["properties"]["status"]["enum"] == ["transition"]
+    )
+    proposal = transition["properties"]["proposals"]["items"]
+    assert proposal["properties"]["source_refs"]["items"]["enum"] == ["s0", "s1", "s2"]
+    assert proposal["properties"]["predecessor_refs"]["items"]["enum"] == [
+        "s0",
+        "s1",
+        "s2",
+    ]
+    assert proposal["properties"]["expiry_condition"]["enum"] == [
+        "until_appraisal_contradicted",
+        "until_counter_evidence",
+        "until_relationship_stage_changes",
+        "one_month_without_support",
+    ]
+    no_change = next(
+        branch
+        for branch in parameters["anyOf"]
+        if branch["properties"]["status"]["enum"] == ["no_change"]
+    )
+    assert no_change["properties"]["proposals"]["maxItems"] == 0
+
+
+@pytest.mark.asyncio
+async def test_private_impression_required_tool_reaches_deepseek_http_boundary() -> None:
+    captured: dict[str, object] = {}
+    raw_result = _private_impression_result()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "character_role_private_impression_reflection_v1",
+                                        "arguments": raw_result,
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    model = DeepSeekChatModel(
+        "key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await StructuredCharacterRoleFaculty(
+            model=model,
+            model_id="deepseek-v4-flash",
+        ).experience(
+            await _request(
+                phase="experience",
+                purpose="private_impression_reflection",
+                capability_manifest=_private_impression_manifest(),
+            )
+        )
+    finally:
+        await model.aclose()
+
+    assert result["status"] == "no_change"
+    assert "response_format" not in captured
+    assert captured["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "character_role_private_impression_reflection_v1"},
+    }
+    tools = captured["tools"]
+    assert isinstance(tools, list) and len(tools) == 1
+    assert tools[0]["function"]["name"] == "character_role_private_impression_reflection_v1"
 
 
 @pytest.mark.asyncio
@@ -1511,7 +1716,7 @@ async def test_expression_reconsideration_requires_an_explicit_role_disposition(
 @pytest.mark.asyncio
 async def test_private_impression_experience_normalizes_one_exact_typed_proposal() -> None:
     manifest = _manifest("appraisal:h1", kind="private_impression_reflection")
-    model = _QueueModel(
+    model = _RequiredToolQueueModel(
         json.dumps(
             {
                 "status": "transition",
