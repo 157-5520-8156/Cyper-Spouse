@@ -895,6 +895,45 @@ async def test_open_world_stimulus_processes_merge_before_the_character_turn_and
     assert len({item.opportunity_ref for item in identities.values()}) == 1
     assert next(iter(identities.values())).source_refs == batch.identity.source_refs
 
+    third_ref = "occurrence-settled-3"
+    third = first.model_copy(
+        update={
+            "trigger_id": "appraisal:synthetic:third",
+            "trigger_ref": "appraisal:synthetic:third",
+            "source_evidence_ref": third_ref,
+        }
+    )
+    third_event = first_event[0].model_copy(
+        update={
+            "event_id": third_ref,
+            "logical_time": first_event[0].logical_time
+            + timedelta(seconds=runtime._merge_window_seconds + 31),  # noqa: SLF001
+        }
+    )
+    separated_projection = SimpleNamespace(
+        trigger_processes=(first, second, third),
+        model_result_audits=(),
+        world_revision=real_projection.world_revision,
+        deliberation_revision=real_projection.deliberation_revision,
+        ledger_sequence=real_projection.ledger_sequence,
+    )
+    source_events[third_ref] = third_event
+    separated_batch = await runtime._opportunity_batch(  # noqa: SLF001 - seam test
+        process=third,
+        projection=separated_projection,
+    )
+    separated_identities = runtime._health_opportunity_identities(  # noqa: SLF001 - seam test
+        projection=separated_projection,
+        processes=(first, second, third),
+    )
+
+    assert tuple(item.trigger_id for item in separated_batch.processes) == (third.trigger_id,)
+    assert separated_batch.identity.source_refs == (third_ref,)
+    assert separated_batch.identity.epoch == third_ref
+    assert separated_batch.identity.opportunity_ref != batch.identity.opportunity_ref
+    assert len({item.opportunity_ref for item in separated_identities.values()}) == 2
+    assert separated_identities[third.trigger_id].source_refs == (third_ref,)
+
 
 @pytest.mark.asyncio
 async def test_model_no_change_is_durable_and_completes_the_exact_trigger() -> None:
