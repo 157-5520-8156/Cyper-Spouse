@@ -1494,3 +1494,10 @@ commit：hash
 - 资格状态不变：真实 DeepSeek forced-tool/stream/QQ 回执仍未达到 100 次样本，真实 QQ、24 小时 soak、旧生产
   daemon 的 §20 重启/替换人工门仍未完成；Delayed Trigger Matrix 继续 `declaration_only`，发布状态继续
   `manual_only`/`qualification_incomplete`。上述自由对聊只证明当前隔离 composition 可工作，不证明生产上线。
+- 随后用同一最终源码启动隔离 soak 时，首次发现 acceptance capture 只接受 `/chat/completions`，会把 strict
+  `/beta/chat/completions` 误报为“无 durable provider acceptance”；这不是模型失败。capture 现同时接受并按
+  路径转发两个端点，forced-tool hash 重建也按真实 `strict` dialect 编译，避免只记录普通 schema 的假阴性。
+- 修复后 60 秒 real-provider smoke（1 turn、临时 SQLite、OneBot loopback、无重启）完成：HTTP 200、1 个
+  provider request、1 个 ActionProviderAccepted/ActionAuthorized、0 failures、cold replay 与 live projection
+  一致，roundtrip `3471.465 ms`。这只证明 beta capture/账本闭环的单样本；24 小时 soak 需在该修复提交后重新显式
+  启动，仍不改变 `manual_only`/`qualification_incomplete`。

@@ -582,6 +582,11 @@ def _forced_tool_request_hashes(payload: dict[str, object]) -> list[str]:
     hashes: list[str] = []
     # The isolated daemon environment fixes cadence to shadow.  Do not report
     # indistinguishable off/shadow schema candidates as if both were evidence.
+    schema_dialect = (
+        "deepseek-strict"
+        if isinstance(function.get("strict"), bool) and function.get("strict") is True
+        else "standard"
+    )
     for recorded_cadence_mode in ("shadow",):
         capabilities = qq_expression_capabilities(
             "napcat",
@@ -593,6 +598,7 @@ def _forced_tool_request_hashes(payload: dict[str, object]) -> list[str]:
             capabilities=capabilities,
             recall_allowed=recall_allowed,
             require_turn_posture=require_turn_posture,
+            schema_dialect=schema_dialect,
         )
         if list(contract.provider_tools) != raw_tools:
             continue
@@ -945,7 +951,7 @@ class _ProviderCaptureState:
         payload: dict[str, object],
         authorization: str,
     ) -> tuple[int, dict[str, object]]:
-        if path != "/chat/completions":
+        if path not in {"/chat/completions", "/beta/chat/completions"}:
             return 404, {"error": {"message": "unsupported capture endpoint"}}
         raw_messages = payload.get("messages")
         if not isinstance(raw_messages, list) or not all(
@@ -1026,8 +1032,13 @@ class _ProviderCaptureState:
             if self.upstream_base_url is None:
                 raise RuntimeError("real provider forwarding has no upstream URL")
             with httpx.Client(timeout=90, trust_env=True) as client:
+                upstream_path = (
+                    "/beta/chat/completions"
+                    if path == "/beta/chat/completions"
+                    else "/chat/completions"
+                )
                 response = client.post(
-                    f"{self.upstream_base_url}/chat/completions",
+                    f"{self.upstream_base_url}{upstream_path}",
                     headers={
                         "Authorization": authorization,
                         "Content-Type": "application/json",

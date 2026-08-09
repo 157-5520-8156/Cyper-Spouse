@@ -887,6 +887,75 @@ def test_loopback_stub_returns_required_tool_arguments_for_tool_request() -> Non
     assert decoded["expression_draft"]["timing_choice"] == "now"
 
 
+def test_loopback_stub_accepts_deepseek_beta_tool_endpoint() -> None:
+    state = _ProviderCaptureState(
+        mode="loopback-stub",
+        upstream_base_url=None,
+    )
+    status, response = state.handle(
+        path="/beta/chat/completions",
+        payload={
+            "messages": [
+                {"role": "system", "content": "COMBINED OUTPUT ENVELOPE"},
+                {"role": "user", "content": "请按当前角色状态回应。"},
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "character_inbound_initial_v1",
+                        "strict": True,
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "character_inbound_initial_v1"},
+            },
+        },
+        authorization="Bearer isolated-test",
+    )
+
+    assert status == 200
+    assert response["choices"][0]["message"]["tool_calls"]
+
+
+def test_provider_capture_reconstructs_deepseek_strict_tool_identity() -> None:
+    capabilities = qq_expression_capabilities(
+        "napcat",
+        recorded_cadence_mode="shadow",
+    )
+    contract = InboundToolContracts().contract_for(
+        phase="initial",
+        transport="atomic",
+        capabilities=capabilities,
+        recall_allowed=True,
+        schema_dialect="deepseek-strict",
+    )
+    state = _ProviderCaptureState(
+        mode="loopback-stub",
+        upstream_base_url=None,
+    )
+    status, _response = state.handle(
+        path="/beta/chat/completions",
+        payload={
+            "messages": [
+                {"role": "system", "content": "COMBINED OUTPUT ENVELOPE"},
+            ],
+            "temperature": 0.7,
+            "tools": list(contract.provider_tools),
+            "tool_choice": contract.provider_tool_choice,
+        },
+        authorization="Bearer isolated-test",
+    )
+
+    assert status == 200
+    evidence = state.report()["request_evidence"]
+    assert isinstance(evidence, list) and evidence
+    assert evidence[0]["forced_tool_request_hashes"]
+
+
 def test_provider_capture_retains_presented_source_ids_for_causal_correlation() -> None:
     state = _ProviderCaptureState(
         mode="loopback-stub",
