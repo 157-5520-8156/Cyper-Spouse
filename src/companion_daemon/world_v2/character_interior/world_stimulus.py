@@ -83,6 +83,7 @@ from .run_result import (
     CAUSAL_OPPORTUNITY_CONTRACT_VERSION,
     CausalOpportunityHealth,
     CausalOpportunityIdentity,
+    CausalOpportunityWindow,
     CharacterInteriorRunResult,
 )
 from .core import CharacterInterior
@@ -135,9 +136,15 @@ _EVIDENCE_KIND = {
 
 _PERCEPTION_RESULT_CONTEXT_LIMIT = 720
 _TECHNICAL_FAILURE_DEFER_SECONDS = 30.0
+_DEFAULT_OPPORTUNITY_MERGE_WINDOW_SECONDS = 300
+_DEFAULT_OPPORTUNITY_EXPIRY_SECONDS = 7 * 24 * 60 * 60
 _CURRENT_TRIGGER_ID: ContextVar[str | None] = ContextVar(
     "world_stimulus_current_trigger_id",
     default=None,
+)
+_CURRENT_TRIGGER_IDS: ContextVar[tuple[str, ...]] = ContextVar(
+    "world_stimulus_current_trigger_ids",
+    default=(),
 )
 
 
@@ -279,6 +286,15 @@ class _PreparedWorldStimulusAudit:
     decision: DecisionProposal
     lineage: _InteriorAuthorLineage
     opportunity_identity: CausalOpportunityIdentity
+
+
+@dataclass(frozen=True, slots=True)
+class _WorldStimulusOpportunityBatch:
+    """One merge-window batch routed through one CharacterInterior turn."""
+
+    processes: tuple[TriggerProcess, ...]
+    source_events: tuple[WorldEvent, ...]
+    identity: CausalOpportunityIdentity
 
 
 class _WorldStimulusRelationshipSettlement(Protocol):
@@ -554,50 +570,71 @@ class _WorldStimulusInteriorAuthorityHandler:
             or request.subject_source_refs != tuple(manifest.source_refs)
         ):
             raise ValueError("world stimulus InnerTurn is not actor-bound to its opportunity")
-        if len(manifest.source_refs) != 1:
-            raise ValueError("world stimulus capability must bind one source event")
-        source_ref = manifest.source_refs[0]
-        if request.trigger_ref != source_ref or request.subject_source_refs != (source_ref,):
+        source_refs = tuple(manifest.source_refs)
+        if request.trigger_ref not in source_refs or request.subject_source_refs != source_refs:
             raise ValueError("world stimulus InnerTurn is not bound to its source")
-        located = await self._lookup(source_ref)
-        if located is None:
-            raise ValueError("world stimulus source event is unavailable")
-        source_event, source_commit = located
+        source_events: list[WorldEvent] = []
+        source_commits: list[object] = []
+        for source_ref in source_refs:
+            located = await self._lookup(source_ref)
+            if located is None:
+                raise ValueError("world stimulus source event is unavailable")
+            source_events.append(located[0])
+            source_commits.append(located[1])
+        primary_index = source_refs.index(request.trigger_ref)
+        source_event = source_events[primary_index]
+        source_ref = request.trigger_ref
         pinned = await self._project_at(request.cursor)
-        source_authority = next(
-            (item for item in pinned.committed_world_event_refs if item.event_id == source_ref),
-            None,
-        )
+        source_authorities = {
+            item.event_id: item
+            for item in pinned.committed_world_event_refs
+            if item.event_id in source_refs
+        }
         source_view = manifest.payload.get("source_event")
+        source_views = manifest.payload.get("source_events")
         process_kind = manifest.payload.get("process_kind")
-        if (
-            not isinstance(source_view, dict)
-            or process_kind not in _PROCESS_PRIORITY
-            or source_event.event_type != _SOURCE_EVENT_TYPE[process_kind]
-            or source_view
-            != {
+        expected_source_views = [
+            {
                 "event_id": source_event.event_id,
                 "event_type": source_event.event_type,
                 "logical_time": source_event.logical_time.isoformat(),
                 "payload": json.loads(source_event.payload_json),
                 "payload_hash": source_event.payload_hash,
             }
-            or source_commit.world_revision > request.cursor.world_revision
-            or source_commit.ledger_sequence > request.cursor.ledger_sequence
-            or source_authority is None
-            or source_authority.event_type != source_event.event_type
-            or source_authority.payload_hash != source_event.payload_hash
+            for source_event in source_events
+        ]
+        if not isinstance(source_view, dict) or process_kind not in _PROCESS_PRIORITY:
+            raise ValueError("world stimulus source material is not exact authority")
+        if source_view != expected_source_views[primary_index]:
+            raise ValueError("world stimulus source material is not exact authority")
+        if source_views != expected_source_views:
+            raise ValueError("world stimulus source set material is not exact authority")
+        if any(
+            event.event_type != _SOURCE_EVENT_TYPE[process_kind]
+            or commit.world_revision > request.cursor.world_revision
+            or commit.ledger_sequence > request.cursor.ledger_sequence
+            or source_authorities.get(event.event_id) is None
+            or source_authorities[event.event_id].event_type != event.event_type
+            or source_authorities[event.event_id].payload_hash != event.payload_hash
+            for event, commit in zip(source_events, source_commits, strict=True)
         ):
             raise ValueError("world stimulus source material is not exact authority")
-        expected_perception_result = (
-            _perception_result_material(
-                source_event=source_event,
-                reader=self._perception_result_reader,
-            )
+        expected_perception_results = (
+            {
+                event.event_id: _perception_result_material(
+                    source_event=event,
+                    reader=self._perception_result_reader,
+                )
+                for event in source_events
+            }
             if process_kind == "perception_result_deliberation"
-            else None
+            else {}
         )
-        if manifest.payload.get("perception_result") != expected_perception_result:
+        expected_perception_result = expected_perception_results.get(source_event.event_id)
+        if (
+            process_kind == "perception_result_deliberation"
+            and manifest.payload.get("perception_results") != expected_perception_results
+        ):
             raise ValueError("world stimulus perception material is not exact authority")
         if expected_perception_result is not None:
             receipt_ref = expected_perception_result["receipt_event_ref"]
@@ -624,9 +661,17 @@ class _WorldStimulusInteriorAuthorityHandler:
         if active_affect_heads != _active_affect_capability(pinned):
             raise ValueError("world stimulus active Affect heads are not cursor exact")
         relationship_subject_refs = manifest.payload.get("relationship_subject_refs")
-        known_relationship_subjects = relationship_transition_subject_refs(
-            projection=pinned,
-            source_event=source_event,
+        known_relationship_subjects = tuple(
+            sorted(
+                {
+                    subject_ref
+                    for event in source_events
+                    for subject_ref in relationship_transition_subject_refs(
+                        projection=pinned,
+                        source_event=event,
+                    )
+                }
+            )
         )
         if not isinstance(relationship_subject_refs, list) or relationship_subject_refs not in (
             [],
@@ -714,11 +759,13 @@ class _WorldStimulusInteriorAuthorityHandler:
             active_by_id = {item["aspiration_id"]: item for item in active_aspirations}
             selected_sources = set(transition.source_refs)
             offered_sources = (
-                {source_ref}
+                set(source_refs)
                 | {str(item["authority_source_ref"]) for item in active_aspirations}
                 | {str(item["planted_event_ref"]) for item in active_aspirations}
             )
-            if source_ref not in selected_sources or not selected_sources.issubset(offered_sources):
+            if not set(source_refs).intersection(selected_sources) or not selected_sources.issubset(
+                offered_sources
+            ):
                 raise ValueError("world stimulus aspiration evidence is outside authority")
             if transition.operation != "plant":
                 selected = active_by_id.get(transition.aspiration_id)
@@ -741,7 +788,7 @@ class _WorldStimulusInteriorAuthorityHandler:
                 "payload": result.model_dump(mode="json"),
             }
         )
-        evidence_refs = [source_ref]
+        evidence_refs = list(source_refs)
         if result.aspiration_transition is not None:
             evidence_refs.extend(result.aspiration_transition.source_refs)
         if result.experience_transition is not None:
@@ -776,7 +823,7 @@ class _WorldStimulusInteriorAuthorityHandler:
                     target_id=appraisal_id,
                     transition="activate",
                     expected_entity_revision=0,
-                    evidence_refs=(source_ref,),
+                    evidence_refs=source_refs,
                     payload=CanonicalTypedPayload.from_value(
                         payload_schema="appraisal_transition.v1",
                         value={
@@ -844,7 +891,7 @@ class _WorldStimulusInteriorAuthorityHandler:
                         target_id=affect_episode_id,
                         transition=affect_transition.operation,
                         expected_entity_revision=expected_affect_revision,
-                        evidence_refs=(source_ref,),
+                        evidence_refs=source_refs,
                         payload=CanonicalTypedPayload.from_value(
                             payload_schema="affect_transition.v1",
                             value=affect_payload,
@@ -864,7 +911,7 @@ class _WorldStimulusInteriorAuthorityHandler:
                         ),
                         transition="suggest",
                         expected_entity_revision=0,
-                        evidence_refs=(source_ref,),
+                        evidence_refs=source_refs,
                         payload=CanonicalTypedPayload.from_value(
                             payload_schema="relationship_signal.v1",
                             value=signal.model_dump(mode="json"),
@@ -1142,9 +1189,17 @@ class CharacterInteriorWorldStimulusRuntime:
         relationship_settlement: _WorldStimulusRelationshipSettlement | None = None,
         experience_settlement: ExperienceTransitionSettlement | None = None,
         lease_seconds: int = 120,
+        merge_window_seconds: int = _DEFAULT_OPPORTUNITY_MERGE_WINDOW_SECONDS,
+        expiry_seconds: int = _DEFAULT_OPPORTUNITY_EXPIRY_SECONDS,
         source: str = "world-v2:character-interior-world-stimulus-runtime",
     ) -> None:
-        if not owner_id or not companion_actor_ref or lease_seconds <= 0:
+        if (
+            not owner_id
+            or not companion_actor_ref
+            or lease_seconds <= 0
+            or merge_window_seconds <= 0
+            or expiry_seconds <= 0
+        ):
             raise ValueError("world stimulus runtime composition is incomplete")
         if emotion_worker.ledger is not ledger:
             raise ValueError("world stimulus emotion worker must own the exact ledger")
@@ -1165,6 +1220,8 @@ class CharacterInteriorWorldStimulusRuntime:
             companion_actor_ref=companion_actor_ref,
         )
         self._lease_seconds = lease_seconds
+        self._merge_window_seconds = merge_window_seconds
+        self._expiry_seconds = expiry_seconds
         self._source = source
         # Technical scheduling state only.  A malformed/provider-failed
         # trigger must not monopolize the host's bounded background budget;
@@ -1174,6 +1231,11 @@ class CharacterInteriorWorldStimulusRuntime:
         self._technical_failure_deferred_until: dict[str, float] = {}
 
     async def drain_one(self) -> CharacterInteriorRunResult:
+        return await self._run_one()
+
+    async def advance_due_once(self) -> CharacterInteriorRunResult:
+        """Route one due opportunity for the background producer/consumer seam."""
+
         return await self._run_one()
 
     async def advance_once(
@@ -1208,20 +1270,18 @@ class CharacterInteriorWorldStimulusRuntime:
             for item in projection.trigger_processes
             if item.process_kind in _PROCESS_PRIORITY and item.source_evidence_ref is not None
         )
-        identities = tuple(
-            self._opportunity_identity(
-                process=item,
-                source_refs=(item.source_evidence_ref,),
-            )
-            for item in processes
+        identity_by_trigger = self._health_opportunity_identities(
+            projection=projection,
+            processes=processes,
         )
         last = processes[-1] if processes else None
-        last_identity = identities[-1] if identities else None
+        last_identity = identity_by_trigger.get(last.trigger_id) if last is not None else None
         deferred = sum(
             1
             for item in processes
             if item.trigger_id in self._technical_failure_deferred_until
         )
+        outcomes = tuple(item.runtime_outcome_ref or "" for item in processes)
         return CausalOpportunityHealth(
             world_id=world_id,
             actor_ref=self._companion_actor_ref,
@@ -1230,41 +1290,159 @@ class CharacterInteriorWorldStimulusRuntime:
             claimed_count=sum(item.state == "claimed" for item in processes),
             terminal_count=sum(item.state == "terminal" for item in processes),
             deferred_count=deferred,
-            opportunity_count=len({item.opportunity_ref for item in identities}),
+            opportunity_count=len(
+                {item.opportunity_ref for item in identity_by_trigger.values()}
+            ),
             last_source_ref=(last.source_evidence_ref if last is not None else None),
             last_opportunity_ref=(last_identity.opportunity_ref if last_identity else None),
+            no_change_count=sum(item.endswith(":no-change") for item in outcomes),
+            ignored_count=sum(":ignored" in item for item in outcomes),
+            expired_count=sum(":expired:" in item for item in outcomes),
+            accepted_count=sum(
+                process.state == "terminal"
+                and not outcome.endswith(":no-change")
+                and ":expired:" not in outcome
+                and ":ignored" not in outcome
+                for process, outcome in zip(processes, outcomes, strict=True)
+            ),
+            technical_failure_count=deferred,
         )
+
+    def _health_opportunity_identities(
+        self,
+        *,
+        projection: object,
+        processes: tuple[TriggerProcess, ...],
+    ) -> dict[str, CausalOpportunityIdentity]:
+        """Project merged open work and durable lineage as one health view."""
+
+        identities: dict[str, CausalOpportunityIdentity] = {}
+        unassigned = {item.trigger_id for item in processes}
+        by_id = {item.trigger_id: item for item in processes}
+        while unassigned:
+            trigger_id = next(iter(unassigned))
+            process = by_id[trigger_id]
+            durable = self._durable_opportunity_identity(projection, process.source_evidence_ref)
+            if durable is not None:
+                identities[trigger_id] = durable
+                unassigned.remove(trigger_id)
+                continue
+            if process.state == "terminal":
+                identities[trigger_id] = self._opportunity_identity(
+                    process=process,
+                    source_refs=(process.source_evidence_ref,),
+                )
+                unassigned.remove(trigger_id)
+                continue
+            located = self._health_source_event(process.source_evidence_ref)
+            if located is None:
+                identities[trigger_id] = self._opportunity_identity(
+                    process=process,
+                    source_refs=(process.source_evidence_ref,),
+                )
+                unassigned.remove(trigger_id)
+                continue
+            anchor_time = located.logical_time
+            grouped: list[TriggerProcess] = []
+            for candidate_id in tuple(unassigned):
+                candidate = by_id[candidate_id]
+                if candidate.process_kind != process.process_kind or candidate.state == "terminal":
+                    continue
+                candidate_event = self._health_source_event(candidate.source_evidence_ref)
+                if candidate_event is None:
+                    continue
+                if (
+                    abs((candidate_event.logical_time - anchor_time).total_seconds())
+                    <= self._merge_window_seconds
+                ):
+                    grouped.append(candidate)
+            refs = tuple(item.source_evidence_ref for item in grouped)
+            identity = self._opportunity_identity(process=process, source_refs=refs)
+            for candidate in grouped:
+                identities[candidate.trigger_id] = identity
+                unassigned.remove(candidate.trigger_id)
+        return identities
+
+    def _durable_opportunity_identity(
+        self,
+        projection: object,
+        source_ref: str | None,
+    ) -> CausalOpportunityIdentity | None:
+        if source_ref is None:
+            return None
+        for model_audit in reversed(projection.model_result_audits):
+            try:
+                recorded = RecordedModelResultAudit.model_validate_json(model_audit.audit_json)
+            except ValueError:
+                continue
+            lineage = recorded.character_interior_lineage
+            if (
+                lineage is None
+                or source_ref not in lineage.causal_source_refs
+                or lineage.causal_actor_ref != self._companion_actor_ref
+                or lineage.purpose != PURPOSE
+                or lineage.causal_epoch is None
+                or lineage.causal_contract_version is None
+            ):
+                continue
+            return CausalOpportunityIdentity.from_source_refs(
+                world_id=self._ledger.world_id,
+                actor_ref=lineage.causal_actor_ref,
+                purpose=lineage.purpose,
+                source_refs=lineage.causal_source_refs,
+                epoch=lineage.causal_epoch,
+                contract_version=lineage.causal_contract_version,
+            )
+        return None
+
+    def _health_source_event(self, source_ref: str | None) -> WorldEvent | None:
+        if source_ref is None:
+            return None
+        located = self._ledger.lookup_event_commit(source_ref)
+        return located[0] if located is not None else None
 
     async def _run_one(
         self,
         *,
         wake_event_ref: str | None = None,
     ) -> CharacterInteriorRunResult:
+        trigger_ids: tuple[str, ...] = ()
         try:
             result = await self._drain_one_impl(wake_event_ref=wake_event_ref)
+            trigger_ids = _CURRENT_TRIGGER_IDS.get()
         except Exception:
+            trigger_ids = _CURRENT_TRIGGER_IDS.get()
             trigger_id = _CURRENT_TRIGGER_ID.get()
-            if trigger_id:
+            if not trigger_ids and trigger_id:
+                trigger_ids = (trigger_id,)
+            if trigger_ids:
                 # A crash before the runtime can return its typed technical
                 # result must receive the same scheduler isolation, including
                 # a terminal source whose authored aftermath is still pending.
                 # The defer is process-local and non-durable: it lets another
                 # recovery proceed now while a restarted runtime can resume
                 # this immutable aftermath from its audit.
-                self._defer_technical_failure(trigger_id)
+                self._defer_technical_failures(trigger_ids)
             raise
         finally:
             _CURRENT_TRIGGER_ID.set(None)
+            _CURRENT_TRIGGER_IDS.set(())
         if result.work_status == "technical_failure" and result.trigger_id:
-            self._defer_technical_failure(result.trigger_id)
+            self._defer_technical_failures(trigger_ids or (result.trigger_id,))
         elif result.trigger_id:
-            self._technical_failure_deferred_until.pop(result.trigger_id, None)
+            for trigger_id in trigger_ids or (result.trigger_id,):
+                self._technical_failure_deferred_until.pop(trigger_id, None)
         return await self._attach_opportunity_lineage(result)
 
     def _defer_technical_failure(self, trigger_id: str) -> None:
-        self._technical_failure_deferred_until[trigger_id] = (
-            time.monotonic() + _TECHNICAL_FAILURE_DEFER_SECONDS
-        )
+        self._defer_technical_failures((trigger_id,))
+
+    def _defer_technical_failures(self, trigger_ids: tuple[str, ...]) -> None:
+        deferred_until = time.monotonic() + _TECHNICAL_FAILURE_DEFER_SECONDS
+        for trigger_id in trigger_ids:
+            if not trigger_id:
+                continue
+            self._technical_failure_deferred_until[trigger_id] = deferred_until
 
     async def _drain_one_impl(
         self,
@@ -1276,39 +1454,85 @@ class CharacterInteriorWorldStimulusRuntime:
         if process is None:
             return CharacterInteriorRunResult(trigger_id="", status="idle")
         _CURRENT_TRIGGER_ID.set(process.trigger_id)
-        source_event = await self._source_event(process, cursor=_cursor(projection))
+        batch = await self._opportunity_batch(process=process, projection=projection)
+        identity = batch.identity
+        source_events_by_trigger = {
+            candidate.trigger_id: source_event
+            for candidate, source_event in zip(
+                batch.processes,
+                batch.source_events,
+                strict=True,
+            )
+        }
+        source_event = source_events_by_trigger[process.trigger_id]
+        _CURRENT_TRIGGER_IDS.set(tuple(item.trigger_id for item in batch.processes))
+
+        def result(
+            *,
+            work_status: str | None = None,
+            status: str = "processed",
+        ) -> CharacterInteriorRunResult:
+            return CharacterInteriorRunResult(
+                trigger_id=process.trigger_id,
+                status=status,
+                work_status=work_status,  # type: ignore[arg-type]
+                opportunity_ref=identity.opportunity_ref,
+                source_refs=identity.source_refs,
+                epoch=identity.epoch,
+                contract_version=identity.contract_version,
+            )
+
         terminal_recovery = process.state == "terminal"
+        active_processes: list[TriggerProcess] = []
+        newly_claimed_any = False
         if terminal_recovery:
-            active, newly_claimed = process, False
+            active_processes.append(process)
         else:
-            active, newly_claimed = await self._claim_or_reclaim(
-                process=process,
-                source_event=source_event,
-                projection=projection,
-            )
-        if active is None:
-            return CharacterInteriorRunResult(
-                trigger_id=process.trigger_id,
-                status="owned_elsewhere",
-            )
+            for candidate in batch.processes:
+                current_projection = await self._project()
+                current_process = next(
+                    item
+                    for item in current_projection.trigger_processes
+                    if item.trigger_id == candidate.trigger_id
+                )
+                active_candidate, newly_claimed = await self._claim_or_reclaim(
+                    process=current_process,
+                    source_event=source_events_by_trigger[candidate.trigger_id],
+                    projection=current_projection,
+                )
+                if active_candidate is None:
+                    return result(status="owned_elsewhere")
+                active_processes.append(active_candidate)
+                newly_claimed_any = newly_claimed_any or newly_claimed
+        active = next(
+            item for item in active_processes if item.trigger_id == process.trigger_id
+        )
         current = await self._project()
-        audit = self._existing_audit(current, source_ref=source_event.event_id)
-        if audit is None and not newly_claimed:
-            return CharacterInteriorRunResult(
-                trigger_id=process.trigger_id,
-                status="owned_elsewhere",
-            )
+        audit = self._existing_audit_for_opportunity(
+            current,
+            identity=identity,
+            source_ref=source_event.event_id,
+        )
+        if audit is None and not newly_claimed_any:
+            return result(status="owned_elsewhere")
         if audit is None:
+            if self._opportunity_is_expired(
+                source_events=batch.source_events,
+                at=current.logical_time or source_event.logical_time,
+            ):
+                await self._complete_opportunity_processes(
+                    processes=active_processes,
+                    source_events=source_events_by_trigger,
+                    outcome_ref=f"outcome:causal-opportunity:expired:{identity.opportunity_ref}",
+                )
+                return result(work_status="expired")
             cursor = _cursor(current)
-            opportunity_identity = self._opportunity_identity(
-                process=active,
-                source_refs=(source_event.event_id,),
-            )
             manifest = await self._manifest(
                 process=active,
                 source_event=source_event,
                 projection=current,
-                opportunity_identity=opportunity_identity,
+                opportunity_identity=identity,
+                source_events=batch.source_events,
             )
             transition = await self._interior.experience(
                 InteriorStimulus(
@@ -1319,8 +1543,8 @@ class CharacterInteriorWorldStimulusRuntime:
                     cursor=cursor,
                     logical_time=current.logical_time or source_event.logical_time,
                     purpose=PURPOSE,
-                    source_refs=(source_event.event_id,),
-                    stimulus_ref=opportunity_identity.opportunity_ref,
+                    source_refs=identity.source_refs,
+                    stimulus_ref=identity.opportunity_ref,
                     capability_manifest=manifest,
                     context_note=(
                         "A committed change is available for the character's own private "
@@ -1334,27 +1558,30 @@ class CharacterInteriorWorldStimulusRuntime:
                     active.trigger_id,
                     transition.failure_code,
                 )
-                return CharacterInteriorRunResult(
-                    trigger_id=active.trigger_id,
-                    status="processed",
-                    work_status="technical_failure",
+                return result(work_status="technical_failure")
+            if transition.status == "model_no_change" and not transition.proposal_refs:
+                await self._complete_opportunity_processes(
+                    processes=active_processes,
+                    source_events=source_events_by_trigger,
+                    outcome_ref=f"outcome:{active.trigger_id}:ignored",
                 )
+                return result(work_status="ignored")
             if len(transition.proposal_refs) != 1:
-                return CharacterInteriorRunResult(
-                    trigger_id=active.trigger_id,
-                    status="processed",
-                    work_status="technical_failure",
-                )
+                return result(work_status="technical_failure")
             proposal_id = transition.proposal_refs[0]
             after = await self._project()
-            audit = next(
-                (
+            audit = self._existing_audit_for_opportunity(
+                after,
+                identity=identity,
+                source_ref=source_event.event_id,
+            )
+            if audit is not None and audit.proposal_id != proposal_id:
+                audit = next(
                     item
                     for item in after.proposal_audits
-                    if item.proposal_id == proposal_id and item.trigger_ref == source_event.event_id
-                ),
-                None,
-            )
+                    if item.proposal_id == proposal_id
+                    and item.trigger_ref == source_event.event_id
+                )
             if audit is None:
                 raise RuntimeError("world stimulus result audit was not durably recorded")
         located_audit = await self._lookup(audit.event_ref)
@@ -1379,11 +1606,7 @@ class CharacterInteriorWorldStimulusRuntime:
             # A stale head or incomplete content authority is a technical
             # failure, never a character choice.  The source trigger remains
             # claimed/recoverable and no local after-image is invented.
-            return CharacterInteriorRunResult(
-                trigger_id=active.trigger_id,
-                status="processed",
-                work_status="technical_failure",
-            )
+            return result(work_status="technical_failure")
         aspiration = await self._process_aspiration(
             audit_cursor=audit_cursor,
             current_cursor=_cursor(await self._project()),
@@ -1391,11 +1614,7 @@ class CharacterInteriorWorldStimulusRuntime:
             source_event=source_event,
         )
         if aspiration.status not in {"no_change", "accepted"}:
-            return CharacterInteriorRunResult(
-                trigger_id=active.trigger_id,
-                status="processed",
-                work_status="technical_failure",
-            )
+            return result(work_status="technical_failure")
         # Settle the optional relationship signal while the exact historical
         # source trigger is still claimed. Appraisal acceptance terminalizes
         # that trigger, so doing this first removes the crash gap instead of
@@ -1413,11 +1632,7 @@ class CharacterInteriorWorldStimulusRuntime:
             if relationship_status not in {"no_change", "accepted"}:
                 # The exact source trigger stays claimed/retryable. Contention
                 # and settlement errors are never converted into a choice.
-                return CharacterInteriorRunResult(
-                    trigger_id=active.trigger_id,
-                    status="processed",
-                    work_status="technical_failure",
-                )
+                return result(work_status="technical_failure")
         current_cursor = _cursor(await self._project())
         try:
             emotion = await self._process_emotion(
@@ -1438,11 +1653,7 @@ class CharacterInteriorWorldStimulusRuntime:
                 active.trigger_id,
                 exc,
             )
-            return CharacterInteriorRunResult(
-                trigger_id=active.trigger_id,
-                status="processed",
-                work_status="technical_failure",
-            )
+            return result(work_status="technical_failure")
         emotion_status = emotion.status
         if emotion_status not in {"no_change", "appraisal_only", "accepted"}:
             raise RuntimeError("world stimulus emotion settlement returned invalid status")
@@ -1454,23 +1665,119 @@ class CharacterInteriorWorldStimulusRuntime:
             and experience.status == "no_change"
             else "accepted"
         )
-        # ``appraisal_only`` means the Appraisal acceptance already
-        # terminalized this source trigger in its own atomic batch.  Only a
-        # genuine no-change appraisal needs this runtime's completion event.
-        if not terminal_recovery and emotion_status == "no_change":
-            await self._complete(
-                process=active,
-                source_event=source_event,
-                cursor=_cursor(await self._project()),
+        # Appraisal acceptance may already terminalize the primary source in
+        # its own atomic batch.  The helper skips that terminal process and
+        # closes every other claimed source in the same merged opportunity.
+        if not terminal_recovery:
+            await self._complete_opportunity_processes(
+                processes=active_processes,
+                source_events=source_events_by_trigger,
                 outcome_ref=f"outcome:{active.trigger_id}:{completed_status}",
             )
-        elif not self._process_is_terminal(await self._project(), trigger_id=active.trigger_id):
+        if not self._process_is_terminal(await self._project(), trigger_id=active.trigger_id):
             raise RuntimeError("accepted world stimulus did not terminalize its source trigger")
-        return CharacterInteriorRunResult(
-            trigger_id=active.trigger_id,
-            status="processed",
-            work_status=("no_change" if completed_status == "no-change" else "accepted"),
+        return result(
+            work_status=("no_change" if completed_status == "no-change" else "accepted")
         )
+
+    async def _opportunity_batch(
+        self,
+        *,
+        process: TriggerProcess,
+        projection: object,
+    ) -> _WorldStimulusOpportunityBatch:
+        """Collect open source processes inside one explicit merge window."""
+
+        if process.state == "terminal":
+            source_event = await self._source_event(process, cursor=_cursor(projection))
+            return _WorldStimulusOpportunityBatch(
+                processes=(process,),
+                source_events=(source_event,),
+                identity=self._opportunity_identity(
+                    process=process,
+                    source_refs=(source_event.event_id,),
+                ),
+            )
+        candidates = tuple(
+            item
+            for item in projection.trigger_processes
+            if item.process_kind == process.process_kind
+            and item.state != "terminal"
+            and item.source_evidence_ref is not None
+        )
+        located: list[tuple[TriggerProcess, WorldEvent]] = []
+        for candidate in candidates:
+            located.append(
+                (
+                    candidate,
+                    await self._source_event(candidate, cursor=_cursor(projection)),
+                )
+            )
+        located.sort(key=lambda item: (item[1].logical_time, item[1].event_id))
+        anchor_time = next(
+            event.logical_time
+            for candidate, event in located
+            if candidate.trigger_id == process.trigger_id
+        )
+        selected = tuple(
+            item
+            for item in located
+            if abs((item[1].logical_time - anchor_time).total_seconds())
+            <= self._merge_window_seconds
+        )
+        selected_processes = tuple(item[0] for item in selected)
+        selected_events = tuple(item[1] for item in selected)
+        identity = self._opportunity_identity(
+            process=process,
+            source_refs=tuple(item.event_id for item in selected_events),
+        )
+        return _WorldStimulusOpportunityBatch(
+            processes=selected_processes,
+            source_events=selected_events,
+            identity=identity,
+        )
+
+    def _opportunity_is_expired(
+        self,
+        *,
+        source_events: tuple[WorldEvent, ...],
+        at: datetime,
+    ) -> bool:
+        anchor = min(event.logical_time for event in source_events)
+        return CausalOpportunityWindow(
+            expires_at=anchor + timedelta(seconds=self._expiry_seconds),
+        ).is_expired(at)
+
+    async def _complete_opportunity_processes(
+        self,
+        *,
+        processes: list[TriggerProcess],
+        source_events: dict[str, WorldEvent],
+        outcome_ref: str,
+    ) -> None:
+        """Terminalize every claimed source without duplicating the turn."""
+
+        for process in processes:
+            current = await self._project()
+            current_process = next(
+                item
+                for item in current.trigger_processes
+                if item.trigger_id == process.trigger_id
+            )
+            if current_process.state == "terminal":
+                continue
+            if (
+                current_process.state != "claimed"
+                or current_process.claim_lease is None
+                or current_process.claim_lease.owner_id != self._owner_id
+            ):
+                raise RuntimeError("causal opportunity source is not owned for completion")
+            await self._complete(
+                process=current_process,
+                source_event=source_events[process.trigger_id],
+                cursor=_cursor(current),
+                outcome_ref=outcome_ref,
+            )
 
     def _next_process(
         self,
@@ -1566,7 +1873,7 @@ class CharacterInteriorWorldStimulusRuntime:
         self,
         result: CharacterInteriorRunResult,
     ) -> CharacterInteriorRunResult:
-        if not result.trigger_id:
+        if not result.trigger_id or result.opportunity_ref is not None:
             return result
         projection = await self._project()
         process = next(
@@ -2059,8 +2366,13 @@ class CharacterInteriorWorldStimulusRuntime:
         source_event,
         projection,
         opportunity_identity: CausalOpportunityIdentity,
+        source_events: tuple[WorldEvent, ...],
     ):
         logical_time = projection.logical_time or source_event.logical_time
+        source_event_by_ref = {item.event_id: item for item in source_events}
+        ordered_source_events = tuple(
+            source_event_by_ref[ref] for ref in opportunity_identity.source_refs
+        )
         payload = {
             "contract": "character-interior-world-stimulus-capability.1",
             "process_kind": process.process_kind,
@@ -2074,6 +2386,16 @@ class CharacterInteriorWorldStimulusRuntime:
                 "payload": json.loads(source_event.payload_json),
                 "payload_hash": source_event.payload_hash,
             },
+            "source_events": [
+                {
+                    "event_id": item.event_id,
+                    "event_type": item.event_type,
+                    "logical_time": item.logical_time.isoformat(),
+                    "payload": json.loads(item.payload_json),
+                    "payload_hash": item.payload_hash,
+                }
+                for item in ordered_source_events
+            ],
             "result_choices": ["no_change", "activate"],
             "affect_target_lower_bounds": lower_bounds_from_projection(projection).model_dump(
                 mode="json"
@@ -2084,9 +2406,15 @@ class CharacterInteriorWorldStimulusRuntime:
             # free to omit the signal even when subjects are offered.
             "relationship_subject_refs": (
                 list(
-                    relationship_transition_subject_refs(
-                        projection=projection,
-                        source_event=source_event,
+                    sorted(
+                        {
+                            subject_ref
+                            for item in ordered_source_events
+                            for subject_ref in relationship_transition_subject_refs(
+                                projection=projection,
+                                source_event=item,
+                            )
+                        }
                     )
                 )
                 if self._relationship_settlement is not None
@@ -2104,13 +2432,17 @@ class CharacterInteriorWorldStimulusRuntime:
         }
         if process.process_kind == "perception_result_deliberation":
             payload["perception_result"] = await self._read_perception_result(source_event)
+            payload["perception_results"] = {
+                item.event_id: await self._read_perception_result(item)
+                for item in ordered_source_events
+            }
         payload_json = _canonical(payload)
         return _InteriorCapabilityManifest(
             capability_ref=f"capability:world-stimulus:{process.trigger_id}:{process.claim_lease.attempt_id}",
             capability_kind=PURPOSE,
             payload_json=payload_json,
             payload_hash="sha256:" + hashlib.sha256(payload_json.encode()).hexdigest(),
-            source_refs=(source_event.event_id,),
+            source_refs=opportunity_identity.source_refs,
         )
 
     async def _read_perception_result(
@@ -2145,6 +2477,36 @@ class CharacterInteriorWorldStimulusRuntime:
             and item.proposal_id.startswith("proposal:character-interior-world-stimulus:")
         )
         return matches[-1] if matches else None
+
+    def _existing_audit_for_opportunity(
+        self,
+        projection,
+        *,
+        identity: CausalOpportunityIdentity,
+        source_ref: str,
+    ):
+        """Find one durable proposal by canonical opportunity before source fallback."""
+
+        for model_audit in reversed(projection.model_result_audits):
+            try:
+                recorded = RecordedModelResultAudit.model_validate_json(model_audit.audit_json)
+            except ValueError:
+                continue
+            lineage = recorded.character_interior_lineage
+            if lineage is None or lineage.opportunity_ref != identity.opportunity_ref:
+                continue
+            proposal = next(
+                (
+                    item
+                    for item in reversed(projection.proposal_audits)
+                    if item.model_result_ref == model_audit.model_result_ref
+                    and item.proposal_kind == "decision"
+                ),
+                None,
+            )
+            if proposal is not None:
+                return proposal
+        return self._existing_audit(projection, source_ref=source_ref)
 
     async def _process_emotion(self, *, audit_cursor, current_cursor, proposal_id):
         def run():

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -74,7 +75,13 @@ from companion_daemon.world_v2.schemas import (
     relationship_signal_fingerprint,
 )
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
-from test_life_projection import WORLD_ID, commit, seed_through_proposal, settlement_batch
+from test_life_projection import (
+    WORLD_ID,
+    commit,
+    event,
+    seed_through_proposal,
+    settlement_batch,
+)
 
 
 NOW = datetime(2026, 8, 4, 18, 0, tzinfo=UTC)
@@ -793,6 +800,100 @@ async def test_source_bound_opportunity_rejects_a_different_actor() -> None:
 
     with pytest.raises(ValueError, match="actor"):
         await runtime.advance_once(SOURCE_REF, actor_ref="actor:other")
+
+
+@pytest.mark.asyncio
+async def test_expired_opportunity_is_terminal_and_distinct_from_character_no_change() -> None:
+    model = _RoleModel(decision="no_change")
+    runtime, ledger, _projection = _runtime(model=model)
+    runtime._expiry_seconds = 1  # noqa: SLF001 - explicit clock seam fixture
+    current = ledger.project().logical_time
+    assert current is not None
+    later = current + timedelta(seconds=2)
+    commit(
+        ledger,
+        [
+            event(
+                "clock:causal-opportunity-expired",
+                "ClockAdvanced",
+                {
+                    "logical_time_from": current.isoformat(),
+                    "logical_time_to": later.isoformat(),
+                },
+                at=later,
+            )
+        ],
+    )
+
+    result = await runtime.advance_once(SOURCE_REF)
+
+    assert result.work_status == "expired"
+    assert model.calls == 0
+    health = runtime.health_snapshot(WORLD_ID)
+    assert health.expired_count == 1
+    assert health.no_change_count == 0
+    assert health.open_count == 0
+    assert health.claimed_count == 0
+    assert ledger.rebuild() == ledger.project()
+    assert (await runtime.advance_once(SOURCE_REF)).status == "idle"
+
+
+@pytest.mark.asyncio
+async def test_open_world_stimulus_processes_merge_before_the_character_turn_and_health() -> None:
+    runtime, ledger, _projection = _runtime(model=_RoleModel(decision="no_change"))
+    first = next(
+        item
+        for item in ledger.project().trigger_processes
+        if item.process_kind == "npc_world_appraisal"
+    )
+    second = first.model_copy(
+        update={
+            "trigger_id": "appraisal:synthetic:second",
+            "trigger_ref": "appraisal:synthetic:second",
+            "source_evidence_ref": "occurrence-settled-2",
+        }
+    )
+    first_event = ledger.lookup_event_commit(SOURCE_REF)
+    assert first_event is not None
+    second_event = first_event[0].model_copy(
+        update={
+            "event_id": "occurrence-settled-2",
+            "logical_time": first_event[0].logical_time + timedelta(seconds=30),
+        }
+    )
+    real_projection = ledger.project()
+    fake_projection = SimpleNamespace(
+        trigger_processes=(first, second),
+        model_result_audits=(),
+        world_revision=real_projection.world_revision,
+        deliberation_revision=real_projection.deliberation_revision,
+        ledger_sequence=real_projection.ledger_sequence,
+    )
+    source_events = {SOURCE_REF: first_event[0], "occurrence-settled-2": second_event}
+
+    async def source_event(process, *, cursor):  # type: ignore[no-untyped-def]
+        del cursor
+        return source_events[process.source_evidence_ref]
+
+    runtime._source_event = source_event  # type: ignore[method-assign]  # noqa: SLF001
+    runtime._health_source_event = lambda ref: source_events.get(ref)  # type: ignore[method-assign]  # noqa: SLF001
+
+    batch = await runtime._opportunity_batch(  # noqa: SLF001 - seam test
+        process=first,
+        projection=fake_projection,
+    )
+    identities = runtime._health_opportunity_identities(  # noqa: SLF001 - seam test
+        projection=fake_projection,
+        processes=(first, second),
+    )
+
+    assert tuple(item.trigger_id for item in batch.processes) == (
+        first.trigger_id,
+        second.trigger_id,
+    )
+    assert batch.identity.source_refs == (SOURCE_REF, "occurrence-settled-2")
+    assert len({item.opportunity_ref for item in identities.values()}) == 1
+    assert next(iter(identities.values())).source_refs == batch.identity.source_refs
 
 
 @pytest.mark.asyncio

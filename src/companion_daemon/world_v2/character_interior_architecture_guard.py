@@ -1196,6 +1196,35 @@ def _scan_retired_live_provider_contracts(
     )
 
 
+def _scan_causal_opportunity_bypasses(
+    path: Path,
+) -> tuple[CharacterInteriorArchitectureViolation, ...]:
+    """Keep production scheduling on the unified opportunity entry point."""
+
+    if path.name != "production.py":
+        return ()
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    violations: list[CharacterInteriorArchitectureViolation] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        target = node.func.value
+        if (
+            node.func.attr == "drain_one"
+            and isinstance(target, ast.Attribute)
+            and target.attr == "_world_stimulus"
+        ):
+            violations.append(
+                CharacterInteriorArchitectureViolation(
+                    path,
+                    node.lineno,
+                    "scattered_causal_opportunity_bypass",
+                    "_world_stimulus.drain_one",
+                )
+            )
+    return tuple(dict.fromkeys(violations))
+
+
 def scan_character_interior_architecture(
     repository_root: Path,
 ) -> tuple[CharacterInteriorArchitectureViolation, ...]:
@@ -1221,6 +1250,7 @@ def scan_character_interior_architecture(
             violations.extend(_scan_forbidden_interior_facades(path))
             violations.extend(_scan_retired_author_definitions(path))
             violations.extend(_scan_interior_private_author_boundary(path))
+            violations.extend(_scan_causal_opportunity_bypasses(path))
             continue
         if "tests" in path.relative_to(production_root).parts or path.name.startswith("test_"):
             continue

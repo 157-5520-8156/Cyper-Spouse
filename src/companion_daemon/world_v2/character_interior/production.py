@@ -682,7 +682,10 @@ class _CharacterInteriorBackgroundDriver:
                 )
                 if result.status not in {"idle", "owned_elsewhere"}:
                     return result
-        result = await self._world_stimulus.drain_one()
+        # The background driver routes through the unified opportunity seam;
+        # the historical ``drain_one`` compatibility entry point is reserved
+        # for direct runtime/replay tests and is not a production bypass.
+        result = await self._world_stimulus.advance_due_once()
         return None if result.status in {"idle", "owned_elsewhere"} else result
 
     async def drain_reconsideration_once(self) -> object | None:
