@@ -1371,6 +1371,7 @@ class CharacterInteriorWorldStimulusRuntime:
     ) -> CausalOpportunityIdentity | None:
         if source_ref is None:
             return None
+        identities: dict[str, CausalOpportunityIdentity] = {}
         for model_audit in reversed(projection.model_result_audits):
             try:
                 recorded = RecordedModelResultAudit.model_validate_json(model_audit.audit_json)
@@ -1382,19 +1383,25 @@ class CharacterInteriorWorldStimulusRuntime:
                 or source_ref not in lineage.causal_source_refs
                 or lineage.causal_actor_ref != self._companion_actor_ref
                 or lineage.purpose != PURPOSE
-                or lineage.causal_epoch is None
-                or lineage.causal_contract_version is None
             ):
                 continue
-            return CausalOpportunityIdentity.from_source_refs(
-                world_id=self._ledger.world_id,
-                actor_ref=lineage.causal_actor_ref,
-                purpose=lineage.purpose,
-                source_refs=lineage.causal_source_refs,
-                epoch=lineage.causal_epoch,
-                contract_version=lineage.causal_contract_version,
-            )
-        return None
+            try:
+                identity = CausalOpportunityIdentity.from_source_refs(
+                    world_id=lineage.causal_world_id,
+                    actor_ref=lineage.causal_actor_ref,
+                    purpose=lineage.purpose,
+                    source_refs=lineage.causal_source_refs,
+                    epoch=lineage.causal_epoch,
+                    contract_version=lineage.causal_contract_version,
+                )
+            except (TypeError, ValueError):
+                continue
+            if identity.opportunity_ref != lineage.opportunity_ref:
+                continue
+            identities[identity.opportunity_ref] = identity
+        if len(identities) != 1:
+            return None
+        return next(iter(identities.values()))
 
     def _health_source_event(self, source_ref: str | None) -> WorldEvent | None:
         if source_ref is None:
@@ -1843,9 +1850,26 @@ class CharacterInteriorWorldStimulusRuntime:
                 ):
                     continue
                 source_ref = process.source_evidence_ref
+                durable_identity = self._durable_opportunity_identity(projection, source_ref)
+                identity = (
+                    durable_identity
+                    if durable_identity is not None
+                    else (
+                        self._opportunity_identity(
+                            process=process,
+                            source_refs=(source_ref,),
+                        )
+                        if source_ref is not None
+                        else None
+                    )
+                )
                 audit = (
-                    self._existing_audit(projection, source_ref=source_ref)
-                    if source_ref is not None
+                    self._existing_audit_for_opportunity(
+                        projection,
+                        identity=identity,
+                        source_ref=source_ref,
+                    )
+                    if source_ref is not None and identity is not None
                     else None
                 )
                 if audit is not None and (
@@ -2503,8 +2527,10 @@ class CharacterInteriorWorldStimulusRuntime:
         identity: CausalOpportunityIdentity,
         source_ref: str,
     ):
-        """Find one durable proposal by canonical opportunity before source fallback."""
+        """Find a proposal only through an exact or contained durable identity."""
 
+        exact_matches = []
+        contained_matches = []
         for model_audit in reversed(projection.model_result_audits):
             try:
                 recorded = RecordedModelResultAudit.model_validate_json(model_audit.audit_json)
@@ -2518,6 +2544,19 @@ class CharacterInteriorWorldStimulusRuntime:
                 or source_ref not in lineage.causal_source_refs
             ):
                 continue
+            try:
+                durable_identity = CausalOpportunityIdentity.from_source_refs(
+                    world_id=lineage.causal_world_id,
+                    actor_ref=lineage.causal_actor_ref,
+                    purpose=lineage.purpose,
+                    source_refs=lineage.causal_source_refs,
+                    epoch=lineage.causal_epoch,
+                    contract_version=lineage.causal_contract_version,
+                )
+            except (TypeError, ValueError):
+                continue
+            if durable_identity.opportunity_ref != lineage.opportunity_ref:
+                continue
             proposal = next(
                 (
                     item
@@ -2527,9 +2566,36 @@ class CharacterInteriorWorldStimulusRuntime:
                 ),
                 None,
             )
-            if proposal is not None:
-                return proposal
-        return self._existing_audit(projection, source_ref=source_ref)
+            if proposal is None:
+                continue
+            if durable_identity.opportunity_ref == identity.opportunity_ref and all(
+                getattr(durable_identity, field) == getattr(identity, field)
+                for field in (
+                    "world_id",
+                    "actor_ref",
+                    "purpose",
+                    "source_refs",
+                    "epoch",
+                    "contract_version",
+                )
+            ):
+                exact_matches.append((durable_identity.opportunity_ref, proposal))
+            elif (
+                durable_identity.world_id == identity.world_id
+                and durable_identity.actor_ref == identity.actor_ref
+                and durable_identity.purpose == identity.purpose
+                and durable_identity.epoch == identity.epoch
+                and durable_identity.contract_version == identity.contract_version
+                and source_ref in identity.source_refs
+                and set(identity.source_refs).issubset(durable_identity.source_refs)
+            ):
+                contained_matches.append((durable_identity.opportunity_ref, proposal))
+        if exact_matches:
+            return exact_matches[0][1]
+        durable_refs = {opportunity_ref for opportunity_ref, _ in contained_matches}
+        if len(durable_refs) == 1:
+            return contained_matches[0][1]
+        return None
 
     async def _process_emotion(self, *, audit_cursor, current_cursor, proposal_id):
         def run():

@@ -44,6 +44,7 @@ def causal_opportunity_lineage_fields(
     if subject_ref != identity.opportunity_ref:
         raise ValueError("CharacterInterior subject is not the causal opportunity")
     return {
+        "causal_world_id": identity.world_id,
         "causal_source_refs": identity.source_refs,
         "causal_epoch": identity.epoch,
         "causal_actor_ref": identity.actor_ref,

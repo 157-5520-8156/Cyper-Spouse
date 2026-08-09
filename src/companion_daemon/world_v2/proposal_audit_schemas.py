@@ -96,6 +96,12 @@ class RecordedCharacterInteriorTurnLineage(FrozenModel):
     # Optional for historical audit.  New L4 producers persist the complete
     # canonical identity here so a cold replay can recover a merged source set
     # without asking the character model to author it again.
+    causal_world_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        exclude_if=lambda value: value is None,
+    )
     causal_source_refs: tuple[str, ...] = Field(
         default=(),
         max_length=64,
@@ -148,6 +154,7 @@ class RecordedCharacterInteriorTurnLineage(FrozenModel):
         if self.author_parent_model_call_id == self.author_model_call_id:
             raise ValueError("CharacterInterior author cannot be its own correction parent")
         causal_fields = (
+            self.causal_world_id,
             self.causal_epoch,
             self.causal_actor_ref,
             self.causal_contract_version,
