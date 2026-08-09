@@ -1339,3 +1339,20 @@ commit：hash
 - 报告仍是临时 SQLite、OneBot loopback capture、外部 provider；工作树 dirty 只反映用户保留的 `.idea`/`training`
   文件，真实 QQ 未连接。它没有覆盖 100 次 forced-tool/stream、24 小时 soak 或自由对话质量，因此发布资格仍为
   `manual_only`/`qualification_incomplete`，不得把这次短跑写成生产健康证明。
+
+### 2026-08-09：隔离 daemon soak supervisor（仅建立安全执行器）
+
+- 新增 `scripts/run_isolated_daemon_soak.py` 与对应测试。它只允许临时 SQLite、OneBot loopback capture 和隔离
+  daemon；真实 provider 必须显式传 `--allow-real-provider`，持续 24 小时还必须显式传 `--confirm-24h`。它没有
+  生产 daemon 重启、生产数据库路径或真实 QQ 发送入口，报告固定为 `manual_only`，并记录 Git revision 与关键
+  源文件 SHA-256。
+- supervisor 的每次输入、health、计划重启、冷重放和失败都写入 JSONL/JSON；重放检查同时区分可见 effect、原始
+  provider request 数和 CharacterInterior authority request 数，不能把 reviewer/background provider 请求误报为角色
+  重选，也不能把“没有可见消息”误报成零模型调用。
+- 只做过一个短 loopback smoke：约 3 秒、1 个输入、1 次计划重启；重复输入没有新增可见 effect，CharacterInterior
+  authority reauthor 为 `0`，冷重放和临时数据库闭环正常。该 smoke 中捕获到的 `2` 个非角色 reviewer request
+  被单独记录，未被吞掉，也未被当作资格通过。这里没有运行真实 provider 的 24 小时任务。
+- 这是资格采集器的安全/证据薄片，不是生产发布门。100 次 forced-tool/stream/QQ receipt 样本、自由对话质量、
+  24 小时 wall-clock soak 仍需人工明确授权后单独执行；在此之前发布状态继续保持
+  `manual_only`/`qualification_incomplete`。新增薄片后的完整源码回归为 `4911 passed, 1 warning`，仍不改变这条
+  资格结论。
