@@ -1582,3 +1582,16 @@ commit：hash
 - 红测断言 proactive `character_interior_lineage.opportunity_ref` 等于 canonical `causal-opportunity.1` 身份；主动联系
   与审计/Deliberation 相关回归分别为 `77 passed`、`134 passed`，ruff/diff-check 通过。该证据补片仍不是真实
   DeepSeek/QQ/24 小时资格；发布状态不变。
+
+### 2026-08-09：当前 HEAD 的回归与隔离 100 样本终态
+
+- 当前 HEAD `7c06b60` 之后的源码全量回归为 `4942 passed, 1 warning`；冻结离线场景完整套件、CharacterInterior
+  审计/召回、感知生产组合均已通过。该数字是必要的本地证据，不等于真实 provider 或真实 QQ 发布资格。
+- 隔离 real-provider atomic 批次 `/tmp/girl-agent-daemon-qualification-100-20260809.json` 已完成 `100/100`：
+  HTTP 200 为 `100/100`、记录失败为 0、Action effect 为 100、角色私有选择审计为 100，三次计划重启均
+  `healthy=true`；`duplicate_authoritative_role_request_delta=0`、`duplicate_effect_delta=0`，最终持久投影与独立冷重放一致。
+  roundtrip 为 `p50≈4.05s`、`max≈7.61s`。该批次明确排除真实 QQ、生产数据库/daemon、措辞与角色选择质量门，报告状态仍为
+  `manual_only`，不能把它写成“100 次生产首次成功率资格”。
+- 24 小时 supervisor 仍在同一最终源码的临时库/OneBot loopback 中运行，当前只有 `2/24` 个低频样本，尚无终态报告；
+  旧生产 daemon 仍不得按本计划自动重启或替换。后续只有在人工授权下，才可审阅 24h wall-clock、成本、账本增长、
+  provider usage、冷重放和正式 receipt 证据，并决定是否推进 release gate。
