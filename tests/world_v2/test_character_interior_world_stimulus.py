@@ -936,6 +936,49 @@ async def test_open_world_stimulus_processes_merge_before_the_character_turn_and
 
 
 @pytest.mark.asyncio
+async def test_merged_opportunity_replay_finds_a_durable_audit_from_any_source_ref() -> None:
+    runtime, ledger, _projection = _runtime(model=_RoleModel(decision="no_change"))
+    await runtime.drain_one()
+    projection = ledger.project()
+    model_audit = next(
+        item
+        for item in projection.model_result_audits
+        if json.loads(item.audit_json)["character_interior_lineage"]["purpose"]
+        == "world_stimulus_appraisal"
+    )
+    audit_payload = json.loads(model_audit.audit_json)
+    audit_payload["character_interior_lineage"]["causal_source_refs"] = [
+        SOURCE_REF,
+        "occurrence-settled-2",
+    ]
+    replay_projection = SimpleNamespace(
+        model_result_audits=(
+            SimpleNamespace(
+                audit_json=json.dumps(audit_payload),
+                model_result_ref=model_audit.model_result_ref,
+            ),
+        ),
+        proposal_audits=projection.proposal_audits,
+    )
+    merged_identity = CausalOpportunityIdentity.from_source_refs(
+        world_id=WORLD_ID,
+        actor_ref="actor:companion",
+        purpose="world_stimulus_appraisal",
+        source_refs=(SOURCE_REF, "occurrence-settled-2"),
+        epoch=SOURCE_REF,
+    )
+
+    audit = runtime._existing_audit_for_opportunity(  # noqa: SLF001 - replay seam
+        replay_projection,
+        identity=merged_identity,
+        source_ref="occurrence-settled-2",
+    )
+
+    assert audit is not None
+    assert audit.proposal_id.startswith("proposal:character-interior-world-stimulus:")
+
+
+@pytest.mark.asyncio
 async def test_model_no_change_is_durable_and_completes_the_exact_trigger() -> None:
     model = _RoleModel(decision="no_change")
     runtime, ledger, _projection = _runtime(model=model)

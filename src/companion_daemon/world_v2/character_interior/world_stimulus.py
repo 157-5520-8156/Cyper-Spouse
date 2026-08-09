@@ -1585,6 +1585,18 @@ class CharacterInteriorWorldStimulusRuntime:
                 )
             if audit is None:
                 raise RuntimeError("world stimulus result audit was not durably recorded")
+        durable_identity = self._durable_opportunity_identity(
+            await self._project(),
+            source_event.event_id,
+        )
+        if durable_identity is not None:
+            identity = durable_identity
+        authority_source_event = source_event
+        if audit.trigger_ref != source_event.event_id:
+            located_authority_source = await self._lookup(audit.trigger_ref)
+            if located_authority_source is None:
+                raise RuntimeError("world stimulus audit anchor source is unavailable")
+            authority_source_event = located_authority_source[0]
         located_audit = await self._lookup(audit.event_ref)
         if located_audit is None:
             raise RuntimeError("world stimulus result audit event is unavailable")
@@ -1601,7 +1613,7 @@ class CharacterInteriorWorldStimulusRuntime:
                 audit_cursor=audit_cursor,
                 current_cursor=_cursor(await self._project()),
                 proposal_id=audit.proposal_id,
-                source_event=source_event,
+                source_event=authority_source_event,
             )
         except (ConcurrencyConflict, ValueError):
             # A stale head or incomplete content authority is a technical
@@ -1612,7 +1624,7 @@ class CharacterInteriorWorldStimulusRuntime:
             audit_cursor=audit_cursor,
             current_cursor=_cursor(await self._project()),
             proposal_id=audit.proposal_id,
-            source_event=source_event,
+            source_event=authority_source_event,
         )
         if aspiration.status not in {"no_change", "accepted"}:
             return result(work_status="technical_failure")
@@ -1627,7 +1639,7 @@ class CharacterInteriorWorldStimulusRuntime:
                 audit_cursor=audit_cursor,
                 current_cursor=_cursor(await self._project()),
                 proposal_id=audit.proposal_id,
-                source_event=source_event,
+                source_event=authority_source_event,
             )
             relationship_status = getattr(relationship, "status", "")
             if relationship_status not in {"no_change", "accepted"}:
@@ -2499,7 +2511,12 @@ class CharacterInteriorWorldStimulusRuntime:
             except ValueError:
                 continue
             lineage = recorded.character_interior_lineage
-            if lineage is None or lineage.opportunity_ref != identity.opportunity_ref:
+            if (
+                lineage is None
+                or lineage.purpose != PURPOSE
+                or lineage.causal_actor_ref != self._companion_actor_ref
+                or source_ref not in lineage.causal_source_refs
+            ):
                 continue
             proposal = next(
                 (
