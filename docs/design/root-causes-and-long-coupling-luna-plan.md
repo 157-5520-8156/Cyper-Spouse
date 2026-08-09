@@ -1703,3 +1703,13 @@ commit：hash
   写入 canonical opportunity；inbound author、wire、durable-lineage 全套共 `466 passed`，ruff/diff-check
   通过。L4 其他 user/Life/NPC/Memory/Perception/Plan producer/consumer、merge/expiry/epoch 仍未统一，
   真实 provider/QQ/自由对聊与 24 小时资格状态不变。
+
+### 2026-08-09：L4 expression reconsideration opportunity lineage 薄片
+
+- 用户新 Observation 打断尚未发送的 expression beat 时，`expression_reconsideration` 原先用 trigger/claim
+  attempt、cursor 与 capability 临时拼接 opportunity id；重启或 lease recovery 后同一 Observation 可能落在
+  不同的机会坐标。现在使用同一 `causal-opportunity.1`，source set 包含 Observation、旧 beat 和可用的旧
+  private-turn audit，epoch 固定为该 Observation event。
+- durable trigger claim、CAS、取消/替换、Action effect-once 和角色是否 continue/merge/supersede/cancel 的
+  authority 没有改变；该改动只让 source→opportunity→Interior lineage 可重放、可比较。`expression_reconsideration`
+  与 expression tail/restart 相关回归 `22 passed`，真实 provider、QQ 回执和 24 小时资格仍未因此升级。

@@ -10,6 +10,9 @@ from companion_daemon.world_v2.character_interior.contracts import InnerDecision
 from companion_daemon.world_v2.character_interior.expression_reconsideration import (
     CharacterInteriorExpressionReconsiderationReviewer,
 )
+from companion_daemon.world_v2.character_interior.run_result import (
+    CausalOpportunityIdentity,
+)
 from companion_daemon.world_v2.private_turn_state import PrivateTurnState
 from companion_daemon.world_v2.proposal_envelope import MinimalProposal
 from companion_daemon.world_v2.schemas import (
@@ -196,8 +199,9 @@ async def test_reconsideration_is_one_character_interior_opportunity() -> None:
         actor_ref="character:test",
     )
 
+    observation_event = _observation()
     decision = await reviewer.review(
-        process=_process(), observation_event=_observation(), cursor=CURSOR
+        process=_process(), observation_event=observation_event, cursor=CURSOR
     )
 
     assert decision.disposition == "continue"
@@ -207,6 +211,13 @@ async def test_reconsideration_is_one_character_interior_opportunity() -> None:
     assert len(interior.opportunities) == 1
     opportunity = interior.opportunities[0]
     assert opportunity.purpose == "expression_reconsideration"
+    assert decision.character_interior_lineage.opportunity_ref == CausalOpportunityIdentity(
+        world_id="world:test",
+        actor_ref="character:test",
+        purpose="expression_reconsideration",
+        source_refs=tuple(sorted(opportunity.source_refs)),
+        epoch=observation_event.event_id,
+    ).opportunity_ref
     assert opportunity.source_refs == (
         "event:observation:interjection:1",
         "event:beat:old",

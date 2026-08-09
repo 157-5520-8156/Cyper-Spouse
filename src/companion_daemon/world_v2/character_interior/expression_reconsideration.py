@@ -23,6 +23,7 @@ from ..schemas import ProjectionCursor, TriggerProcess, WorldEvent
 from .contracts import InnerDecision, InteriorOpportunity, _InteriorCapabilityManifest
 from .core import CharacterInterior
 from .audit import recorded_character_interior_lineage
+from .run_result import CausalOpportunityIdentity
 
 
 _PURPOSE = "expression_reconsideration"
@@ -120,16 +121,15 @@ class CharacterInteriorExpressionReconsiderationReviewer:
             source_refs=source_refs,
             old_private_turn_state=old_private_turn_state,
         )
+        opportunity_identity = CausalOpportunityIdentity(
+            world_id=observation_event.world_id,
+            actor_ref=self._actor_ref,
+            purpose=_PURPOSE,
+            source_refs=tuple(sorted(source_refs)),
+            epoch=observation_event.event_id,
+        )
         opportunity = InteriorOpportunity(
-            opportunity_ref="opportunity:expression-reconsideration:"
-            + _digest(
-                {
-                    "trigger_id": process.trigger_id,
-                    "attempt_ids": process.attempt_ids,
-                    "cursor": cursor.model_dump(mode="json"),
-                    "capability": capability.capability_ref,
-                }
-            ),
+            opportunity_ref=opportunity_identity.opportunity_ref,
             inner_turn_ref=(
                 process.claim_lease.attempt_id
                 if process.claim_lease is not None
