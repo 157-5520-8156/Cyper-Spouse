@@ -1616,7 +1616,7 @@ commit：hash
 - 重新从隔离临时 SQLite 启动 `scripts/chat_with_world_v2.py`，显式设置
   `WORLD_V2_CHAT_SOURCE_REVIEW_ENABLED=true`、`WORLD_V2_SOURCE_INVENTORY_ENABLED=false`、关闭
   semantic recall embedding；这次不是单元测试，也没有接真实 QQ 投递。
-- 当前工作树随后完成全量回归：`4944 passed, 1 warning`；这是源码与公开测试链的证据，不能替代
+- 当前工作树随后完成全量回归：`4945 passed, 1 warning`；这是源码与公开测试链的证据，不能替代
   真实 provider 首次合法率、正式 QQ 回执或长时间运行资格。
 - 旧路径在一次自然提问中曾让角色写出“傍晚在书店靠窗坐、喝桂花乌龙”等第一人称外部经历，
   但 `world_claims=[]`。这不是允许的私密感受，而是没有来源的生活事实。修复后的生产路径在
