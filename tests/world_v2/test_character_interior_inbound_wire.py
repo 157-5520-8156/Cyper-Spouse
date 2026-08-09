@@ -25,6 +25,7 @@ from companion_daemon.world_v2.character_interior.inbound_wire import (
     review_expression_source_closure_appeal,
     shape_repair_instruction,
 )
+from companion_daemon.world_v2.character_interior.inbound_turn import InboundTurnFaculty
 from companion_daemon.world_v2.companion_identity import (
     CompanionIdentityFrame,
     companion_identity_source_ref,
@@ -81,6 +82,32 @@ def _request() -> ModelInput:
         trigger_ref="trigger:1",
         evaluated_world_revision=3,
         model_content_json='{"capsule":"authoritative"}',
+    )
+
+
+class _StreamReservationAuthor:
+    def propose(self, _request: ModelInput) -> object:
+        raise AssertionError("the stale stream publication test must not author a turn")
+
+    def stream_provider_available(self, _request: ModelInput) -> bool:
+        return True
+
+
+@pytest.mark.asyncio
+async def test_late_cancelled_stream_head_publication_is_ignored_after_attention_advance() -> None:
+    faculty = InboundTurnFaculty(author=_StreamReservationAuthor())
+    request = _request()
+
+    assert faculty.transport_available(transport="stream", payload=request) is True
+    faculty.advance_attention(attention_ref="attention:newer-message")
+
+    # The superseded provider task may unwind after advance_attention() has
+    # cleared its reservation. Its cancellation publication must not mask the
+    # original supersession with a second invariant error.
+    faculty.publish_transport(
+        transport="stream_head",
+        payload=request,
+        output=None,
     )
 
 

@@ -303,6 +303,13 @@ class InboundTurnFaculty:
         key = _stream_key(payload)
         ready = self._stream_ready.get(key)
         if ready is None:
+            # A superseded provider task can unwind after advance_attention()
+            # has cleared its reservation. Its failure publication is a late
+            # no-op; preserve the original cancellation rather than masking
+            # it with a second invariant error. A late usable head remains a
+            # real publication bug and must still fail closed.
+            if output is None:
+                return
             raise RuntimeError("inbound CharacterInterior stream publication was not reserved")
         if ready.done():
             return
