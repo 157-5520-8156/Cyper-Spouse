@@ -40,6 +40,7 @@ from .character_interior.contracts import (
     _InteriorCapabilityManifest,
 )
 from .character_interior.ports import _AuthorityRequest
+from .character_interior.run_result import CausalOpportunityIdentity
 from .event_identity import domain_idempotency_key
 from .ledger import LedgerPort
 from .model_json import extract_json_object_text
@@ -772,9 +773,16 @@ class PrivateImpressionTriggerRuntime:
         )
         attempt_id = active.claim_lease.attempt_id
         capability_manifest = _private_impression_capability(capsule)
+        opportunity_identity = CausalOpportunityIdentity(
+            world_id=self._ledger.world_id,
+            actor_ref=self._companion_actor_ref,
+            purpose="private_impression_reflection",
+            source_refs=(source_event.event_id,),
+            epoch=source_event.event_id,
+        )
         transition = await self._character_interior.experience(
             InteriorStimulus(
-                stimulus_ref=active.trigger_id,
+                stimulus_ref=opportunity_identity.opportunity_ref,
                 inner_turn_ref=attempt_id,
                 world_id=self._ledger.world_id,
                 actor_ref=self._companion_actor_ref,

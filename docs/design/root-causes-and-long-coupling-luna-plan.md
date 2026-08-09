@@ -1659,3 +1659,19 @@ commit：hash
   structured-role 相关回归为 `123 passed`，ruff 与 `git diff --check` 通过。该数字是本地
   typed/fixture evidence；真实 DeepSeek 首次成功率、QQ 回执、自由对聊质量和 24 小时 soak 仍为
   `manual_only`/`qualification_incomplete`，正在运行的临时 soak 不能提前计入资格。
+
+### 2026-08-09：private impression source→opportunity lineage 补片
+
+- private-impression runtime 原先把 `InteriorStimulus.stimulus_ref` 直接设为本次 trigger id；同一
+  accepted appraisal 在重试/重启后虽然仍 effect-once，却无法与已经落账的 L4
+  `causal-opportunity.1` 视图统一。现在由 `world_id + actor_ref + purpose + accepted appraisal
+  event_ref + epoch` 派生稳定机会身份，作为该次 Interior stimulus 和 `RecordedCharacterInteriorTurnLineage`
+  的 `opportunity_ref`；原 TriggerProcess 仍是 claim/CAS/retry authority。
+- 这是 lineage/重放诊断补片，不新增 producer、事件类型或语义作者；角色仍决定是否形成 private impression，
+  existing-impression predecessor、anchor、source closure、CAS、接受和 effect-once 继续由原 authority
+  验证。重复触发不会重作者或改变 trigger identity。
+- 新回归把真实 private-impression runtime 的 accepted short-token 路径与 durable ModelResult audit
+  绑定到同一 canonical opportunity，连同既有 producer/authority/structured-role/world-stimulus 套件共
+  `162 passed`；ruff 与 `git diff --check` 通过。L4 的 user/Life/NPC/Memory/Perception/Plan 全源统一、
+  merge/expiry/epoch 全矩阵仍未完成，故 Matrix 和发布状态不升级，继续保持
+  `declaration_only`/`manual_only`/`qualification_incomplete`。

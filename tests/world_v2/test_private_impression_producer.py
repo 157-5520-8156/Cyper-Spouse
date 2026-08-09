@@ -18,6 +18,7 @@ from companion_daemon.world_v2.character_interior.authority import (
     _DeferredInteriorAuthority,
 )
 from companion_daemon.world_v2.character_interior.contracts import FACET_NAMES
+from companion_daemon.world_v2.character_interior.run_result import CausalOpportunityIdentity
 from companion_daemon.world_v2.character_interior.structured_role import (
     StructuredCharacterRoleFaculty,
 )
@@ -658,6 +659,28 @@ async def test_short_token_capability_maps_to_real_refs_and_recovers_on_missed_a
     # model-result audit exists and its audit payload must not contain any
     # short token reference.
     assert ledger.project().model_result_audits
+    process = next(
+        item
+        for item in ledger.project().trigger_processes
+        if item.process_kind == "private_impression_deliberation"
+    )
+    assert process.source_evidence_ref is not None
+    opportunity = CausalOpportunityIdentity(
+        world_id=WORLD_ID,
+        actor_ref="actor:companion",
+        purpose="private_impression_reflection",
+        source_refs=(process.source_evidence_ref,),
+        epoch=process.source_evidence_ref,
+    )
+    lineage_json = [
+        json.loads(item.audit_json)["character_interior_lineage"]
+        for item in ledger.project().model_result_audits
+        if "character_interior_lineage" in json.loads(item.audit_json)
+        and json.loads(item.audit_json)["character_interior_lineage"]["purpose"]
+        == "private_impression_reflection"
+    ]
+    assert lineage_json
+    assert all(item["opportunity_ref"] == opportunity.opportunity_ref for item in lineage_json)
     audit_json = json.dumps(
         [item.model_dump(mode="json") for item in ledger.project().model_result_audits]
     )
