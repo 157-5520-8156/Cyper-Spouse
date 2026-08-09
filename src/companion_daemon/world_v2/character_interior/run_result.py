@@ -182,7 +182,18 @@ class CausalOpportunityIdentity(FrozenModel):
 
     @property
     def opportunity_ref(self) -> str:
-        material = self.model_dump(mode="json")
+        # Merge/expiry coordinates are routing metadata, not causal identity.
+        # Keep the L4 identity contract exactly actor + purpose + canonical
+        # source set + epoch + contract version so a policy reload cannot
+        # manufacture a second semantic opportunity.
+        material = {
+            "world_id": self.world_id,
+            "actor_ref": self.actor_ref,
+            "purpose": self.purpose,
+            "source_refs": self.source_refs,
+            "epoch": self.epoch,
+            "contract_version": self.contract_version,
+        }
         digest = hashlib.sha256(
             json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()

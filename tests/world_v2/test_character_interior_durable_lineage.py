@@ -158,7 +158,7 @@ def test_causal_lineage_reconstructs_and_binds_the_authoritative_opportunity_ref
         ("causal_contract_version", "causal-opportunity.2"),
         (
             "causal_policy_ref",
-            "causal-opportunity-policy.1:merge=300:expiry=604801",
+            "not-a-canonical-policy-ref",
         ),
         ("causal_policy_version", "causal-opportunity-policy.2"),
     ),

@@ -90,6 +90,7 @@ from .run_result import (
     CausalOpportunityWindow,
     CharacterInteriorRunResult,
     causal_opportunity_policy_from_attempt_id,
+    DEFAULT_CAUSAL_OPPORTUNITY_POLICY,
     merge_causal_opportunity_identities,
 )
 from .core import CharacterInterior
@@ -1391,17 +1392,31 @@ class CharacterInteriorWorldStimulusRuntime:
 
         identities: dict[str, CausalOpportunityIdentity] = {}
         unresolved: list[_WorldStimulusLocatedSource] = []
+        terminal_groups: dict[tuple[str, str], list[_WorldStimulusLocatedSource]] = {}
         for process in sorted(processes, key=self._health_process_sort_key):
             durable = self._durable_opportunity_identity(projection, process.source_evidence_ref)
             if durable is not None:
                 identities[process.trigger_id] = durable
                 continue
             if process.state == "terminal":
-                identities[process.trigger_id] = self._opportunity_identity(
-                    process=process,
-                    source_refs=(process.source_evidence_ref,),
-                    policy=self._policy_for_process(process),
-                )
+                policy = self._policy_for_process(process)
+                located = self._health_source_event(process.source_evidence_ref)
+                if located is not None and process.runtime_outcome_ref:
+                    terminal_groups.setdefault(
+                        (process.runtime_outcome_ref, policy.policy_ref), []
+                    ).append(
+                        _WorldStimulusLocatedSource(
+                            process=process,
+                            source_event=located,
+                            policy=policy,
+                        )
+                    )
+                else:
+                    identities[process.trigger_id] = self._opportunity_identity(
+                        process=process,
+                        source_refs=(process.source_evidence_ref,),
+                        policy=policy,
+                    )
                 continue
             located = self._health_source_event(process.source_evidence_ref)
             if located is None:
@@ -1418,6 +1433,15 @@ class CharacterInteriorWorldStimulusRuntime:
                     policy=self._policy_for_process(process),
                 )
             )
+        for group in terminal_groups.values():
+            anchor = group[0].process
+            identity = self._opportunity_identity(
+                process=anchor,
+                source_refs=tuple(item.source_event.event_id for item in group),
+                policy=group[0].policy,
+            )
+            for item in group:
+                identities[item.process.trigger_id] = identity
         unresolved_by_policy: dict[str, list[_WorldStimulusLocatedSource]] = {}
         for item in unresolved:
             unresolved_by_policy.setdefault(item.policy.policy_ref, []).append(item)
@@ -1459,7 +1483,11 @@ class CharacterInteriorWorldStimulusRuntime:
             ):
                 continue
             try:
-                policy = CausalOpportunityPolicy.from_ref(lineage.causal_policy_ref)
+                policy = (
+                    CausalOpportunityPolicy.from_ref(lineage.causal_policy_ref)
+                    if lineage.causal_policy_ref is not None
+                    else DEFAULT_CAUSAL_OPPORTUNITY_POLICY
+                )
                 identity = CausalOpportunityIdentity.from_source_refs(
                     world_id=lineage.causal_world_id,
                     actor_ref=lineage.causal_actor_ref,
@@ -1471,7 +1499,10 @@ class CharacterInteriorWorldStimulusRuntime:
                 )
             except (TypeError, ValueError):
                 continue
-            if identity.policy_version != lineage.causal_policy_version:
+            if (
+                lineage.causal_policy_version is not None
+                and identity.policy_version != lineage.causal_policy_version
+            ):
                 continue
             if identity.opportunity_ref != lineage.opportunity_ref:
                 continue
@@ -2708,7 +2739,11 @@ class CharacterInteriorWorldStimulusRuntime:
             ):
                 continue
             try:
-                policy = CausalOpportunityPolicy.from_ref(lineage.causal_policy_ref)
+                policy = (
+                    CausalOpportunityPolicy.from_ref(lineage.causal_policy_ref)
+                    if lineage.causal_policy_ref is not None
+                    else DEFAULT_CAUSAL_OPPORTUNITY_POLICY
+                )
                 durable_identity = CausalOpportunityIdentity.from_source_refs(
                     world_id=lineage.causal_world_id,
                     actor_ref=lineage.causal_actor_ref,
@@ -2720,7 +2755,10 @@ class CharacterInteriorWorldStimulusRuntime:
                 )
             except (TypeError, ValueError):
                 continue
-            if durable_identity.policy_version != lineage.causal_policy_version:
+            if (
+                lineage.causal_policy_version is not None
+                and durable_identity.policy_version != lineage.causal_policy_version
+            ):
                 continue
             if durable_identity.opportunity_ref != lineage.opportunity_ref:
                 continue

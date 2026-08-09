@@ -664,7 +664,7 @@ async def test_private_impression_policy_survives_cold_replay() -> None:
     assert process.claim_lease is not None
     assert causal_opportunity_policy_from_attempt_id(process.claim_lease.attempt_id) == old_policy
     assert result.opportunity_ref == health.last_opportunity_ref
-    assert result.opportunity_ref != changed_identity.opportunity_ref
+    assert result.opportunity_ref == changed_identity.opportunity_ref
     assert health.technical_failure_count == 0
 
 

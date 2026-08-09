@@ -165,22 +165,25 @@ class RecordedCharacterInteriorTurnLineage(FrozenModel):
             raise ValueError("CharacterInterior correction parent lineage is incomplete")
         if self.author_parent_model_call_id == self.author_model_call_id:
             raise ValueError("CharacterInterior author cannot be its own correction parent")
-        causal_fields = (
+        identity_fields = (
             self.causal_world_id,
             self.causal_epoch,
             self.causal_actor_ref,
             self.causal_contract_version,
-            self.causal_policy_version,
-            self.causal_policy_ref,
         )
         if not self.causal_source_refs:
-            if any(value is not None for value in causal_fields):
+            if any(
+                value is not None
+                for value in (*identity_fields, self.causal_policy_version, self.causal_policy_ref)
+            ):
                 raise ValueError("causal opportunity lineage is incomplete")
         else:
             if tuple(sorted(set(self.causal_source_refs))) != self.causal_source_refs:
                 raise ValueError("causal opportunity lineage source refs are not canonical")
-            if any(value is None for value in causal_fields):
+            if any(value is None for value in identity_fields):
                 raise ValueError("causal opportunity lineage is incomplete")
+            if (self.causal_policy_version is None) != (self.causal_policy_ref is None):
+                raise ValueError("causal opportunity lineage policy is incomplete")
             try:
                 # Import lazily: the world schema module imports this audit
                 # contract while the CharacterInterior package is still
@@ -188,8 +191,13 @@ class RecordedCharacterInteriorTurnLineage(FrozenModel):
                 # single hash authority; this avoids a package-init cycle.
                 from .character_interior.run_result import CausalOpportunityIdentity
                 from .character_interior.run_result import CausalOpportunityPolicy
+                from .character_interior.run_result import DEFAULT_CAUSAL_OPPORTUNITY_POLICY
 
-                policy = CausalOpportunityPolicy.from_ref(self.causal_policy_ref)
+                policy = (
+                    CausalOpportunityPolicy.from_ref(self.causal_policy_ref)
+                    if self.causal_policy_ref is not None
+                    else DEFAULT_CAUSAL_OPPORTUNITY_POLICY
+                )
                 identity = CausalOpportunityIdentity.from_source_refs(
                     world_id=self.causal_world_id,
                     actor_ref=self.causal_actor_ref,
@@ -201,7 +209,10 @@ class RecordedCharacterInteriorTurnLineage(FrozenModel):
                 )
             except (TypeError, ValueError) as exc:
                 raise ValueError("causal opportunity lineage identity is invalid") from exc
-            if identity.policy_version != self.causal_policy_version:
+            if (
+                self.causal_policy_version is not None
+                and identity.policy_version != self.causal_policy_version
+            ):
                 raise ValueError("causal opportunity lineage policy version is not canonical")
             if self.opportunity_ref != identity.opportunity_ref:
                 raise ValueError(

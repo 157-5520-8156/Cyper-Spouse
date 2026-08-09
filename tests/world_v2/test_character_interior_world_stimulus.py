@@ -178,7 +178,7 @@ def test_causal_opportunity_policy_is_restart_readable_and_identity_bound() -> N
     assert restarted_policy == policy
     assert identity.policy_version == policy.policy_version
     assert identity.policy_ref == policy.policy_ref
-    assert identity.opportunity_ref != changed_policy_identity.opportunity_ref
+    assert identity.opportunity_ref == changed_policy_identity.opportunity_ref
     with pytest.raises(ValueError, match="same policy"):
         identity.merge(changed_policy_identity)
 
@@ -243,7 +243,7 @@ async def test_claimed_policy_survives_restart_and_new_policy_fails_closed() -> 
     )
 
     assert batch.identity.opportunity_policy == old_policy
-    assert batch.identity.opportunity_ref != new_policy_identity.opportunity_ref
+    assert batch.identity.opportunity_ref == new_policy_identity.opportunity_ref
     assert restarted._opportunity_is_expired(  # noqa: SLF001 - policy seam
         source_events=(source_event,),
         at=source_event.logical_time + timedelta(seconds=900),
@@ -1048,6 +1048,59 @@ async def test_open_world_stimulus_processes_merge_before_the_character_turn_and
     assert separated_batch.identity.opportunity_ref != batch.identity.opportunity_ref
     assert len({item.opportunity_ref for item in separated_identities.values()}) == 2
     assert separated_identities[third.trigger_id].source_refs == (third_ref,)
+
+
+def test_health_keeps_one_identity_for_merged_terminal_outcome() -> None:
+    runtime, ledger, _projection = _runtime(model=_RoleModel(decision="no_change"))
+    first = next(
+        item
+        for item in ledger.project().trigger_processes
+        if item.process_kind == "npc_world_appraisal"
+    )
+    first_located = ledger.lookup_event_commit(SOURCE_REF)
+    assert first_located is not None
+    first_event = first_located[0]
+    second_ref = "occurrence-settled-terminal-2"
+    second = first.model_copy(
+        update={
+            "trigger_id": "appraisal:synthetic:terminal-second",
+            "trigger_ref": "appraisal:synthetic:terminal-second",
+            "source_evidence_ref": second_ref,
+            "state": "terminal",
+            "runtime_outcome_ref": "outcome:appraisal:synthetic:terminal:no-change",
+        }
+    )
+    first = first.model_copy(
+        update={
+            "state": "terminal",
+            "runtime_outcome_ref": "outcome:appraisal:synthetic:terminal:no-change",
+        }
+    )
+    source_events = {
+        SOURCE_REF: first_event,
+        second_ref: first_event.model_copy(
+            update={
+                "event_id": second_ref,
+                "logical_time": first_event.logical_time + timedelta(seconds=30),
+            }
+        ),
+    }
+    runtime._health_source_event = lambda ref: source_events.get(ref)  # type: ignore[method-assign]  # noqa: SLF001
+    projection = SimpleNamespace(
+        trigger_processes=(first, second),
+        model_result_audits=(),
+        world_revision=ledger.project().world_revision,
+        deliberation_revision=ledger.project().deliberation_revision,
+        ledger_sequence=ledger.project().ledger_sequence,
+    )
+
+    identities = runtime._health_opportunity_identities(  # noqa: SLF001 - seam test
+        projection=projection,
+        processes=(first, second),
+    )
+
+    assert len({item.opportunity_ref for item in identities.values()}) == 1
+    assert next(iter(identities.values())).source_refs == (SOURCE_REF, second_ref)
 
 
 @pytest.mark.asyncio

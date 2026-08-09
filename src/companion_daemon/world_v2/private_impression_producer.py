@@ -96,6 +96,7 @@ EXPIRY_CONDITIONS = (
     "one_month_without_support",
 )
 PRIVATE_IMPRESSION_PURPOSE = "private_impression_reflection"
+_NON_ATTEMPT_TECHNICAL_FAILURES = frozenset({"required_tool_choice_unsupported"})
 
 # Bound the number of times one private-reflection trigger may be reclaimed
 # after its model output failed authority validation.  Lease expiry alone
@@ -1027,11 +1028,18 @@ class PrivateImpressionTriggerRuntime:
             )
         )
         if transition.status == "technical_failure":
-            await self._record_technical_failure(
-                process=active,
-                source_event=source_event,
-                failure_code=transition.failure_code or "interior_technical_failure",
-            )
+            failure_code = transition.failure_code or "interior_technical_failure"
+            # No provider/model result exists when the required tool is not
+            # supported. Keep the typed technical outcome and retry lease, but
+            # do not manufacture a ModelResultRecorded audit that pollutes an
+            # unrelated replay sequence. CharacterInterior topology health is
+            # the authority for this preflight qualification failure.
+            if failure_code not in _NON_ATTEMPT_TECHNICAL_FAILURES:
+                await self._record_technical_failure(
+                    process=active,
+                    source_event=source_event,
+                    failure_code=failure_code,
+                )
             return result(work_status="technical_failure")
         if transition.status == "model_no_change":
             model_result_audit = recorded_character_interior_model_result(
@@ -1171,7 +1179,11 @@ class PrivateImpressionTriggerRuntime:
             ):
                 continue
             try:
-                policy = CausalOpportunityPolicy.from_ref(lineage.causal_policy_ref)
+                policy = (
+                    CausalOpportunityPolicy.from_ref(lineage.causal_policy_ref)
+                    if lineage.causal_policy_ref is not None
+                    else DEFAULT_CAUSAL_OPPORTUNITY_POLICY
+                )
                 identity = CausalOpportunityIdentity.from_source_refs(
                     world_id=lineage.causal_world_id,
                     actor_ref=lineage.causal_actor_ref,
@@ -1184,7 +1196,10 @@ class PrivateImpressionTriggerRuntime:
             except (TypeError, ValueError):
                 continue
             if (
-                identity.policy_version != lineage.causal_policy_version
+                (
+                    lineage.causal_policy_version is not None
+                    and identity.policy_version != lineage.causal_policy_version
+                )
                 or identity.opportunity_ref != lineage.opportunity_ref
             ):
                 continue
