@@ -3754,6 +3754,35 @@ async def test_qq_c2c_scheduler_diagnostics_record_real_pass_progress() -> None:
 
 
 @pytest.mark.asyncio
+async def test_qq_c2c_scheduler_diagnostics_surface_returned_background_failure() -> None:
+    completed = asyncio.Event()
+
+    class _Host:
+        async def scheduler_once(self, **_kwargs: object) -> SimpleNamespace:
+            completed.set()
+            return SimpleNamespace(background_statuses=("technical_failure:valueerror",))
+
+    diagnostics = QQC2CSchedulerDiagnostics(interval_seconds=60)
+    task = asyncio.create_task(
+        _scheduler_loop(_Host(), interval_seconds=60, diagnostics=diagnostics)  # type: ignore[arg-type]
+    )
+    diagnostics.task = task
+    try:
+        await asyncio.wait_for(completed.wait(), timeout=1)
+        await asyncio.sleep(0)
+        snapshot = diagnostics.snapshot(now=datetime.now(UTC))
+        assert snapshot["status"] == "failing"
+        assert snapshot["passes_started"] == 1
+        assert snapshot["passes_completed"] == 1
+        assert snapshot["failures"] == 1
+        assert snapshot["last_success_at"] is None
+        assert snapshot["last_error"] == "technical_failure:valueerror"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_qq_scheduler_health_is_failing_when_latest_pass_failed() -> None:
     diagnostics = QQC2CSchedulerDiagnostics(interval_seconds=30)
     task = asyncio.create_task(asyncio.sleep(60))

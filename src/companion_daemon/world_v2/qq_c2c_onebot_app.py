@@ -579,7 +579,7 @@ async def _scheduler_loop(
         diagnostics.passes_started += 1
         diagnostics.last_started_at = started_at
         try:
-            await host.scheduler_once(
+            result = await host.scheduler_once(
                 observed_at=datetime.now(UTC),
                 max_action_units=8,
                 max_background_units=background_units_per_pass,
@@ -591,8 +591,27 @@ async def _scheduler_loop(
             diagnostics.last_error = type(exc).__name__
             logger.exception("World v2 QQ C2C scheduler pass failed")
         else:
-            diagnostics.last_success_at = datetime.now(UTC)
-            diagnostics.last_error = None
+            raw_background_statuses = getattr(result, "background_statuses", ())
+            background_statuses = (
+                raw_background_statuses
+                if isinstance(raw_background_statuses, (list, tuple))
+                else ()
+            )
+            technical_failures = tuple(
+                status
+                for status in background_statuses
+                if isinstance(status, str) and status.startswith("technical_failure:")
+            )
+            if technical_failures:
+                diagnostics.failures += 1
+                diagnostics.last_error = technical_failures[-1]
+                logger.error(
+                    "World v2 QQ C2C scheduler pass recorded technical background failure: %s",
+                    technical_failures[-1],
+                )
+            else:
+                diagnostics.last_success_at = datetime.now(UTC)
+                diagnostics.last_error = None
         diagnostics.passes_completed += 1
         diagnostics.last_completed_at = datetime.now(UTC)
         diagnostics.last_duration_ms = round((time.monotonic() - started) * 1_000)

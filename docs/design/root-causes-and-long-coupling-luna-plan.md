@@ -1374,3 +1374,19 @@ commit：hash
 - 在该提交后又执行了一次只使用临时 SQLite、loopback capture、loopback role 的短 smoke：2 次输入、1 次计划
   重启，失败数为 0，重复可见 effect 为 `0`，冷重放与 live projection 一致。该运行只验证当前隔离 scheduler/
   restart/replay 闭环，仍不包含真实 provider、真实 QQ 或自主性质量判断，不能改变上述资格状态。
+
+### 2026-08-09：scheduler health 暴露返回式后台技术失败
+
+- `QQC2CHost.scheduler_once()` 已把直接背景路径的异常隔离为持久工作可重试的
+  `technical_failure:<type>` 状态；此前 OneBot scheduler loop 只判断该调用是否抛异常，忽略返回的
+  `background_statuses`，会把“pass 完成但背景单元失败”误记为成功并清空 `last_error`。
+- 现在 loop 仍不重新抛出这类异常（避免恢复路径再次饿死其他 due 工作），但会把同一 pass 的技术失败计入
+  scheduler diagnostics：`failures += 1`、`last_error` 保留精确状态、`last_success_at` 不前移；下一次没有
+  `technical_failure:*` 的干净 pass 才恢复 running。测试通过 OneBot scheduler public loop 观察 health，而非读取
+  worker 私有状态。
+- 红测先复现旧行为：返回 `technical_failure:valueerror` 时 health 为 `running`；修复后该场景为 `failing`，
+  `passes_completed` 仍递增，证明隔离和可观测性同时成立。相关 scheduler migration/cadence 定向回归 `72 passed`，
+  本次源码全量回归 `4914 passed, 1 warning`，ruff 与 `git diff --check` 通过。
+- 这只是 scheduler 诊断一致性修复，不是旧生产 daemon 已部署的证明。旧 PID 仍未重启/替换；真实 DeepSeek
+  100 次 forced-tool/stream、真实 QQ 回执、自由对聊质量与 24 小时 wall-clock soak 仍需 §20 人工授权，发布状态
+  继续保持 `manual_only`/`qualification_incomplete`。
