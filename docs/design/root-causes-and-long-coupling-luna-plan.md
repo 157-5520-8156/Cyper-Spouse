@@ -1736,3 +1736,20 @@ commit：hash
 - 以上仍只证明本地源码、typed/fixture、公开宿主和冷重放链。真实 DeepSeek 首轮/流式/QQ 回执 100 样本、自由
   对聊质量、24 小时 soak 以及旧 production daemon 的恢复资格仍未完成；继续保持
   `manual_only`/`qualification_incomplete`，不触发 §20 的重启/替换人工门。
+
+### 2026-08-09：真实自由对话复测与生物来源投影修复（不升级资格）
+
+- 真实 DeepSeek 隔离对话复现了一类确定性失声：同一 `ClockAdvanced` 事件同时作为生物时间投影和
+  `current_situation` 的逻辑时间来源，两个投影的 `authority_type` 不同，旧闭包把它误报为多个权威，
+  合法的“嘉兴/暑假”类 `current_world` claim 被拒绝。现在只在
+  `source_kind + source_world_revision + immutable_hash` 完全相同的情况下合并投影别名；真正的 hash、
+  revision 或 source kind 冲突继续 fail-closed。新增正/负回归覆盖该边界。
+- 修复后的真实 DeepSeek、临时 SQLite、`WORLD_V2_EXPRESSION_EPISODE_MODE=off` 复测：单轮约 8.5s，
+  `action_authorized`，发送两段文本，live/replay semantic hash 一致。该样本只证明当前来源闭包修复和隔离
+  transport 链，不证明 QQ 回执、100 次首轮成功率或生产自主性。
+- 同一 provider 在当前默认 `stream` 模式复测约 11–12s 后仍出现 `primary_timeout`，因此 stream 仍未达到
+  12s 交互预算；没有把它改成普通 JSON fallback，也没有把失败记成成功。真实 stream/QQ/24h 资格继续是
+  `manual_only`/`qualification_incomplete`，生产现场不应在 §20 人工门前重启旧 daemon。
+- 新增 `scripts/test_fast.py` 分层入口：`smoke`、`character`、`host` 和 `full`。日常默认只跑
+  CharacterInterior/LLM 主链，提交前才跑完整套件；`--last-failed` 用于快速回到最近失败，避免每次小改动
+  都支付完整 SQLite/冷重放回归成本。

@@ -68,7 +68,11 @@ def _inline_refs(schema: object, definitions: dict[str, object]) -> object:
     }
 
 
-@lru_cache(maxsize=8)
+# The faculty precompiles every built-in purpose (currently more than eight
+# canonical wires).  A smaller cache evicted ExpressionDraft/_WireRoleResult
+# before the first capability-specialized proactive contract and put Pydantic
+# schema generation back on the provider-entry path.
+@lru_cache(maxsize=32)
 def _compiled_provider_schema(model_type: object) -> dict[str, object]:
     generated = getattr(model_type, "model_json_schema")(mode="validation")
     if not isinstance(generated, dict):

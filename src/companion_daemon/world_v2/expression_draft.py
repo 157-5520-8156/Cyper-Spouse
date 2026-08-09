@@ -1628,7 +1628,15 @@ def _world_claim_evidence(
                 for ref in (binding.get("ref"),)
                 if isinstance(ref, str) and ref
             )
-    candidates: dict[str, set[tuple[str, str, int, str]]] = {}
+    # One immutable event can be projected into several semantic lanes.  For
+    # example, the clock event that pins a biography is also the source of the
+    # current-situation logical time.  Those projections may use different
+    # ``authority_type`` labels, but they are not competing authorities when
+    # their source kind, revision, and immutable payload are identical.
+    # Keep the authority labels separately so a genuinely conflicting event
+    # binding (different hash/revision/source kind) still fails closed.
+    candidates: dict[str, set[tuple[str, int, str]]] = {}
+    candidate_authority_types: dict[str, set[str]] = {}
     for lane in slices.values():
         if not isinstance(lane, dict):
             continue
@@ -1659,9 +1667,8 @@ def _world_claim_evidence(
                     and isinstance(immutable_hash, str)
                     and len(immutable_hash) == 64
                 ):
-                    candidates.setdefault(ref, set()).add(
-                        (source_kind, authority_type, revision, immutable_hash)
-                    )
+                    candidates.setdefault(ref, set()).add((source_kind, revision, immutable_hash))
+                    candidate_authority_types.setdefault(ref, set()).add(authority_type)
     evidence: list[ProposalEvidenceRef] = []
     for ref in sorted(expanded_cited):
         matches = candidates.get(ref, set())
@@ -1674,11 +1681,31 @@ def _world_claim_evidence(
             continue
         if len(matches) != 1:
             raise ValueError("world claim source has ambiguous authority binding")
-        source_kind, authority_type, revision, immutable_hash = next(iter(matches))
+        source_kind, revision, immutable_hash = next(iter(matches))
         if source_kind == "execution_receipt":
             kind = "settled_external_result"
         elif source_kind == "committed_event":
-            kind = _EVENT_EVIDENCE_KIND.get(authority_type, "committed_world_event")
+            authority_types = candidate_authority_types.get(ref, set())
+            # A situation projection is an explicitly namespaced alias for
+            # the same immutable event.  Two independent event authority
+            # labels, however, are not aliases: accepting them and falling
+            # back to ``committed_world_event`` would let a malformed Context
+            # hide an authority conflict behind one hash/revision pair.
+            canonical_authority_types = {
+                authority_type
+                for authority_type in authority_types
+                if not authority_type.startswith("situation_source:")
+            }
+            if len(canonical_authority_types) > 1:
+                raise ValueError("world claim source has ambiguous authority binding")
+            projected_kinds = {
+                _EVENT_EVIDENCE_KIND[authority_type]
+                for authority_type in authority_types
+                if authority_type in _EVENT_EVIDENCE_KIND
+            }
+            if len(projected_kinds) > 1:
+                raise ValueError("world claim source has ambiguous authority binding")
+            kind = next(iter(projected_kinds), "committed_world_event")
         else:
             raise ValueError("world claim source is not immutable event authority")
         evidence.append(

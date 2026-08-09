@@ -30,11 +30,13 @@ from companion_daemon.world_v2.companion_identity import (
     companion_identity_source_ref,
 )
 from companion_daemon.world_v2.expression_draft import (
+    ExpressionDraft,
     QQ_NAPCAT_EXPRESSION_CAPABILITIES,
     TEXT_ONLY_EXPRESSION_CAPABILITIES,
     build_source_ref_alias_table,
     current_counterpart_report_source_refs,
     qq_expression_capabilities,
+    _world_claim_evidence,
     world_source_scope_boundary,
 )
 from companion_daemon.world_v2.isolated_source_closure_trace import (
@@ -13862,6 +13864,124 @@ async def test_expression_world_claim_must_cite_its_semantic_context_lane() -> N
     forged_model = _Model(json.dumps(forged, ensure_ascii=False))
     accepted = await _ExpressionDraftWire(model=forged_model).propose(request)
     assert accepted.raw_proposal["action_intents"][0]["kind"] == "reply"
+
+
+def _biographical_claim_evidence_context(*, clock_hash: str = "b" * 64) -> dict[str, object]:
+    return {
+        "logical_time": "2026-08-09T15:00:00Z",
+        "slices": {
+            "world_life": {
+                "availability": "available",
+                "items": [
+                    {
+                        "item_ref": "biography:primary",
+                        "source_bindings": [
+                            {
+                                "ref": "event:biography-configured",
+                                "source_kind": "committed_event",
+                                "authority_type": "BiographicalTimelineConfigured",
+                                "source_world_revision": 2,
+                                "immutable_hash": "a" * 64,
+                            },
+                            {
+                                "ref": "event:clock-advanced",
+                                "source_kind": "committed_event",
+                                "authority_type": "ClockAdvanced",
+                                "source_world_revision": 3,
+                                "immutable_hash": clock_hash,
+                            },
+                        ],
+                        "value": {
+                            "context_kind": "biographical_context",
+                            "logical_at": "2026-08-09T15:00:00Z",
+                            "current_residence_context_tags": ["residence:family_home_jiaxing"],
+                        },
+                    }
+                ],
+            },
+            "current_situation": {
+                "availability": "available",
+                "items": [
+                    {
+                        "item_ref": "agent:companion",
+                        "source_bindings": [
+                            {
+                                "ref": "event:clock-advanced",
+                                "source_kind": "committed_event",
+                                "authority_type": "situation_source:logical_time",
+                                "source_world_revision": 3,
+                                "immutable_hash": clock_hash,
+                            }
+                        ],
+                    }
+                ],
+            },
+        },
+    }
+
+
+def _biographical_claim_draft(source_ref: str) -> ExpressionDraft:
+    return ExpressionDraft(
+        timing_choice="now",
+        beats=({"modality": "text", "text": "我在嘉兴的家里过暑假。"},),
+        stance="answer_from_world",
+        brief_rationale="Answer from the pinned biography.",
+        world_claims=(
+            {
+                "claim_text": "我在嘉兴的家里过暑假",
+                "scope": "current_world",
+                "source_refs": (source_ref,),
+            },
+        ),
+    )
+
+
+def test_biographical_claim_evidence_deduplicates_projection_aliases() -> None:
+    context = _biographical_claim_evidence_context()
+    coordinate = biographical_coordinate_authorities(context)[0]
+    evidence = _world_claim_evidence(
+        draft=_biographical_claim_draft(coordinate.source_ref),
+        request=_request().model_copy(
+            update={"model_content_json": json.dumps(context, ensure_ascii=False)}
+        ),
+    )
+
+    assert {item.ref_id for item in evidence} == {
+        "event:biography-configured",
+        "event:clock-advanced",
+    }
+
+
+def test_biographical_claim_evidence_still_rejects_conflicting_projection() -> None:
+    context = _biographical_claim_evidence_context()
+    context["slices"]["current_situation"]["items"][0]["source_bindings"][0][
+        "immutable_hash"
+    ] = "c" * 64
+    coordinate = biographical_coordinate_authorities(context)[0]
+
+    with pytest.raises(ValueError, match="ambiguous authority binding"):
+        _world_claim_evidence(
+            draft=_biographical_claim_draft(coordinate.source_ref),
+            request=_request().model_copy(
+                update={"model_content_json": json.dumps(context, ensure_ascii=False)}
+            ),
+        )
+
+
+def test_biographical_claim_evidence_rejects_unknown_authority_alias() -> None:
+    context = _biographical_claim_evidence_context()
+    context["slices"]["current_situation"]["items"][0]["source_bindings"][0][
+        "authority_type"
+    ] = "untrusted_projection"
+    coordinate = biographical_coordinate_authorities(context)[0]
+
+    with pytest.raises(ValueError, match="ambiguous authority binding"):
+        _world_claim_evidence(
+            draft=_biographical_claim_draft(coordinate.source_ref),
+            request=_request().model_copy(
+                update={"model_content_json": json.dumps(context, ensure_ascii=False)}
+            ),
+        )
 
 
 @pytest.mark.asyncio

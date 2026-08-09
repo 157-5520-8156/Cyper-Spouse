@@ -29,6 +29,25 @@ Run tests:
 uv run pytest
 ```
 
+日常开发不需要每次都跑完整回归。完整套件包含大量 SQLite 冷重放、公开宿主和延迟触发场景，当前约 5,000 条测试，适合作为提交前门禁；开发时使用分层入口：
+
+```bash
+# 默认：CharacterInterior/LLM 主链，几十秒级
+uv run python scripts/test_fast.py
+
+# 调度、QQ host、延迟触发和 Matrix
+uv run python scripts/test_fast.py --tier host
+
+# 上一次失败的测试
+uv run python scripts/test_fast.py --last-failed
+
+# 提交前唯一完整门禁
+uv run python scripts/test_fast.py --tier full
+```
+
+`pytest-xdist` 在本项目的 SQLite/进程 fixture 上未必更快；先用分层和
+`--last-failed`，不要盲目并行化导致启动开销和共享状态竞争。
+
 Run the daemon:
 
 ```bash
