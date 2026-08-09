@@ -28,6 +28,12 @@ _ACCEPTANCE_SCRIPT = _ROOT / "scripts" / "run_isolated_daemon_acceptance.py"
 SoakModelMode = Literal["loopback-stub", "real-provider"]
 SOAK_CONTRACT = "isolated-daemon-soak.1"
 DAY_SECONDS = 24 * 60 * 60
+# The soak deliberately exercises the real provider path.  Its durable
+# ActionProviderAccepted terminal can arrive after the ingress HTTP response
+# and after the normal acceptance harness's 5-second observation window;
+# budget the soak independently so a valid 5–10 second model turn is not
+# recorded as a false terminal failure.
+SOAK_PROVIDER_ACCEPTANCE_TIMEOUT_SECONDS = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,6 +384,7 @@ def run_soak(options: SoakOptions) -> dict[str, object]:
                                 acceptance._wait_for_durable_provider_acceptance_count(  # noqa: SLF001
                                     database,
                                     expected_count=turn_index,
+                                    timeout_seconds=SOAK_PROVIDER_ACCEPTANCE_TIMEOUT_SECONDS,
                                 )
                                 turns.append(turn)
                                 journal.write(

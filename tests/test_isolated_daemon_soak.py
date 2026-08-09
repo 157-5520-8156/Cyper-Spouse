@@ -21,6 +21,9 @@ SoakOptions = _MODULE.SoakOptions
 validate_options = _MODULE.validate_options
 build_soak_report = _MODULE.build_soak_report
 restart_due = _MODULE.restart_due
+SOAK_PROVIDER_ACCEPTANCE_TIMEOUT_SECONDS = (
+    _MODULE.SOAK_PROVIDER_ACCEPTANCE_TIMEOUT_SECONDS
+)
 
 
 def _options(tmp_path: Path) -> object:
@@ -62,6 +65,10 @@ def test_restart_due_is_monotonic_and_disabled_for_zero_interval() -> None:
     assert restart_due(started_at=10.0, now=15.0, interval_seconds=5.0)
     assert not restart_due(started_at=10.0, now=14.9, interval_seconds=5.0)
     assert not restart_due(started_at=10.0, now=100.0, interval_seconds=0.0)
+
+
+def test_real_provider_terminal_wait_has_room_for_strict_stream_latency() -> None:
+    assert SOAK_PROVIDER_ACCEPTANCE_TIMEOUT_SECONDS >= 60.0
 
 
 def test_report_is_explicitly_non_qualification_evidence(tmp_path: Path) -> None:
