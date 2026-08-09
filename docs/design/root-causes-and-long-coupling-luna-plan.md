@@ -1713,3 +1713,14 @@ commit：hash
 - durable trigger claim、CAS、取消/替换、Action effect-once 和角色是否 continue/merge/supersede/cancel 的
   authority 没有改变；该改动只让 source→opportunity→Interior lineage 可重放、可比较。`expression_reconsideration`
   与 expression tail/restart 相关回归 `22 passed`，真实 provider、QQ 回执和 24 小时资格仍未因此升级。
+
+### 2026-08-09：L4 memory opportunity lineage 薄片
+
+- Fact retention、Experience retention 和 Memory withdrawal 三个 purpose 共用的 `_memory_opportunity` 原先
+  把 cursor、`inner_turn_ref` 和 capability payload 纳入 opportunity hash；同一 source 在 CAS refresh、lease
+  recovery 或重启后可能产生新的机会坐标。现在它们统一使用 `causal-opportunity.1`，以 actor、purpose、
+  canonical source set 和 `context.trigger_ref` 作为 epoch；capability 仍单独绑定完整 source refs、hash 和
+  当前 pinned context。
+- memory candidate 的接受、撤回、CAS、retry、effect-once 和角色 retain/forget/revise 选择均未改变；这只是
+  让 source→opportunity→memory decision 的审计与冷重放稳定。Fact/Experience/Withdrawal/life-memory 回归
+  共 `38 passed`，真实 provider、embedding、跨 actor memory 统一和 24 小时资格仍未完成。

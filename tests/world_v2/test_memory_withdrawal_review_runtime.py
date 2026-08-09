@@ -27,6 +27,9 @@ from test_production_turn_application import (
 from companion_daemon.world_v2.character_interior.production import (
     compose_fixture_character_interior,
 )
+from companion_daemon.world_v2.character_interior.run_result import (
+    CausalOpportunityIdentity,
+)
 from companion_daemon.world_v2.fact_events import FactChangedPayload, fact_mutation_hash
 from companion_daemon.world_v2.memory_withdrawal_review import (
     MemoryWithdrawalReviewRuntime,
@@ -406,6 +409,14 @@ async def test_fact_reducer_does_not_cascade_but_review_forgets_exactly_once(tmp
     assert model.calls == 1
     assert len(interior.opportunities) == 1
     assert interior.opportunities[0].purpose == "memory_withdrawal_review"
+    memory_opportunity = interior.opportunities[0]
+    assert memory_opportunity.opportunity_ref == CausalOpportunityIdentity(
+        world_id=WORLD,
+        actor_ref="character:zhizhi",
+        purpose="memory_withdrawal_review",
+        source_refs=tuple(sorted(memory_opportunity.source_refs)),
+        epoch=memory_opportunity.trigger_ref,
+    ).opportunity_ref
     assert interior.opportunities[0].capability_manifest.payload[
         "offered_tokens"
     ] == ["retain", "forget"]
