@@ -248,9 +248,35 @@ class _CognitiveHostModel:
     """One model serving reply plus the narrow background cognitive prompts."""
 
     model = "test-cognitive-host"
+    supports_required_tool_choice = True
 
     def __init__(self) -> None:
         self.reply_requests: list[list[dict[str, str]]] = []
+
+    async def complete_json(
+        self,
+        messages,
+        *,
+        temperature: float = 0.2,
+        tools=None,
+        tool_choice=None,
+    ):  # type: ignore[no-untyped-def]
+        if tools is None:
+            return await self.complete(messages, temperature=temperature)
+        del temperature
+        assert tools and len(tools) == 1
+        tool_name = tools[0]["function"]["name"]
+        assert tool_name in {
+            "character_role_fact_memory_retention_v1",
+            "character_role_experience_memory_retention_v1",
+        }
+        assert tool_choice == {
+            "type": "function",
+            "function": {"name": tool_name},
+        }
+        # Keep one fixture semantic author.  The same role-shaped response is
+        # parsed by StructuredCharacterRoleFaculty after the transport gate.
+        return await self.complete(messages, temperature=0.15)
 
     async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
         prompt = messages[0]["content"]

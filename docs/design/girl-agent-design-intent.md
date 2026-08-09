@@ -567,6 +567,11 @@ RSS/NWS/USGS → hub 采集/去重/嵌入/聚类 → attention 影子/实时注�
   已资格化，Coverage V5 dormant）。
 - 审计证据：`private_self_expression_audit.py`（私密自我 → 表达的因果链只读证据）。
 - 记忆撤回审查：`memory_withdrawal_review.py`（Fact 撤回后的检索记忆来源审查）。
+- 记忆保留选择：`fact_memory_retention` 与 `experience_memory_retention` 现在通过
+  `character_role_fact_memory_retention_v1` / `character_role_experience_memory_retention_v1`
+  的 required-tool 运输进入同一 CharacterInterior；工具只闭合 retain/no-change、cue、理由和
+  salience 的 typed wire，保留/放弃仍由角色选择，矩阵元数据、来源闭包、CAS 与 durable decision
+  仍由下游权威负责。真实 provider 首次成功率尚未资格化。
 
 **断链点**：检索取回质量（用户体感"失忆"）——索引在、注入路径在，但取回什么、取回多少、
 什么时候注入进快照，是模型与编译参数共同作用的结果，质量未校准。

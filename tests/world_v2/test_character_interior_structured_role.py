@@ -289,6 +289,42 @@ def _private_impression_manifest() -> _InteriorCapabilityManifest:
     )
 
 
+def _memory_retention_manifest(
+    *,
+    kind: str = "fact_memory_retention",
+) -> _InteriorCapabilityManifest:
+    payload = {
+        "source_kind": (
+            "verified_user_fact"
+            if kind == "fact_memory_retention"
+            else "companion_lived_experience"
+        ),
+        "predicate_code": "preference.likes",
+        (
+            "verified_source_text"
+            if kind == "fact_memory_retention"
+            else "verified_experience_text"
+        ): (
+            "用户明确说过自己喜欢乌龙茶。"
+            if kind == "fact_memory_retention"
+            else "她记得那次一起在雨里赶末班车。"
+        ),
+    }
+    payload_json = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return _InteriorCapabilityManifest(
+        capability_ref=f"capability:{kind}:71",
+        capability_kind=kind,
+        payload_json=payload_json,
+        payload_hash="sha256:" + hashlib.sha256(payload_json.encode()).hexdigest(),
+        source_refs=("source:private_self",),
+    )
+
+
 def _private_impression_result(*, status: str = "no_change") -> str:
     if status == "no_change":
         proposal = []
@@ -2441,6 +2477,237 @@ async def test_expression_reconsideration_rejects_malformed_capability_before_pr
 
     assert raised.value.code == "role_result_schema_invalid"
     assert model.calls == []
+
+
+@pytest.mark.asyncio
+async def test_fact_memory_retention_uses_one_versioned_forced_tool() -> None:
+    manifest = _memory_retention_manifest()
+    model = _RequiredToolQueueModel(
+        _result(
+            status="decision",
+            decision={
+                "source_refs": ["source:private_self"],
+                "payload": {
+                    "retain": True,
+                    "cue_kind": "relationship",
+                    "retention_rationales": ["relationship_continuity"],
+                    "salience": {
+                        "autobiographical_relevance_bp": 6200,
+                        "relationship_relevance_bp": 7800,
+                        "emotional_residue_bp": 4200,
+                        "unfinished_business_bp": 1200,
+                        "recurrence_bp": 2400,
+                        "novelty_bp": 3100,
+                        "future_utility_bp": 6900,
+                        "world_continuity_bp": 4800,
+                    },
+                },
+            }
+        )
+    )
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-chat")
+
+    result = await role.consider(
+        await _request(
+            purpose="fact_memory_retention",
+            capability_manifest=manifest,
+        )
+    )
+
+    assert result["decision"]["payload"]["retain"] is True
+    assert len(model.tool_calls) == 1
+    tools, tool_choice = model.tool_calls[0]
+    assert tools[0]["function"]["name"] == "character_role_fact_memory_retention_v1"
+    assert tool_choice == {
+        "type": "function",
+        "function": {"name": "character_role_fact_memory_retention_v1"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_memory_retention_without_required_tool_support_fails_closed() -> None:
+    manifest = _memory_retention_manifest()
+    model = _QueueModel(
+        _result(
+            status="decision",
+            decision={
+                "source_refs": ["source:private_self"],
+                "payload": {"retain": False},
+            },
+        )
+    )
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-chat")
+
+    with pytest.raises(StructuredRoleResultError) as raised:
+        await role.consider(
+            await _request(
+                purpose="fact_memory_retention",
+                capability_manifest=manifest,
+            )
+        )
+
+    assert raised.value.code == "required_tool_choice_unsupported"
+    assert model.calls == []
+
+
+@pytest.mark.asyncio
+async def test_experience_memory_retention_uses_its_own_versioned_tool() -> None:
+    manifest = _memory_retention_manifest(kind="experience_memory_retention")
+    model = _RequiredToolQueueModel(
+        _result(
+            status="decision",
+            decision={
+                "source_refs": ["source:private_self"],
+                "payload": {"retain": False},
+            },
+        )
+    )
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-chat")
+
+    result = await role.consider(
+        await _request(
+            purpose="experience_memory_retention",
+            capability_manifest=manifest,
+        )
+    )
+
+    assert result["decision"]["payload"] == {
+        "contract": "character-interior-experience-memory-retention.1",
+        "retain": False,
+    }
+    tools, tool_choice = model.tool_calls[0]
+    assert tools[0]["function"]["name"] == (
+        "character_role_experience_memory_retention_v1"
+    )
+    assert tool_choice == {
+        "type": "function",
+        "function": {"name": "character_role_experience_memory_retention_v1"},
+    }
+
+
+def test_memory_retention_tool_schema_closes_no_change_and_retain_branches() -> None:
+    manifest = _memory_retention_manifest()
+    contract = StructuredRoleToolContracts().memory_retention(
+        purpose="fact_memory_retention",
+        capability_payload=manifest.payload,
+        source_refs=manifest.source_refs,
+        recall_allowed=True,
+    )
+    parameters = contract.provider_tools[0]["function"]["parameters"]
+    Draft202012Validator.check_schema(parameters)
+    validator = Draft202012Validator(parameters)
+    valid_no_change = json.loads(
+        _result(
+            status="decision",
+            decision={
+                "source_refs": ["source:private_self"],
+                "payload": {"retain": False},
+            },
+        )
+    )
+    validator.validate(valid_no_change)
+    valid_retain = json.loads(
+        _result(
+            status="decision",
+            decision={
+                "source_refs": ["source:private_self"],
+                "payload": {
+                    "retain": True,
+                    "cue_kind": "future_utility",
+                    "retention_rationales": ["future_utility"],
+                    "salience": {
+                        name: 1000
+                        for name in (
+                            "autobiographical_relevance_bp",
+                            "relationship_relevance_bp",
+                            "emotional_residue_bp",
+                            "unfinished_business_bp",
+                            "recurrence_bp",
+                            "novelty_bp",
+                            "future_utility_bp",
+                            "world_continuity_bp",
+                        )
+                    },
+                },
+            },
+        )
+    )
+    validator.validate(valid_retain)
+    with pytest.raises(ValidationError):
+        validator.validate(
+            {
+                **valid_no_change,
+                "decision": {
+                    **valid_no_change["decision"],
+                    "payload": {"retain": True},
+                },
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_fact_memory_retention_required_tool_reaches_deepseek_http_boundary() -> None:
+    captured: dict[str, object] = {}
+    raw_result = _result(
+        status="decision",
+        decision={
+            "source_refs": ["source:private_self"],
+            "payload": {"retain": False},
+        },
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "character_role_fact_memory_retention_v1",
+                                        "arguments": raw_result,
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    model = DeepSeekChatModel(
+        "key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await StructuredCharacterRoleFaculty(
+            model=model,
+            model_id="deepseek-v4-flash",
+        ).consider(
+            await _request(
+                purpose="fact_memory_retention",
+                capability_manifest=_memory_retention_manifest(),
+            )
+        )
+    finally:
+        await model.aclose()
+
+    assert result["decision"]["payload"]["retain"] is False
+    assert "response_format" not in captured
+    assert captured["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "character_role_fact_memory_retention_v1"},
+    }
+    tools = captured["tools"]
+    assert isinstance(tools, list) and len(tools) == 1
+    assert tools[0]["function"]["name"] == "character_role_fact_memory_retention_v1"
 
 
 @pytest.mark.asyncio

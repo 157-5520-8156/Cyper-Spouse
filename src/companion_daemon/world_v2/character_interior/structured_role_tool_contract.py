@@ -25,6 +25,8 @@ _OUTCOME_SELECTION_TOOL_NAME = "character_role_outcome_selection_v1"
 _ACTIVITY_LIFECYCLE_TOOL_NAME = "character_role_activity_lifecycle_choice_v1"
 _LIFE_DEVELOPMENT_TOOL_NAME = "character_role_life_development_choice_v1"
 _EXPRESSION_RECONSIDERATION_TOOL_NAME = "character_role_expression_reconsideration_v1"
+_FACT_MEMORY_RETENTION_TOOL_NAME = "character_role_fact_memory_retention_v1"
+_EXPERIENCE_MEMORY_RETENTION_TOOL_NAME = "character_role_experience_memory_retention_v1"
 
 
 def _canonical_json(value: object) -> str:
@@ -559,6 +561,7 @@ class StructuredRoleToolContracts:
         from .structured_role import (
             _ActivityLifecyclePayload,
             _ExpressionReconsiderationPayload,
+            _MemoryRetentionPayload,
             _PrivateImpressionProposal,
             _OutcomeSelectionPayload,
             _WorldStimulusAppraisalResult,
@@ -572,6 +575,7 @@ class StructuredRoleToolContracts:
         _compiled_provider_schema(ExpressionDraft)
         _compiled_provider_schema(_ActivityLifecyclePayload)
         _compiled_provider_schema(_ExpressionReconsiderationPayload)
+        _compiled_provider_schema(_MemoryRetentionPayload)
         _compiled_provider_schema(_WorldStimulusAppraisalResult)
         _compiled_provider_schema(_PrivateImpressionProposal)
         _compiled_provider_schema(_OutcomeSelectionPayload)
@@ -714,6 +718,25 @@ class StructuredRoleToolContracts:
         """Compile the source-bound disposition for an interrupted beat."""
 
         return self._cached_expression_reconsideration(
+            _canonical_json(capability_payload),
+            _canonical_json(source_refs),
+            recall_allowed,
+        )
+
+    def memory_retention(
+        self,
+        *,
+        purpose: str,
+        capability_payload: Mapping[str, object],
+        source_refs: tuple[str, ...] = (),
+        recall_allowed: bool,
+    ) -> StructuredRoleToolContract:
+        """Compile the shared fact/experience retain-or-no-change wire."""
+
+        if purpose not in {"fact_memory_retention", "experience_memory_retention"}:
+            raise ValueError("memory retention compiler received an unsupported purpose")
+        return self._cached_memory_retention(
+            purpose,
             _canonical_json(capability_payload),
             _canonical_json(source_refs),
             recall_allowed,
@@ -1349,6 +1372,46 @@ class StructuredRoleToolContracts:
                 "Return the complete source-bound expression reconsideration choice. "
                 "Choose one disposition from the supplied capability; the function "
                 "constrains transport shape only and does not choose for the character."
+            ),
+        )
+
+    @staticmethod
+    @lru_cache(maxsize=32)
+    def _cached_memory_retention(
+        purpose: str,
+        capability_payload_json: str,
+        source_refs_json: str,
+        recall_allowed: bool,
+    ) -> StructuredRoleToolContract:
+        from .structured_role import _MemoryRetentionPayload
+
+        tool_names = {
+            "fact_memory_retention": _FACT_MEMORY_RETENTION_TOOL_NAME,
+            "experience_memory_retention": _EXPERIENCE_MEMORY_RETENTION_TOOL_NAME,
+        }
+        tool_name = tool_names.get(purpose)
+        if tool_name is None:
+            raise ValueError("memory retention compiler received an unsupported purpose")
+        capability_payload = json.loads(capability_payload_json)
+        if not isinstance(capability_payload, dict):
+            raise ValueError("memory retention capability must be one object")
+        source_refs = json.loads(source_refs_json)
+        if not isinstance(source_refs, list):
+            raise ValueError("memory retention source refs are malformed")
+        payload_schema = _provider_schema(_MemoryRetentionPayload)
+        return _compile_generic_decision_contract(
+            purpose=purpose,
+            tool_name=tool_name,
+            payload_schema=payload_schema,
+            capability_identity=capability_payload,
+            source_refs=tuple(source_refs),
+            recall_allowed=recall_allowed,
+            description=(
+                "Return the complete source-bound memory retention choice. The "
+                "character may retain this exact source with personally authored "
+                "cue, reasons, and salience, or explicitly choose no_change. The "
+                "function constrains transport and typed shape only; it does not "
+                "choose for the character."
             ),
         )
 

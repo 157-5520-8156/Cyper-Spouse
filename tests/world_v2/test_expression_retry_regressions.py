@@ -171,12 +171,35 @@ class _Delivery:
 
 class _BlockingExpressionModel:
     model = "fixture:blocking-expression"
+    supports_required_tool_choice = True
 
     def __init__(self) -> None:
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
         self.expression_calls = 0
         self._fallback = FakeCompanionModel()
+
+    async def complete_json(
+        self,
+        messages,
+        *,
+        temperature=0.8,
+        tools=None,
+        tool_choice=None,
+    ):  # type: ignore[no-untyped-def]
+        if tools is None:
+            return await self.complete(messages, temperature=temperature)
+        assert tools and len(tools) == 1
+        tool_name = tools[0]["function"]["name"]
+        assert tool_name in {
+            "character_role_fact_memory_retention_v1",
+            "character_role_experience_memory_retention_v1",
+        }
+        assert tool_choice == {
+            "type": "function",
+            "function": {"name": tool_name},
+        }
+        return await self.complete(messages, temperature=temperature)
 
     async def complete(self, messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
         prompt = "\n".join(message["content"] for message in messages)
@@ -278,6 +301,7 @@ class _CountingFactModel:
 
 class _BatchUpdatingFactModel:
     model = "fixture:batch-updating-fact"
+    supports_required_tool_choice = True
 
     def __init__(self) -> None:
         self.fact_calls = 0
@@ -310,6 +334,63 @@ class _BatchUpdatingFactModel:
                     }
                     for item in observations
                 ]
+            },
+            ensure_ascii=False,
+        )
+
+    async def complete_json(
+        self,
+        messages,
+        *,
+        temperature=0.8,
+        tools=None,
+        tool_choice=None,
+    ):  # type: ignore[no-untyped-def]
+        if tools is None:
+            return await self.complete(messages, temperature=temperature)
+        del temperature
+        assert tools and len(tools) == 1
+        tool_name = tools[0]["function"]["name"]
+        assert tool_name in {
+            "character_role_fact_memory_retention_v1",
+            "character_role_experience_memory_retention_v1",
+        }
+        assert tool_choice == {
+            "type": "function",
+            "function": {"name": tool_name},
+        }
+        request = json.loads(messages[-1]["content"])
+        inner_turn = request["inner_turn"]
+        source_refs = inner_turn["subject_source_refs"]
+        if tool_name == "character_role_experience_memory_retention_v1":
+            payload = {"retain": False}
+        else:
+            payload = {
+                "retain": True,
+                "cue_kind": "relationship",
+                "retention_rationales": ["relationship_continuity"],
+                "salience": {
+                    "autobiographical_relevance_bp": 5200,
+                    "relationship_relevance_bp": 6800,
+                    "emotional_residue_bp": 2600,
+                    "unfinished_business_bp": 1000,
+                    "recurrence_bp": 1800,
+                    "novelty_bp": 2400,
+                    "future_utility_bp": 6200,
+                    "world_continuity_bp": 4500,
+                },
+            }
+        return json.dumps(
+            {
+                "status": "decision",
+                "summary": "The character makes an explicit memory choice.",
+                "attended_source_refs": [],
+                "decision": {
+                    "source_refs": source_refs,
+                    "payload": payload,
+                },
+                "recall_query": None,
+                "proposals": [],
             },
             ensure_ascii=False,
         )

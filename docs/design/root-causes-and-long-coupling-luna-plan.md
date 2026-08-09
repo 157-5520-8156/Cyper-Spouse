@@ -1410,3 +1410,24 @@ commit：hash
   delayed-expression model，以及 scenario runner 的 required-tool purpose 校验；它们现在都显式传递唯一
   `tool_choice`，没有把 fixture 改回普通 JSON。修复后的源码全量回归为 `4917 passed, 1 warning`；这仍只证明
   本地和隔离公开宿主链路，不改变真实 provider/QQ/24 小时资格门。
+
+### 2026-08-09：事实/体验记忆保留 required-tool 薄片
+
+- `fact_memory_retention` 与 `experience_memory_retention` 共用一个由 typed wire 派生的
+  retain/no-change union；版本化工具分别为
+  `character_role_fact_memory_retention_v1` 和 `character_role_experience_memory_retention_v1`。
+  `retain=true` 时角色必须自己提出 cue、唯一 retention rationales 和八维 salience；`retain=false`
+  只能是显式 `{retain:false}`。系统没有替角色默认保留或遗忘，也没有把矩阵版本、digest 或来源
+  authority 塞进角色输出。
+- capability payload、source refs、tool/schema/contract identity 继续绑定到 CharacterInterior
+  request hash；不支持 required tool 的 provider 精确终结为
+  `required_tool_choice_unsupported`，不回落到 plain JSON。既有 `FactMemoryRetentionDraft` 的
+  概率/基点归一化保持兼容，最终 MemoryCandidate/Experience decision 仍经过现有来源闭包、CAS、
+  durable audit 与重试。
+- 本薄片回归覆盖两个工具名与 tool choice、两种 purpose、retain/no-change union、缺字段拒绝及
+  provider 能力缺失 fail-closed；记忆/生活/生产相关回归为 `183 passed`，ruff 与
+  `git diff --check` 通过。该数字是本地 typed/fixture evidence，不是 100 次真实 DeepSeek
+  qualification；真实 QQ、自由对聊与 24 小时 soak 仍保持 `manual_only`/`qualification_incomplete`。
+- 迁移同时修正了两个公开 fixture：它们现在声明并接收记忆 purpose 的 required tool，同时保留
+  事实批处理等非 CharacterInterior 背景协议的普通入口。源码全量回归为 `4922 passed, 1 warning`，
+  `ruff` 与 Delayed Trigger Matrix 静态 verifier 也通过；这仍不改变真实 provider 资格门。

@@ -9,6 +9,7 @@ adapter or protagonist faculty port.
 from __future__ import annotations
 
 import json
+import math
 
 from .model_json import extract_json_object_text
 from .schema_core import FrozenModel
@@ -73,14 +74,19 @@ def materialize_fact_memory_draft(raw: object) -> FactMemoryRetentionDraft | Non
         # instead of basis points; normalize that natural scale exactly like
         # the chat-side appraisal wire so a draft never fails solely on this
         # representation.
-        normalized = {
-            field: (
-                int(round(value * 10_000))
-                if isinstance(value, float) and 0.0 <= value <= 1.0
-                else value
-            )
-            for field, value in salience.items()
-        }
+        normalized: dict[str, object] = {}
+        for field, value in salience.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                normalized[field] = value
+            elif isinstance(value, float):
+                if not math.isfinite(value):
+                    normalized[field] = value
+                elif 0.0 <= value <= 1.0:
+                    normalized[field] = int(round(value * 10_000))
+                else:
+                    normalized[field] = int(round(value))
+            else:
+                normalized[field] = value
         result = FactMemoryRetentionDraft(
             cue_kind=cue_kind,
             retention_rationales=tuple(rationales),

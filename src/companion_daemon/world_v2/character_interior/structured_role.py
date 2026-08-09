@@ -14,12 +14,13 @@ from datetime import datetime
 import hashlib
 import json
 import unicodedata
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    RootModel,
     ValidationError,
     field_validator,
     model_validator,
@@ -32,6 +33,7 @@ from ..character_outcome_contract import CharacterLifeDirectionDraft
 from ..proposal_envelope import AspirationTransitionPayload
 from ..schema_core import canonicalize_json_value
 from ..structured_completion import complete_json_object
+from ..schemas import MemoryCueKind, MemoryRetentionRationale
 from .author_identity import character_semantic_author_identity
 from .contracts import (
     InteriorAffectOpenTransition,
@@ -184,6 +186,55 @@ class _ExpressionReconsiderationPayload(BaseModel):
         "supersede",
         "new_beat",
     ]
+
+
+_MemoryBasisPointInteger = Annotated[int, Field(ge=0, le=10_000)]
+_MemoryBasisPointNumber = Annotated[float, Field(ge=0, le=10_000)]
+
+
+class _MemorySaliencePayload(BaseModel):
+    """Provider-facing salience values without reducer-owned matrix metadata."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    autobiographical_relevance_bp: _MemoryBasisPointInteger | _MemoryBasisPointNumber
+    relationship_relevance_bp: _MemoryBasisPointInteger | _MemoryBasisPointNumber
+    emotional_residue_bp: _MemoryBasisPointInteger | _MemoryBasisPointNumber
+    unfinished_business_bp: _MemoryBasisPointInteger | _MemoryBasisPointNumber
+    recurrence_bp: _MemoryBasisPointInteger | _MemoryBasisPointNumber
+    novelty_bp: _MemoryBasisPointInteger | _MemoryBasisPointNumber
+    future_utility_bp: _MemoryBasisPointInteger | _MemoryBasisPointNumber
+    world_continuity_bp: _MemoryBasisPointInteger | _MemoryBasisPointNumber
+
+
+class _MemoryRetentionNoChangePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    retain: Literal[False]
+
+
+class _MemoryRetentionPayloadValue(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    retain: Literal[True]
+    cue_kind: MemoryCueKind
+    retention_rationales: list[MemoryRetentionRationale] = Field(
+        min_length=1,
+        max_length=8,
+    )
+    salience: _MemorySaliencePayload
+
+    @model_validator(mode="after")
+    def rationales_are_unique(self) -> "_MemoryRetentionPayloadValue":
+        if len(self.retention_rationales) != len(set(self.retention_rationales)):
+            raise ValueError("memory retention rationales must be unique")
+        return self
+
+
+class _MemoryRetentionPayload(
+    RootModel[_MemoryRetentionNoChangePayload | _MemoryRetentionPayloadValue]
+):
+    """Canonical retain/no-change wire shared by fact and experience memory."""
 
 
 def _validate_proactive_payload(
@@ -995,6 +1046,8 @@ class StructuredCharacterRoleFaculty:
             "activity_lifecycle_choice",
             "life_development_choice",
             "expression_reconsideration",
+            "fact_memory_retention",
+            "experience_memory_retention",
         }:
             return None
         if not bool(getattr(self._model, "supports_required_tool_choice", False)):
@@ -1039,6 +1092,16 @@ class StructuredCharacterRoleFaculty:
                 )
             if request.purpose == "expression_reconsideration":
                 return compiler.expression_reconsideration(
+                    capability_payload=manifest.payload,
+                    source_refs=manifest.source_refs,
+                    recall_allowed=not request.recall_completed,
+                )
+            if request.purpose in {
+                "fact_memory_retention",
+                "experience_memory_retention",
+            }:
+                return compiler.memory_retention(
+                    purpose=request.purpose,
                     capability_payload=manifest.payload,
                     source_refs=manifest.source_refs,
                     recall_allowed=not request.recall_completed,
