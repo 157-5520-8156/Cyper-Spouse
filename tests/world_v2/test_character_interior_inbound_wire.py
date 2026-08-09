@@ -17953,14 +17953,15 @@ async def test_cancelled_recall_followup_keeps_the_exact_nested_provider_identit
 
 
 # ---------------------------------------------------------------------------
-# V8 declared-claims-only review lane (2026-08-07).
+# V8 declared-claims-only compatibility lane (2026-08-07).
 #
-# Interactive source review is retired: with inventory disabled the entry
-# reviews only the declared world_claim records (zero-call pass for
-# claim-free drafts, one bounded reviewer call when claims exist). These
-# tests pin that lane's semantics: zero-call shortcut, supported/unsupported
-# verdicts, mechanical-ref enforcement that a reviewer cannot whiten, and
-# reviewer failover + usage auditing.
+# These historical fixtures leave ``review_claim_free_candidates`` false, so
+# with inventory disabled the entry reviews only declared world_claim records
+# (zero-call pass for claim-free drafts, one bounded reviewer call when claims
+# exist). Production composition enables the full visible-text audit. These
+# tests pin the compatibility lane's semantics: zero-call shortcut,
+# supported/unsupported verdicts, mechanical-ref enforcement that a reviewer
+# cannot whiten, and reviewer failover + usage auditing.
 # ---------------------------------------------------------------------------
 
 

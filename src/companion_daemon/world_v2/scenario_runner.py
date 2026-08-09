@@ -273,8 +273,9 @@ FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.58"
 # install_trace_authority_key() instead of a fresh secrets.token_bytes per
 # process. The frozen manifest hash is byte-identical across independent
 # processes; this hash was verified twice cross-process.
-# 2026-08-07: rebaselined after interactive source review was retired and the
-# author contract was hardened: the reviewer/repair lanes no longer alter
+# 2026-08-07: rebaselined while the frozen fixture remained on the historical
+# declared-claims-only source-review lane and the author contract was hardened:
+# the reviewer/repair lanes no longer alter
 # candidates, the author prompt gained the closed-scope "declare before you
 # assert" hard clause and beats-last serialization, and Inner Life Snapshot
 # material limits were trimmed. All drift is expected prompt/material input

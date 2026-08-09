@@ -479,9 +479,8 @@ class Settings(BaseSettings):
         ),
     )
     # Life Ecology source closure is a hard dependency of life_development
-    # (fail-closed when the reviewer is absent), independent of the retired
-    # interactive chat review lane. Default on so the event machine keeps
-    # producing while chat runs pure deterministic.
+    # (fail-closed when the reviewer is absent), using its own isolated runtime
+    # from the visible chat source boundary. Default on for the event machine.
     world_v2_life_source_review_enabled: bool = Field(
         default=True,
         alias="WORLD_V2_LIFE_SOURCE_REVIEW_ENABLED",
