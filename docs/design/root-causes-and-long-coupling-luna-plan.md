@@ -1534,7 +1534,7 @@ commit：hash
 
 ### 2026-08-09：当前最终源码的全量回归与资格批次进行中
 
-- 当前最终源码重新执行全量回归为 `4940 passed, 1 warning`。该数字只证明本地源码、typed/fixture、公开宿主与
+- 当前最终源码重新执行全量回归为 `4942 passed, 1 warning`。该数字只证明本地源码、typed/fixture、公开宿主与
   既有回放测试在当前工作树通过，不替代真实 provider、正式 QQ 回执或 24 小时稳定性资格。
 - 独立的 real-provider atomic 批次使用临时 SQLite、OneBot loopback、隔离端口和 shadow cadence；截至本记录已完成
   `46/100` 轮，均为 `action_authorized`，health 中 scheduler failures、technical failures、correction 均为零。
@@ -1559,3 +1559,16 @@ commit：hash
 - 回归：该 lane `30 passed`，含精确 source isolation、terminal replay/effect-once、lineage/health、ruff；这是本地
   typed/fixture/公开 runtime 证据，不是 DeepSeek 首次成功率、真实 QQ 回执或 24 小时资格。L4 后续仍需按同一
   public-host seam 扩展多 source merge、epoch/expiry、restart/cold replay，并逐个迁移真实 producer/consumer。
+
+### 2026-08-09：L4 source-bound lineage 持久化补片
+
+- `e3a0a0c` 将 world-stimulus 新的 `causal-opportunity.1` 身份真正放入 `InteriorStimulus` 的 `stimulus_ref`，因此
+  `ModelResultRecorded` 的 `character_interior_lineage.opportunity_ref` 与 `source → opportunity → turn` 返回值/health
+  一致；此前只在内存返回值中携带机会身份，重放审计仍会落回旧的临时 stimulus id。新增红测覆盖持久化 audit，world-stimulus
+  全文件为 `31 passed`。
+- `d91a797` 将同一 canonical 身份接入已有 `ActivityLifecycleWorker.advance_once(wake_event_ref)` 的
+  `activity_lifecycle_choice`，没有新增 runtime 或语义作者；activity worker/proposal 与 Life public-host 定向回归共
+  `12 passed`，ruff/diff-check 通过。
+- 该补片只修正身份/lineage，不宣称已经完成 L4 的 merge、epoch/expiry、跨 user/Life/NPC/Memory/Perception/Plan
+  统一 consumer，也不改变真实 provider、QQ 回执、自由对聊或 24 小时资格门。全量回归基线为 `4942 passed, 1 warning`；
+  两个提交后的受影响 lane 已单独复跑，发布状态继续 `manual_only`/`qualification_incomplete`。
