@@ -261,7 +261,7 @@ class ScenarioVerificationError(AssertionError):
 # .53 hash was stale (the per-case verification predicates and replay checks
 # still pass, but the aggregate request/room/replay manifest moved), so this
 # is an explicit audited rebaseline rather than weakening the drift guard.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.57"
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.58"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
@@ -319,8 +319,11 @@ FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.57"
 # the DeepSeek strict-schema projection is transport-only and uses the same
 # canonical semantics. Rebaseline the aggregate hash instead of weakening
 # the drift guard.
+# 2026-08-09 5th: durable CharacterInterior author identity is carried through
+# the Deliberation audit boundary.  Fixed scenario predicates remain unchanged,
+# but the complete executable manifest is rebaselined to the resulting hash.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "6781fc591dafaf5cd60e76221876190ab593d3b381e30e7e9174cc901373269a"
+    "c8918ecec30bbaa3e195baa819a669dfd0ed081d9318ed47d8303c902200fbdb"
 )
 
 

@@ -757,7 +757,19 @@ class CharacterInteriorInboundDeliberationAdapter:
             subject_ref=f"inbound-opportunity:sha256:{identity}",
             capability_ref=manifest.capability_ref,
         )
-        output = output.model_copy(update={"character_interior_lineage": lineage})
+        # The durable CharacterInterior lineage is the authoritative identity
+        # of this provider result.  Carry it back onto the Deliberation
+        # boundary as the winning invocation too; otherwise the outer audit
+        # would combine the adapter's lineage with the Deliberation wrapper's
+        # request hash and strict revalidation would (correctly) reject the
+        # record as two different authors.
+        output = output.model_copy(
+            update={
+                "character_interior_lineage": lineage,
+                "winning_model_call_id": lineage.author_model_call_id,
+                "winning_request_hash": lineage.author_request_hash.removeprefix("sha256:"),
+            }
+        )
         if transport_operation == "stream_head":
             self._interior._publish_purpose_transport(  # noqa: SLF001
                 _PURPOSE,

@@ -4484,9 +4484,14 @@ async def test_paired_cognition_honors_character_recall_and_replays_trace(
     recall_audits = tuple(
         item
         for item in evidence.projection.model_result_audits
-        if item.audit_contract in {"model-result-audit.4", "model-result-audit.5"}
+        if item.audit_contract in {
+            "model-result-audit.4",
+            "model-result-audit.5",
+            "model-result-audit.7",
+        }
     )
     assert recall_audits
+    assert any(item.audit_contract == "model-result-audit.7" for item in recall_audits)
     assert all('"query_text":"之前关于机器人的谈话"' in item.audit_json for item in recall_audits)
     assert all('"mode":"character_pull"' in item.audit_json for item in recall_audits)
     assert all(
