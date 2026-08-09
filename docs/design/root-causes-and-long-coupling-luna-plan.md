@@ -1356,3 +1356,17 @@ commit：hash
   24 小时 wall-clock soak 仍需人工明确授权后单独执行；在此之前发布状态继续保持
   `manual_only`/`qualification_incomplete`。新增薄片后的完整源码回归为 `4911 passed, 1 warning`，仍不改变这条
   资格结论。
+
+### 2026-08-09：QQ scheduler 直接背景路径异常隔离
+
+- `QQC2CHost` 在逻辑时钟 CAS 前后各有一条受限的直接背景工作预检路径；它们不经过
+  `WorldV2PlatformHost.drain_scheduled_work`，历史触发器或 provider 前置异常因此可能直接逃出 scheduler，
+  让整个调度 pass 失败并饿死无关的到期工作。新增 `_drain_direct_background_once`，对非取消异常采用与
+  PlatformHost 相同的 `technical_failure:<type>` 记录；durable claim/退避仍由所属 runtime 保留，预算只消耗
+  当前失败单元，不把它改写成角色沉默或 no-op。
+- 前、后时钟路径分别有回归；重启后模型调用前崩溃的恢复测试改为验证技术失败可观察、租约仍可由新实例接管，
+  而不是要求 scheduler 进程级崩溃。当前提交为 `c857ff51`，源码全量回归 `4913 passed, 1 warning`，静态
+  Delayed Trigger Matrix verifier 仍为 `28 delayed trigger mechanisms`。
+- 旧生产 PID 早于该提交，未在本轮重启或替换；其历史 health/ValueError 不能证明当前源码已在线部署，也不能
+  被这次隔离修复宣称为生产资格。真实 DeepSeek/QQ 100 样本、自由对聊与 24 小时 soak 仍保持
+  `manual_only`/`qualification_incomplete`，须经过 §20 人工发布门。
