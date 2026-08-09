@@ -133,6 +133,13 @@ class _Interior:
         manifest = opportunity.capability_manifest
         assert manifest is not None
         summary = "She chooses one available attachment capability."
+        payload = {
+            "contract": ("character-interior-qq-attachment-perception-decision.1"),
+            "decision": "select",
+            "selected_token": IMAGE_REF,
+        }
+        if self.terminal == "extra":
+            payload["free_reason"] = "legacy extra field"
         return InnerDecision(
             **identity,
             snapshot_id=SNAPSHOT_ID,
@@ -158,11 +165,7 @@ class _Interior:
                 "source_refs": list(manifest.source_refs),
                 "capability_ref": manifest.capability_ref,
                 "capability_payload_hash": manifest.payload_hash,
-                "payload": {
-                    "contract": ("character-interior-qq-attachment-perception-decision.1"),
-                    "selected_token": IMAGE_REF,
-                    "free_reason": "她自己想看",
-                },
+                "payload": payload,
             },
         )
 
@@ -308,6 +311,13 @@ async def test_model_silence_is_a_real_no_change_but_technical_failure_is_not(
     with pytest.raises(QQAttachmentPerceptionTechnicalFailure) as raised:
         await _port(tmp_path / "technical", interior=technical).propose(_request())
     assert raised.value.code == "provider_timeout"
+
+
+@pytest.mark.asyncio
+async def test_selected_attachment_rejects_legacy_extra_payload_fields(tmp_path: Path) -> None:
+    with pytest.raises(QQAttachmentPerceptionTechnicalFailure) as raised:
+        await _port(tmp_path / "extra", interior=_Interior("extra")).propose(_request())
+    assert raised.value.code == "qq_attachment_perception_decision_payload_invalid"
 
 
 @pytest.mark.asyncio

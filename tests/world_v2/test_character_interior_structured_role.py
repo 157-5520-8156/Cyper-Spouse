@@ -3131,12 +3131,15 @@ async def test_unoffered_token_is_a_precise_structural_failure() -> None:
 
 @pytest.mark.asyncio
 async def test_qq_perception_purpose_closes_selection_over_offered_tokens() -> None:
-    model = _QueueModel(
+    model = _RequiredToolQueueModel(
         _result(
             status="decision",
             decision={
                 "source_refs": ["source:private_self"],
-                "payload": {"selected_token": "opaque-token:1"},
+                "payload": {
+                    "decision": "select",
+                    "selected_token": "opaque-token:1",
+                },
             },
         )
     )
@@ -3152,6 +3155,137 @@ async def test_qq_perception_purpose_closes_selection_over_offered_tokens() -> N
     assert result["decision"]["payload"]["contract"] == (
         "character-interior-qq-attachment-perception-decision.1"
     )
+    tools, tool_choice = model.tool_calls[0]
+    assert tools[0]["function"]["name"] == "character_role_qq_attachment_perception_v1"
+    payload_schema = tools[0]["function"]["parameters"]["anyOf"][0]["properties"][
+        "decision"
+    ]["properties"]["payload"]
+    select_branch = next(
+        branch
+        for branch in payload_schema["anyOf"]
+        if branch["properties"]["decision"]["enum"] == ["select"]
+    )
+    assert select_branch["properties"]["selected_token"]["enum"] == [
+        "opaque-token:1"
+    ]
+    assert tool_choice == {
+        "type": "function",
+        "function": {"name": "character_role_qq_attachment_perception_v1"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_qq_perception_without_required_tool_support_fails_closed() -> None:
+    model = _QueueModel(_result(status="silent"))
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-chat")
+
+    with pytest.raises(StructuredRoleResultError) as raised:
+        await role.consider(
+            await _request(
+                purpose="qq_attachment_perception",
+                capability_manifest=_manifest(
+                    "opaque-token:1", kind="qq_attachment_perception"
+                ),
+            )
+        )
+
+    assert raised.value.code == "required_tool_choice_unsupported"
+    assert model.calls == []
+
+
+@pytest.mark.asyncio
+async def test_qq_perception_required_tool_reaches_deepseek_http_boundary() -> None:
+    captured: dict[str, object] = {}
+    raw_result = _result(
+        status="decision",
+        decision={
+            "source_refs": ["source:private_self"],
+            "payload": {"decision": "select", "selected_token": "opaque-token:1"},
+        },
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "character_role_qq_attachment_perception_v1",
+                                        "arguments": raw_result,
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    model = DeepSeekChatModel(
+        "key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await _ProductionStructuredCharacterRoleFaculty(
+            model=model,
+            model_id="deepseek-v4-flash",
+        ).consider(
+            await _request(
+                purpose="qq_attachment_perception",
+                capability_manifest=_manifest(
+                    "opaque-token:1", kind="qq_attachment_perception"
+                ),
+            )
+        )
+    finally:
+        await model.aclose()
+
+    assert result["decision"]["payload"]["selected_token"] == "opaque-token:1"
+    assert "response_format" not in captured
+    assert captured["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "character_role_qq_attachment_perception_v1"},
+    }
+    tools = captured["tools"]
+    assert isinstance(tools, list) and len(tools) == 1
+    assert tools[0]["function"]["name"] == "character_role_qq_attachment_perception_v1"
+
+
+@pytest.mark.asyncio
+async def test_qq_perception_preserves_role_owned_no_op() -> None:
+    model = _RequiredToolQueueModel(
+        _result(
+            status="decision",
+            decision={
+                "source_refs": ["source:private_self"],
+                "payload": {"decision": "no_op"},
+            },
+        )
+    )
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-v4-flash")
+
+    result = await role.consider(
+        await _request(
+            purpose="qq_attachment_perception",
+            capability_manifest=_manifest(
+                "opaque-token:1", kind="qq_attachment_perception"
+            ),
+        )
+    )
+
+    assert result["decision"]["payload"] == {
+        "contract": "character-interior-qq-attachment-perception-decision.1",
+        "decision": "no_op",
+    }
 
 
 @pytest.mark.asyncio
@@ -3192,7 +3326,7 @@ async def test_pure_capability_purposes_reject_domain_proposals(
     role = StructuredCharacterRoleFaculty(
         model=(
             _RequiredToolQueueModel(response)
-            if purpose == "media_selection"
+            if purpose in {"media_selection", "qq_attachment_perception"}
             else _QueueModel(response)
         ),
         model_id="deepseek-chat",

@@ -1458,3 +1458,18 @@ commit：hash
 - 媒体链仍是 limited-production；真实 DeepSeek 首次成功率、QQ/媒体回执、多轮对聊质量和 24 小时
   soak 没有由本薄片资格化，Matrix 仍为 `declaration_only`，发布状态继续
   `manual_only`/`qualification_incomplete`。
+
+### 2026-08-09：QQ attachment perception required-tool 薄片
+
+- `qq_attachment_perception` 现在接入统一 CharacterInterior required-tool 编译器，使用版本化工具
+  `character_role_qq_attachment_perception_v1`。参数由 `_QQAttachmentPerceptionPayload`、`_WireDecision`
+  与 `_WireRoleResult` 派生；当前 source-bound attachment capability 中的 `select|no_op` 和
+  `selected_token` 枚举由编译器闭合，模型不再通过普通 JSON 运输一个未绑定的附件引用。
+- 角色仍决定是否选择某个附件；QQ archive、隐私/预算、vision dispatch、结果回执、source closure、CAS
+  和 effect-once 仍由 `qq_attachment_perception.py` 与 perception transport 负责。`no_op` 只表示角色
+  不发起这次感知，不等于“图片已理解”或系统自动产生感知事实。
+- 不支持 required tool 的 provider 精确 fail-closed 为 `required_tool_choice_unsupported`，不回落普通
+  JSON。角色、DeepSeek-compatible HTTP、QQ perception port/deployment 的定向回归已通过，ruff 与
+  `git diff --check` 通过；QQ 感知仍受 deployment shadow/live 门控。
+- 本薄片不资格化真实 DeepSeek 首次成功率、OneBot/vision 回执、自由多轮对聊或 24 小时 soak；Matrix
+  继续 `declaration_only`，发布状态继续 `manual_only`/`qualification_incomplete`。

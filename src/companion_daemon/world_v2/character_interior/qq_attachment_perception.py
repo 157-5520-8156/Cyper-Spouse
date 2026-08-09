@@ -148,6 +148,8 @@ class CharacterInteriorQQAttachmentPerceptionPort:
             opportunity=opportunity,
             candidates=candidates,
         )
+        if attachment_ref is None:
+            return self._character_no_change(request, decision, opportunity=opportunity)
         return self._request_proposal(
             request,
             decision=decision,
@@ -373,7 +375,7 @@ class CharacterInteriorQQAttachmentPerceptionPort:
         *,
         opportunity: InteriorOpportunity,
         candidates: tuple[tuple[str, str, PerceptionInputDescriptor], ...],
-    ) -> str:
+    ) -> str | None:
         raw = decision.decision
         manifest = opportunity.capability_manifest
         if (
@@ -397,6 +399,12 @@ class CharacterInteriorQQAttachmentPerceptionPort:
         allowed_sources = set(opportunity.source_refs) | set(manifest.source_refs)
         if any(not isinstance(item, str) or item not in allowed_sources for item in source_refs):
             raise _technical("qq_attachment_perception_decision_source_unpinned")
+        if payload.get("decision") == "no_op" and set(payload) == {"contract", "decision"}:
+            return None
+        if payload.get("decision") != "select":
+            raise _technical("qq_attachment_perception_decision_payload_invalid")
+        if set(payload) != {"contract", "decision", "selected_token"}:
+            raise _technical("qq_attachment_perception_decision_payload_invalid")
         selected = payload.get("selected_token")
         offered = {item[0] for item in candidates}
         if not isinstance(selected, str) or selected not in offered:

@@ -162,6 +162,7 @@ class _PerceptionPurposeFaculty:
                 "capability_payload_hash": manifest.payload_hash,
                 "payload": {
                     "contract": ("character-interior-qq-attachment-perception-decision.1"),
+                    "decision": "select",
                     "selected_token": manifest.payload["offered_tokens"][0],
                 },
             },

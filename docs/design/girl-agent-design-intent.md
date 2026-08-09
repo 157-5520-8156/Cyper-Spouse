@@ -515,7 +515,9 @@ RSS/NWS/USGS → hub 采集/去重/嵌入/聚类 → attention 影子/实时注�
 - 感知工具：`injected-perception-tool`（mechanism_closure: closed/limited-production）——
   需显式模型输入源 + 预置 enforcement authority；结果审议当前"无可见动作"。
 - QQ 附件：`character_interior/qq_attachment_perception.py` 经唯一 CharacterInterior 做有来源的附件感知，
-  `perception_vision_transport.py`（OpenAI vision, SQLite 持久化）。
+  `perception_vision_transport.py`（OpenAI vision, SQLite 持久化）。角色运输使用
+  `character_role_qq_attachment_perception_v1` required tool，在当前附件 capability 中选择一个
+  opaque token 或明确 `no_op`；工具不替角色决定是否理解图片，也不越过视觉 transport、预算和回执边界。
 - 状态：registry off/shadow/live 门控，**半启用**——离线/影子模式可用，live 模式需配置。
 
 ### 4.6 对话节奏与表达（真人聊天感）——[active]（估算质量未校准）

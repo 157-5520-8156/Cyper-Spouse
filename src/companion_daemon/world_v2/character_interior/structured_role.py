@@ -456,6 +456,47 @@ class _MediaSelectionPayload(BaseModel):
         return self
 
 
+class _QQAttachmentPerceptionPayload(BaseModel):
+    """Canonical role-authored attachment select/no-op payload."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    decision: Literal["no_op", "select"]
+    selected_token: str | None = Field(default=None, min_length=1, max_length=512)
+
+    @model_validator(mode="after")
+    def choice_shape_is_closed(self) -> "_QQAttachmentPerceptionPayload":
+        if self.decision == "no_op" and self.selected_token is not None:
+            raise ValueError("attachment perception no_op cannot carry a selected token")
+        if self.decision == "select" and not self.selected_token:
+            raise ValueError("attachment perception select requires a selected token")
+        return self
+
+
+def _validate_qq_attachment_perception_payload(
+    payload: Mapping[str, object],
+    offered_tokens: frozenset[str],
+) -> None:
+    decision = payload.get("decision")
+    if decision == "no_op" and set(payload) == {"decision"}:
+        return
+    selected_token = payload.get("selected_token")
+    if decision == "select":
+        if not isinstance(selected_token, str) or not selected_token:
+            raise StructuredRoleResultError(
+                "selected_token_required",
+                detail=_FAILURE_DETAILS["selected_token_required"],
+            )
+        if selected_token not in offered_tokens:
+            raise StructuredRoleResultError(
+                "selected_token_not_offered",
+                detail=_FAILURE_DETAILS["selected_token_not_offered"],
+            )
+        if set(payload) == {"decision", "selected_token"}:
+            return
+    raise ValueError("attachment perception must be no_op or select exactly one offered token")
+
+
 def _validate_memory_retention_payload(
     payload: Mapping[str, object],
     _offered_tokens: frozenset[str],
@@ -664,13 +705,14 @@ _BUILTIN_CONTRACTS = (
         purpose="qq_attachment_perception",
         payload_contract="character-interior-qq-attachment-perception-decision.1",
         capability_kind="qq_attachment_perception",
-        offered_token_fields=(
-            "offered_tokens",
-            "attachments",
-            "attachment_refs",
-        ),
-        selected_token_required=True,
+        # ``offered_tokens`` is the canonical transport vocabulary.  The
+        # attachment descriptors are evidence, not a second token source;
+        # keeping them out of this union makes the host validator agree with
+        # the required-tool enum and fail closed on malformed providers.
+        offered_token_fields=("offered_tokens",),
+        decision_required=True,
         proposals_allowed=False,
+        validator=_validate_qq_attachment_perception_payload,
     ),
     PurposeDecisionContract(
         purpose="proactive_contact",
@@ -1070,6 +1112,7 @@ class StructuredCharacterRoleFaculty:
     ) -> StructuredRoleToolContract | None:
         if request.purpose not in {
             "media_selection",
+            "qq_attachment_perception",
             "proactive_contact",
             "world_stimulus_appraisal",
             "private_impression_reflection",
@@ -1097,6 +1140,12 @@ class StructuredCharacterRoleFaculty:
             compiler = StructuredRoleToolContracts()
             if request.purpose == "media_selection":
                 return compiler.media_selection(
+                    capability_payload=manifest.payload,
+                    source_refs=manifest.source_refs,
+                    recall_allowed=not request.recall_completed,
+                )
+            if request.purpose == "qq_attachment_perception":
+                return compiler.qq_attachment_perception(
                     capability_payload=manifest.payload,
                     source_refs=manifest.source_refs,
                     recall_allowed=not request.recall_completed,
@@ -2266,6 +2315,11 @@ class StructuredCharacterRoleFaculty:
             view["payload_schema"] = {
                 "decision": "select|no_op",
                 "selected_token": "required only for select; one offered token",
+            }
+        if contract.purpose == "qq_attachment_perception":
+            view["payload_schema"] = {
+                "decision": "select|no_op",
+                "selected_token": "required only for select; one offered attachment token",
             }
         if contract.purpose == "external_perception_attention":
             view["payload_schema"] = {

@@ -123,6 +123,7 @@ class _PerceptionFaculty:
                     "contract": (
                         "character-interior-qq-attachment-perception-decision.1"
                     ),
+                    "decision": "select",
                     "selected_token": token,
                 },
             },

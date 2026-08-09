@@ -19,6 +19,7 @@ from ..schema_core import canonicalize_json_value
 
 _CONTRACT_VERSION = "1"
 _MEDIA_SELECTION_TOOL_NAME = "character_role_media_selection_v1"
+_QQ_ATTACHMENT_PERCEPTION_TOOL_NAME = "character_role_qq_attachment_perception_v1"
 _PROACTIVE_TOOL_NAME = "character_role_proactive_contact_v1"
 _WORLD_STIMULUS_TOOL_NAME = "character_role_world_stimulus_appraisal_v1"
 _PRIVATE_IMPRESSION_TOOL_NAME = "character_role_private_impression_reflection_v1"
@@ -566,6 +567,7 @@ class StructuredRoleToolContracts:
             _MediaSelectionPayload,
             _MemoryRetentionPayload,
             _MemoryWithdrawalReviewPayload,
+            _QQAttachmentPerceptionPayload,
             _PrivateImpressionProposal,
             _OutcomeSelectionPayload,
             _WorldStimulusAppraisalResult,
@@ -580,6 +582,7 @@ class StructuredRoleToolContracts:
         _compiled_provider_schema(_ActivityLifecyclePayload)
         _compiled_provider_schema(_ExpressionReconsiderationPayload)
         _compiled_provider_schema(_MediaSelectionPayload)
+        _compiled_provider_schema(_QQAttachmentPerceptionPayload)
         _compiled_provider_schema(_MemoryRetentionPayload)
         _compiled_provider_schema(_MemoryWithdrawalReviewPayload)
         _compiled_provider_schema(_WorldStimulusAppraisalResult)
@@ -634,6 +637,21 @@ class StructuredRoleToolContracts:
         """Compile the role's select/no-op choice over media candidates."""
 
         return self._cached_media_selection(
+            _canonical_json(capability_payload),
+            _canonical_json(source_refs),
+            recall_allowed,
+        )
+
+    def qq_attachment_perception(
+        self,
+        *,
+        capability_payload: Mapping[str, object],
+        source_refs: tuple[str, ...] = (),
+        recall_allowed: bool,
+    ) -> StructuredRoleToolContract:
+        """Compile the role's select/no-op choice over QQ attachments."""
+
+        return self._cached_qq_attachment_perception(
             _canonical_json(capability_payload),
             _canonical_json(source_refs),
             recall_allowed,
@@ -858,6 +876,68 @@ class StructuredRoleToolContracts:
             description=(
                 "Return the complete source-bound media selection choice. The "
                 "character may select one offered media candidate or explicitly "
+                "choose no_op; the function constrains capability and transport "
+                "shape only and does not choose for the character."
+            ),
+        )
+
+    @staticmethod
+    @lru_cache(maxsize=32)
+    def _cached_qq_attachment_perception(
+        capability_payload_json: str,
+        source_refs_json: str,
+        recall_allowed: bool,
+    ) -> StructuredRoleToolContract:
+        from .structured_role import _QQAttachmentPerceptionPayload
+
+        capability_payload = json.loads(capability_payload_json)
+        if not isinstance(capability_payload, dict):
+            raise ValueError("QQ attachment perception capability must be one object")
+        offered = capability_payload.get("offered_tokens")
+        if (
+            not isinstance(offered, list)
+            or not offered
+            or any(not isinstance(item, str) or not item for item in offered)
+            or len(offered) != len(set(offered))
+        ):
+            raise ValueError("QQ attachment perception offered tokens are malformed")
+        source_refs = json.loads(source_refs_json)
+        if not isinstance(source_refs, list):
+            raise ValueError("QQ attachment perception source refs are malformed")
+        payload_schema = _provider_schema(_QQAttachmentPerceptionPayload)
+        properties = _required_object_properties(payload_schema)
+        selected = properties.get("selected_token")
+        if not isinstance(selected, dict):
+            raise ValueError("QQ attachment perception selected-token schema is incomplete")
+        non_null_selected = _non_null_schema(selected, field_name="selected_token")
+        payload_schema["required"] = ["decision"]
+        payload_schema["anyOf"] = [
+            {
+                "properties": {"decision": {"enum": ["no_op"]}},
+                "required": ["decision"],
+                "not": {"required": ["selected_token"]},
+            },
+            {
+                "properties": {
+                    "decision": {"enum": ["select"]},
+                    "selected_token": {
+                        **deepcopy(non_null_selected),
+                        "enum": list(offered),
+                    },
+                },
+                "required": ["decision", "selected_token"],
+            },
+        ]
+        return _compile_generic_decision_contract(
+            purpose="qq_attachment_perception",
+            tool_name=_QQ_ATTACHMENT_PERCEPTION_TOOL_NAME,
+            payload_schema=payload_schema,
+            capability_identity=capability_payload,
+            source_refs=tuple(source_refs),
+            recall_allowed=recall_allowed,
+            description=(
+                "Return the complete source-bound QQ attachment perception choice. "
+                "The character may select one offered attachment or explicitly "
                 "choose no_op; the function constrains capability and transport "
                 "shape only and does not choose for the character."
             ),
