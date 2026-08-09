@@ -1531,3 +1531,15 @@ commit：hash
   失败；批次随后主动停止，避免继续消耗成本和制造伪资格样本。
 - 该 12 轮只保留为 stream/冷重放/无回执边界证据，不计入真实 QQ 回执或 100 次首次成功率；正式资格必须经过
   `WorldV2PlatformHost.receipt` 或真实 transport callback，并继续保持 `manual_only`/`qualification_incomplete`。
+
+### 2026-08-09：当前最终源码的全量回归与资格批次进行中
+
+- 当前最终源码重新执行全量回归为 `4940 passed, 1 warning`。该数字只证明本地源码、typed/fixture、公开宿主与
+  既有回放测试在当前工作树通过，不替代真实 provider、正式 QQ 回执或 24 小时稳定性资格。
+- 独立的 real-provider atomic 批次使用临时 SQLite、OneBot loopback、隔离端口和 shadow cadence；截至本记录已完成
+  `46/100` 轮，均为 `action_authorized`，health 中 scheduler failures、technical failures、correction 均为零。
+  已完成一次计划重启，`duplicate_authoritative_role_request_delta=0`、`duplicate_effect_delta=0`；另有一个背景 provider
+  请求，因其 `authoritative_role_request=false`，不计作角色重复作者调用。终态报告尚未生成，不能把中间计数当成资格结论。
+- 同一最终源码的 24 小时 real-provider supervisor 已完成 `2/24` 个低频样本，当前无失败；截至本记录累计成本约
+  `¥0.06`。两条批次均保持临时库/loopback，不触碰旧生产 daemon；发布状态继续为
+  `manual_only`/`qualification_incomplete`，待终态报告后再逐项审计首次成功率、provider usage、回执、重启、冷重放与成本。
