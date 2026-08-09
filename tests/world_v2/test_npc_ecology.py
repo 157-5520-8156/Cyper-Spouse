@@ -23,10 +23,13 @@ from companion_daemon.world_v2.schemas import ProjectionCursor
 from test_life_projection import (
     WORLD_ID,
     commit,
+    evidence,
     event,
     seed_through_proposal,
+    register_operator_observations,
     settlement_batch,
 )
+from companion_daemon.world_v2.schemas import NpcProjection
 
 
 class _Model:
@@ -237,6 +240,98 @@ def test_npc_snapshot_never_reads_or_surfaces_protagonist_private_affect() -> No
         "available_location_refs",
         "recent_occurrence_refs",
     }
+
+
+def test_npc_snapshot_can_compile_one_explicit_actor_capsule() -> None:
+    ledger, _store, _actor_model, _world_model, runtime = _runtime(
+        _actor("no_op"), {"decision": "no_op"}
+    )
+    projection = ledger.project()
+
+    focused = runtime.snapshot(
+        ProjectionCursor(
+            world_revision=projection.world_revision,
+            deliberation_revision=projection.deliberation_revision,
+            ledger_sequence=projection.ledger_sequence,
+        ),
+        focus_npc_ref="npc:lin",
+    )
+
+    assert tuple(item.npc_ref for item in focused.identities) == ("npc:lin",)
+    assert focused.available_npc_refs == ("npc:lin",)
+
+
+def test_npc_snapshot_rejects_an_unknown_explicit_actor_capsule() -> None:
+    ledger, _store, _actor_model, _world_model, runtime = _runtime(
+        _actor("no_op"), {"decision": "no_op"}
+    )
+    projection = ledger.project()
+
+    with pytest.raises(ValueError, match="source-closed NPC identity"):
+        runtime.snapshot(
+            ProjectionCursor(
+                world_revision=projection.world_revision,
+                deliberation_revision=projection.deliberation_revision,
+                ledger_sequence=projection.ledger_sequence,
+            ),
+            focus_npc_ref="npc:missing",
+        )
+
+
+@pytest.mark.asyncio
+async def test_npc_advance_request_contains_only_the_selected_actor_capsule() -> None:
+    ledger, store, actor, _world_model, runtime = _runtime(
+        _actor("no_op"), {"decision": "no_op"}
+    )
+    register_operator_observations(ledger, "operator:npc-mei")
+    mei = NpcProjection(
+        npc_id="mei",
+        entity_revision=1,
+        stable_identity_ref="identity:npc:mei",
+        known_trait_refs=("trait:careful",),
+        privacy_class="personal",
+    )
+    commit(
+        ledger,
+        [
+            event(
+                "npc-mei-registered",
+                "NpcRegistered",
+                {
+                    "change_id": "change:npc-mei-registered",
+                    "transition_id": "transition:npc-mei-registered",
+                    "expected_entity_revision": 0,
+                    "evidence_refs": [
+                        evidence(
+                            "operator:npc-mei",
+                            "operator_observation",
+                            "current_fact",
+                        )
+                    ],
+                    "policy_refs": ["policy:life-v1"],
+                    "npc": mei.model_dump(mode="json"),
+                },
+            )
+        ],
+    )
+    store.put_if_absent(
+        StoredLifeContent(
+            content_ref="identity:npc:mei",
+            content_kind="provisional_npc_introduction",
+            content_payload_hash=life_content_payload_hash("梅，角色在生活里认识的人。"),
+            text="梅，角色在生活里认识的人。",
+        )
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref="clock-life", trace_id="trace", correlation_id="correlation"
+    )
+
+    assert result.status == "state_advanced"
+    actor_payload = json.loads(actor.calls[0][1]["content"])
+    assert actor_payload["authority"]["selected_npc_ref"] == "npc:lin"
+    assert actor_payload["public_world"]["available_npc_refs"] == ["npc:lin"]
+    assert "identity:npc:mei" not in actor.calls[0][1]["content"]
 
 
 @pytest.mark.asyncio

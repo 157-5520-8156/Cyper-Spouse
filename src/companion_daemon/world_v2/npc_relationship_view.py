@@ -62,6 +62,7 @@ def npc_relationship_readings(
     projection,
     *,
     protagonist_actor_ref: str,
+    npc_refs: tuple[str, ...] | None = None,
 ) -> tuple[NpcRelationshipReading, ...]:
     """Derive each NPC reading from events both actors actually participated in.
 
@@ -74,7 +75,12 @@ def npc_relationship_readings(
     if not protagonist_actor_ref:
         raise ValueError("NPC relationship view requires the protagonist actor ref")
     logical_time = getattr(projection, "logical_time", None)
-    npcs = tuple(getattr(projection, "npcs", ()))
+    requested_refs = None if npc_refs is None else frozenset(npc_refs)
+    npcs = tuple(
+        item
+        for item in getattr(projection, "npcs", ())
+        if requested_refs is None or f"npc:{item.npc_id}" in requested_refs
+    )
     if logical_time is None or not npcs:
         return ()
     occurrences = tuple(getattr(projection, "world_occurrences", ()))
@@ -124,16 +130,15 @@ def npc_relationship_by_ref(
     return {item.npc_ref: item for item in readings}
 
 
-def _closeness_prose(reading: NpcRelationshipReading) -> str:
-    if reading.settled_shared_count == 0:
-        base = "认识，但还没真正一起做过什么"
-    elif reading.closeness_bp >= 5_000:
-        base = f"最近走得挺近（一起经历过 {reading.settled_shared_count} 件小事）"
-    elif reading.closeness_bp >= 3_500:
-        base = f"关系在慢慢熟起来（一起经历过 {reading.settled_shared_count} 件小事）"
-    else:
-        base = f"有点疏远（虽然一起经历过 {reading.settled_shared_count} 件小事）"
-    return base
+def _shared_history_fact(reading: NpcRelationshipReading) -> str:
+    """Describe only settled evidence; the actor owns its meaning."""
+
+    if reading.last_shared_at is None:
+        return f"已结算共同经历 {reading.settled_shared_count} 次"
+    return (
+        f"已结算共同经历 {reading.settled_shared_count} 次；"
+        f"最近一次发生于 {reading.last_shared_at.isoformat()}"
+    )
 
 
 def npc_relationship_advisories(
@@ -172,7 +177,7 @@ def npc_relationship_advisories(
             candidate_ref="npc-relationship:" + _digest(reading.npc_ref),
             value=(
                 f"和{npc_names.get(reading.npc_ref, reading.npc_ref)}："
-                + _closeness_prose(reading)
+                + _shared_history_fact(reading)
             )[:256],
             weight_bp=10_000,
             confidence_bp=10_000,

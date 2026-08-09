@@ -236,3 +236,21 @@ def test_advisory_is_ledger_backed_and_silent_without_history() -> None:
     assert len(advisory.candidates) == 1
     assert "reviewed-person:fan-yuan" in advisory.candidates[0].value
     assert len(advisory.candidates[0].value) <= 256
+
+
+def test_advisory_does_not_author_relationship_meaning_from_shared_history() -> None:
+    advisories = npc_relationship_advisories(
+        _Projection(
+            npcs=(_npc(),),
+            world_occurrences=(
+                _settled_occurrence(occurrence_id="o1", settled_at=NOW - timedelta(days=1)),
+                _settled_occurrence(occurrence_id="o2", settled_at=NOW - timedelta(days=3)),
+            ),
+        ),
+        protagonist_actor_ref="agent:companion",
+    )
+
+    value = advisories[0].candidates[0].value
+    assert "走得挺近" not in value
+    assert "慢慢熟起来" not in value
+    assert "有点疏远" not in value

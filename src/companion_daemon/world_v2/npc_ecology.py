@@ -265,14 +265,28 @@ class NpcEcology:
         self._worker_actor = worker_actor
         self._catalog = catalog
 
-    def snapshot(self, cursor: ProjectionCursor) -> NpcSocialWorldSnapshot:
+    def snapshot(
+        self,
+        cursor: ProjectionCursor,
+        *,
+        focus_npc_ref: str | None = None,
+    ) -> NpcSocialWorldSnapshot:
         projection = self._ledger.project_at(cursor)
+        requested_refs = None if focus_npc_ref is None else (focus_npc_ref,)
+        if focus_npc_ref is not None and not focus_npc_ref.startswith("npc:"):
+            raise ValueError("source-closed NPC identity must use an npc ref")
+        if focus_npc_ref is not None and not any(
+            f"npc:{item.npc_id}" == focus_npc_ref
+            for item in getattr(projection, "npcs", ())
+        ):
+            raise ValueError("source-closed NPC identity is unavailable")
         identities = npc_identity_views(
             projection,
             content_store=self._store,
             relationships=npc_relationship_readings(
                 projection,
                 protagonist_actor_ref=self._protagonist,
+                npc_refs=requested_refs,
             ),
             reviewed_identity_summaries=(
                 {
@@ -283,6 +297,7 @@ class NpcEcology:
                 if self._catalog is not None
                 else None
             ),
+            npc_refs=requested_refs,
         )
         available_npcs = tuple(
             item.npc_ref for item in identities if item.lifecycle_state == "active"
@@ -377,9 +392,16 @@ class NpcEcology:
             return NpcEcologyResult(
                 status="rejected", reason_code="npc_ecology.source_not_committed"
             )
-        snapshot = self.snapshot(stimulus.cursor)
-        if not snapshot.available_npc_refs:
+        if not any(item.status == "active" for item in projection.npcs):
             return NpcEcologyResult(status="no_npcs", reason_code="npc_ecology.no_registered_npc")
+        selected_npc_ref = self._selected_npc_ref_from_projection(
+            stimulus=stimulus,
+            projection=projection,
+        )
+        snapshot = self.snapshot(
+            stimulus.cursor,
+            focus_npc_ref=selected_npc_ref,
+        )
         pending_actor_event_id = self._pending_actor_event_ref(projection)
         if pending_actor_event_id is not None:
             actor_event_id = pending_actor_event_id
@@ -910,6 +932,40 @@ class NpcEcology:
         ) % len(available)
         return available[offset]
 
+    def _selected_npc_ref_from_projection(
+        self,
+        *,
+        stimulus: NpcEcologyStimulus,
+        projection: object,
+    ) -> str:
+        """Select one active actor before compiling its source-closed capsule."""
+
+        available = tuple(
+            sorted(
+                f"npc:{item.npc_id}"
+                for item in getattr(projection, "npcs", ())
+                if item.status == "active"
+            )
+        )
+        if not available:
+            raise ValueError("NPC ecology has no active source-closed actor")
+        if stimulus.focus_npc_ref is not None:
+            if stimulus.focus_npc_ref not in available:
+                raise ValueError("NPC ecology focused actor is unavailable")
+            return stimulus.focus_npc_ref
+        offset = int(
+            _digest(
+                {
+                    "world": self._ledger.world_id,
+                    "epoch": stimulus.epoch_ref,
+                    "sources": stimulus.source_event_refs,
+                    "lane": "npc_attention_opportunity",
+                }
+            ),
+            16,
+        ) % len(available)
+        return available[offset]
+
     def _actor_context_event_refs(self, *, stimulus, snapshot, npc_ref: str) -> tuple[str, ...]:
         selected = next(item for item in snapshot.identities if item.npc_ref == npc_ref)
         committed = {
@@ -1115,7 +1171,10 @@ class NpcEcology:
     ) -> bool:
         npc_id = decision.npc_ref.removeprefix("npc:")
         before = next(item for item in projection.npcs if item.npc_id == npc_id)
-        snapshot = self.snapshot(_cursor(projection))
+        snapshot = self.snapshot(
+            _cursor(projection),
+            focus_npc_ref=decision.npc_ref,
+        )
         context_event_refs = self._actor_context_event_refs(
             stimulus=stimulus,
             snapshot=snapshot,

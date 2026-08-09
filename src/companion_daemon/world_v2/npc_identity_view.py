@@ -49,6 +49,7 @@ def npc_identity_views(
     content_store: ImmutableLifeContentStore,
     relationships: tuple[NpcRelationshipReading, ...] | None = None,
     reviewed_identity_summaries: dict[str, str] | None = None,
+    npc_refs: tuple[str, ...] | None = None,
 ) -> tuple[NpcIdentityView, ...]:
     """Resolve stable NPC identities from exact content and ledger sources."""
 
@@ -58,7 +59,12 @@ def npc_identity_views(
     occurrences = tuple(getattr(projection, "world_occurrences", ()))
     experiences = tuple(getattr(projection, "experiences", ()))
     plans = tuple(getattr(projection, "plans", ()))
-    npcs = tuple(getattr(projection, "npcs", ()))
+    requested_refs = None if npc_refs is None else frozenset(npc_refs)
+    npcs = tuple(
+        item
+        for item in getattr(projection, "npcs", ())
+        if requested_refs is None or f"npc:{item.npc_id}" in requested_refs
+    )
     dynamic_edges = tuple(
         item.promotion_edge
         for item in npcs
