@@ -59,15 +59,16 @@ def npc_identity_views(
     occurrences = tuple(getattr(projection, "world_occurrences", ()))
     experiences = tuple(getattr(projection, "experiences", ()))
     plans = tuple(getattr(projection, "plans", ()))
+    all_npcs = tuple(getattr(projection, "npcs", ()))
     requested_refs = None if npc_refs is None else frozenset(npc_refs)
     npcs = tuple(
         item
-        for item in getattr(projection, "npcs", ())
+        for item in all_npcs
         if requested_refs is None or f"npc:{item.npc_id}" in requested_refs
     )
     dynamic_edges = tuple(
         item.promotion_edge
-        for item in npcs
+        for item in all_npcs
         if getattr(item, "source_event_ref", None) is not None
         and getattr(item, "promotion_edge", None) is not None
     )

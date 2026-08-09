@@ -394,15 +394,20 @@ class NpcEcology:
             )
         if not any(item.status == "active" for item in projection.npcs):
             return NpcEcologyResult(status="no_npcs", reason_code="npc_ecology.no_registered_npc")
+        pending_actor_event_id = self._pending_actor_event_ref(projection)
+        pending_npc_ref = self._pending_actor_npc_ref(
+            projection=projection,
+            actor_event_ref=pending_actor_event_id,
+        )
         selected_npc_ref = self._selected_npc_ref_from_projection(
             stimulus=stimulus,
             projection=projection,
+            preferred_npc_ref=(pending_npc_ref or stimulus.focus_npc_ref),
         )
         snapshot = self.snapshot(
             stimulus.cursor,
             focus_npc_ref=selected_npc_ref,
         )
-        pending_actor_event_id = self._pending_actor_event_ref(projection)
         if pending_actor_event_id is not None:
             actor_event_id = pending_actor_event_id
             identity = pending_actor_event_id.removeprefix("event:npc-ecology:actor:")
@@ -492,6 +497,23 @@ class NpcEcology:
                 continue
             if self._ledger.lookup_event_commit(f"event:npc-ecology:world:{identity}") is None:
                 return actor_ref
+        return None
+
+    @staticmethod
+    def _pending_actor_npc_ref(
+        *,
+        projection: object,
+        actor_event_ref: str | None,
+    ) -> str | None:
+        if actor_event_ref is None:
+            return None
+        for item in getattr(projection, "npcs", ()):
+            subjective = getattr(item, "subjective_state", None)
+            if (
+                subjective is not None
+                and subjective.pending_actor_event_ref == actor_event_ref
+            ):
+                return f"npc:{item.npc_id}"
         return None
 
     async def advance_once(
@@ -937,6 +959,7 @@ class NpcEcology:
         *,
         stimulus: NpcEcologyStimulus,
         projection: object,
+        preferred_npc_ref: str | None = None,
     ) -> str:
         """Select one active actor before compiling its source-closed capsule."""
 
@@ -949,10 +972,11 @@ class NpcEcology:
         )
         if not available:
             raise ValueError("NPC ecology has no active source-closed actor")
-        if stimulus.focus_npc_ref is not None:
-            if stimulus.focus_npc_ref not in available:
+        selected_ref = preferred_npc_ref or stimulus.focus_npc_ref
+        if selected_ref is not None:
+            if selected_ref not in available:
                 raise ValueError("NPC ecology focused actor is unavailable")
-            return stimulus.focus_npc_ref
+            return selected_ref
         offset = int(
             _digest(
                 {
