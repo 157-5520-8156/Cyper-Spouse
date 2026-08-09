@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 from companion_daemon.world_v2.character_interior.inbound_turn import (
     CharacterInteriorInboundDeliberationAdapter,
     InboundTurnFaculty,
