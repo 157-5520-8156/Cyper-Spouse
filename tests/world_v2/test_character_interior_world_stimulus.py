@@ -30,6 +30,8 @@ from companion_daemon.world_v2.character_interior.run_result import (
     CausalOpportunityWindow,
     CausalOpportunityIdentity,
     CausalOpportunityPolicy,
+    CausalOpportunityRuntime,
+    CausalOpportunitySource,
     causal_opportunity_policy_from_attempt_id,
 )
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
@@ -132,6 +134,50 @@ def test_causal_opportunity_merge_preserves_the_complete_source_set() -> None:
         first.merge(first.model_copy(update={"actor_ref": "actor:other"}))
     with pytest.raises(ValueError, match="same epoch"):
         first.merge(first.model_copy(update={"epoch": "epoch:2"}))
+
+
+def test_shared_causal_opportunity_runtime_routes_sources_deterministically() -> None:
+    policy = CausalOpportunityPolicy(merge_window_seconds=300, expiry_seconds=900)
+    runtime = CausalOpportunityRuntime(
+        world_id=WORLD_ID,
+        actor_ref="actor:companion",
+        purpose="world_stimulus_appraisal",
+    )
+    sources = (
+        CausalOpportunitySource(
+            source_ref="source:c",
+            process_ref="trigger:c",
+            process_kind="world_stimulus",
+            logical_time=NOW + timedelta(seconds=480),
+            policy=policy,
+        ),
+        CausalOpportunitySource(
+            source_ref="source:a",
+            process_ref="trigger:a",
+            process_kind="world_stimulus",
+            logical_time=NOW,
+            policy=policy,
+        ),
+        CausalOpportunitySource(
+            source_ref="source:b",
+            process_ref="trigger:b",
+            process_kind="world_stimulus",
+            logical_time=NOW + timedelta(seconds=240),
+            policy=policy,
+        ),
+    )
+
+    groups = runtime.group_sources(sources)
+
+    assert tuple(item.source_ref for item in groups[0]) == ("source:a", "source:b")
+    assert tuple(item.source_ref for item in groups[1]) == ("source:c",)
+    assert groups == runtime.group_sources(tuple(reversed(sources)))
+    identity = runtime.identity_for(groups[0])
+    assert identity.source_refs == ("source:a", "source:b")
+    assert identity.actor_ref == "actor:companion"
+    assert identity.purpose == "world_stimulus_appraisal"
+    assert not runtime.is_expired(groups[0], at=NOW + timedelta(seconds=899))
+    assert runtime.is_expired(groups[0], at=NOW + timedelta(seconds=900))
 
 
 def test_causal_opportunity_window_expiry_is_explicit_and_clock_only_is_not_an_epoch() -> None:

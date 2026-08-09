@@ -49,10 +49,10 @@ from .character_interior.run_result import (
     CausalOpportunityHealth,
     CausalOpportunityIdentity,
     CausalOpportunityPolicy,
-    CausalOpportunityWindow,
+    CausalOpportunityRuntime,
+    CausalOpportunitySource,
     DEFAULT_CAUSAL_OPPORTUNITY_POLICY,
     causal_opportunity_policy_from_attempt_id,
-    merge_causal_opportunity_identities,
 )
 from .event_identity import domain_idempotency_key
 from .ledger import LedgerPort
@@ -631,52 +631,22 @@ class _PrivateImpressionLocatedSource:
     source_event: WorldEvent
     policy: CausalOpportunityPolicy
 
+    @property
+    def route_source(self) -> CausalOpportunitySource:
+        return CausalOpportunitySource(
+            source_ref=self.source_event.event_id,
+            process_ref=self.process.trigger_id,
+            process_kind=self.process.process_kind,
+            logical_time=self.source_event.logical_time,
+            policy=self.policy,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class _PrivateImpressionOpportunityBatch:
     processes: tuple[TriggerProcess, ...]
     source_events: tuple[WorldEvent, ...]
     identity: CausalOpportunityIdentity
-
-
-def _group_private_impression_sources(
-    located_sources: tuple[_PrivateImpressionLocatedSource, ...],
-    *,
-    merge_window_seconds: int,
-) -> tuple[tuple[_PrivateImpressionLocatedSource, ...], ...]:
-    """Group appraisal sources around deterministic, non-transitive anchors."""
-
-    if merge_window_seconds < 0:
-        raise ValueError("causal opportunity merge window cannot be negative")
-    remaining = sorted(
-        located_sources,
-        key=lambda item: (
-            item.source_event.logical_time,
-            item.source_event.event_id,
-            item.process.trigger_id,
-        ),
-    )
-    groups: list[tuple[_PrivateImpressionLocatedSource, ...]] = []
-    while remaining:
-        anchor = remaining.pop(0)
-        group = [anchor]
-        retained: list[_PrivateImpressionLocatedSource] = []
-        for candidate in remaining:
-            if (
-                candidate.process.process_kind == anchor.process.process_kind
-                and candidate.policy.policy_ref == anchor.policy.policy_ref
-                and abs(
-                    (candidate.source_event.logical_time - anchor.source_event.logical_time)
-                    .total_seconds()
-                )
-                <= merge_window_seconds
-            ):
-                group.append(candidate)
-            else:
-                retained.append(candidate)
-        remaining = retained
-        groups.append(tuple(group))
-    return tuple(groups)
 
 
 def _private_impression_opportunity_identity(
@@ -696,31 +666,15 @@ def _private_impression_opportunity_identity(
     if not canonical_refs:
         raise ValueError("private impression opportunity requires source refs")
     selected_policy = policy or DEFAULT_CAUSAL_OPPORTUNITY_POLICY
-    identity = CausalOpportunityIdentity.from_source_refs(
+    runtime = CausalOpportunityRuntime(
         world_id=world_id,
         actor_ref=actor_ref,
         purpose=PRIVATE_IMPRESSION_PURPOSE,
-        source_refs=(canonical_refs[0],),
-        epoch=epoch or canonical_refs[0],
-        contract_version=CAUSAL_OPPORTUNITY_CONTRACT_VERSION,
-        policy=selected_policy,
     )
-    return merge_causal_opportunity_identities(
-        [
-            identity,
-            *(
-                CausalOpportunityIdentity.from_source_refs(
-                    world_id=world_id,
-                    actor_ref=actor_ref,
-                    purpose=PRIVATE_IMPRESSION_PURPOSE,
-                    source_refs=(ref,),
-                    epoch=identity.epoch,
-                    contract_version=CAUSAL_OPPORTUNITY_CONTRACT_VERSION,
-                    policy=selected_policy,
-                )
-                for ref in canonical_refs[1:]
-            ),
-        ]
+    return runtime.identity_for_refs(
+        canonical_refs,
+        epoch=epoch or canonical_refs[0],
+        policy=selected_policy,
     )
 
 
@@ -853,7 +807,28 @@ class PrivateImpressionTriggerRuntime:
             merge_window_seconds=merge_window_seconds,
             expiry_seconds=expiry_seconds,
         )
+        self._opportunity_runtime = CausalOpportunityRuntime(
+            world_id=ledger.world_id,
+            actor_ref=companion_actor_ref,
+            purpose=PRIVATE_IMPRESSION_PURPOSE,
+            contract_version=CAUSAL_OPPORTUNITY_CONTRACT_VERSION,
+        )
         self._source = source
+
+    def _route_groups(
+        self,
+        located_sources: tuple[_PrivateImpressionLocatedSource, ...],
+    ) -> tuple[tuple[_PrivateImpressionLocatedSource, ...], ...]:
+        by_process_ref = {
+            item.process.trigger_id: item
+            for item in located_sources
+        }
+        return tuple(
+            tuple(by_process_ref[item.process_ref] for item in group)
+            for group in self._opportunity_runtime.group_sources(
+                tuple(item.route_source for item in located_sources)
+            )
+        )
 
     async def advance_due_once(self) -> PrivateImpressionRunResult:
         """Route one due private-impression opportunity through this seam."""
@@ -950,10 +925,23 @@ class PrivateImpressionTriggerRuntime:
                 ),
             )
             return result(work_status="accepted" if accepted else "no_change")
-        if CausalOpportunityWindow(
-            expires_at=min(item.logical_time for item in batch.source_events)
-            + timedelta(seconds=policy.expiry_seconds)
-        ).is_expired(before.logical_time or source_event.logical_time):
+        if self._opportunity_runtime.is_expired(
+            tuple(
+                CausalOpportunitySource(
+                    source_ref=source_event_item.event_id,
+                    process_ref=process_item.trigger_id,
+                    process_kind=process_item.process_kind,
+                    logical_time=source_event_item.logical_time,
+                    policy=policy,
+                )
+                for process_item, source_event_item in zip(
+                    batch.processes,
+                    batch.source_events,
+                    strict=True,
+                )
+            ),
+            at=before.logical_time or source_event.logical_time,
+        ):
             await self._complete_opportunity_processes(
                 processes=active_processes,
                 source_events=source_events_by_trigger,
@@ -1102,10 +1090,7 @@ class PrivateImpressionTriggerRuntime:
                 )
             )
         located = tuple(located_items)
-        groups = _group_private_impression_sources(
-            located,
-            merge_window_seconds=policy.merge_window_seconds,
-        )
+        groups = self._route_groups(located)
         selected = next(
             (
                 group
@@ -1184,13 +1169,14 @@ class PrivateImpressionTriggerRuntime:
                     if lineage.causal_policy_ref is not None
                     else DEFAULT_CAUSAL_OPPORTUNITY_POLICY
                 )
-                identity = CausalOpportunityIdentity.from_source_refs(
+                identity = CausalOpportunityRuntime(
                     world_id=lineage.causal_world_id,
                     actor_ref=lineage.causal_actor_ref,
                     purpose=lineage.purpose,
-                    source_refs=lineage.causal_source_refs,
-                    epoch=lineage.causal_epoch,
                     contract_version=lineage.causal_contract_version,
+                ).identity_for_refs(
+                    lineage.causal_source_refs,
+                    epoch=lineage.causal_epoch,
                     policy=policy,
                 )
             except (TypeError, ValueError):
@@ -1244,10 +1230,7 @@ class PrivateImpressionTriggerRuntime:
             by_policy.setdefault(item.policy.policy_ref, []).append(item)
         for policy_ref in sorted(by_policy):
             policy_sources = tuple(by_policy[policy_ref])
-            for group in _group_private_impression_sources(
-                policy_sources,
-                merge_window_seconds=policy_sources[0].policy.merge_window_seconds,
-            ):
+            for group in self._route_groups(tuple(policy_sources)):
                 source_refs = tuple(item.source_event.event_id for item in group)
                 identity = _private_impression_opportunity_identity(
                     world_id=self._ledger.world_id,

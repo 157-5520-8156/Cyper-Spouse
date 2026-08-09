@@ -20,7 +20,7 @@ from ..fact_memory_draft import (
 from ..schema_core import canonicalize_json_value
 from .contracts import InnerDecision, InteriorOpportunity, _InteriorCapabilityManifest
 from .purpose_context import InteriorPurposeContext
-from .run_result import CausalOpportunityIdentity
+from .run_result import CausalOpportunityRuntime
 
 
 _FACT_MEMORY_PURPOSE = "fact_memory_retention"
@@ -80,13 +80,11 @@ def _memory_opportunity(
         + hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
         source_refs=context.source_refs,
     )
-    opportunity_identity = CausalOpportunityIdentity.from_source_refs(
+    opportunity_identity = CausalOpportunityRuntime(
         world_id=world_id,
         actor_ref=actor_ref,
         purpose=purpose,
-        source_refs=context.source_refs,
-        epoch=context.trigger_ref,
-    )
+    ).identity_for_refs(context.source_refs, epoch=context.trigger_ref)
     return InteriorOpportunity(
         opportunity_ref=opportunity_identity.opportunity_ref,
         inner_turn_ref=context.inner_turn_ref,

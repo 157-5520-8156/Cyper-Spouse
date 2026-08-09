@@ -189,7 +189,7 @@ class RecordedCharacterInteriorTurnLineage(FrozenModel):
                 # contract while the CharacterInterior package is still
                 # initializing.  The identity implementation remains the
                 # single hash authority; this avoids a package-init cycle.
-                from .character_interior.run_result import CausalOpportunityIdentity
+                from .character_interior.run_result import CausalOpportunityRuntime
                 from .character_interior.run_result import CausalOpportunityPolicy
                 from .character_interior.run_result import DEFAULT_CAUSAL_OPPORTUNITY_POLICY
 
@@ -198,13 +198,14 @@ class RecordedCharacterInteriorTurnLineage(FrozenModel):
                     if self.causal_policy_ref is not None
                     else DEFAULT_CAUSAL_OPPORTUNITY_POLICY
                 )
-                identity = CausalOpportunityIdentity.from_source_refs(
+                identity = CausalOpportunityRuntime(
                     world_id=self.causal_world_id,
                     actor_ref=self.causal_actor_ref,
                     purpose=self.purpose,
-                    source_refs=self.causal_source_refs,
-                    epoch=self.causal_epoch,
                     contract_version=self.causal_contract_version,
+                ).identity_for_refs(
+                    self.causal_source_refs,
+                    epoch=self.causal_epoch,
                     policy=policy,
                 )
             except (TypeError, ValueError) as exc:

@@ -395,8 +395,12 @@ _PROVIDER_CONTRACT_POLICY_MODULE = "world_v2/character_interior_architecture_gua
 # The inbound wire is a separately owned migration surface.  Keep its
 # historical identity construction visible in the final report rather than
 # changing that B-owned file from this worktree; every other production
-# consumer must use ``CausalOpportunityIdentity.from_source_refs``.
+# consumer must use ``CausalOpportunityRuntime``.  Keep the historical inbound
+# constructor visible in the final report rather than changing that B-owned
+# file from this worktree; every other production consumer must cross the
+# runtime seam.
 _CAUSAL_IDENTITY_HANDOFF = "world_v2/character_interior/inbound_turn.py"
+_CAUSAL_OPPORTUNITY_RUNTIME_MODULE = "world_v2/character_interior/run_result.py"
 _CAUSAL_OPPORTUNITY_LANES = frozenset({"_world_stimulus", "_private_impression"})
 
 _INBOUND_PRIVATE_AUTHOR = "_InboundCharacterAuthor"
@@ -443,6 +447,10 @@ def _inside_character_interior(path: Path) -> bool:
 
 def _is_causal_identity_handoff(path: Path) -> bool:
     return path.as_posix().endswith(_CAUSAL_IDENTITY_HANDOFF)
+
+
+def _is_causal_opportunity_runtime(path: Path) -> bool:
+    return path.as_posix().endswith(_CAUSAL_OPPORTUNITY_RUNTIME_MODULE)
 
 
 def _is_production_composition_root(path: Path) -> bool:
@@ -1250,18 +1258,33 @@ def _scan_causal_opportunity_bypasses(
                 for target in node.targets:
                     if isinstance(target, ast.Name):
                         aliases.add(target.id)
-        if (
+        direct_identity_constructor = (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
             and node.func.id in identity_aliases
+        )
+        direct_identity_factory = (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "from_source_refs"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in identity_aliases
+        )
+        if (
+            (direct_identity_constructor or direct_identity_factory)
             and not _is_causal_identity_handoff(path)
+            and not _is_causal_opportunity_runtime(path)
         ):
             violations.append(
                 CharacterInteriorArchitectureViolation(
                     path,
                     node.lineno,
                     "legacy_causal_opportunity_identity_constructor",
-                    node.func.id,
+                    (
+                        node.func.id
+                        if isinstance(node.func, ast.Name)
+                        else f"{node.func.value.id}.{node.func.attr}"
+                    ),
                 )
             )
         if (

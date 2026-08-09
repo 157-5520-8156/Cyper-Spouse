@@ -23,7 +23,7 @@ from ..schemas import ProjectionCursor, TriggerProcess, WorldEvent
 from .contracts import InnerDecision, InteriorOpportunity, _InteriorCapabilityManifest
 from .core import CharacterInterior
 from .audit import recorded_character_interior_lineage
-from .run_result import CausalOpportunityIdentity
+from .run_result import CausalOpportunityRuntime
 
 
 _PURPOSE = "expression_reconsideration"
@@ -121,13 +121,11 @@ class CharacterInteriorExpressionReconsiderationReviewer:
             source_refs=source_refs,
             old_private_turn_state=old_private_turn_state,
         )
-        opportunity_identity = CausalOpportunityIdentity.from_source_refs(
+        opportunity_identity = CausalOpportunityRuntime(
             world_id=observation_event.world_id,
             actor_ref=self._actor_ref,
             purpose=_PURPOSE,
-            source_refs=source_refs,
-            epoch=observation_event.event_id,
-        )
+        ).identity_for_refs(source_refs, epoch=observation_event.event_id)
         opportunity = InteriorOpportunity(
             opportunity_ref=opportunity_identity.opportunity_ref,
             inner_turn_ref=(

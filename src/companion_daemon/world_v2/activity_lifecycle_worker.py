@@ -18,7 +18,7 @@ from .activity_lifecycle_runtime import (
 from .character_interior import CharacterInterior, InteriorOpportunity
 from .character_interior.audit import recorded_character_interior_model_result
 from .character_interior.contracts import _InteriorCapabilityManifest
-from .character_interior.run_result import CausalOpportunityIdentity
+from .character_interior.run_result import CausalOpportunityRuntime
 from .life_ecology_activity import ActivityOpeningCatalog
 from .schema_core import FrozenModel
 from .proposal_audit_schemas import ModelResultRecordedPayload
@@ -195,13 +195,11 @@ class ActivityLifecycleWorker:
             payload_hash=capability_hash,
             source_refs=(wake_event_ref,),
         )
-        opportunity_identity = CausalOpportunityIdentity.from_source_refs(
+        opportunity_identity = CausalOpportunityRuntime(
             world_id=self._ledger.world_id,
             actor_ref=self._owner_actor_ref,
             purpose="activity_lifecycle_choice",
-            source_refs=(wake_event_ref,),
-            epoch=wake_event_ref,
-        )
+        ).identity_for_refs((wake_event_ref,), epoch=wake_event_ref)
         cursor = ProjectionCursor(
             world_revision=projection.world_revision,
             deliberation_revision=projection.deliberation_revision,

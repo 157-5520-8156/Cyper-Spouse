@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal
 
 from pydantic import Field, model_validator
@@ -75,6 +75,134 @@ DEFAULT_CAUSAL_OPPORTUNITY_POLICY = CausalOpportunityPolicy(
     merge_window_seconds=300,
     expiry_seconds=7 * 24 * 60 * 60,
 )
+
+
+class CausalOpportunitySource(FrozenModel):
+    """Typed source coordinates consumed by the shared routing seam."""
+
+    source_ref: str = Field(min_length=1)
+    process_ref: str = Field(min_length=1)
+    process_kind: str = Field(min_length=1)
+    logical_time: datetime
+    policy: CausalOpportunityPolicy
+
+
+class CausalOpportunityRuntime:
+    """Pure source-to-opportunity routing shared by every producer adapter.
+
+    This module owns only deterministic visibility coordinates: grouping,
+    identity construction, and expiry.  Ledger claim/CAS and the Character
+    Interior consumer remain in the producer adapter that owns their typed
+    source authority.
+    """
+
+    def __init__(
+        self,
+        *,
+        world_id: str,
+        actor_ref: str,
+        purpose: str,
+        contract_version: str = CAUSAL_OPPORTUNITY_CONTRACT_VERSION,
+    ) -> None:
+        if not world_id or not actor_ref or not purpose:
+            raise ValueError("causal opportunity runtime coordinates are required")
+        self._world_id = world_id
+        self._actor_ref = actor_ref
+        self._purpose = purpose
+        self._contract_version = contract_version
+
+    def group_sources(
+        self,
+        sources: tuple[CausalOpportunitySource, ...] | list[CausalOpportunitySource],
+    ) -> tuple[tuple[CausalOpportunitySource, ...], ...]:
+        """Group same-kind sources around deterministic, non-transitive anchors."""
+
+        remaining = sorted(
+            sources,
+            key=lambda item: (item.logical_time, item.source_ref, item.process_ref),
+        )
+        groups: list[tuple[CausalOpportunitySource, ...]] = []
+        while remaining:
+            anchor = remaining.pop(0)
+            group = [anchor]
+            retained: list[CausalOpportunitySource] = []
+            for candidate in remaining:
+                if (
+                    candidate.process_kind == anchor.process_kind
+                    and candidate.policy.policy_ref == anchor.policy.policy_ref
+                    and abs(
+                        (candidate.logical_time - anchor.logical_time).total_seconds()
+                    )
+                    <= anchor.policy.merge_window_seconds
+                ):
+                    group.append(candidate)
+                else:
+                    retained.append(candidate)
+            remaining = retained
+            groups.append(tuple(group))
+        return tuple(groups)
+
+    def identity_for(
+        self,
+        sources: tuple[CausalOpportunitySource, ...] | list[CausalOpportunitySource],
+        *,
+        epoch: str | None = None,
+    ) -> "CausalOpportunityIdentity":
+        """Build one canonical identity from a routed source group."""
+
+        if not sources:
+            raise ValueError("causal opportunity identity needs at least one source")
+        policies = {source.policy.policy_ref for source in sources}
+        if len(policies) != 1:
+            raise ValueError("causal opportunity sources must use one policy")
+        ordered = tuple(
+            sorted(sources, key=lambda item: (item.logical_time, item.source_ref, item.process_ref))
+        )
+        return self.identity_for_refs(
+            tuple(source.source_ref for source in ordered),
+            epoch=epoch or ordered[0].source_ref,
+            policy=ordered[0].policy,
+        )
+
+    def identity_for_refs(
+        self,
+        source_refs: tuple[str, ...] | list[str],
+        *,
+        epoch: str,
+        policy: CausalOpportunityPolicy | None = None,
+    ) -> "CausalOpportunityIdentity":
+        """Build the same identity when replay has refs but not source times."""
+
+        if not source_refs:
+            raise ValueError("causal opportunity identity needs at least one source")
+        selected_policy = policy or DEFAULT_CAUSAL_OPPORTUNITY_POLICY
+        return CausalOpportunityIdentity.from_source_refs(
+            world_id=self._world_id,
+            actor_ref=self._actor_ref,
+            purpose=self._purpose,
+            source_refs=source_refs,
+            epoch=epoch,
+            contract_version=self._contract_version,
+            policy=selected_policy,
+        )
+
+    def is_expired(
+        self,
+        sources: tuple[CausalOpportunitySource, ...] | list[CausalOpportunitySource],
+        *,
+        at: datetime,
+    ) -> bool:
+        """Evaluate expiry from the earliest source and its durable policy."""
+
+        if not sources:
+            raise ValueError("causal opportunity expiry needs at least one source")
+        policies = {source.policy.policy_ref for source in sources}
+        if len(policies) != 1:
+            raise ValueError("causal opportunity sources must use one policy")
+        anchor = min(source.logical_time for source in sources)
+        return CausalOpportunityWindow(
+            expires_at=anchor + timedelta(seconds=sources[0].policy.expiry_seconds),
+        ).is_expired(at)
 
 
 def causal_opportunity_policy_from_attempt_id(
@@ -283,6 +411,8 @@ __all__ = [
     "CausalOpportunityHealth",
     "CausalOpportunityIdentity",
     "CausalOpportunityPolicy",
+    "CausalOpportunityRuntime",
+    "CausalOpportunitySource",
     "CharacterInteriorRunResult",
     "DEFAULT_CAUSAL_OPPORTUNITY_POLICY",
     "canonical_source_refs",

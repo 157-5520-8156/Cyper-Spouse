@@ -87,11 +87,11 @@ from .run_result import (
     CausalOpportunityHealth,
     CausalOpportunityIdentity,
     CausalOpportunityPolicy,
-    CausalOpportunityWindow,
+    CausalOpportunityRuntime,
+    CausalOpportunitySource,
     CharacterInteriorRunResult,
     causal_opportunity_policy_from_attempt_id,
     DEFAULT_CAUSAL_OPPORTUNITY_POLICY,
-    merge_causal_opportunity_identities,
 )
 from .core import CharacterInterior
 from .experience_transitions import (
@@ -310,50 +310,15 @@ class _WorldStimulusLocatedSource:
     source_event: WorldEvent
     policy: CausalOpportunityPolicy
 
-
-def _group_world_stimulus_sources(
-    located_sources: tuple[_WorldStimulusLocatedSource, ...],
-    *,
-    merge_window_seconds: int,
-) -> tuple[tuple[_WorldStimulusLocatedSource, ...], ...]:
-    """Group sources with one deterministic earliest-source anchor.
-
-    The window is measured from the earliest source in each group rather than
-    transitively across a chain.  Thus 0, 240, 480 with a 300-second window
-    becomes (0, 240) and (480), independent of projection/input order.
-    """
-
-    if merge_window_seconds < 0:
-        raise ValueError("causal opportunity merge window cannot be negative")
-    remaining = sorted(
-        located_sources,
-        key=lambda item: (
-            item.source_event.logical_time,
-            item.source_event.event_id,
-            item.process.trigger_id,
-        ),
-    )
-    groups: list[tuple[_WorldStimulusLocatedSource, ...]] = []
-    while remaining:
-        anchor = remaining.pop(0)
-        group = [anchor]
-        retained: list[_WorldStimulusLocatedSource] = []
-        for candidate in remaining:
-            if (
-                candidate.process.process_kind == anchor.process.process_kind
-                and candidate.policy.policy_ref == anchor.policy.policy_ref
-                and abs(
-                    (candidate.source_event.logical_time - anchor.source_event.logical_time)
-                    .total_seconds()
-                )
-                <= merge_window_seconds
-            ):
-                group.append(candidate)
-            else:
-                retained.append(candidate)
-        remaining = retained
-        groups.append(tuple(group))
-    return tuple(groups)
+    @property
+    def route_source(self) -> CausalOpportunitySource:
+        return CausalOpportunitySource(
+            source_ref=self.source_event.event_id,
+            process_ref=self.process.trigger_id,
+            process_kind=self.process.process_kind,
+            logical_time=self.source_event.logical_time,
+            policy=self.policy,
+        )
 
 
 class _WorldStimulusRelationshipSettlement(Protocol):
@@ -1283,6 +1248,12 @@ class CharacterInteriorWorldStimulusRuntime:
             merge_window_seconds=merge_window_seconds,
             expiry_seconds=expiry_seconds,
         )
+        self._opportunity_runtime = CausalOpportunityRuntime(
+            world_id=ledger.world_id,
+            actor_ref=companion_actor_ref,
+            purpose=PURPOSE,
+            contract_version=CAUSAL_OPPORTUNITY_CONTRACT_VERSION,
+        )
         # Retain these names as read-only diagnostic compatibility for old
         # fixtures; routing uses the immutable policy below.
         self._merge_window_seconds = self._policy.merge_window_seconds
@@ -1294,6 +1265,21 @@ class CharacterInteriorWorldStimulusRuntime:
         # short wall-clock defer.  No semantic choice or world fact is stored
         # here, and a restart simply reuses the durable trigger lease.
         self._technical_failure_deferred_until: dict[str, float] = {}
+
+    def _route_groups(
+        self,
+        located_sources: tuple[_WorldStimulusLocatedSource, ...],
+    ) -> tuple[tuple[_WorldStimulusLocatedSource, ...], ...]:
+        by_process_ref = {
+            item.process.trigger_id: item
+            for item in located_sources
+        }
+        return tuple(
+            tuple(by_process_ref[item.process_ref] for item in group)
+            for group in self._opportunity_runtime.group_sources(
+                tuple(item.route_source for item in located_sources)
+            )
+        )
 
     async def advance_due_once(self) -> CharacterInteriorRunResult:
         """Route one due opportunity for the background producer/consumer seam."""
@@ -1447,10 +1433,7 @@ class CharacterInteriorWorldStimulusRuntime:
             unresolved_by_policy.setdefault(item.policy.policy_ref, []).append(item)
         for policy_ref in sorted(unresolved_by_policy):
             policy_sources = tuple(unresolved_by_policy[policy_ref])
-            for group in _group_world_stimulus_sources(
-                policy_sources,
-                merge_window_seconds=policy_sources[0].policy.merge_window_seconds,
-            ):
+            for group in self._route_groups(tuple(policy_sources)):
                 anchor = group[0].process
                 identity = self._opportunity_identity(
                     process=anchor,
@@ -1488,13 +1471,14 @@ class CharacterInteriorWorldStimulusRuntime:
                     if lineage.causal_policy_ref is not None
                     else DEFAULT_CAUSAL_OPPORTUNITY_POLICY
                 )
-                identity = CausalOpportunityIdentity.from_source_refs(
+                identity = CausalOpportunityRuntime(
                     world_id=lineage.causal_world_id,
                     actor_ref=lineage.causal_actor_ref,
                     purpose=lineage.purpose,
-                    source_refs=lineage.causal_source_refs,
-                    epoch=lineage.causal_epoch,
                     contract_version=lineage.causal_contract_version,
+                ).identity_for_refs(
+                    lineage.causal_source_refs,
+                    epoch=lineage.causal_epoch,
                     policy=policy,
                 )
             except (TypeError, ValueError):
@@ -1911,7 +1895,7 @@ class CharacterInteriorWorldStimulusRuntime:
                     await self._source_event(candidate, cursor=_cursor(projection)),
                 )
             )
-        groups = _group_world_stimulus_sources(
+        groups = self._route_groups(
             tuple(
                 _WorldStimulusLocatedSource(
                     process=candidate,
@@ -1919,8 +1903,7 @@ class CharacterInteriorWorldStimulusRuntime:
                     policy=policy,
                 )
                 for candidate, source_event in located
-            ),
-            merge_window_seconds=policy.merge_window_seconds,
+            )
         )
         selected_group = next(
             (
@@ -1952,10 +1935,19 @@ class CharacterInteriorWorldStimulusRuntime:
         at: datetime,
         policy: CausalOpportunityPolicy,
     ) -> bool:
-        anchor = min(event.logical_time for event in source_events)
-        return CausalOpportunityWindow(
-            expires_at=anchor + timedelta(seconds=policy.expiry_seconds),
-        ).is_expired(at)
+        return self._opportunity_runtime.is_expired(
+            tuple(
+                CausalOpportunitySource(
+                    source_ref=event.event_id,
+                    process_ref=event.event_id,
+                    process_kind="world_stimulus",
+                    logical_time=event.logical_time,
+                    policy=policy,
+                )
+                for event in source_events
+            ),
+            at=at,
+        )
 
     async def _complete_opportunity_processes(
         self,
@@ -2087,19 +2079,10 @@ class CharacterInteriorWorldStimulusRuntime:
         canonical_refs = tuple(sorted(set(source_refs)))
         if not canonical_refs:
             raise ValueError("causal opportunity requires source refs")
-        return merge_causal_opportunity_identities(
-            [
-                CausalOpportunityIdentity.from_source_refs(
-                    world_id=self._ledger.world_id,
-                    actor_ref=self._companion_actor_ref,
-                    purpose=PURPOSE,
-                    source_refs=(source_ref,),
-                    epoch=canonical_refs[0],
-                    contract_version=CAUSAL_OPPORTUNITY_CONTRACT_VERSION,
-                    policy=policy or self._policy_for_process(process),
-                )
-                for source_ref in canonical_refs
-            ]
+        return self._opportunity_runtime.identity_for_refs(
+            canonical_refs,
+            epoch=canonical_refs[0],
+            policy=policy or self._policy_for_process(process),
         )
 
     async def _attach_opportunity_lineage(
@@ -2744,13 +2727,14 @@ class CharacterInteriorWorldStimulusRuntime:
                     if lineage.causal_policy_ref is not None
                     else DEFAULT_CAUSAL_OPPORTUNITY_POLICY
                 )
-                durable_identity = CausalOpportunityIdentity.from_source_refs(
+                durable_identity = CausalOpportunityRuntime(
                     world_id=lineage.causal_world_id,
                     actor_ref=lineage.causal_actor_ref,
                     purpose=lineage.purpose,
-                    source_refs=lineage.causal_source_refs,
-                    epoch=lineage.causal_epoch,
                     contract_version=lineage.causal_contract_version,
+                ).identity_for_refs(
+                    lineage.causal_source_refs,
+                    epoch=lineage.causal_epoch,
                     policy=policy,
                 )
             except (TypeError, ValueError):

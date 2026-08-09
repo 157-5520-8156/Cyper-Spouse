@@ -854,7 +854,7 @@ def test_guard_rejects_obvious_causal_opportunity_alias_bypasses(
     assert any(item.rule == "scattered_causal_opportunity_bypass" for item in violations)
 
 
-def test_guard_rejects_direct_causal_identity_constructor_but_allows_shared_factory(
+def test_guard_rejects_direct_identity_factories_but_allows_shared_runtime(
     tmp_path: Path,
 ) -> None:
     direct = tmp_path / "consumer.py"
@@ -868,6 +868,15 @@ def test_guard_rejects_direct_causal_identity_constructor_but_allows_shared_fact
     factory = tmp_path / "factory_consumer.py"
     factory.write_text(
         "from companion_daemon.world_v2.character_interior.run_result import "
+        "CausalOpportunityRuntime\n"
+        "identity = CausalOpportunityRuntime(world_id='w', actor_ref='a', "
+        "purpose='p').identity_for_refs(('s',), epoch='s', "
+        "policy=DEFAULT_CAUSAL_OPPORTUNITY_POLICY)\n",
+        encoding="utf-8",
+    )
+    direct_factory = tmp_path / "direct_factory_consumer.py"
+    direct_factory.write_text(
+        "from companion_daemon.world_v2.character_interior.run_result import "
         "CausalOpportunityIdentity\n"
         "identity = CausalOpportunityIdentity.from_source_refs(world_id='w', "
         "actor_ref='a', purpose='p', source_refs=('s',), epoch='s')\n",
@@ -879,6 +888,10 @@ def test_guard_rejects_direct_causal_identity_constructor_but_allows_shared_fact
     assert any(
         item.rule == "legacy_causal_opportunity_identity_constructor"
         for item in direct_violations
+    )
+    assert any(
+        item.rule == "legacy_causal_opportunity_identity_constructor"
+        for item in scan_character_interior_source(direct_factory)
     )
     assert scan_character_interior_source(factory) == ()
 
