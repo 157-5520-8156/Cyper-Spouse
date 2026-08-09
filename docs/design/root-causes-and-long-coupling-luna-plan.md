@@ -1370,3 +1370,7 @@ commit：hash
 - 旧生产 PID 早于该提交，未在本轮重启或替换；其历史 health/ValueError 不能证明当前源码已在线部署，也不能
   被这次隔离修复宣称为生产资格。真实 DeepSeek/QQ 100 样本、自由对聊与 24 小时 soak 仍保持
   `manual_only`/`qualification_incomplete`，须经过 §20 人工发布门。
+
+- 在该提交后又执行了一次只使用临时 SQLite、loopback capture、loopback role 的短 smoke：2 次输入、1 次计划
+  重启，失败数为 0，重复可见 effect 为 `0`，冷重放与 live projection 一致。该运行只验证当前隔离 scheduler/
+  restart/replay 闭环，仍不包含真实 provider、真实 QQ 或自主性质量判断，不能改变上述资格状态。
