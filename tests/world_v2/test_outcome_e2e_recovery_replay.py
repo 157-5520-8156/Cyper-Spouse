@@ -20,6 +20,7 @@ from world_v2_application import (
 )
 
 from companion_daemon.world_v2.character_interior.inbound_wire import _ExpressionDraftWire
+from companion_daemon.world_v2.character_interior.run_result import CausalOpportunityIdentity
 from companion_daemon.world_v2.deliberation import ModelRoute, RouteRequest
 from companion_daemon.world_v2.expression_draft import (
     PRODUCTION_TEXT_ONLY_EXPRESSION_CAPABILITIES,
@@ -345,5 +346,24 @@ async def test_outcome_restart_recovers_world_result_and_next_turn_context(tmp_p
         kinds = [item.event.event_type for item in evidence.events]
         assert kinds.count("OutcomeObservationRecorded") == 1
         assert kinds.count("WorldOccurrenceSettled") == 1
+        outcome_audits = tuple(
+            item
+            for item in evidence.projection.model_result_audits
+            if json.loads(item.audit_json)
+            .get("character_interior_lineage", {})
+            .get("purpose")
+            == "outcome_selection"
+        )
+        assert len(outcome_audits) == 1
+        outcome_lineage = json.loads(outcome_audits[0].audit_json)[
+            "character_interior_lineage"
+        ]
+        assert outcome_lineage["opportunity_ref"] == CausalOpportunityIdentity(
+            world_id=WORLD_ID,
+            actor_ref="agent:companion",
+            purpose="outcome_selection",
+            source_refs=("event:outcome-observation:observation:e2e:tea-ready",),
+            epoch="event:outcome-observation:observation:e2e:tea-ready",
+        ).opportunity_ref
     finally:
         ledger.close()

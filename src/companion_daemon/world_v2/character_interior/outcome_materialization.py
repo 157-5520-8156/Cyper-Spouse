@@ -14,6 +14,7 @@ from ..schemas import OutcomeObservationProjection, ProjectionCursor
 from .contracts import InteriorOpportunity, _InteriorCapabilityManifest
 from .core import CharacterInterior
 from .audit import recorded_character_interior_lineage
+from .run_result import CausalOpportunityIdentity
 
 
 _CONTRACT = "character-interior-outcome-materialization.1"
@@ -100,9 +101,16 @@ class _CharacterInteriorOutcomeMaterializer:
             deliberation_revision=request.evaluated_deliberation_revision,
             ledger_sequence=request.evaluated_ledger_sequence,
         )
+        opportunity_ref = CausalOpportunityIdentity(
+            world_id=self._ledger.world_id,
+            actor_ref=self._actor_ref,
+            purpose="outcome_selection",
+            source_refs=(request.trigger_ref,),
+            epoch=request.trigger_ref,
+        ).opportunity_ref
         decision = await self._interior.consider(
             InteriorOpportunity(
-                opportunity_ref="opportunity:outcome-observation:" + request.call_id,
+                opportunity_ref=opportunity_ref,
                 inner_turn_ref="inner-turn:outcome-observation:" + request.attempt_id,
                 world_id=self._ledger.world_id,
                 actor_ref=self._actor_ref,
