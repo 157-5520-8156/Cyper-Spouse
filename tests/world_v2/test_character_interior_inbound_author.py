@@ -57,6 +57,9 @@ from companion_daemon.world_v2.proposal_envelope import (
     DecisionProposal,
     ProposalEvidenceRef,
 )
+from companion_daemon.world_v2.character_interior.run_result import (
+    CausalOpportunityIdentity,
+)
 from companion_daemon.world_v2.recall_embedding import OpenAICompatibleRecallEmbedding
 from companion_daemon.world_v2.recall_index import FeatureHashRecallEmbedding
 from companion_daemon.world_v2.character_interior.inbound_author import (
@@ -5166,14 +5169,26 @@ async def test_inbound_expression_uses_one_generation_call_per_turn(
     assert len(provider.calls) == turns
     assert consider_calls == turns
     model_audits = [
-        json.loads(item.event.payload()["audit_json"])
+        (item.event.payload(), json.loads(item.event.payload()["audit_json"]))
         for item in evidence.events
         if item.event.event_type == "ModelResultRecorded"
     ]
     # Each visible expression has one immutable provider result. Durable
     # appraisal acceptance may continue in the background.
     assert len(model_audits) == turns
-    assert all(item["status"] == "proposal_validated" for item in model_audits)
+    assert all(audit["status"] == "proposal_validated" for _payload, audit in model_audits)
+    for payload, audit in model_audits:
+        expected_opportunity_ref = CausalOpportunityIdentity(
+            world_id=_config().world_id,
+            actor_ref=_config().companion_actor_ref,
+            purpose="inbound_turn",
+            source_refs=(payload["trigger_ref"],),
+            epoch=payload["trigger_ref"],
+        ).opportunity_ref
+        assert (
+            audit["character_interior_lineage"]["opportunity_ref"]
+            == expected_opportunity_ref
+        )
 
 
 @pytest.mark.asyncio

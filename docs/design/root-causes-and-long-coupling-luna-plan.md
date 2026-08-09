@@ -1689,3 +1689,17 @@ commit：hash
   L4 的 user/Life/NPC/Memory/Perception/Plan 全源统一、merge/expiry/epoch 矩阵，以及真实 provider 首次
   成功率、正式 QQ 回执、自由对聊质量和 24 小时 soak 仍保持
   `declaration_only`/`manual_only`/`qualification_incomplete`。
+
+### 2026-08-09：L4 inbound source→opportunity lineage 薄片
+
+- 普通入站 `CharacterInterior` 原先把 `opportunity_ref` 绑定到包含 `attempt_id` 的临时身份，导致同一
+  Observation 的 recovery、recall continuation、stream head/tail 与 durable lineage 无法共享一个稳定的
+  source→opportunity 坐标。现在由 `world_id + actor_ref + purpose + trigger source + source epoch`
+  派生 `causal-opportunity.1`；provider attempt identity 仍单独保留给 transport/recovery 审计。
+- 这只统一 lineage/重放诊断，不替角色决定 recall、表达、情绪或关系，也不改变 CharacterInterior、source
+  closure、CAS、Action acceptance 和 effect-once authority。新的 Observation 仍以新的 trigger source 开启
+  新机会；同一 source 的重试/续接共享原机会。
+- 红测先验证 production-shaped inbound host audit 仍写入旧临时身份，绿测验证 durable `ModelResult` lineage
+  写入 canonical opportunity；inbound author、wire、durable-lineage 全套共 `466 passed`，ruff/diff-check
+  通过。L4 其他 user/Life/NPC/Memory/Perception/Plan producer/consumer、merge/expiry/epoch 仍未统一，
+  真实 provider/QQ/自由对聊与 24 小时资格状态不变。

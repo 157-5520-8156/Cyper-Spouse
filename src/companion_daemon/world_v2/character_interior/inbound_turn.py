@@ -45,6 +45,7 @@ from .contracts import (
 )
 from .core import CharacterInterior
 from .ports import _InteriorRoleRequest, _RoleResultContractError
+from .run_result import CausalOpportunityIdentity
 
 
 _CACHE_LIMIT = 128
@@ -709,6 +710,17 @@ class CharacterInteriorInboundDeliberationAdapter:
                 "cursor": cursor.model_dump(mode="json"),
             }
         )
+        # The inbound trigger is the accepted source epoch.  Keep the
+        # provider-attempt identity above separate for transport/recovery, but
+        # make every retry, recall continuation, and streamed head/tail of the
+        # same observation share one durable source→opportunity identity.
+        opportunity_identity = CausalOpportunityIdentity(
+            world_id=self._world_id,
+            actor_ref=self._actor_ref,
+            purpose=_PURPOSE,
+            source_refs=(request.trigger_ref,),
+            epoch=request.trigger_ref,
+        )
         decision = await self._interior.consider(
             InteriorOpportunity(
                 inner_turn_ref=f"inbound-inner-turn:sha256:{identity}",
@@ -720,7 +732,7 @@ class CharacterInteriorInboundDeliberationAdapter:
                 purpose=_PURPOSE,
                 source_refs=(request.trigger_ref,),
                 capability_manifest=manifest,
-                opportunity_ref=f"inbound-opportunity:sha256:{identity}",
+                opportunity_ref=opportunity_identity.opportunity_ref,
             )
         )
         if decision.status == "technical_failure":
@@ -754,7 +766,7 @@ class CharacterInteriorInboundDeliberationAdapter:
         lineage = recorded_character_interior_lineage(
             decision,
             purpose=_PURPOSE,
-            subject_ref=f"inbound-opportunity:sha256:{identity}",
+            subject_ref=opportunity_identity.opportunity_ref,
             capability_ref=manifest.capability_ref,
         )
         # The durable CharacterInterior lineage is the authoritative identity
