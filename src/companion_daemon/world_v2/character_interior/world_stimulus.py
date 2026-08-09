@@ -78,7 +78,12 @@ from .contracts import (
     _InteriorCapabilityManifest,
     InteriorStimulus,
 )
-from .run_result import CharacterInteriorRunResult
+from .run_result import (
+    CAUSAL_OPPORTUNITY_CONTRACT_VERSION,
+    CausalOpportunityHealth,
+    CausalOpportunityIdentity,
+    CharacterInteriorRunResult,
+)
 from .core import CharacterInterior
 from .experience_transitions import (
     ExperienceTransitionSettlement,
@@ -1143,8 +1148,67 @@ class CharacterInteriorWorldStimulusRuntime:
         self._technical_failure_deferred_until: dict[str, float] = {}
 
     async def drain_one(self) -> CharacterInteriorRunResult:
+        return await self._run_one()
+
+    async def advance_once(self, wake_event_ref: str) -> CharacterInteriorRunResult:
+        """Advance only the opportunity opened by one accepted source event.
+
+        This is a source-bound scheduler seam, not a second semantic author:
+        it selects an already-open durable trigger and then crosses the same
+        existing Interior/model/authority path as :meth:`drain_one`.  An
+        unrelated source is an ordinary idle result and cannot claim a sibling
+        trigger.
+        """
+
+        if not isinstance(wake_event_ref, str) or not wake_event_ref:
+            raise ValueError("causal opportunity wake event ref is required")
+        return await self._run_one(wake_event_ref=wake_event_ref)
+
+    def health_snapshot(self, world_id: str) -> CausalOpportunityHealth:
+        """Expose the source→opportunity projection without model material."""
+
+        if world_id != self._ledger.world_id:
+            raise ValueError("causal opportunity health world does not match the ledger")
+        projection = self._ledger.project()
+        processes = tuple(
+            item
+            for item in projection.trigger_processes
+            if item.process_kind in _PROCESS_PRIORITY and item.source_evidence_ref is not None
+        )
+        identities = tuple(
+            self._opportunity_identity(
+                process=item,
+                source_refs=(item.source_evidence_ref,),
+            )
+            for item in processes
+        )
+        last = processes[-1] if processes else None
+        last_identity = identities[-1] if identities else None
+        deferred = sum(
+            1
+            for item in processes
+            if item.trigger_id in self._technical_failure_deferred_until
+        )
+        return CausalOpportunityHealth(
+            world_id=world_id,
+            actor_ref=self._companion_actor_ref,
+            purpose=PURPOSE,
+            open_count=sum(item.state == "open" for item in processes),
+            claimed_count=sum(item.state == "claimed" for item in processes),
+            terminal_count=sum(item.state == "terminal" for item in processes),
+            deferred_count=deferred,
+            opportunity_count=len({item.opportunity_ref for item in identities}),
+            last_source_ref=(last.source_evidence_ref if last is not None else None),
+            last_opportunity_ref=(last_identity.opportunity_ref if last_identity else None),
+        )
+
+    async def _run_one(
+        self,
+        *,
+        wake_event_ref: str | None = None,
+    ) -> CharacterInteriorRunResult:
         try:
-            result = await self._drain_one_impl()
+            result = await self._drain_one_impl(wake_event_ref=wake_event_ref)
         except Exception:
             trigger_id = _CURRENT_TRIGGER_ID.get()
             if trigger_id:
@@ -1162,16 +1226,20 @@ class CharacterInteriorWorldStimulusRuntime:
             self._defer_technical_failure(result.trigger_id)
         elif result.trigger_id:
             self._technical_failure_deferred_until.pop(result.trigger_id, None)
-        return result
+        return await self._attach_opportunity_lineage(result)
 
     def _defer_technical_failure(self, trigger_id: str) -> None:
         self._technical_failure_deferred_until[trigger_id] = (
             time.monotonic() + _TECHNICAL_FAILURE_DEFER_SECONDS
         )
 
-    async def _drain_one_impl(self) -> CharacterInteriorRunResult:
+    async def _drain_one_impl(
+        self,
+        *,
+        wake_event_ref: str | None = None,
+    ) -> CharacterInteriorRunResult:
         projection = await self._project()
-        process = self._next_process(projection)
+        process = self._next_process(projection, wake_event_ref=wake_event_ref)
         if process is None:
             return CharacterInteriorRunResult(trigger_id="", status="idle")
         _CURRENT_TRIGGER_ID.set(process.trigger_id)
@@ -1366,7 +1434,12 @@ class CharacterInteriorWorldStimulusRuntime:
             work_status=("no_change" if completed_status == "no-change" else "accepted"),
         )
 
-    def _next_process(self, projection: object) -> TriggerProcess | None:
+    def _next_process(
+        self,
+        projection: object,
+        *,
+        wake_event_ref: str | None = None,
+    ) -> TriggerProcess | None:
         now = time.monotonic()
         self._technical_failure_deferred_until = {
             trigger_id: deferred_until
@@ -1378,6 +1451,10 @@ class CharacterInteriorWorldStimulusRuntime:
             return (
                 process.state != "terminal"
                 and process.trigger_id not in self._technical_failure_deferred_until
+                and (
+                    wake_event_ref is None
+                    or process.source_evidence_ref == wake_event_ref
+                )
             )
 
         for kind in _PROCESS_PRIORITY:
@@ -1401,6 +1478,10 @@ class CharacterInteriorWorldStimulusRuntime:
                     process.process_kind != kind
                     or process.state != "terminal"
                     or process.trigger_id in self._technical_failure_deferred_until
+                    or (
+                        wake_event_ref is not None
+                        and process.source_evidence_ref != wake_event_ref
+                    )
                 ):
                     continue
                 source_ref = process.source_evidence_ref
@@ -1424,6 +1505,52 @@ class CharacterInteriorWorldStimulusRuntime:
                 ):
                     return process
         return None
+
+    def _opportunity_identity(
+        self,
+        *,
+        process: TriggerProcess,
+        source_refs: tuple[str, ...],
+    ) -> CausalOpportunityIdentity:
+        canonical_refs = tuple(sorted(set(source_refs)))
+        if not canonical_refs:
+            raise ValueError("causal opportunity requires source refs")
+        return CausalOpportunityIdentity(
+            world_id=self._ledger.world_id,
+            actor_ref=self._companion_actor_ref,
+            purpose=PURPOSE,
+            source_refs=canonical_refs,
+            epoch=canonical_refs[0],
+            contract_version=CAUSAL_OPPORTUNITY_CONTRACT_VERSION,
+        )
+
+    async def _attach_opportunity_lineage(
+        self,
+        result: CharacterInteriorRunResult,
+    ) -> CharacterInteriorRunResult:
+        if not result.trigger_id:
+            return result
+        projection = await self._project()
+        process = next(
+            (
+                item
+                for item in projection.trigger_processes
+                if item.trigger_id == result.trigger_id
+            ),
+            None,
+        )
+        if process is None or process.source_evidence_ref is None:
+            raise RuntimeError("completed world stimulus has no source-bound opportunity")
+        source_refs = (process.source_evidence_ref,)
+        identity = self._opportunity_identity(process=process, source_refs=source_refs)
+        return result.model_copy(
+            update={
+                "opportunity_ref": identity.opportunity_ref,
+                "source_refs": source_refs,
+                "epoch": identity.epoch,
+                "contract_version": identity.contract_version,
+            }
+        )
 
     @staticmethod
     def _process_is_terminal(projection: object, *, trigger_id: str) -> bool:

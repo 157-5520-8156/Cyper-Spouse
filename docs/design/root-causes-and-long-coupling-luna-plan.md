@@ -1543,3 +1543,19 @@ commit：hash
 - 同一最终源码的 24 小时 real-provider supervisor 已完成 `2/24` 个低频样本，当前无失败；截至本记录累计成本约
   `¥0.06`。两条批次均保持临时库/loopback，不触碰旧生产 daemon；发布状态继续为
   `manual_only`/`qualification_incomplete`，待终态报告后再逐项审计首次成功率、provider usage、回执、重启、冷重放与成本。
+
+### 2026-08-09：L4 source→opportunity 第一薄片（不扩大资格范围）
+
+- 在既有 `CharacterInteriorWorldStimulusRuntime` 内增加了 source-bound `advance_once(wake_event_ref)`：它只选择
+  已由现有 opener 写入账本、且 `source_evidence_ref` 精确匹配的 durable trigger；不匹配的 source 返回 `idle`，
+  不 claim sibling、不调用模型。命中的 trigger 仍进入原有 Interior、required-tool、source-closure、CAS、
+  Affect/Relationship/Experience authority 和 effect-once 路径，没有新增事件或第二语义作者。
+- 结果与只读 `health_snapshot(world_id)` 共享 `causal-opportunity.1` identity：`actor + purpose + canonical
+  source set + epoch + contract version`。这只是 lineage/diagnostic projection，不是新的剧情或事实 authority；
+  同一 terminal source 再次唤醒为 `idle`，不会重作者，health 也只计一个 opportunity。
+- CharacterInterior production background driver 对新 opener 优先通过该 source-bound seam，再保留历史/recovery
+  `drain_one()` 作为既有 terminal aftermath 的兼容路径。当前薄片只覆盖 `world_stimulus_appraisal` 五类 source
+  contract，尚未声称 user fact、Life、NPC、Memory、Perception、Plan outcome 已全部迁入统一 runtime。
+- 回归：该 lane `30 passed`，含精确 source isolation、terminal replay/effect-once、lineage/health、ruff；这是本地
+  typed/fixture/公开 runtime 证据，不是 DeepSeek 首次成功率、真实 QQ 回执或 24 小时资格。L4 后续仍需按同一
+  public-host seam 扩展多 source merge、epoch/expiry、restart/cold replay，并逐个迁移真实 producer/consumer。

@@ -644,15 +644,44 @@ class _CharacterInteriorBackgroundDriver:
     async def drain_world_stimulus_once(self) -> object | None:
         if self._world_stimulus is None:
             return None
+        opened_trigger_ids: list[str] = []
         for opener in (self._silence_opener, self._plan_disruption_opener):
             if opener is None:
                 continue
             try:
-                await opener.open_once()
+                trigger_id = await opener.open_once()
+                if trigger_id is not None:
+                    opened_trigger_ids.append(trigger_id)
             except (ConcurrencyConflict, IdempotencyConflict):
                 # Both opportunities are deterministically derived again on
                 # the next pass; a concurrent ledger winner is ordinary CAS.
                 pass
+        # A newly accepted source is routed through the source-bound L4 seam
+        # before falling back to historical/recovery selection.  The seam only
+        # narrows which durable trigger may be claimed; the same Interior
+        # consumer, model contract and authorities still do all semantic work.
+        if opened_trigger_ids:
+            projection = (
+                await asyncio.to_thread(self._ledger.project)
+                if self._ledger.blocks_event_loop
+                else self._ledger.project()
+            )
+            for trigger_id in opened_trigger_ids:
+                process = next(
+                    (
+                        item
+                        for item in projection.trigger_processes
+                        if item.trigger_id == trigger_id
+                    ),
+                    None,
+                )
+                if process is None or process.source_evidence_ref is None:
+                    raise RuntimeError("opened world stimulus lacks source evidence")
+                result = await self._world_stimulus.advance_once(
+                    process.source_evidence_ref
+                )
+                if result.status not in {"idle", "owned_elsewhere"}:
+                    return result
         result = await self._world_stimulus.drain_one()
         return None if result.status in {"idle", "owned_elsewhere"} else result
 

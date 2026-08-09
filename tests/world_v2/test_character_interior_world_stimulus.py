@@ -25,6 +25,9 @@ from companion_daemon.world_v2.character_interior.world_stimulus import (
     _WorldStimulusInteriorAuthorityHandler,
     _WorldStimulusRelationshipSignalSettlement,
 )
+from companion_daemon.world_v2.character_interior.run_result import (
+    CausalOpportunityIdentity,
+)
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.immediate_emotion_proposal_worker import (
     ImmediateEmotionProposalWorker,
@@ -75,6 +78,29 @@ from test_life_projection import WORLD_ID, commit, seed_through_proposal, settle
 
 NOW = datetime(2026, 8, 4, 18, 0, tzinfo=UTC)
 SOURCE_REF = "occurrence-settled"
+
+
+def test_causal_opportunity_identity_is_canonical_and_actor_bound() -> None:
+    first = CausalOpportunityIdentity(
+        world_id=WORLD_ID,
+        actor_ref="actor:companion",
+        purpose="world_stimulus_appraisal",
+        source_refs=("source:a", "source:b"),
+        epoch="epoch:1",
+    )
+    replay = first.model_copy()
+    other_actor = first.model_copy(update={"actor_ref": "actor:other"})
+
+    assert first.opportunity_ref == replay.opportunity_ref
+    assert first.opportunity_ref != other_actor.opportunity_ref
+    with pytest.raises(ValueError, match="canonicalized"):
+        CausalOpportunityIdentity(
+            world_id=WORLD_ID,
+            actor_ref="actor:companion",
+            purpose="world_stimulus_appraisal",
+            source_refs=("source:b", "source:a"),
+            epoch="epoch:1",
+        )
 
 
 class _Projection:
@@ -668,6 +694,39 @@ async def test_settled_world_change_crosses_one_eight_facet_character_interior_t
         and item.state != "terminal"
         for item in ledger.project().trigger_processes
     )
+
+
+@pytest.mark.asyncio
+async def test_source_bound_opportunity_advance_and_health_are_one_causal_view() -> None:
+    model = _RoleModel(decision="no_change")
+    runtime, ledger, _projection = _runtime(model=model)
+
+    unrelated = await runtime.advance_once("event:unrelated-accepted-change")
+    assert unrelated.status == "idle"
+    assert model.calls == 0
+
+    result = await runtime.advance_once(SOURCE_REF)
+    assert result.work_status == "no_change"
+    assert result.opportunity_ref is not None
+    assert result.source_refs == (SOURCE_REF,)
+    assert result.epoch == SOURCE_REF
+    assert result.contract_version == "causal-opportunity.1"
+
+    health = runtime.health_snapshot(WORLD_ID)
+    assert health.world_id == WORLD_ID
+    assert health.actor_ref == "actor:companion"
+    assert health.purpose == "world_stimulus_appraisal"
+    assert health.terminal_count == 1
+    assert health.last_source_ref == SOURCE_REF
+    assert health.last_opportunity_ref == result.opportunity_ref
+    assert health.open_count == 0
+    assert health.claimed_count == 0
+    assert ledger.project().trigger_processes
+
+    replay = await runtime.advance_once(SOURCE_REF)
+    assert replay.status == "idle"
+    assert model.calls == 1
+    assert runtime.health_snapshot(WORLD_ID).opportunity_count == 1
 
 
 @pytest.mark.asyncio
