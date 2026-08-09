@@ -192,6 +192,12 @@ class InboundTurnFaculty:
             return bool(owns_recall())
         return getattr(self._author, "_recall", None) is None
 
+    def source_closure_review_enabled(self) -> bool:
+        """Expose the reviewer phase owned by this same inbound author."""
+
+        operation = getattr(self._author, "source_closure_review_enabled", None)
+        return bool(callable(operation) and operation())
+
     @staticmethod
     def prefetch_presentation_phase(request: _InteriorRoleRequest) -> str:
         if request.recall_completed:
@@ -622,9 +628,12 @@ class CharacterInteriorInboundDeliberationAdapter:
         self._actor_ref = actor_ref
 
     def source_closure_review_enabled(self) -> bool:
-        # The combined internal Faculty owns the existing source-closure pass;
-        # Deliberation must not reserve a second semantic author lane.
-        return False
+        # The combined internal Faculty owns the source-closure pass.  Surface
+        # that fact so Deliberation opens its existing validation budget for
+        # the same candidate; this does not create a second semantic author.
+        faculty = self._interior._registry.for_purpose(_PURPOSE)  # noqa: SLF001
+        operation = getattr(faculty, "source_closure_review_enabled", None)
+        return bool(callable(operation) and operation())
 
     def has_hedge_provider(self, _request: ModelInput) -> bool:
         return False

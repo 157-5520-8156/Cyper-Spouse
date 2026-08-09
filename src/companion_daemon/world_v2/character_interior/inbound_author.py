@@ -1564,6 +1564,11 @@ class _InboundCharacterAuthor:
 
         return self._character_interior_recall_delegate and self._recall is None
 
+    def source_closure_review_enabled(self) -> bool:
+        """Report the source review owned by this same character author."""
+
+        return self._expression_materializer.source_closure_review_enabled()
+
     async def propose(self, request: ModelInput) -> ModelOutput:
         """Return one merged Expression+Appraisal+optional Affect decision."""
 
