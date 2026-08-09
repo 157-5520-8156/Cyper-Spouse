@@ -365,5 +365,9 @@ async def test_outcome_restart_recovers_world_result_and_next_turn_context(tmp_p
             source_refs=("event:outcome-observation:observation:e2e:tea-ready",),
             epoch="event:outcome-observation:observation:e2e:tea-ready",
         ).opportunity_ref
+        assert outcome_lineage["causal_source_refs"] == [
+            "event:outcome-observation:observation:e2e:tea-ready"
+        ]
+        assert outcome_lineage["causal_actor_ref"] == "agent:companion"
     finally:
         ledger.close()

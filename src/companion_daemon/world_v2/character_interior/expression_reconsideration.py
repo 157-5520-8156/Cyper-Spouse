@@ -168,6 +168,7 @@ class CharacterInteriorExpressionReconsiderationReviewer:
                 purpose=_PURPOSE,
                 subject_ref=opportunity.opportunity_ref,
                 capability_ref=capability.capability_ref,
+                causal_opportunity=opportunity_identity,
             ),
         )
 

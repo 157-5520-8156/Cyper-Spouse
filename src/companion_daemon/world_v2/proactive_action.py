@@ -308,6 +308,10 @@ class _CharacterInteriorProactiveTransport:
         if not source_refs or request.trigger_ref not in source_refs:
             raise ValueError("proactive Interior opportunity lacks trigger evidence")
         capability = self._capability(request=request, source_refs=source_refs)
+        opportunity_identity = self._opportunity_identity(
+            trigger_ref=request.trigger_ref,
+            source_refs=source_refs,
+        )
         decision = await self._interior.consider(
             self._opportunity(
                 attempt_id=request.attempt_id,
@@ -368,6 +372,7 @@ class _CharacterInteriorProactiveTransport:
                 purpose="proactive_contact",
                 subject_ref=decision.opportunity_ref,
                 capability_ref=capability.capability_ref,
+                causal_opportunity=opportunity_identity,
             ),
         )
 
@@ -415,11 +420,10 @@ class _CharacterInteriorProactiveTransport:
         logical_time: datetime,
         capability: _InteriorCapabilityManifest,
     ) -> InteriorOpportunity:
-        opportunity_identity = CausalOpportunityRuntime(
-            world_id=self._world_id,
-            actor_ref=self._actor_ref,
-            purpose="proactive_contact",
-        ).identity_for_refs(source_refs, epoch=trigger_ref)
+        opportunity_identity = self._opportunity_identity(
+            trigger_ref=trigger_ref,
+            source_refs=source_refs,
+        )
         return InteriorOpportunity(
             opportunity_ref=opportunity_identity.opportunity_ref,
             inner_turn_ref=attempt_id,
@@ -436,6 +440,18 @@ class _CharacterInteriorProactiveTransport:
                 "freely owns now, later, silent, wording and message count."
             ),
         )
+
+    def _opportunity_identity(
+        self,
+        *,
+        trigger_ref: str,
+        source_refs: tuple[str, ...],
+    ):
+        return CausalOpportunityRuntime(
+            world_id=self._world_id,
+            actor_ref=self._actor_ref,
+            purpose="proactive_contact",
+        ).identity_for_refs(source_refs, epoch=trigger_ref)
 
     def _draft(self, *, decision) -> ProactiveDraft:  # type: ignore[no-untyped-def]
         outer = decision.decision

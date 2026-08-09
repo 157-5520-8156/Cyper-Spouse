@@ -276,6 +276,7 @@ class ActivityLifecycleWorker:
             route_tier="flash",
             route_reason_code="activity_lifecycle.character_choice",
             router_version="character-interior-activity-lifecycle-capability.2",
+            causal_opportunity=opportunity_identity,
         )
         return (
             ActivityLifecycleModelDraft(

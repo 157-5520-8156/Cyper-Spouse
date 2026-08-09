@@ -101,14 +101,14 @@ class _CharacterInteriorOutcomeMaterializer:
             deliberation_revision=request.evaluated_deliberation_revision,
             ledger_sequence=request.evaluated_ledger_sequence,
         )
-        opportunity_ref = CausalOpportunityRuntime(
+        opportunity_identity = CausalOpportunityRuntime(
             world_id=self._ledger.world_id,
             actor_ref=self._actor_ref,
             purpose="outcome_selection",
-        ).identity_for_refs((request.trigger_ref,), epoch=request.trigger_ref).opportunity_ref
+        ).identity_for_refs((request.trigger_ref,), epoch=request.trigger_ref)
         decision = await self._interior.consider(
             InteriorOpportunity(
-                opportunity_ref=opportunity_ref,
+                opportunity_ref=opportunity_identity.opportunity_ref,
                 inner_turn_ref="inner-turn:outcome-observation:" + request.attempt_id,
                 world_id=self._ledger.world_id,
                 actor_ref=self._actor_ref,
@@ -169,6 +169,7 @@ class _CharacterInteriorOutcomeMaterializer:
                 purpose="outcome_selection",
                 subject_ref=decision.opportunity_ref,
                 capability_ref=capability.capability_ref,
+                causal_opportunity=opportunity_identity,
             ),
         )
 

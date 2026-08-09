@@ -218,6 +218,10 @@ async def test_reconsideration_is_one_character_interior_opportunity() -> None:
         source_refs=tuple(sorted(opportunity.source_refs)),
         epoch=observation_event.event_id,
     ).opportunity_ref
+    assert decision.character_interior_lineage.causal_source_refs == tuple(
+        sorted(opportunity.source_refs)
+    )
+    assert decision.character_interior_lineage.causal_actor_ref == "character:test"
     assert opportunity.source_refs == (
         "event:observation:interjection:1",
         "event:beat:old",

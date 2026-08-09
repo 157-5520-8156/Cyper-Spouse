@@ -363,6 +363,11 @@ async def test_worker_turns_one_claimed_wake_into_one_accepted_transition() -> N
         ]
         == "activity_lifecycle_choice"
     )
+    activity_lineage = json.loads(recorded_model["audit_json"])[
+        "character_interior_lineage"
+    ]
+    assert activity_lineage["causal_source_refs"] == ["event:clock:opening"]
+    assert activity_lineage["causal_actor_ref"] == "actor:companion"
 
 
 @pytest.mark.asyncio

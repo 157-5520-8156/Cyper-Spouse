@@ -1508,6 +1508,12 @@ async def test_visible_proactive_expression_is_bound_to_its_semantic_opportunity
             epoch=proposal["trigger_ref"],
         ).opportunity_ref
     )
+    assert model_audit["character_interior_lineage"]["causal_source_refs"] == [
+        proposal["trigger_ref"]
+    ]
+    assert model_audit["character_interior_lineage"]["causal_actor_ref"] == (
+        "actor:companion"
+    )
 
 
 @pytest.mark.asyncio
