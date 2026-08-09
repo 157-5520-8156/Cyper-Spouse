@@ -199,7 +199,7 @@ def _provisioned_grants_present(*, database_path: Path, world_id: str) -> bool:
 
 
 def build_qq_media_preview_deployment(
-    *, settings: Settings, world_id: str
+    *, settings: Settings, world_id: str, output_dir: Path | None = None
 ) -> QQMediaDeploymentBundle | None:
     """Assemble the world-delivered media deployment, or disable it with one log line."""
 
@@ -284,7 +284,7 @@ def build_qq_media_preview_deployment(
     renderer = event_media.MediaRenderer(
         generator=generator,
         inspector=inspector,
-        output_dir=Path("output/event-media"),
+        output_dir=output_dir or Path("output/event-media"),
         visual_identity_path=settings.visual_identity_path,
     )
     transport = SQLiteDurableMediaProviderTransport(

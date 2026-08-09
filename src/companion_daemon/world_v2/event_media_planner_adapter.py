@@ -265,6 +265,43 @@ class EventMediaPlannerAdapter:
         self._sidecar = sidecar
         self._legacy_planner = legacy_planner
         self._result_store = result_store
+        self._provider_call_count = 0
+
+    @property
+    def provider_call_count(self) -> int:
+        """Number of legacy planner calls made by this composed adapter.
+
+        This is diagnostic state only; durable replay authority remains the
+        result store.  Qualification harnesses use it to distinguish a cold
+        lookup from an accidental second provider call.
+        """
+
+        return self._provider_call_count
+
+    def close(self) -> None:
+        """Release durable sidecars after an application restart boundary.
+
+        The planner adapter is normally owned by a long-lived deployment
+        bundle, so the application cannot close it as part of its ledger
+        shutdown.  Offline qualification and restart tests do have an
+        explicit ownership boundary; closing only the durable stores here
+        prevents the previous bundle from retaining SQLite handles while a
+        fresh bundle is composed against the same scratch world.
+        """
+
+        for resource in (self._result_store, self._sidecar):
+            close = getattr(resource, "close", None)
+            if callable(close):
+                close()
+
+    async def aclose(self) -> None:
+        """Close durable sidecars and the planner's async provider client."""
+
+        self.close()
+        model = getattr(self._legacy_planner, "model", None)
+        close = getattr(model, "aclose", None)
+        if callable(close):
+            await close()
 
     async def lookup(self, *, planning_request_id: str) -> MediaPlanningResult | None:
         if self._result_store is None:
@@ -317,6 +354,7 @@ class EventMediaPlannerAdapter:
             allowed_evidence_refs=tuple(sorted(_snapshot_leaves(snapshot))),
         )
         try:
+            self._provider_call_count += 1
             legacy_result = await self._legacy_planner.plan(legacy_opportunity, recent_media=())
         except Exception:
             return await self._store_terminal(
