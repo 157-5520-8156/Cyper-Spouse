@@ -261,7 +261,9 @@ __all__ = [
     "NPC_RELATIONSHIP_VIEW_VERSION",
     "RESTING_CLOSENESS_BP",
     "NpcRelationshipReading",
+    "SharedHistoryEvidence",
     "npc_relationship_advisories",
     "npc_relationship_by_ref",
     "npc_relationship_readings",
+    "npc_shared_history_evidence",
 ]

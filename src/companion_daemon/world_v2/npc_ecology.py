@@ -283,6 +283,19 @@ class NpcEcology:
             for item in getattr(projection, "npcs", ())
         ):
             raise ValueError("source-closed NPC identity is unavailable")
+        focused_npc = next(
+            (
+                item
+                for item in getattr(projection, "npcs", ())
+                if f"npc:{item.npc_id}" == focus_npc_ref
+            ),
+            None,
+        )
+        focused_participant_refs = {focus_npc_ref} if focus_npc_ref is not None else set()
+        if focused_npc is not None and focused_npc.promotion_edge is not None:
+            focused_participant_refs.add(
+                focused_npc.promotion_edge.provisional_entity_ref
+            )
         shared_history = npc_shared_history_evidence(
             projection,
             protagonist_actor_ref=self._protagonist,
@@ -311,50 +324,62 @@ class NpcEcology:
         available_npcs = tuple(
             item.npc_ref for item in identities if item.lifecycle_state == "active"
         )
-        locations = {
-            item.values.location_ref
-            for item in projection.locations
-            if isinstance(getattr(item.values, "location_ref", None), str)
-        }
-        locations.update(
-            item.location_ref
-            for item in projection.world_places
-            if isinstance(getattr(item, "location_ref", None), str)
-        )
-        locations.update(
-            item.location_ref
-            for item in projection.plans
-            if isinstance(getattr(item, "location_ref", None), str)
-        )
-        locations.update(
-            item.current_location_ref
-            for item in projection.npcs
-            if isinstance(item.current_location_ref, str)
-        )
-        if self._catalog is not None and projection.logical_time is not None:
-            biography = self._catalog.biographical_context_at(
-                instant=projection.logical_time,
-                life_arcs=projection.life_arcs,
-                biographical_coordinates=projection.biographical_coordinates,
-            )
-            local = self._catalog.localize(projection.logical_time)
+        if focus_npc_ref is None:
+            locations = {
+                item.values.location_ref
+                for item in projection.locations
+                if isinstance(getattr(item.values, "location_ref", None), str)
+            }
             locations.update(
                 item.location_ref
-                for item in self._catalog.reviewed_locations
-                if item.eligible_in_context(biography) and item.available_at(local)
+                for item in projection.world_places
+                if isinstance(getattr(item, "location_ref", None), str)
+            )
+            locations.update(
+                item.location_ref
+                for item in projection.plans
+                if isinstance(getattr(item, "location_ref", None), str)
+            )
+            locations.update(
+                item.current_location_ref
+                for item in projection.npcs
+                if isinstance(item.current_location_ref, str)
+            )
+            if self._catalog is not None and projection.logical_time is not None:
+                biography = self._catalog.biographical_context_at(
+                    instant=projection.logical_time,
+                    life_arcs=projection.life_arcs,
+                    biographical_coordinates=projection.biographical_coordinates,
+                )
+                local = self._catalog.localize(projection.logical_time)
+                locations.update(
+                    item.location_ref
+                    for item in self._catalog.reviewed_locations
+                    if item.eligible_in_context(biography) and item.available_at(local)
+                )
+        else:
+            locations = {
+                focused_npc.current_location_ref
+            } if focused_npc is not None and isinstance(
+                focused_npc.current_location_ref, str
+            ) else set()
+            locations.update(
+                item.location_ref
+                for item in projection.plans
+                if (
+                    item.owner_actor_ref == focus_npc_ref
+                    or focused_participant_refs.intersection(item.participant_refs)
+                )
+                and isinstance(getattr(item, "location_ref", None), str)
+            )
+            locations.update(
+                item.location_ref
+                for item in projection.world_occurrences
+                if focused_participant_refs.intersection(item.participant_refs)
+                and isinstance(getattr(item, "location_ref", None), str)
             )
         occurrence_projection = projection.world_occurrences
         if focus_npc_ref is not None:
-            focused_npc = next(
-                item
-                for item in projection.npcs
-                if f"npc:{item.npc_id}" == focus_npc_ref
-            )
-            focused_participant_refs = {focus_npc_ref}
-            if focused_npc.promotion_edge is not None:
-                focused_participant_refs.add(
-                    focused_npc.promotion_edge.provisional_entity_ref
-                )
             occurrence_projection = tuple(
                 item
                 for item in occurrence_projection
@@ -434,6 +459,12 @@ class NpcEcology:
             stimulus.cursor,
             focus_npc_ref=selected_npc_ref,
         )
+        if selected_npc_ref not in snapshot.available_npc_refs:
+            return NpcEcologyResult(
+                status="rejected",
+                reason_code="npc_ecology.actor_identity_unavailable",
+                npc_ref=selected_npc_ref,
+            )
         if pending_actor_event_id is not None:
             actor_event_id = pending_actor_event_id
             identity = pending_actor_event_id.removeprefix("event:npc-ecology:actor:")
@@ -710,6 +741,7 @@ class NpcEcology:
         # neutral shared-history facts instead and keeps its own subjective
         # relationship state in the private capsule.
         npc_private_capsule.pop("protagonist_relationship", None)
+        npc_private_capsule.pop("last_shared_at", None)
         shared_history_evidence = npc_private_capsule.pop(
             "shared_history_with_protagonist", None
         )
@@ -786,20 +818,15 @@ class NpcEcology:
         )
 
     def _world_request(self, *, stimulus, snapshot, actor_decision):
+        proposal = actor_decision.proposal
+        participant_refs = (
+            proposal.participant_refs if proposal is not None else (actor_decision.npc_ref,)
+        )
         payload = {
             "stimulus": stimulus.model_dump(mode="json"),
             "npc_actor_decision": actor_decision.model_dump(mode="json"),
             "world_capabilities": {
-                "participant_refs": (
-                    self._protagonist,
-                    *tuple(
-                        sorted(
-                            f"npc:{item.npc_id}"
-                            for item in self._ledger.project().npcs
-                            if item.status == "active"
-                        )
-                    ),
-                ),
+                "participant_refs": participant_refs,
                 "location_refs": snapshot.available_location_refs,
             },
         }

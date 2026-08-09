@@ -313,6 +313,23 @@ def test_npc_snapshot_rejects_an_unknown_explicit_actor_capsule() -> None:
 
 
 @pytest.mark.asyncio
+async def test_npc_advance_fails_closed_when_active_identity_content_is_missing() -> None:
+    ledger, _store, actor, _world_model, runtime = _runtime(
+        _actor("no_op"), {"decision": "no_op"}
+    )
+    runtime._store = InMemoryImmutableLifeContentStore()
+
+    result = await runtime.advance_once(
+        wake_event_ref="clock-life", trace_id="trace", correlation_id="correlation"
+    )
+
+    assert result.status == "rejected"
+    assert result.reason_code == "npc_ecology.actor_identity_unavailable"
+    assert result.npc_ref == "npc:lin"
+    assert actor.calls == []
+
+
+@pytest.mark.asyncio
 async def test_npc_advance_request_contains_only_the_selected_actor_capsule() -> None:
     ledger, store, actor, _world_model, runtime = _runtime(
         _actor("no_op"), {"decision": "no_op"}
@@ -324,6 +341,7 @@ async def test_npc_advance_request_contains_only_the_selected_actor_capsule() ->
         stable_identity_ref="identity:npc:mei",
         known_trait_refs=("trait:careful",),
         privacy_class="personal",
+        current_location_ref="room:mei",
     )
     commit(
         ledger,
@@ -365,6 +383,7 @@ async def test_npc_advance_request_contains_only_the_selected_actor_capsule() ->
     actor_payload = json.loads(actor.calls[0][1]["content"])
     assert actor_payload["authority"]["selected_npc_ref"] == "npc:lin"
     assert actor_payload["public_world"]["available_npc_refs"] == ["npc:lin"]
+    assert actor_payload["public_world"]["available_location_refs"] == ["room:kitchen"]
     assert "identity:npc:mei" not in actor.calls[0][1]["content"]
     assert "protagonist_relationship" not in actor_payload["npc_private_capsule"]
     assert "shared_history_evidence" in actor_payload
@@ -386,6 +405,7 @@ async def test_npc_impulse_is_separately_adjudicated_and_enters_event_machine() 
         "participant_refs",
         "location_refs",
     }
+    assert world_payload["world_capabilities"]["participant_refs"] == ["npc:lin"]
     assert "affect" not in world.calls[0][1]["content"].lower()
     occurrence = next(
         item

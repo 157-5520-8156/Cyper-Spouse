@@ -208,6 +208,7 @@ def npc_identity_views(
             )
         )
         relationship = relationship_by_ref.get(npc_ref)
+        shared_history_item = shared_history_by_ref.get(npc_ref)
         subjective = getattr(npc, "subjective_state", None)
         inner_state = None
         if subjective is not None:
@@ -242,6 +243,11 @@ def npc_identity_views(
                     source_event_ref,
                     getattr(first, "settlement_event_ref", None),
                     *(relationship.source_event_refs if relationship is not None else ()),
+                    *(
+                        shared_history_item.source_event_refs
+                        if shared_history_item is not None
+                        else ()
+                    ),
                     *(item.origin.accepted_event_ref for item in shared_experiences),
                     *(
                         item.authority_origin.accepted_event_ref
@@ -272,7 +278,7 @@ def npc_identity_views(
                 active_plan_refs=active_plan_refs,
                 current_location_ref=getattr(npc, "current_location_ref", None),
                 protagonist_relationship=relationship,
-                shared_history_with_protagonist=shared_history_by_ref.get(npc_ref),
+                shared_history_with_protagonist=shared_history_item,
                 npc_relationship_to_protagonist=(
                     subjective.relationship_to_subject
                     if subjective is not None and inner_state is not None
@@ -293,7 +299,13 @@ def npc_identity_views(
                 ),
                 source_refs=sources,
                 private_source_refs=private_source_refs,
-                last_shared_at=(relationship.last_shared_at if relationship else None),
+                last_shared_at=(
+                    relationship.last_shared_at
+                    if relationship is not None
+                    else shared_history_item.last_shared_at
+                    if shared_history_item is not None
+                    else None
+                ),
             )
         )
     return tuple(sorted(result, key=lambda item: item.npc_ref))
