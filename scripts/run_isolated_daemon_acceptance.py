@@ -36,6 +36,7 @@ import sys
 import tempfile
 from threading import Event, Lock, Thread
 import time
+from types import SimpleNamespace
 from typing import Any, Iterator, Literal
 from urllib.parse import urlparse
 
@@ -57,6 +58,7 @@ from companion_daemon.world_v2.isolated_daemon_acceptance import (
 from companion_daemon.world_v2.qq_c2c_host import qq_c2c_world_id
 from companion_daemon.world_v2.qq_c2c_onebot_app import create_qq_c2c_onebot_app
 from companion_daemon.world_v2.expression_draft import qq_expression_capabilities
+from companion_daemon.world_v2.model_authority_identity import semantic_authority_id
 from companion_daemon.world_v2.character_interior.inbound_tool_contract import (
     InboundToolContracts,
 )
@@ -96,6 +98,15 @@ _LOOPBACK_LIFE_REVIEW_CONTRACTS = (
     "life-development-source-closure-review.1",
     "life-development-novel-origin-review.2",
 )
+
+
+def _deepseek_capture_authority_id(*, model: str, base_url: str) -> str | None:
+    """Resolve the underlying DeepSeek identity before a loopback capture hop."""
+
+    if not base_url:
+        return None
+    descriptor = SimpleNamespace(provider="deepseek", base_url=base_url, model=model)
+    return semantic_authority_id(descriptor)
 
 
 def _canonical_hash(value: object) -> str:
@@ -1607,6 +1618,36 @@ def _serve_isolated_loopback_daemon(*, port: int) -> None:
         asyncio.run(close_models())
 
 
+def _serve_real_provider_daemon(*, port: int) -> None:
+    """Run production composition with an explicit capture-hop identity.
+
+    The real-provider acceptance keeps DeepSeek HTTP on a local hash proxy, so
+    endpoint-derived identity would otherwise look like an unknown localhost
+    model and fail the independent-reviewer preflight. The identity was
+    resolved from the original exact DeepSeek route before the child process
+    rewrote its base URL; the composition validates it again before use.
+    """
+
+    authority_id = os.environ.get(
+        "WORLD_V2_TEST_ONLY_PROVIDER_CAPTURE_AUTHORITY_ID",
+        "",
+    ).strip()
+    if not authority_id:
+        raise RuntimeError("real-provider capture is missing its underlying author identity")
+    settings = Settings()
+    app = create_qq_c2c_onebot_app(
+        adapter="napcat",
+        settings=settings,
+        _test_only_provider_capture_authority_id=authority_id,
+        scheduler_interval_seconds=settings.qq_c2c_scheduler_interval_seconds,
+    )
+    with QQOutboundOwnerLease(
+        qq_outbound_owner_lock_path(settings.database_path),
+        adapter="napcat",
+    ):
+        uvicorn.run(app, host="127.0.0.1", port=port)
+
+
 def _is_exact_ipv4_loopback_http_url(value: str) -> bool:
     """Accept only a path-free HTTP endpoint on literal ``127.0.0.1``."""
 
@@ -1636,12 +1677,30 @@ def _daemon_environment(
     model_mode: _ModelMode,
     provider_capture_url: str | None,
     production_source_authority: bool = False,
+    deepseek_base_url: str | None = None,
+    deepseek_model: str | None = None,
 ) -> dict[str, str]:
     if not _is_exact_ipv4_loopback_http_url(capture_url):
         raise ValueError("OneBot capture must bind exact IPv4 loopback")
     if production_source_authority and model_mode != "real-provider":
         raise ValueError("production source authority is valid only with real-provider mode")
     environment = dict(os.environ)
+    original_deepseek_base_url = deepseek_base_url or environment.get(
+        "DEEPSEEK_BASE_URL",
+        "https://api.deepseek.com",
+    )
+    original_deepseek_model = deepseek_model or environment.get(
+        "DEEPSEEK_MODEL",
+        "deepseek-v4-flash",
+    )
+    capture_authority_id = (
+        _deepseek_capture_authority_id(
+            model=original_deepseek_model,
+            base_url=original_deepseek_base_url,
+        )
+        if production_source_authority
+        else None
+    )
     environment.update(
         {
             # OneBot and the DeepSeek hash-capture hop are exact loopback.
@@ -1682,8 +1741,21 @@ def _daemon_environment(
             # actual profile rather than inheriting a caller's ambient mode.
             "WORLD_V2_RECORDED_CADENCE_MODE": "shadow",
             "ATTACHMENT_CACHE_PATH": str(attachment_cache),
+            # Never inherit a stale acceptance-only authority across modes.
+            "WORLD_V2_TEST_ONLY_PROVIDER_CAPTURE_AUTHORITY_ID": "",
         }
     )
+    if deepseek_model is not None:
+        # Pin the child to the already validated parent Settings value.  This
+        # avoids a .env-only model override changing the authority digest after
+        # the parent computed the capture handoff.
+        environment["DEEPSEEK_MODEL"] = deepseek_model
+    if capture_authority_id is not None:
+        # This value is consumed only by the acceptance wrapper below. It is
+        # never a production Settings field and cannot grant an unknown route.
+        environment["WORLD_V2_TEST_ONLY_PROVIDER_CAPTURE_AUTHORITY_ID"] = (
+            capture_authority_id
+        )
     if not production_source_authority:
         # Every default mode is hermetic with respect to external reviewer
         # providers, including ``--fake``.  Ambient shell credentials or a
@@ -1752,6 +1824,8 @@ def _start_daemon(
     model_mode: _ModelMode,
     provider_capture_url: str | None,
     production_source_authority: bool = False,
+    deepseek_base_url: str | None = None,
+    deepseek_model: str | None = None,
 ) -> _DaemonProcess:
     port = _loopback_port()
     log_stream = log_path.open("a", encoding="utf-8")
@@ -1764,6 +1838,18 @@ def _start_daemon(
                 "from scripts.run_isolated_daemon_acceptance import "
                 "_serve_isolated_loopback_daemon; "
                 "_serve_isolated_loopback_daemon(port=int(sys.argv[1]))"
+            ),
+            str(port),
+        ]
+    elif model_mode == "real-provider":
+        command = [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "from scripts.run_isolated_daemon_acceptance import "
+                "_serve_real_provider_daemon; "
+                "_serve_real_provider_daemon(port=int(sys.argv[1]))"
             ),
             str(port),
         ]
@@ -1793,6 +1879,8 @@ def _start_daemon(
                 model_mode=model_mode,
                 provider_capture_url=provider_capture_url,
                 production_source_authority=production_source_authority,
+                deepseek_base_url=deepseek_base_url,
+                deepseek_model=deepseek_model,
             ),
             stdout=log_stream,
             stderr=subprocess.STDOUT,
@@ -3201,6 +3289,14 @@ def run(
         allow_real_provider=allow_real_provider,
         production_source_authority=production_source_authority,
     )
+    provider_capture_authority_id = (
+        _deepseek_capture_authority_id(
+            model=settings.deepseek_model,
+            base_url=settings.deepseek_base_url,
+        )
+        if production_source_authority
+        else None
+    )
     ambient_database = Path(settings.database_path).expanduser().resolve()
     upstream_base_url = settings.deepseek_base_url if model_mode == "real-provider" else None
     network_topology = _network_topology(
@@ -3244,6 +3340,8 @@ def run(
                     model_mode=model_mode,
                     provider_capture_url=provider_capture_url,
                     production_source_authority=production_source_authority,
+                    deepseek_base_url=settings.deepseek_base_url,
+                    deepseek_model=settings.deepseek_model,
                 )
                 process_start_count += 1
                 pre_restart_turns: list[dict[str, object]] = []
@@ -3320,6 +3418,8 @@ def run(
                     model_mode=model_mode,
                     provider_capture_url=provider_capture_url,
                     production_source_authority=production_source_authority,
+                    deepseek_base_url=settings.deepseek_base_url,
+                    deepseek_model=settings.deepseek_model,
                 )
                 process_start_count += 1
                 try:
@@ -3539,7 +3639,12 @@ def run(
                             "scripts.run_isolated_daemon_acceptance:"
                             "_serve_isolated_loopback_daemon"
                             if model_mode == "loopback-stub"
-                            else "companion_daemon.napcat_cli"
+                            else (
+                                "scripts.run_isolated_daemon_acceptance:"
+                                "_serve_real_provider_daemon"
+                                if model_mode == "real-provider"
+                                else "companion_daemon.napcat_cli"
+                            )
                         ),
                         "command_mode": (
                             "explicit-test-authorities"
@@ -3554,6 +3659,7 @@ def run(
                         "fake_cli_flag_used": model_mode == "fake",
                         "test_only_semantic_authority_injection": (
                             model_mode == "loopback-stub"
+                            or provider_capture_authority_id is not None
                         ),
                         "semantic_authorities": (
                             {
@@ -3568,7 +3674,11 @@ def run(
                                 ),
                             }
                             if model_mode == "loopback-stub"
-                            else None
+                            else (
+                                {"character_capture_underlying": provider_capture_authority_id}
+                                if provider_capture_authority_id is not None
+                                else None
+                            )
                         ),
                         "real_provider_explicitly_allowed": (
                             model_mode == "real-provider" and allow_real_provider

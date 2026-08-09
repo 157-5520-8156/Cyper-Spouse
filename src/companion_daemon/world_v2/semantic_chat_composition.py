@@ -12,7 +12,9 @@ import asyncio
 from collections.abc import Awaitable
 from dataclasses import dataclass
 import logging
+from types import SimpleNamespace
 from typing import Literal
+from urllib.parse import urlsplit
 
 from companion_daemon.character import load_character
 from companion_daemon.config import Settings
@@ -36,6 +38,7 @@ from .model_completion import ChatCompletionModel
 from .model_authority_identity import (
     possible_provider_lanes,
     provider_lane_sets_are_independent,
+    semantic_authority_id,
     transport_route_ids,
 )
 from .semantic_compute_router import SemanticComputeRouter
@@ -109,6 +112,7 @@ class _ConfiguredProviderLane:
     provider: str
     base_url: str
     model: str
+    semantic_authority_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +136,83 @@ def _direct_source_review_reasoning_effort(model: str) -> str:
     """
 
     return "minimal" if direct_openai_model_id(model).casefold() == "gpt-5-mini" else ""
+
+
+def _validated_test_only_provider_capture_authority(
+    *,
+    settings: Settings,
+    authority_id: str | None,
+) -> str | None:
+    """Validate the identity hand-off used by the isolated provider harness.
+
+    The real author route is identified by its provider endpoint and checkpoint.
+    A loopback hash capture necessarily changes that endpoint, so the acceptance
+    process may carry the already-derived identity explicitly.  This seam is
+    deliberately restricted to an IPv4 loopback endpoint and to the exact
+    release-pinned DeepSeek checkpoint; production configuration cannot use it
+    to claim an arbitrary authority.
+    """
+
+    if authority_id is None:
+        return None
+    try:
+        parsed = urlsplit(settings.deepseek_base_url.rstrip("/"))
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(
+            "test-only provider capture authority requires a valid loopback DeepSeek endpoint"
+        ) from exc
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname != "127.0.0.1"
+        or port is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "test-only provider capture authority requires an exact IPv4 loopback DeepSeek endpoint"
+        )
+    expected = semantic_authority_id(
+        SimpleNamespace(
+            provider="deepseek",
+            base_url="https://api.deepseek.com",
+            model=settings.deepseek_model,
+        )
+    )
+    if expected is None or authority_id != expected:
+        raise ValueError(
+            "test-only provider capture authority does not match the configured DeepSeek checkpoint"
+        )
+    return authority_id
+
+
+def _apply_test_only_provider_capture_authority(
+    model: object | None,
+    authority_id: str | None,
+    *,
+    settings: Settings,
+) -> None:
+    """Attach the validated capture identity before independence checks.
+
+    Only auto-created models reach this helper.  Rechecking their route and
+    checkpoint here prevents a future provider-construction change from
+    accidentally inheriting the primary model's authority label.
+    """
+
+    if authority_id is None or model is None:
+        return
+    if (
+        getattr(model, "provider", None) != "deepseek"
+        or str(getattr(model, "base_url", "")).rstrip("/")
+        != settings.deepseek_base_url.rstrip("/")
+        or str(getattr(model, "model", "")).strip()
+        != settings.deepseek_model
+    ):
+        raise ValueError("test-only provider capture authority requires a DeepSeek model")
+    object.__setattr__(model, "semantic_authority_id", authority_id)
 
 
 def _model_identity(model: object | None) -> str | None:
@@ -329,6 +410,7 @@ def _preflight_production_source_review(
     settings: Settings,
     thinking_model: object | None,
     source_closure_model: object | None,
+    character_authority_id: str | None = None,
 ) -> None:
     """Reject an unusable hard-boundary topology before allocating clients."""
 
@@ -336,6 +418,7 @@ def _preflight_production_source_review(
         provider="deepseek",
         base_url=settings.deepseek_base_url,
         model=settings.deepseek_model,
+        semantic_authority_id=character_authority_id,
     )
     authors: list[object] = [deepseek_author]
     if thinking_model is not None:
@@ -346,6 +429,7 @@ def _preflight_production_source_review(
                 provider="deepseek",
                 base_url=settings.deepseek_base_url,
                 model=settings.deepseek_character_thinking_model,
+                semantic_authority_id=character_authority_id,
             )
         )
     if source_closure_model is not None:
@@ -833,6 +917,7 @@ def build_semantic_chat_composition(
     usage_observer: object | None = None,
     character_interior_turn_store: _CharacterInteriorTurnStore | None = None,
     character_interior_turn_owner_id: str = "character-interior:production",
+    test_only_provider_capture_authority_id: str | None = None,
 ) -> SemanticChatComposition:
     """Build one explicitly supplied or provider-backed Character author.
 
@@ -860,6 +945,28 @@ def build_semantic_chat_composition(
             "CharacterInterior cannot install an implicit backup character author; "
             "provider failure must enter its durable technical-failure lifecycle"
         )
+    test_only_provider_capture_authority_id = (
+        _validated_test_only_provider_capture_authority(
+            settings=settings,
+            authority_id=test_only_provider_capture_authority_id,
+        )
+    )
+    if test_only_provider_capture_authority_id is not None and (
+        flash_model is not None or thinking_model is not None
+    ):
+        raise ValueError(
+            "test-only provider capture authority cannot be combined with caller-supplied "
+            "character models"
+        )
+    if (
+        test_only_provider_capture_authority_id is not None
+        and settings.deepseek_character_thinking_enabled
+        and settings.deepseek_character_thinking_model != settings.deepseek_model
+    ):
+        raise ValueError(
+            "test-only provider capture authority requires the thinking character route "
+            "to use the configured DeepSeek checkpoint"
+        )
     # Source review is an explicit deployment capability. It is a hard
     # boundary for visible World-bound expression facts; the redundant-route
     # switch must not silently turn that boundary off. An explicitly injected
@@ -882,6 +989,7 @@ def build_semantic_chat_composition(
             settings=settings,
             thinking_model=thinking_model,
             source_closure_model=source_closure_model,
+            character_authority_id=test_only_provider_capture_authority_id,
         )
     owned: list[object] = []
     owned_closeables: list[object] = []
@@ -920,6 +1028,16 @@ def build_semantic_chat_composition(
         )
         thinking_model = provider_thinking
         owned.append(provider_thinking)
+    _apply_test_only_provider_capture_authority(
+        flash_model,
+        test_only_provider_capture_authority_id,
+        settings=settings,
+    )
+    _apply_test_only_provider_capture_authority(
+        thinking_model,
+        test_only_provider_capture_authority_id,
+        settings=settings,
+    )
 
     local_endpoint_model: ChatCompletionModel | None = None
     local_provider_capacity: ProviderCapacityGate | None = None
@@ -1349,6 +1467,11 @@ def build_semantic_chat_composition(
             thinking_enabled=False,
             max_completion_tokens=4_096,
             usage_observer=usage_observer,
+        )
+        _apply_test_only_provider_capture_authority(
+            background_model,
+            test_only_provider_capture_authority_id,
+            settings=settings,
         )
         owned.append(background_model)
     if background_model is None:

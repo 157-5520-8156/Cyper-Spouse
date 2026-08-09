@@ -246,6 +246,112 @@ async def test_world_v2_composition_uses_one_character_provider_and_independent_
     await composition.aclose()
 
 
+def test_provider_capture_can_preserve_deepseek_authority_for_isolated_preflight() -> None:
+    """A loopback hash capture must not erase the underlying author identity."""
+
+    settings = Settings(
+        _env_file=None,
+        DEEPSEEK_API_KEY="deepseek-test-key",
+        deepseek_base_url="http://127.0.0.1:32124",
+        deepseek_model="deepseek-v4-flash",
+        OPENAI_API_KEY="openai-test-key",
+        OPENROUTER_API_KEY="openrouter-test-key",
+        WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+    )
+
+    composition = build_semantic_chat_composition(
+        settings=settings,
+        model_id_prefix="isolated-capture",
+        test_only_provider_capture_authority_id=(
+            "semantic-authority:2026-08-01.1:deepseek:deepseek-v4-flash"
+        ),
+    )
+
+    assert composition.proactive_source_authority_health()["status"] == "ready"
+
+
+@pytest.mark.parametrize(
+    "settings_update",
+    [
+        {"deepseek_base_url": "https://api.deepseek.com"},
+        {"deepseek_model": "unknown-checkpoint"},
+    ],
+)
+def test_provider_capture_authority_is_fail_closed_outside_exact_loopback_route(
+    settings_update: dict[str, str],
+) -> None:
+    settings_kwargs = {
+        "_env_file": None,
+        "DEEPSEEK_API_KEY": "deepseek-test-key",
+        "deepseek_base_url": "http://127.0.0.1:32124",
+        "deepseek_model": "deepseek-v4-flash",
+        "OPENAI_API_KEY": "openai-test-key",
+        "OPENROUTER_API_KEY": "openrouter-test-key",
+        "WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED": True,
+        **settings_update,
+    }
+    settings = Settings(
+        **settings_kwargs,
+    )
+    with pytest.raises(ValueError, match="test-only provider capture authority"):
+        build_semantic_chat_composition(
+            settings=settings,
+            model_id_prefix="isolated-capture",
+            test_only_provider_capture_authority_id=(
+                "semantic-authority:2026-08-01.1:deepseek:deepseek-v4-flash"
+            ),
+        )
+
+
+def test_provider_capture_authority_rejects_caller_supplied_character_route() -> None:
+    settings = Settings(
+        _env_file=None,
+        DEEPSEEK_API_KEY="deepseek-test-key",
+        deepseek_base_url="http://127.0.0.1:32124",
+        deepseek_model="deepseek-v4-flash",
+        OPENAI_API_KEY="openai-test-key",
+        OPENROUTER_API_KEY="openrouter-test-key",
+        WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+    )
+
+    with pytest.raises(ValueError, match="caller-supplied character models"):
+        build_semantic_chat_composition(
+            settings=settings,
+            flash_model=SimpleNamespace(
+                provider="deepseek",
+                base_url="https://evil.example/v1",
+                model="wrong-checkpoint",
+            ),
+            model_id_prefix="isolated-capture",
+            test_only_provider_capture_authority_id=(
+                "semantic-authority:2026-08-01.1:deepseek:deepseek-v4-flash"
+            ),
+        )
+
+
+def test_provider_capture_authority_rejects_unpinned_thinking_checkpoint() -> None:
+    settings = Settings(
+        _env_file=None,
+        DEEPSEEK_API_KEY="deepseek-test-key",
+        deepseek_base_url="http://127.0.0.1:32124",
+        deepseek_model="deepseek-v4-flash",
+        DEEPSEEK_CHARACTER_THINKING_ENABLED=True,
+        DEEPSEEK_CHARACTER_THINKING_MODEL="deepseek-v4-thinking",
+        OPENAI_API_KEY="openai-test-key",
+        OPENROUTER_API_KEY="openrouter-test-key",
+        WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+    )
+
+    with pytest.raises(ValueError, match="thinking character route"):
+        build_semantic_chat_composition(
+            settings=settings,
+            model_id_prefix="isolated-capture",
+            test_only_provider_capture_authority_id=(
+                "semantic-authority:2026-08-01.1:deepseek:deepseek-v4-flash"
+            ),
+        )
+
+
 @pytest.mark.asyncio
 async def test_production_composition_has_no_backup_character_author() -> None:
 

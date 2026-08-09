@@ -232,6 +232,7 @@ def create_qq_c2c_onebot_app(
     _test_only_world_support_model: ChatCompletionModel | None = None,
     _test_only_source_closure_model: ChatCompletionModel | None = None,
     _test_only_life_source_closure_model: ChatCompletionModel | None = None,
+    _test_only_provider_capture_authority_id: str | None = None,
     scheduler_interval_seconds: float = 15.0,
     media_preview: MediaPreviewDeployment | None = None,
     media_transport: MediaProviderTransport | None = None,
@@ -270,6 +271,8 @@ def create_qq_c2c_onebot_app(
     )
     if use_fake_model and test_authorities_injected:
         raise ValueError("fake-model mode cannot also inject test authorities")
+    if use_fake_model and _test_only_provider_capture_authority_id is not None:
+        raise ValueError("fake-model mode cannot use a provider capture authority")
     if test_authorities_injected:
         if _test_only_model is None or _test_only_source_closure_model is None:
             raise ValueError(
@@ -342,6 +345,9 @@ def create_qq_c2c_onebot_app(
         ),
         perception_budget_limit=(
             perception_bundle.budget_limit if perception_bundle is not None else 0
+        ),
+        test_only_provider_capture_authority_id=(
+            _test_only_provider_capture_authority_id
         ),
         scheduler_interval_seconds=scheduler_interval_seconds,
     )

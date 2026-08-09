@@ -2459,6 +2459,7 @@ def build_qq_c2c_host(
     external_perception_channel_port: LiveAttentionChannelPort | None = None,
     external_perception_authorized_search_profile: SourceProfile | None = None,
     scheduler_interval_seconds: float | None = None,
+    test_only_provider_capture_authority_id: str | None = None,
 ) -> QQC2CHost:
     """Compose the C2C lane without importing legacy chat/runtime code.
 
@@ -2514,6 +2515,9 @@ def build_qq_c2c_host(
             usage_observer=usage_store.record,
             character_interior_turn_store=character_turn_store,
             character_interior_turn_owner_id=f"qq-c2c:{recipient_id}",
+            test_only_provider_capture_authority_id=(
+                test_only_provider_capture_authority_id
+            ),
         )
     except BaseException:
         character_turn_store.close()

@@ -1752,6 +1752,33 @@ def test_production_source_authority_preserves_only_its_external_credentials(
     assert environment["ARK_API_KEY"] == ""
     assert environment["CIVITAI_API_KEY"] == ""
     assert environment["WORLD_V2_RECORDED_CADENCE_MODE"] == "shadow"
+    assert environment["WORLD_V2_TEST_ONLY_PROVIDER_CAPTURE_AUTHORITY_ID"] == (
+        "semantic-authority:2026-08-01.1:deepseek:deepseek-v4-flash"
+    )
+
+
+def test_provider_capture_environment_uses_validated_settings_over_ambient_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://wrong.example/v1")
+    monkeypatch.setenv("DEEPSEEK_MODEL", "wrong-checkpoint")
+
+    environment = _daemon_environment(
+        database=tmp_path / "isolated.sqlite",
+        capture_url="http://127.0.0.1:32123",
+        attachment_cache=tmp_path / "attachments",
+        model_mode="real-provider",
+        provider_capture_url="http://127.0.0.1:32124",
+        production_source_authority=True,
+        deepseek_base_url="https://api.deepseek.com",
+        deepseek_model="deepseek-v4-flash",
+    )
+
+    assert environment["DEEPSEEK_MODEL"] == "deepseek-v4-flash"
+    assert environment["WORLD_V2_TEST_ONLY_PROVIDER_CAPTURE_AUTHORITY_ID"] == (
+        "semantic-authority:2026-08-01.1:deepseek:deepseek-v4-flash"
+    )
 
 
 def test_provider_acceptance_clears_source_authority_without_separate_opt_in(
@@ -1773,6 +1800,7 @@ def test_provider_acceptance_clears_source_authority_without_separate_opt_in(
     assert environment["OPENAI_API_KEY"] == ""
     assert environment["OPENROUTER_API_KEY"] == ""
     assert environment["WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED"] == "false"
+    assert environment["WORLD_V2_TEST_ONLY_PROVIDER_CAPTURE_AUTHORITY_ID"] == ""
     assert environment["WORLD_V2_RECORDED_CADENCE_MODE"] == "shadow"
 
 

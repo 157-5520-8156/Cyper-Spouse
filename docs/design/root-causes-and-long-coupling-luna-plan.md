@@ -1753,3 +1753,17 @@ commit：hash
 - 新增 `scripts/test_fast.py` 分层入口：`smoke`、`character`、`host` 和 `full`。日常默认只跑
   CharacterInterior/LLM 主链，提交前才跑完整套件；`--last-failed` 用于快速回到最近失败，避免每次小改动
   都支付完整 SQLite/冷重放回归成本。
+
+### 2026-08-10：隔离真实 provider 接线与测试分层（不升级资格）
+
+- 隔离 acceptance 的 DeepSeek 请求继续经过本地 hash capture；为避免 loopback endpoint 被错误当成未知
+  角色 authority，新增了显式、仅测试使用的 underlying-authority handoff。它只接受字面 `127.0.0.1`
+  capture、必须匹配 canonical DeepSeek model identity，且 fake/普通生产 composition 不能携带该值；未知或
+  非 loopback 路由仍 fail-closed。该 handoff 不改变生产 provider registry、source reviewer 或角色语义。
+- 当前隔离真实 provider 复测能启动并通过 source-authority preflight，但 7 轮中 4 轮为
+  `primary_timeout`，可见终态角色选择为 0，HTTP round-trip 约 11.1–11.5 秒；这是真实的性能/资格阻断，
+  没有通过放宽预算、关闭来源审查或模板回复掩盖。真实 DeepSeek 首轮/流式/QQ 回执样本、24 小时 soak 与
+  自由对聊质量仍为 `manual_only`/`qualification_incomplete`，不触发 §20 生产替换人工门。
+- 分层测试的实测基线为：Character tier 627 tests 约 33 秒，host tier 136 tests 约 205 秒，完整套件
+  4950 tests 约 14 分 42 秒。日常改动使用 `uv run python scripts/test_fast.py --tier character` 或
+  `--last-failed`；完整套件仍是提交门禁，因为 host/SQLite/冷重放测试不能安全地盲目并行化。
