@@ -1300,9 +1300,7 @@ class CharacterInteriorWorldStimulusRuntime:
             expired_count=sum(":expired:" in item for item in outcomes),
             accepted_count=sum(
                 process.state == "terminal"
-                and not outcome.endswith(":no-change")
-                and ":expired:" not in outcome
-                and ":ignored" not in outcome
+                and (outcome.endswith(":accepted") or ":accepted:" in outcome)
                 for process, outcome in zip(processes, outcomes, strict=True)
             ),
             technical_failure_count=deferred,
@@ -1563,9 +1561,9 @@ class CharacterInteriorWorldStimulusRuntime:
                 await self._complete_opportunity_processes(
                     processes=active_processes,
                     source_events=source_events_by_trigger,
-                    outcome_ref=f"outcome:{active.trigger_id}:ignored",
+                    outcome_ref=f"outcome:{active.trigger_id}:no-change",
                 )
-                return result(work_status="ignored")
+                return result(work_status="no_change")
             if len(transition.proposal_refs) != 1:
                 return result(work_status="technical_failure")
             proposal_id = transition.proposal_refs[0]

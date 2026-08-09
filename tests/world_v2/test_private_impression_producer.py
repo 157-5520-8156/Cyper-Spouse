@@ -578,6 +578,7 @@ async def test_invalid_private_reflection_uses_one_interior_correction_then_retr
     assert len(model.calls) == 2
     assert ledger.project().private_impressions == ()
     assert ledger.project().trigger_processes[-1].state == "claimed"
+    assert runtime.health_snapshot(WORLD_ID).technical_failure_count == 1
     assert interior.runtime_health()["last_failure_code"] == (
         "invalid_role_result_after_correction"
     )

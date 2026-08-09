@@ -958,6 +958,24 @@ async def test_model_no_change_is_durable_and_completes_the_exact_trigger() -> N
 
 
 @pytest.mark.asyncio
+async def test_model_no_change_without_a_proposal_is_still_character_no_change(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    runtime, ledger, _projection = _runtime(model=_RoleModel(decision="no_change"))
+
+    async def no_change_without_proposal(_stimulus):  # type: ignore[no-untyped-def]
+        return SimpleNamespace(status="model_no_change", proposal_refs=())
+
+    monkeypatch.setattr(runtime._interior, "experience", no_change_without_proposal)  # noqa: SLF001
+
+    result = await runtime.drain_one()
+
+    assert result.work_status == "no_change"
+    assert runtime.health_snapshot(WORLD_ID).no_change_count == 1
+    assert ledger.project().trigger_processes[-1].state == "terminal"
+
+
+@pytest.mark.asyncio
 async def test_same_world_stimulus_inner_turn_can_plant_a_free_source_bound_aspiration() -> None:
     model = _RoleModel(
         decision="no_change",

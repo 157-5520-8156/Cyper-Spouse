@@ -756,6 +756,7 @@ class PrivateImpressionTriggerRuntime:
         self._owner_id = owner_id
         self._lease_seconds = lease_seconds
         self._source = source
+        self._technical_failure_trigger_ids: set[str] = set()
 
     async def drain_one(self) -> PrivateImpressionRunResult:
         result = await self._drain_one_impl()
@@ -813,6 +814,7 @@ class PrivateImpressionTriggerRuntime:
             for impression in before.private_impressions
         )
         if appraisal is None or appraisal.status != "active" or already_interpreted:
+            self._technical_failure_trigger_ids.discard(active.trigger_id)
             await self._complete(
                 process=active,
                 source_event=source_event,
@@ -858,6 +860,7 @@ class PrivateImpressionTriggerRuntime:
             )
         )
         if transition.status == "technical_failure":
+            self._technical_failure_trigger_ids.add(active.trigger_id)
             return PrivateImpressionRunResult(
                 trigger_id=active.trigger_id,
                 status="processed",
@@ -865,6 +868,7 @@ class PrivateImpressionTriggerRuntime:
             )
         after_interior = await _project(self._ledger)
         if transition.status == "model_no_change":
+            self._technical_failure_trigger_ids.discard(active.trigger_id)
             model_result_audit = recorded_character_interior_model_result(
                 transition,
                 purpose=PRIVATE_IMPRESSION_PURPOSE,
@@ -889,12 +893,14 @@ class PrivateImpressionTriggerRuntime:
         if len(transition.proposal_refs) != 1:
             # A transitioned result without exactly one accepted typed
             # proposal is an authority failure, never model no-change.
+            self._technical_failure_trigger_ids.add(active.trigger_id)
             return PrivateImpressionRunResult(
                 trigger_id=active.trigger_id,
                 status="processed",
                 work_status="technical_failure",
             )
         accepted_ref = transition.proposal_refs[0]
+        self._technical_failure_trigger_ids.discard(active.trigger_id)
         await self._complete(
             process=active,
             source_event=source_event,
@@ -954,6 +960,8 @@ class PrivateImpressionTriggerRuntime:
             for item in processes
         )
         outcomes = tuple(item.runtime_outcome_ref or "" for item in processes)
+        process_ids = {item.trigger_id for item in processes}
+        self._technical_failure_trigger_ids.intersection_update(process_ids)
         last = processes[-1] if processes else None
         last_identity = identities[-1] if identities else None
         return CausalOpportunityHealth(
@@ -972,13 +980,14 @@ class PrivateImpressionTriggerRuntime:
             expired_count=sum(":expired:" in item for item in outcomes),
             accepted_count=sum(
                 process.state == "terminal"
-                and not outcome.endswith(":no-change")
-                and ":ignored" not in outcome
-                and ":no-source" not in outcome
-                and ":expired:" not in outcome
+                and (outcome.endswith(":accepted") or ":accepted:" in outcome)
                 for process, outcome in zip(processes, outcomes, strict=True)
             ),
-            technical_failure_count=0,
+            technical_failure_count=sum(
+                item.trigger_id in self._technical_failure_trigger_ids
+                or ":attempts-exhausted" in outcome
+                for item, outcome in zip(processes, outcomes, strict=True)
+            ),
         )
 
     async def _accept(
