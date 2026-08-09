@@ -1724,3 +1724,15 @@ commit：hash
 - memory candidate 的接受、撤回、CAS、retry、effect-once 和角色 retain/forget/revise 选择均未改变；这只是
   让 source→opportunity→memory decision 的审计与冷重放稳定。Fact/Experience/Withdrawal/life-memory 回归
   共 `38 passed`，真实 provider、embedding、跨 actor memory 统一和 24 小时资格仍未完成。
+
+### 2026-08-09：当前 HEAD 冻结场景 `.59` 基线（不改变资格边界）
+
+- 在 inbound、expression-reconsideration 与 memory 三个 source→opportunity lineage 薄片之后，冻结离线套件
+  的可见事件、Action、重启/冷重放谓词均保持通过，但持久审计行变化使聚合 manifest 发生预期漂移。已按项目规则
+  将 `FROZEN_OFFLINE_SUITE_BASELINE_VERSION` 明确升为 `.59`，并绑定当前稳定哈希
+  `8d20d11b429b5a5bc9167072ed371740a430f15733aa425b63ae6e70c385b80d`；没有删除 drift guard 或放宽断言。
+- 当前 HEAD 的完整回归为 `4947 passed, 1 warning`；冻结场景为 `6 passed`，Delayed Trigger Matrix/公开宿主
+  定向套件为 `48 passed`，ruff、`git diff --check` 与静态声明校验均通过。
+- 以上仍只证明本地源码、typed/fixture、公开宿主和冷重放链。真实 DeepSeek 首轮/流式/QQ 回执 100 样本、自由
+  对聊质量、24 小时 soak 以及旧 production daemon 的恢复资格仍未完成；继续保持
+  `manual_only`/`qualification_incomplete`，不触发 §20 的重启/替换人工门。

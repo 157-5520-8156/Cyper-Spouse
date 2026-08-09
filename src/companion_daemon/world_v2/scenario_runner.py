@@ -261,7 +261,7 @@ class ScenarioVerificationError(AssertionError):
 # .53 hash was stale (the per-case verification predicates and replay checks
 # still pass, but the aggregate request/room/replay manifest moved), so this
 # is an explicit audited rebaseline rather than weakening the drift guard.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.58"
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.59"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
@@ -323,8 +323,12 @@ FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.58"
 # 2026-08-09 5th: durable CharacterInterior author identity is carried through
 # the Deliberation audit boundary.  Fixed scenario predicates remain unchanged,
 # but the complete executable manifest is rebaselined to the resulting hash.
+# 2026-08-09 6th: inbound, expression-reconsideration, and memory opportunities
+# now use the canonical source→opportunity identity.  These are lineage-only
+# changes: the frozen event/action/replay predicates remain unchanged, while
+# durable audit rows (and therefore the aggregate manifest) move again.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "c8918ecec30bbaa3e195baa819a669dfd0ed081d9318ed47d8303c902200fbdb"
+    "8d20d11b429b5a5bc9167072ed371740a430f15733aa425b63ae6e70c385b80d"
 )
 
 
