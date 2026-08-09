@@ -27,6 +27,7 @@ _LIFE_DEVELOPMENT_TOOL_NAME = "character_role_life_development_choice_v1"
 _EXPRESSION_RECONSIDERATION_TOOL_NAME = "character_role_expression_reconsideration_v1"
 _FACT_MEMORY_RETENTION_TOOL_NAME = "character_role_fact_memory_retention_v1"
 _EXPERIENCE_MEMORY_RETENTION_TOOL_NAME = "character_role_experience_memory_retention_v1"
+_MEMORY_WITHDRAWAL_REVIEW_TOOL_NAME = "character_role_memory_withdrawal_review_v1"
 
 
 def _canonical_json(value: object) -> str:
@@ -562,6 +563,7 @@ class StructuredRoleToolContracts:
             _ActivityLifecyclePayload,
             _ExpressionReconsiderationPayload,
             _MemoryRetentionPayload,
+            _MemoryWithdrawalReviewPayload,
             _PrivateImpressionProposal,
             _OutcomeSelectionPayload,
             _WorldStimulusAppraisalResult,
@@ -576,6 +578,7 @@ class StructuredRoleToolContracts:
         _compiled_provider_schema(_ActivityLifecyclePayload)
         _compiled_provider_schema(_ExpressionReconsiderationPayload)
         _compiled_provider_schema(_MemoryRetentionPayload)
+        _compiled_provider_schema(_MemoryWithdrawalReviewPayload)
         _compiled_provider_schema(_WorldStimulusAppraisalResult)
         _compiled_provider_schema(_PrivateImpressionProposal)
         _compiled_provider_schema(_OutcomeSelectionPayload)
@@ -737,6 +740,21 @@ class StructuredRoleToolContracts:
             raise ValueError("memory retention compiler received an unsupported purpose")
         return self._cached_memory_retention(
             purpose,
+            _canonical_json(capability_payload),
+            _canonical_json(source_refs),
+            recall_allowed,
+        )
+
+    def memory_withdrawal_review(
+        self,
+        *,
+        capability_payload: Mapping[str, object],
+        source_refs: tuple[str, ...] = (),
+        recall_allowed: bool,
+    ) -> StructuredRoleToolContract:
+        """Compile the offered retain/forget/revise review disposition."""
+
+        return self._cached_memory_withdrawal_review(
             _canonical_json(capability_payload),
             _canonical_json(source_refs),
             recall_allowed,
@@ -1412,6 +1430,54 @@ class StructuredRoleToolContracts:
                 "cue, reasons, and salience, or explicitly choose no_change. The "
                 "function constrains transport and typed shape only; it does not "
                 "choose for the character."
+            ),
+        )
+
+    @staticmethod
+    @lru_cache(maxsize=32)
+    def _cached_memory_withdrawal_review(
+        capability_payload_json: str,
+        source_refs_json: str,
+        recall_allowed: bool,
+    ) -> StructuredRoleToolContract:
+        from .structured_role import _MemoryWithdrawalReviewPayload
+
+        capability_payload = json.loads(capability_payload_json)
+        if not isinstance(capability_payload, dict):
+            raise ValueError("memory withdrawal capability must be one object")
+        offered = capability_payload.get("offered_tokens")
+        if (
+            not isinstance(offered, list)
+            or not offered
+            or any(not isinstance(item, str) or not item for item in offered)
+            or len(offered) != len(set(offered))
+            or not set(offered) <= {"retain", "forget", "revise"}
+        ):
+            raise ValueError("memory withdrawal offered dispositions are malformed")
+        source_refs = json.loads(source_refs_json)
+        if not isinstance(source_refs, list):
+            raise ValueError("memory withdrawal source refs are malformed")
+        payload_schema = _provider_schema(_MemoryWithdrawalReviewPayload)
+        properties = _required_object_properties(payload_schema)
+        selected_token = properties.get("selected_token")
+        if not isinstance(selected_token, dict):
+            raise ValueError("memory withdrawal selected-token schema is incomplete")
+        properties["selected_token"] = {
+            **deepcopy(selected_token),
+            "enum": list(offered),
+        }
+        return _compile_generic_decision_contract(
+            purpose="memory_withdrawal_review",
+            tool_name=_MEMORY_WITHDRAWAL_REVIEW_TOOL_NAME,
+            payload_schema=payload_schema,
+            capability_identity=capability_payload,
+            source_refs=tuple(source_refs),
+            recall_allowed=recall_allowed,
+            description=(
+                "Return the complete source-bound memory withdrawal review. Choose "
+                "one offered disposition for this exact candidate; the function "
+                "constrains transport and candidate shape only and does not choose "
+                "for the character."
             ),
         )
 

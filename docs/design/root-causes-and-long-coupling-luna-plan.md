@@ -1429,5 +1429,16 @@ commit：hash
   `git diff --check` 通过。该数字是本地 typed/fixture evidence，不是 100 次真实 DeepSeek
   qualification；真实 QQ、自由对聊与 24 小时 soak 仍保持 `manual_only`/`qualification_incomplete`。
 - 迁移同时修正了两个公开 fixture：它们现在声明并接收记忆 purpose 的 required tool，同时保留
-  事实批处理等非 CharacterInterior 背景协议的普通入口。源码全量回归为 `4922 passed, 1 warning`，
+  事实批处理等非 CharacterInterior 背景协议的普通入口。源码全量回归为 `4924 passed, 1 warning`，
   `ruff` 与 Delayed Trigger Matrix 静态 verifier 也通过；这仍不改变真实 provider 资格门。
+
+### 2026-08-09：Fact 撤回后的 memory-withdrawal review required-tool 薄片
+
+- `memory_withdrawal_review` 接入 `character_role_memory_withdrawal_review_v1`；payload 只包含
+  一个由 surviving capability 专门化的 `selected_token`，当前可选值为 `retain|forget|revise`。
+  tool schema 不替角色决定保留、遗忘或修订，也不修改 Fact/MemoryCandidate 的 authority。
+- source refs、candidate/withdrawal payload hash、tool/schema/contract identity 仍绑定
+  CharacterInterior request hash；不支持 required tool 时精确 fail-closed。review runtime 继续
+  负责来源失效、候选 CAS、proposal/acceptance、effect-once 和技术重试。
+- 结构化角色与生产 builder 回归 `142 passed`；真实 DeepSeek、QQ 回执、自由对聊与 24 小时
+  soak 仍未资格化，发布状态继续 `manual_only`/`qualification_incomplete`。

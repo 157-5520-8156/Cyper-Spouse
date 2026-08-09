@@ -63,6 +63,27 @@ class _Model:
 
 
 class _StructuredInteriorWithdrawalModel(_Model):
+    supports_required_tool_choice = True
+
+    async def complete_json(
+        self,
+        messages,
+        *,
+        temperature=0.2,
+        tools=None,
+        tool_choice=None,
+    ):  # type: ignore[no-untyped-def]
+        if tools is not None:
+            assert len(tools) == 1
+            assert tools[0]["function"]["name"] == (
+                "character_role_memory_withdrawal_review_v1"
+            )
+            assert tool_choice == {
+                "type": "function",
+                "function": {"name": "character_role_memory_withdrawal_review_v1"},
+            }
+        return await self.complete(messages, temperature=temperature)
+
     async def complete(self, messages, *, temperature=0.2) -> str:
         del temperature
         self.calls += 1

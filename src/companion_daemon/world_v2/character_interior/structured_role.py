@@ -237,6 +237,14 @@ class _MemoryRetentionPayload(
     """Canonical retain/no-change wire shared by fact and experience memory."""
 
 
+class _MemoryWithdrawalReviewPayload(BaseModel):
+    """Canonical disposition wire for one withdrawn-memory review."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    selected_token: str = Field(min_length=1, max_length=32)
+
+
 def _validate_proactive_payload(
     payload: Mapping[str, object],
     _offered_tokens: frozenset[str],
@@ -1048,6 +1056,7 @@ class StructuredCharacterRoleFaculty:
             "expression_reconsideration",
             "fact_memory_retention",
             "experience_memory_retention",
+            "memory_withdrawal_review",
         }:
             return None
         if not bool(getattr(self._model, "supports_required_tool_choice", False)):
@@ -1102,6 +1111,12 @@ class StructuredCharacterRoleFaculty:
             }:
                 return compiler.memory_retention(
                     purpose=request.purpose,
+                    capability_payload=manifest.payload,
+                    source_refs=manifest.source_refs,
+                    recall_allowed=not request.recall_completed,
+                )
+            if request.purpose == "memory_withdrawal_review":
+                return compiler.memory_withdrawal_review(
                     capability_payload=manifest.payload,
                     source_refs=manifest.source_refs,
                     recall_allowed=not request.recall_completed,

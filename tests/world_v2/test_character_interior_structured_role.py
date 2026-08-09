@@ -2711,6 +2711,74 @@ async def test_fact_memory_retention_required_tool_reaches_deepseek_http_boundar
 
 
 @pytest.mark.asyncio
+async def test_memory_withdrawal_review_uses_offered_disposition_tool() -> None:
+    manifest = _manifest("retain", "forget", kind="memory_withdrawal_review")
+    model = _RequiredToolQueueModel(
+        _result(
+            status="decision",
+            decision={
+                "source_refs": ["source:private_self"],
+                "payload": {"selected_token": "forget"},
+            },
+        )
+    )
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-chat")
+
+    result = await role.consider(
+        await _request(
+            purpose="memory_withdrawal_review",
+            capability_manifest=manifest,
+        )
+    )
+
+    assert result["decision"]["payload"] == {
+        "contract": "character-interior-memory-withdrawal-review.1",
+        "selected_token": "forget",
+    }
+    tools, tool_choice = model.tool_calls[0]
+    assert tools[0]["function"]["name"] == (
+        "character_role_memory_withdrawal_review_v1"
+    )
+    payload_schema = tools[0]["function"]["parameters"]["anyOf"][0]["properties"][
+        "decision"
+    ]["properties"]["payload"]
+    assert payload_schema["properties"]["selected_token"]["enum"] == [
+        "retain",
+        "forget",
+    ]
+    assert tool_choice == {
+        "type": "function",
+        "function": {"name": "character_role_memory_withdrawal_review_v1"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_memory_withdrawal_review_without_required_tool_support_fails_closed() -> None:
+    manifest = _manifest("retain", "forget", kind="memory_withdrawal_review")
+    model = _QueueModel(
+        _result(
+            status="decision",
+            decision={
+                "source_refs": ["source:private_self"],
+                "payload": {"selected_token": "forget"},
+            },
+        )
+    )
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-chat")
+
+    with pytest.raises(StructuredRoleResultError) as raised:
+        await role.consider(
+            await _request(
+                purpose="memory_withdrawal_review",
+                capability_manifest=manifest,
+            )
+        )
+
+    assert raised.value.code == "required_tool_choice_unsupported"
+    assert model.calls == []
+
+
+@pytest.mark.asyncio
 async def test_private_impression_experience_normalizes_one_exact_typed_proposal() -> None:
     manifest = _manifest("appraisal:h1", kind="private_impression_reflection")
     model = _RequiredToolQueueModel(

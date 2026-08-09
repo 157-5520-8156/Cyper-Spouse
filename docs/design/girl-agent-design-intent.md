@@ -572,6 +572,10 @@ RSS/NWS/USGS → hub 采集/去重/嵌入/聚类 → attention 影子/实时注�
   的 required-tool 运输进入同一 CharacterInterior；工具只闭合 retain/no-change、cue、理由和
   salience 的 typed wire，保留/放弃仍由角色选择，矩阵元数据、来源闭包、CAS 与 durable decision
   仍由下游权威负责。真实 provider 首次成功率尚未资格化。
+- Fact 撤回后的 `memory_withdrawal_review` 也通过
+  `character_role_memory_withdrawal_review_v1` 传输，`retain|forget|revise` 只从 surviving
+  capability 动态枚举；角色决定 disposition，撤回来源、候选 CAS 和 effect-once 仍由 review
+  runtime 负责。
 
 **断链点**：检索取回质量（用户体感"失忆"）——索引在、注入路径在，但取回什么、取回多少、
 什么时候注入进快照，是模型与编译参数共同作用的结果，质量未校准。
