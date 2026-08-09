@@ -378,6 +378,9 @@ class _CombinedInteriorStreamProvider:
         self.supports_required_tool_choice = bool(
             getattr(provider, "supports_required_tool_choice", False)
         )
+        self.supports_strict_tool_choice = bool(
+            getattr(provider, "supports_strict_tool_choice", False)
+        )
         self._request = request
         self._provider = provider
         self._stream_adapter = stream_adapter
@@ -1912,6 +1915,11 @@ class _InboundCharacterAuthor:
                 request.trigger_message is not None
                 and request.trigger_message.turn_attention_advisory is not None
             ),
+            schema_dialect=(
+                "deepseek-strict"
+                if bool(getattr(provider, "supports_strict_tool_choice", False))
+                else "standard"
+            ),
         )
         return {
             "tools": list(contract.provider_tools),
@@ -2718,6 +2726,11 @@ class _InboundCharacterAuthor:
             require_turn_posture=(
                 provider_request.trigger_message is not None
                 and provider_request.trigger_message.turn_attention_advisory is not None
+            ),
+            schema_dialect=(
+                "deepseek-strict"
+                if bool(getattr(provider, "supports_strict_tool_choice", False))
+                else "standard"
             ),
         )
         cognition_tools = list(cognition_contract.provider_tools)

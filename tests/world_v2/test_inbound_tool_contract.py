@@ -174,6 +174,71 @@ def test_stream_provider_root_accepts_both_decision_and_recall_branches() -> Non
     assert list(validator.iter_errors(recall)) == []
 
 
+def test_deepseek_strict_dialect_projects_optional_fields_to_required_nulls() -> None:
+    contract = InboundToolContracts().contract_for(
+        phase="initial",
+        transport="stream",
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        recall_allowed=True,
+        schema_dialect="deepseek-strict",
+    )
+    function = contract.provider_tools[0]["function"]
+    assert function["strict"] is True
+    assert contract.identity.schema_dialect == "deepseek-strict"
+    parameters = function["parameters"]
+    Draft202012Validator.check_schema(parameters)
+
+    def assert_strict_objects(value: object) -> None:
+        if isinstance(value, list):
+            for item in value:
+                assert_strict_objects(item)
+            return
+        if not isinstance(value, dict):
+            return
+        properties = value.get("properties")
+        if isinstance(properties, dict):
+            assert value.get("type") == "object"
+            assert value.get("additionalProperties") is False
+            assert set(value.get("required", ())) == set(properties)
+        for item in value.values():
+            assert_strict_objects(item)
+
+    assert_strict_objects(parameters)
+    assert "maxLength" not in json.dumps(parameters)
+    assert "minLength" not in json.dumps(parameters)
+    assert '"date-time"' not in json.dumps(parameters)
+
+
+def test_deepseek_strict_unwrap_removes_only_outer_null_branch_siblings() -> None:
+    contract = InboundToolContracts().contract_for(
+        phase="initial",
+        transport="atomic",
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        recall_allowed=True,
+        schema_dialect="deepseek-strict",
+    )
+    value = {
+        "result_kind": "decision",
+        "appraisal_draft": _appraisal(),
+        "expression_draft": {
+            "timing_choice": "now",
+            "beats": [{"modality": "text", "text": "现在回你。"}],
+            "stance": "自然",
+            "brief_rationale": "保持当前对话。",
+            "confidence": 7000,
+            "world_claims": [],
+        },
+    }
+    parameters = contract.provider_tools[0]["function"]["parameters"]
+    for key in parameters["properties"]:
+        value.setdefault(key, None)
+    unwrapped = json.loads(contract.unwrap(json.dumps(value, ensure_ascii=False)))
+    assert unwrapped == {
+        "appraisal_draft": _appraisal(),
+        "expression_draft": value["expression_draft"],
+    }
+
+
 def test_final_contract_is_a_decision_only_atomic_contract() -> None:
     contract = InboundToolContracts().contract_for(
         phase="final",

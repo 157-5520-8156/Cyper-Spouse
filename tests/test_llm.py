@@ -348,6 +348,27 @@ def test_deepseek_json_payload_requests_one_object() -> None:
     assert payload["response_format"] == {"type": "json_object"}
 
 
+def test_deepseek_strict_tool_uses_beta_completion_endpoint() -> None:
+    model = DeepSeekChatModel("key", "https://api.deepseek.com", "deepseek-v4-flash")
+    strict_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "strict_probe",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+    ]
+    assert model._completion_base_url(strict_tools) == "https://api.deepseek.com/beta"  # noqa: SLF001
+    assert model._completion_base_url(None) == "https://api.deepseek.com"  # noqa: SLF001
+
+
 @pytest.mark.asyncio
 async def test_deepseek_http_request_preserves_inbound_forced_tool_contract() -> None:
     captured: dict[str, object] = {}

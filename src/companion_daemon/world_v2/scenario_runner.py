@@ -261,7 +261,7 @@ class ScenarioVerificationError(AssertionError):
 # .53 hash was stale (the per-case verification predicates and replay checks
 # still pass, but the aggregate request/room/replay manifest moved), so this
 # is an explicit audited rebaseline rather than weakening the drift guard.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.56"
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.57"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
@@ -313,8 +313,14 @@ FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.56"
 # predicates remain unchanged, while its prompt/audit material moves.  Keep
 # the drift guard explicit rather than weakening it for this intentional
 # source-boundary change.
+# 2026-08-09 4th: the appraisal contract now explicitly keeps trust in the
+# relationship signal rather than the affect dimensions.  The fixed suite's
+# visible predicates remain unchanged while its prompt/audit material moves;
+# the DeepSeek strict-schema projection is transport-only and uses the same
+# canonical semantics. Rebaseline the aggregate hash instead of weakening
+# the drift guard.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "fd6fef01c2fb9f0011a888add6370c041249124996645b4494c089218ec550c9"
+    "6781fc591dafaf5cd60e76221876190ab593d3b381e30e7e9174cc901373269a"
 )
 
 

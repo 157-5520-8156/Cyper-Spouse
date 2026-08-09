@@ -1473,3 +1473,24 @@ commit：hash
   `git diff --check` 通过；QQ 感知仍受 deployment shadow/live 门控。
 - 本薄片不资格化真实 DeepSeek 首次成功率、OneBot/vision 回执、自由多轮对聊或 24 小时 soak；Matrix
   继续 `declaration_only`，发布状态继续 `manual_only`/`qualification_incomplete`。
+
+### 2026-08-09：DeepSeek strict tool 方言与真实自由对聊抽样
+
+- DeepSeek 的 inbound atomic/stream required-tool 请求现在由同一 canonical typed contract 投影到
+  `deepseek-strict` 方言：严格对象的可选字段以显式 `null` 运输，timing/beat 三分支和
+  decision/recall 顶层分支保持互斥；DeepSeek provider adapter 只对带 `strict: true` 的工具走官方
+  `/beta/chat/completions`，普通聊天和非 strict provider 不改变。主机仍在解包后执行原有 source closure、
+  capability、一次同角色纠正、CAS、Action effect-once 与 cold replay 校验，不能把 provider schema 当作
+  语义验收。
+- 真实隔离自由对聊（空 SQLite、`deepseek-v4-flash`、关闭 recall embedding、非 QQ Console delivery）
+  连续 5 轮均为 `action_authorized`，没有 correction/technical failure；延迟分别为
+  `5195.622/6539.159/7035.967/7722.322/5576.426 ms`，累计记录成本 `¥0.06`，每轮
+  `replay_matches_live=true` 且 `last_failure_code=null`。回复体现了疲劳边界、主动分享、意见分歧、亲密同意
+  和跨轮记忆，但这只是 5 轮隔离样本，不是 100 次资格统计。
+- 本轮还修复了严格流式 provider 的两类运输问题：严格 union 的 null/空数组 padding 不再被误判为语义双写，
+  被取消的 head future 会被显式观察，避免 `Future exception was never retrieved` 噪声。冻结离线场景基线
+  由 `.56` 显式升为 `.57`，120 场景聚合哈希重新计算并独立复跑通过；本地源码全量回归此前为
+  `4936 passed, 1 warning`，唯一失败是旧聚合哈希，更新 `.57` 后冻结基线单测通过，ruff/diff-check 均通过。
+- 资格状态不变：真实 DeepSeek forced-tool/stream/QQ 回执仍未达到 100 次样本，真实 QQ、24 小时 soak、旧生产
+  daemon 的 §20 重启/替换人工门仍未完成；Delayed Trigger Matrix 继续 `declaration_only`，发布状态继续
+  `manual_only`/`qualification_incomplete`。上述自由对聊只证明当前隔离 composition 可工作，不证明生产上线。

@@ -489,7 +489,10 @@ def _appraisal_draft_messages(
         "such a change. Message counts, thresholds, politeness conventions, and this contract do "
         "not imply that a relationship signal should exist. Do not return subject_ref; the trusted "
         "boundary binds the verified message actor. Do not infer a preferred appraisal, relationship "
-        "change, behavior, stance, or display choice from this wire contract."
+        "change, behavior, stance, or display choice from this wire contract. Critical distinction: "
+        "trust is not an affect component dimension. Never put the word trust in components[].dimension; "
+        "if the character forms a relationship change, trust belongs only in relationship_signal."
+        "suggested_deltas.trust_bp."
     )
     request_material = request.model_dump(mode="json")
     # The full ModelInput remains available to proposal materialization,

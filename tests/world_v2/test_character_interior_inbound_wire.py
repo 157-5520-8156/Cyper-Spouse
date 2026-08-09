@@ -17,6 +17,7 @@ from companion_daemon.world_v2.character_interior.inbound_wire import (
     _RoutedExpressionDraftWire,
     _incremental_first_expression,
     _stream_first_expression,
+    _stream_tail_expression,
     expression_draft_shape_contract,
     review_candidate_external_proposition_coverage,
     review_expression_source_closure,
@@ -816,6 +817,66 @@ def test_expression_event_stream_requires_role_owned_timing_before_head_release(
 
     with pytest.raises(ValueError, match="requires explicit timing_choice"):
         _stream_first_expression(raw)
+
+
+def test_strict_forced_stream_removes_only_null_union_siblings() -> None:
+    """DeepSeek strict root padding must not invalidate the event envelope."""
+
+    raw = json.dumps(
+        {
+            "result_kind": "decision",
+            "protocol": "character-interior-events.1",
+            "appraisal_draft": {"appraise": False, "affect": "no_change"},
+            "events": [
+                {
+                    "type": "head",
+                    "timing_choice": "now",
+                    "beat": {"modality": "text", "text": "先说一句。"},
+                    "stance": "自然",
+                    "brief_rationale": "保持对话。",
+                    "confidence": 7000,
+                    "world_claims": [],
+                },
+                {"type": "end"},
+            ],
+            "expression_draft": None,
+            "recall_request": None,
+            "private_turn_state": None,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+    first = json.loads(_stream_first_expression(raw))
+    tail = json.loads(_stream_tail_expression(raw))
+    assert first["appraisal_draft"]["affect"] == "no_change"
+    assert first["expression_draft"]["beats"][0]["text"] == "先说一句。"
+    assert tail["expression_draft"]["timing_choice"] == "silent"
+
+
+def test_strict_forced_stream_accepts_empty_sibling_beat_transport_padding() -> None:
+    raw = json.dumps(
+        {
+            "result_kind": "decision",
+            "protocol": "character-interior-events.1",
+            "appraisal_draft": {"appraise": False, "affect": "no_change"},
+            "events": [
+                {
+                    "type": "head",
+                    "timing_choice": "now",
+                    "beat": {"modality": "text", "text": "这一句先说。"},
+                    "beats": [],
+                    "world_claims": [],
+                },
+                {"type": "end"},
+            ],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+    first = json.loads(_stream_first_expression(raw))
+    assert first["expression_draft"]["beats"][0]["text"] == "这一句先说。"
 
 
 @pytest.mark.asyncio

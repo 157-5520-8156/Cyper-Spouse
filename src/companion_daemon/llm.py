@@ -774,6 +774,11 @@ class DeepSeekChatModel:
     provider = "deepseek"
     reports_exact_request_emission = True
     supports_required_tool_choice = True
+    # DeepSeek's strict function-calling dialect is enabled by the provider
+    # adapter only for the tools that explicitly carry ``strict: true``.  The
+    # adapter routes those calls through the beta endpoint without changing
+    # ordinary JSON/chat traffic.
+    supports_strict_tool_choice = True
 
     def __init__(
         self,
@@ -805,6 +810,22 @@ class DeepSeekChatModel:
             trust_env=False,
             transport=transport,
         )
+
+    def _completion_base_url(self, tools: list[dict[str, object]] | None) -> str:
+        strict_tools = bool(
+            tools
+            and any(
+                isinstance(tool, dict)
+                and isinstance(tool.get("function"), dict)
+                and tool["function"].get("strict") is True
+                for tool in tools
+            )
+        )
+        if not strict_tools or not self.supports_strict_tool_choice:
+            return self.base_url
+        if self.base_url.rstrip("/").endswith("/beta"):
+            return self.base_url
+        return self.base_url.rstrip("/") + "/beta"
 
     def request_payload(
         self,
@@ -960,7 +981,7 @@ class DeepSeekChatModel:
             try:
                 async with self.client.stream(
                     "POST",
-                    f"{self.base_url}/chat/completions",
+                    f"{self._completion_base_url(tools)}/chat/completions",
                     headers={
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
@@ -1252,7 +1273,7 @@ class DeepSeekChatModel:
             request_span = mark_model_request_emitted()
             try:
                 response = await self.client.post(
-                    f"{self.base_url}/chat/completions",
+                    f"{self._completion_base_url(tools)}/chat/completions",
                     headers={
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
@@ -1471,6 +1492,7 @@ class OpenAICompatibleChatModel(DeepSeekChatModel):
     """Chat Completions client for OpenAI-compatible fallback providers."""
 
     provider = "openai"
+    supports_strict_tool_choice = False
 
     def __init__(
         self,

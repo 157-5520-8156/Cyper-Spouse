@@ -186,6 +186,8 @@ def test_appraisal_prompt_matches_the_canonical_live_wire_bounds() -> None:
     assert "1-128 characters" in prompt
     assert "affect must be explicit on every live result" in prompt
     assert "omitting affect means no_change" not in prompt
+    assert "trust is not an affect component dimension" in prompt
+    assert "trust belongs only in relationship_signal" in prompt
 
 
 @pytest.mark.parametrize(

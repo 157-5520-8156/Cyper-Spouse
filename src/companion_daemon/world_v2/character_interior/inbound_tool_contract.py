@@ -25,7 +25,113 @@ from .inbound_appraisal_wire import AppraisalDraftWire
 
 InboundToolPhase = Literal["initial", "after_recall", "final"]
 InboundToolTransport = Literal["atomic", "stream"]
+InboundToolSchemaDialect = Literal["standard", "deepseek-strict"]
 _CONTRACT_VERSION = "1"
+
+# DeepSeek's strict tool dialect intentionally has a smaller JSON-Schema
+# vocabulary than the canonical Pydantic wire.  The provider also requires
+# every property of every object to be present; optional semantic fields are
+# therefore transported as explicit ``null`` and retain their meaning in the
+# existing canonical materializer.  This projection is kept here, rather than
+# at call sites, so the standard provider path and the strict provider path
+# cannot drift apart.
+_DEEPSEEK_STRICT_UNSUPPORTED_KEYS = frozenset(
+    {
+        "default",
+        "maxItems",
+        "maxLength",
+        "maximum",
+        "minItems",
+        "minLength",
+        "minimum",
+        "title",
+        "uniqueItems",
+    }
+)
+_DEEPSEEK_STRICT_FORMATS = frozenset(
+    {"email", "hostname", "ipv4", "ipv6", "uuid"}
+)
+
+
+def _nullable_strict_schema(schema: object) -> object:
+    if isinstance(schema, dict):
+        if schema.get("type") == "null":
+            return schema
+        variants = schema.get("anyOf")
+        if isinstance(variants, list) and any(
+            isinstance(item, dict) and item.get("type") == "null" for item in variants
+        ):
+            return schema
+    return {"anyOf": [schema, {"type": "null"}]}
+
+
+def _deepseek_strict_schema(value: object) -> object:
+    """Project one canonical schema into DeepSeek's strict tool dialect.
+
+    The function is deliberately a pure schema adapter.  It never changes
+    the canonical decoder or adds a semantic default; omitted optional values
+    become explicit JSON nulls and are still validated by the host afterward.
+    """
+
+    if isinstance(value, list):
+        return [_deepseek_strict_schema(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    projected: dict[str, object] = {}
+    for key, item in value.items():
+        if key in _DEEPSEEK_STRICT_UNSUPPORTED_KEYS:
+            continue
+        if key == "format" and item not in _DEEPSEEK_STRICT_FORMATS:
+            continue
+        if key == "const":
+            projected["enum"] = [item]
+            continue
+        projected[key] = _deepseek_strict_schema(item)
+
+    properties = projected.get("properties")
+    if not isinstance(properties, dict):
+        return projected
+
+    original_required = set(projected.get("required", ()))
+    properties = {
+        key: _deepseek_strict_schema(item) for key, item in properties.items()
+    }
+    projected["properties"] = properties
+
+    # Branches such as affect lifecycle, timing, and the outer recall/decision
+    # union are object schemas without a full property inventory.  Expand each
+    # branch to the same required-null envelope, preserving non-null fields
+    # that the canonical object already required.
+    branches = projected.get("anyOf")
+    if isinstance(branches, list):
+        projected_branches: list[object] = []
+        for branch in branches:
+            if not isinstance(branch, dict):
+                projected_branches.append(branch)
+                continue
+            branch = dict(branch)
+            branch.setdefault("type", "object")
+            branch_properties = branch.get("properties")
+            if not isinstance(branch_properties, dict):
+                branch_properties = {}
+            branch_properties = {
+                key: _deepseek_strict_schema(item)
+                for key, item in branch_properties.items()
+            }
+            for key, schema in properties.items():
+                if key not in branch_properties:
+                    branch_properties[key] = (
+                        schema if key in original_required else _nullable_strict_schema(schema)
+                    )
+            branch["properties"] = branch_properties
+            branch["required"] = list(properties)
+            branch["additionalProperties"] = False
+            projected_branches.append(branch)
+        projected["anyOf"] = projected_branches
+
+    projected["required"] = list(properties)
+    projected["additionalProperties"] = False
+    return projected
 
 
 def _canonical_json(value: object) -> str:
@@ -143,6 +249,7 @@ class InboundToolContractIdentity:
     contract_id: str
     phase: InboundToolPhase
     transport: InboundToolTransport
+    schema_dialect: InboundToolSchemaDialect
     tool_name: str
     version: str
     schema_sha256: str
@@ -156,6 +263,7 @@ class InboundToolContractIdentity:
             "contract_id": self.contract_id,
             "phase": self.phase,
             "transport": self.transport,
+            "schema_dialect": self.schema_dialect,
             "tool_name": self.tool_name,
             "version": self.version,
             "schema_sha256": self.schema_sha256,
@@ -187,6 +295,20 @@ class InboundToolContract:
         if not isinstance(value, dict):
             raise ValueError("forced transport must be one JSON object")
         kind = value.get("result_kind")
+        if self.identity.schema_dialect == "deepseek-strict":
+            # DeepSeek strict mode requires every property of the outer
+            # object to be present.  The branch that was not selected is
+            # represented by explicit nulls; remove only those transport-null
+            # siblings before applying the ordinary exact-envelope rules.
+            parameters = self.provider_tools[0]["function"].get("parameters")
+            properties = parameters.get("properties") if isinstance(parameters, dict) else None
+            if not isinstance(properties, dict) or set(value) != set(properties):
+                raise ValueError("DeepSeek strict transport envelope is incomplete")
+            value = {
+                key: item
+                for key, item in value.items()
+                if key == "result_kind" or item is not None
+            }
         if kind == "decision":
             expected = (
                 {"result_kind", "appraisal_draft", "expression_draft"}
@@ -228,11 +350,14 @@ class InboundToolContracts:
         capabilities: ExpressionDraftCapabilities,
         recall_allowed: bool,
         require_turn_posture: bool = False,
+        schema_dialect: InboundToolSchemaDialect = "standard",
     ) -> InboundToolContract:
         if phase not in {"initial", "after_recall", "final"}:
             raise ValueError("unsupported inbound tool phase")
         if transport not in {"atomic", "stream"}:
             raise ValueError("unsupported inbound tool transport")
+        if schema_dialect not in {"standard", "deepseek-strict"}:
+            raise ValueError("unsupported inbound tool schema dialect")
         recall_allowed = phase == "initial" and recall_allowed
         tool_name = (
             f"character_inbound_{phase}_v{_CONTRACT_VERSION}"
@@ -309,6 +434,41 @@ class InboundToolContracts:
                     if field not in {"beats", "episode_disposition"}
                 ],
             ]
+            # The stream head has three mutually exclusive beat transports:
+            # an immediate visible beat (optionally preceded by typing), a
+            # deferred beat array, or no beat for silence.  Required-tool
+            # providers require every property to be present, so merely
+            # making the sibling fields nullable is not enough: models may
+            # otherwise emit an empty array/object for both transports.  Put
+            # the transport exclusion directly in each timing branch.  This
+            # mirrors ``_expression_event_head`` and prevents a provider from
+            # returning a schema-valid but locally ambiguous head.
+            null_transport = {"type": "null"}
+            now_head_branch = {
+                "properties": {
+                    "timing_choice": {"enum": ["now"]},
+                    "beat": deepcopy(beat_array["items"]),
+                    "beats": null_transport,
+                },
+                "required": ["beat"],
+            }
+            later_head_branch = {
+                "properties": {
+                    "timing_choice": {"enum": ["later"]},
+                    "beat": null_transport,
+                    "beats": deferred_beats,
+                    "leading_typing_beat": null_transport,
+                },
+                "required": ["beats"],
+            }
+            silent_head_branch = {
+                "properties": {
+                    "timing_choice": {"enum": ["silent"]},
+                    "beat": null_transport,
+                    "beats": null_transport,
+                    "leading_typing_beat": null_transport,
+                }
+            }
             continuation = {
                 "type": "object",
                 "properties": {
@@ -343,23 +503,9 @@ class InboundToolContracts:
                                     "required": head_required,
                                     "additionalProperties": False,
                                     "anyOf": [
-                                        {
-                                            "properties": {
-                                                "timing_choice": {"enum": ["now"]}
-                                            },
-                                            "required": ["beat"],
-                                        },
-                                        {
-                                            "properties": {
-                                                "timing_choice": {"enum": ["later"]}
-                                            },
-                                            "required": ["beats"],
-                                        },
-                                        {
-                                            "properties": {
-                                                "timing_choice": {"enum": ["silent"]}
-                                            }
-                                        },
+                                        now_head_branch,
+                                        later_head_branch,
+                                        silent_head_branch,
                                     ],
                                 },
                                 continuation,
@@ -398,6 +544,22 @@ class InboundToolContracts:
                     "additionalProperties": False,
                 }
             )
+        # Make the union's branch-exclusive fields explicit.  The ordinary
+        # dialect may omit these siblings, while DeepSeek strict requires
+        # every property to be present; using ``type: null`` here makes the
+        # decision branch unable to fill recall fields (and vice versa)
+        # instead of relying on a post-hoc host rejection.
+        all_branch_properties: set[str] = set()
+        for branch in branches:
+            properties = branch.get("properties")
+            if not isinstance(properties, dict):
+                raise ValueError("inbound tool branch has no object properties")
+            all_branch_properties.update(properties)
+        for branch in branches:
+            properties = branch["properties"]
+            assert isinstance(properties, dict)
+            for property_name in all_branch_properties - set(properties):
+                properties[property_name] = {"type": "null"}
         # DeepSeek's function-calling dialect requires every function's root
         # parameters schema to declare ``type: object``.  Keep the semantic
         # decision/recall union below that provider-compatible root; the root
@@ -411,7 +573,26 @@ class InboundToolContracts:
                 raise ValueError("inbound tool branch has no object properties")
             for property_name, property_schema in branch_properties.items():
                 if property_name != "result_kind":
-                    root_properties.setdefault(property_name, deepcopy(property_schema))
+                    current = root_properties.get(property_name)
+                    if current is None:
+                        root_properties[property_name] = deepcopy(property_schema)
+                        continue
+                    if not isinstance(current, dict) or not isinstance(property_schema, dict):
+                        raise ValueError("inbound root property schema is not an object")
+                    current_is_null = current.get("type") == "null"
+                    branch_is_null = property_schema.get("type") == "null"
+                    if current_is_null and not branch_is_null:
+                        root_properties[property_name] = {
+                            "anyOf": [deepcopy(property_schema), {"type": "null"}]
+                        }
+                    elif not current_is_null and branch_is_null:
+                        root_properties[property_name] = {
+                            "anyOf": [deepcopy(current), {"type": "null"}]
+                        }
+                    elif current != property_schema:
+                        root_properties[property_name] = {
+                            "anyOf": [deepcopy(current), deepcopy(property_schema)]
+                        }
                     continue
                 # ``result_kind`` is shared by both branches.  The provider
                 # facing envelope must admit every branch discriminator; the
@@ -436,6 +617,11 @@ class InboundToolContracts:
             "additionalProperties": False,
             "anyOf": branches,
         }
+        if schema_dialect == "deepseek-strict":
+            strict_parameters = _deepseek_strict_schema(parameters)
+            if not isinstance(strict_parameters, dict):
+                raise ValueError("DeepSeek strict tool parameters must be an object")
+            parameters = strict_parameters
         function = {
             "name": tool_name,
             "description": (
@@ -464,6 +650,8 @@ class InboundToolContracts:
             ),
             "parameters": parameters,
         }
+        if schema_dialect == "deepseek-strict":
+            function["strict"] = True
         provider_tools = ({"type": "function", "function": function},)
         digest = "sha256:" + sha256(_canonical_json(parameters).encode("utf-8")).hexdigest()
         capabilities_digest = "sha256:" + sha256(
@@ -474,6 +662,7 @@ class InboundToolContracts:
                 {
                     "phase": phase,
                     "transport": transport,
+                    "schema_dialect": schema_dialect,
                     "recall_allowed": recall_allowed,
                     "require_turn_posture": require_turn_posture,
                     "schema_sha256": digest,
@@ -486,6 +675,7 @@ class InboundToolContracts:
             contract_id="character-inbound-forced-tool",
             phase=phase,
             transport=transport,
+            schema_dialect=schema_dialect,
             tool_name=tool_name,
             version=_CONTRACT_VERSION,
             schema_sha256=digest,
@@ -508,6 +698,7 @@ __all__ = [
     "InboundToolContract",
     "InboundToolContractIdentity",
     "InboundToolContracts",
+    "InboundToolSchemaDialect",
     "InboundToolPhase",
     "InboundToolTransport",
 ]

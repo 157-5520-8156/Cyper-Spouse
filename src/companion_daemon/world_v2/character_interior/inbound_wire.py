@@ -7592,8 +7592,33 @@ class _ExpressionStreamGenerationCoordinator:
             cancel.cancel("expression_stream_reselection_started")
 
 
+_FORCED_STREAM_NULL_SIBLING_KEYS = frozenset(
+    {"expression_draft", "recall_request", "private_turn_state"}
+)
+
+
+def _normalize_forced_stream_envelope(value: dict[str, object]) -> dict[str, object]:
+    """Remove only transport-union null siblings from strict tool arguments.
+
+    DeepSeek strict functions require every root property to be present.  A
+    stream decision therefore arrives with the recall/atomic siblings as
+    explicit ``null`` values.  They are transport padding, not authored
+    semantics; removing those top-level nulls lets the existing event parser
+    validate the exact stream envelope.  Non-null siblings remain invalid and
+    are deliberately left for the normal validator to reject.
+    """
+
+    if value.get("result_kind") != "decision":
+        return value
+    return {
+        key: item
+        for key, item in value.items()
+        if not (key in _FORCED_STREAM_NULL_SIBLING_KEYS and item is None)
+    }
+
+
 def _stream_first_expression(raw: str) -> str:
-    parsed = _parse_json_object(raw)
+    parsed = _normalize_forced_stream_envelope(_parse_json_object(raw))
     if parsed.get("result_kind") == "decision":
         parsed = {key: value for key, value in parsed.items() if key != "result_kind"}
     if parsed.get("protocol") == "character-interior-events.1":
@@ -7649,7 +7674,7 @@ def _stream_first_expression(raw: str) -> str:
 
 
 def _stream_tail_expression(raw: str) -> str:
-    parsed = _parse_json_object(raw)
+    parsed = _normalize_forced_stream_envelope(_parse_json_object(raw))
     if parsed.get("result_kind") == "decision":
         parsed = {key: value for key, value in parsed.items() if key != "result_kind"}
     if parsed.get("protocol") == "character-interior-events.1":
@@ -8026,6 +8051,15 @@ def _expression_event_head(event: object, *, continuation: bool | None) -> str:
     beat = event.get("beat")
     leading_typing = event.get("leading_typing_beat")
     plural_beats = event.get("beats")
+    # DeepSeek strict requires every head property to be present and commonly
+    # represents the unused deferred transport as an empty array.  That array
+    # carries no authored beat and is equivalent to an omitted sibling when a
+    # visible singular beat (or typing prelude) is present.  Remove only this
+    # transport padding; a non-empty plural array remains an ambiguity.
+    if isinstance(plural_beats, list) and not plural_beats and (
+        isinstance(beat, dict) or isinstance(leading_typing, dict)
+    ):
+        plural_beats = None
     if plural_beats is not None and (beat is not None or leading_typing is not None):
         raise ValueError("expression event head beat transports are ambiguous")
     if plural_beats is not None and not isinstance(plural_beats, list):
@@ -8753,6 +8787,21 @@ class _ExpressionDraftWire:
         if not task.cancelled():
             task.exception()
 
+    @staticmethod
+    def _observe_expression_unit_stream_future(
+        future: asyncio.Future[object],
+    ) -> None:
+        """Consume a speculative head failure after its waiter is cancelled.
+
+        A stream generation can be superseded after the head waiter has
+        already gone away.  The future still owns the provider exception (or
+        cancellation), so observe it explicitly to keep cancellation
+        bookkeeping truthful without changing the visible result.
+        """
+
+        if not future.cancelled():
+            future.exception()
+
     def advance_expression_attention(self, _attention_ref: str) -> None:
         """Invalidate every older provider generation without awaiting teardown."""
 
@@ -8804,6 +8853,9 @@ class _ExpressionDraftWire:
                     old_session.completed.cancel()
             loop = asyncio.get_running_loop()
             head_future: asyncio.Future[str] = loop.create_future()
+            head_future.add_done_callback(
+                self._observe_expression_unit_stream_future
+            )
             chunks: list[str] = []
 
             async def run() -> tuple[str, str, object, str]:
@@ -8811,17 +8863,35 @@ class _ExpressionDraftWire:
                 current = asyncio.current_task()
                 assert current is not None
                 activated = False
+                incremental_parse_error: ValueError | None = None
 
                 def on_delta(delta: str) -> bool:
+                    nonlocal incremental_parse_error
                     if not self._stream_generation_coordinator.is_current(stream_generation):
                         return False
                     chunks.append(delta)
                     if head_future.done():
                         return True
-                    first = _incremental_first_expression(
-                        "".join(chunks),
-                        forced_tool=tools is not None,
-                    )
+                    try:
+                        first = _incremental_first_expression(
+                            "".join(chunks),
+                            forced_tool=tools is not None,
+                        )
+                    except ValueError as exc:
+                        # A malformed partial argument must not cancel the
+                        # provider stream before it can finish. If the final
+                        # object remains invalid, the complete raw bytes are
+                        # handed to the bounded same-role correction path.
+                        incremental_parse_error = exc
+                        if not head_future.done():
+                            # Release only an invalid, non-visible carrier so
+                            # a provider that waits for the callback before
+                            # sending its tail cannot deadlock. The paired
+                            # author will reject this carrier and spend its
+                            # one bounded correction; no Expression frame is
+                            # authorized from it.
+                            head_future.set_result("".join(chunks))
+                        return True
                     if first is not None:
                         # The final append/complete relationship cannot be
                         # known until continuation arrives, but the first
@@ -8855,12 +8925,31 @@ class _ExpressionDraftWire:
                     ):
                         raise ValueError("streaming provider result must be (text, usage)")
                     complete_raw, usage_raw = result
-                    first_raw = _stream_first_expression(complete_raw)
+                    if incremental_parse_error is not None:
+                        first_raw = (
+                            head_future.result()
+                            if head_future.done()
+                            else complete_raw
+                        )
+                        # Preserve the completed physical response, but make
+                        # a malformed tail fail through normal validation.
+                        tail_raw = complete_raw
+                    else:
+                        try:
+                            first_raw = _stream_first_expression(complete_raw)
+                            tail_raw = _stream_tail_expression(complete_raw)
+                        except ValueError:
+                            first_raw = (
+                                head_future.result()
+                                if head_future.done()
+                                else complete_raw
+                            )
+                            tail_raw = complete_raw
                     if not head_future.done():
                         head_future.set_result(first_raw)
                     return (
                         first_raw,
-                        _stream_tail_expression(complete_raw),
+                        tail_raw,
                         usage_raw,
                         complete_raw,
                     )
