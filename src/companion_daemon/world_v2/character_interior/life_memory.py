@@ -80,11 +80,11 @@ def _memory_opportunity(
         + hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
         source_refs=context.source_refs,
     )
-    opportunity_identity = CausalOpportunityIdentity(
+    opportunity_identity = CausalOpportunityIdentity.from_source_refs(
         world_id=world_id,
         actor_ref=actor_ref,
         purpose=purpose,
-        source_refs=tuple(sorted(context.source_refs)),
+        source_refs=context.source_refs,
         epoch=context.trigger_ref,
     )
     return InteriorOpportunity(

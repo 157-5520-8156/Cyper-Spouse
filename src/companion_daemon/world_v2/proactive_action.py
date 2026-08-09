@@ -415,11 +415,11 @@ class _CharacterInteriorProactiveTransport:
         logical_time: datetime,
         capability: _InteriorCapabilityManifest,
     ) -> InteriorOpportunity:
-        opportunity_identity = CausalOpportunityIdentity(
+        opportunity_identity = CausalOpportunityIdentity.from_source_refs(
             world_id=self._world_id,
             actor_ref=self._actor_ref,
             purpose="proactive_contact",
-            source_refs=tuple(sorted(set(source_refs))),
+            source_refs=source_refs,
             epoch=trigger_ref,
         )
         return InteriorOpportunity(

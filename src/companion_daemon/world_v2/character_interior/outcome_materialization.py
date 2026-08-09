@@ -101,7 +101,7 @@ class _CharacterInteriorOutcomeMaterializer:
             deliberation_revision=request.evaluated_deliberation_revision,
             ledger_sequence=request.evaluated_ledger_sequence,
         )
-        opportunity_ref = CausalOpportunityIdentity(
+        opportunity_ref = CausalOpportunityIdentity.from_source_refs(
             world_id=self._ledger.world_id,
             actor_ref=self._actor_ref,
             purpose="outcome_selection",

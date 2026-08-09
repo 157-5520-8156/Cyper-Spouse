@@ -195,7 +195,7 @@ class ActivityLifecycleWorker:
             payload_hash=capability_hash,
             source_refs=(wake_event_ref,),
         )
-        opportunity_identity = CausalOpportunityIdentity(
+        opportunity_identity = CausalOpportunityIdentity.from_source_refs(
             world_id=self._ledger.world_id,
             actor_ref=self._owner_actor_ref,
             purpose="activity_lifecycle_choice",

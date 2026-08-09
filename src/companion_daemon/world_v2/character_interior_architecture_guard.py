@@ -392,6 +392,13 @@ _HISTORICAL_REPLAY_ALLOWLIST = frozenset(
 _RETIRED_LIVE_PROVIDER_CONTRACTS = frozenset({"expression-units.1"})
 _PROVIDER_CONTRACT_POLICY_MODULE = "world_v2/character_interior_architecture_guard.py"
 
+# The inbound wire is a separately owned migration surface.  Keep its
+# historical identity construction visible in the final report rather than
+# changing that B-owned file from this worktree; every other production
+# consumer must use ``CausalOpportunityIdentity.from_source_refs``.
+_CAUSAL_IDENTITY_HANDOFF = "world_v2/character_interior/inbound_turn.py"
+_CAUSAL_OPPORTUNITY_LANES = frozenset({"_world_stimulus", "_private_impression"})
+
 _INBOUND_PRIVATE_AUTHOR = "_InboundCharacterAuthor"
 _INBOUND_PRIVATE_WIRES = frozenset(
     {
@@ -432,6 +439,10 @@ def _is_testing_module(module: str) -> bool:
 
 def _inside_character_interior(path: Path) -> bool:
     return "character_interior" in path.parts
+
+
+def _is_causal_identity_handoff(path: Path) -> bool:
+    return path.as_posix().endswith(_CAUSAL_IDENTITY_HANDOFF)
 
 
 def _is_production_composition_root(path: Path) -> bool:
@@ -576,7 +587,9 @@ def scan_character_interior_source(
         return ()
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     imported_aliases: dict[str, str] = {}
-    violations: list[CharacterInteriorArchitectureViolation] = []
+    violations: list[CharacterInteriorArchitectureViolation] = list(
+        _scan_causal_opportunity_bypasses(path)
+    )
     for node in ast.walk(tree):
         if path.name == "life_development_runtime.py":
             retired_life_surface: str | None = None
@@ -1199,27 +1212,106 @@ def _scan_retired_live_provider_contracts(
 def _scan_causal_opportunity_bypasses(
     path: Path,
 ) -> tuple[CharacterInteriorArchitectureViolation, ...]:
-    """Keep production scheduling on the unified opportunity entry point."""
+    """Reject direct drains and legacy identity construction.
 
-    if path.name != "production.py":
-        return ()
+    The scan intentionally follows only obvious aliases and ``getattr``
+    forms.  It does not reject arbitrary attribute names or generic helper
+    calls, so unrelated schedulers do not become false positives.
+    """
+
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     violations: list[CharacterInteriorArchitectureViolation] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-            continue
-        target = node.func.value
+    aliases: set[str] = set()
+    identity_aliases: set[str] = {"CausalOpportunityIdentity"}
+
+    def target_lane(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Attribute) and node.attr in _CAUSAL_OPPORTUNITY_LANES:
+            return node.attr
+        if isinstance(node, ast.Name) and node.id in aliases:
+            return node.id
         if (
-            node.func.attr == "drain_one"
-            and isinstance(target, ast.Attribute)
-            and target.attr in {"_world_stimulus", "_private_impression"}
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in _CAUSAL_OPPORTUNITY_LANES
+        ):
+            return str(node.args[1].value)
+        return None
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "CausalOpportunityIdentity":
+                    identity_aliases.add(alias.asname or alias.name)
+        if isinstance(node, ast.Assign) and isinstance(node.value, (ast.Attribute, ast.Call)):
+            if target_lane(node.value) is not None:
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        aliases.add(target.id)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in identity_aliases
+            and not _is_causal_identity_handoff(path)
+        ):
+            violations.append(
+                CharacterInteriorArchitectureViolation(
+                    path,
+                    node.lineno,
+                    "legacy_causal_opportunity_identity_constructor",
+                    node.func.id,
+                )
+            )
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "drain_one"
+            and target_lane(node.func.value) is not None
+        ):
+            lane = target_lane(node.func.value)
+            violations.append(
+                CharacterInteriorArchitectureViolation(
+                    path,
+                    node.lineno,
+                    "scattered_causal_opportunity_bypass",
+                    f"{lane}.drain_one",
+                )
+            )
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Call)
+            and isinstance(node.func.func, ast.Name)
+            and node.func.func.id == "getattr"
+            and len(node.func.args) >= 2
+            and isinstance(node.func.args[1], ast.Constant)
+            and node.func.args[1].value == "drain_one"
+            and target_lane(node.func.args[0]) is not None
+        ):
+            lane = target_lane(node.func.args[0])
+            violations.append(
+                CharacterInteriorArchitectureViolation(
+                    path,
+                    node.lineno,
+                    "scattered_causal_opportunity_bypass",
+                    f"{lane}.drain_one via getattr",
+                )
+            )
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in _CAUSAL_OPPORTUNITY_LANES
         ):
             violations.append(
                 CharacterInteriorArchitectureViolation(
                     path,
                     node.lineno,
                     "scattered_causal_opportunity_bypass",
-                    f"{target.attr}.drain_one",
+                    f"getattr(..., {node.args[1].value!r})",
                 )
             )
     return tuple(dict.fromkeys(violations))

@@ -121,11 +121,11 @@ class CharacterInteriorExpressionReconsiderationReviewer:
             source_refs=source_refs,
             old_private_turn_state=old_private_turn_state,
         )
-        opportunity_identity = CausalOpportunityIdentity(
+        opportunity_identity = CausalOpportunityIdentity.from_source_refs(
             world_id=observation_event.world_id,
             actor_ref=self._actor_ref,
             purpose=_PURPOSE,
-            source_refs=tuple(sorted(source_refs)),
+            source_refs=source_refs,
             epoch=observation_event.event_id,
         )
         opportunity = InteriorOpportunity(

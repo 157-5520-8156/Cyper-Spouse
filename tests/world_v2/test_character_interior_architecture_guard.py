@@ -832,6 +832,58 @@ class Driver:
 
 
 @pytest.mark.parametrize(
+    "source",
+    (
+        "lane = self._world_stimulus\nreturn lane.drain_one()\n",
+        "lane = getattr(self, '_private_impression')\nreturn lane.drain_one()\n",
+        "return getattr(self._world_stimulus, 'drain_one')()\n",
+    ),
+)
+def test_guard_rejects_obvious_causal_opportunity_alias_bypasses(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    _write_production(
+        tmp_path,
+        "world_v2/character_interior/production.py",
+        f"class Driver:\n    def run(self):\n        {source.replace(chr(10), chr(10) + '        ')}",
+    )
+
+    violations = scan_character_interior_architecture(tmp_path)
+
+    assert any(item.rule == "scattered_causal_opportunity_bypass" for item in violations)
+
+
+def test_guard_rejects_direct_causal_identity_constructor_but_allows_shared_factory(
+    tmp_path: Path,
+) -> None:
+    direct = tmp_path / "consumer.py"
+    direct.write_text(
+        "from companion_daemon.world_v2.character_interior.run_result import "
+        "CausalOpportunityIdentity\n"
+        "identity = CausalOpportunityIdentity(world_id='w', actor_ref='a', "
+        "purpose='p', source_refs=('s',), epoch='s')\n",
+        encoding="utf-8",
+    )
+    factory = tmp_path / "factory_consumer.py"
+    factory.write_text(
+        "from companion_daemon.world_v2.character_interior.run_result import "
+        "CausalOpportunityIdentity\n"
+        "identity = CausalOpportunityIdentity.from_source_refs(world_id='w', "
+        "actor_ref='a', purpose='p', source_refs=('s',), epoch='s')\n",
+        encoding="utf-8",
+    )
+
+    direct_violations = scan_character_interior_source(direct)
+
+    assert any(
+        item.rule == "legacy_causal_opportunity_identity_constructor"
+        for item in direct_violations
+    )
+    assert scan_character_interior_source(factory) == ()
+
+
+@pytest.mark.parametrize(
     ("relative", "symbol", "lane"),
     (
         (
