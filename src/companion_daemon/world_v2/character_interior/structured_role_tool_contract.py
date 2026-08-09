@@ -23,6 +23,7 @@ _WORLD_STIMULUS_TOOL_NAME = "character_role_world_stimulus_appraisal_v1"
 _PRIVATE_IMPRESSION_TOOL_NAME = "character_role_private_impression_reflection_v1"
 _OUTCOME_SELECTION_TOOL_NAME = "character_role_outcome_selection_v1"
 _ACTIVITY_LIFECYCLE_TOOL_NAME = "character_role_activity_lifecycle_choice_v1"
+_LIFE_DEVELOPMENT_TOOL_NAME = "character_role_life_development_choice_v1"
 
 
 def _canonical_json(value: object) -> str:
@@ -561,6 +562,10 @@ class StructuredRoleToolContracts:
             _WorldStimulusAppraisalResult,
             _WireRoleResult,
         )
+        from ..life_development_draft import (
+            CharacterChoiceAcceptDraft,
+            CharacterChoiceNoOpDraft,
+        )
 
         _compiled_provider_schema(ExpressionDraft)
         _compiled_provider_schema(_ActivityLifecyclePayload)
@@ -568,6 +573,8 @@ class StructuredRoleToolContracts:
         _compiled_provider_schema(_PrivateImpressionProposal)
         _compiled_provider_schema(_OutcomeSelectionPayload)
         _compiled_provider_schema(_WireRoleResult)
+        _compiled_provider_schema(CharacterChoiceAcceptDraft)
+        _compiled_provider_schema(CharacterChoiceNoOpDraft)
 
     @classmethod
     def precompile_proactive(
@@ -674,6 +681,21 @@ class StructuredRoleToolContracts:
         """Compile the role's select/no-op activity opening choice."""
 
         return self._cached_activity_lifecycle_choice(
+            _canonical_json(capability_payload),
+            _canonical_json(source_refs),
+            recall_allowed,
+        )
+
+    def life_development_choice(
+        self,
+        *,
+        capability_payload: Mapping[str, object],
+        source_refs: tuple[str, ...] = (),
+        recall_allowed: bool,
+    ) -> StructuredRoleToolContract:
+        """Compile the role's accept/no-op choice over one offered life opportunity."""
+
+        return self._cached_life_development_choice(
             _canonical_json(capability_payload),
             _canonical_json(source_refs),
             recall_allowed,
@@ -1259,6 +1281,143 @@ class StructuredRoleToolContracts:
                 "Return the complete source-bound activity lifecycle choice. The "
                 "character may select one offered opening or explicitly choose no_op; "
                 "the function constrains capability and transport shape only."
+            ),
+        )
+
+    @staticmethod
+    @lru_cache(maxsize=32)
+    def _cached_life_development_choice(
+        capability_payload_json: str,
+        source_refs_json: str,
+        recall_allowed: bool,
+    ) -> StructuredRoleToolContract:
+        from ..life_development_draft import (
+            CharacterChoiceAcceptDraft,
+            CharacterChoiceNoOpDraft,
+        )
+
+        capability_payload = json.loads(capability_payload_json)
+        if not isinstance(capability_payload, dict):
+            raise ValueError("life development choice capability must be one object")
+        external_opportunity = capability_payload.get("external_opportunity")
+        if not isinstance(external_opportunity, dict):
+            raise ValueError("life development choice capability lacks opportunity")
+        entity_refs = external_opportunity.get("entity_refs")
+        if (
+            not isinstance(entity_refs, list)
+            or any(not isinstance(item, str) or not item for item in entity_refs)
+            or len(entity_refs) != len(set(entity_refs))
+        ):
+            raise ValueError("life development choice participant capability is malformed")
+        active_aspiration_refs = capability_payload.get("active_aspiration_source_refs")
+        if (
+            not isinstance(active_aspiration_refs, list)
+            or any(not isinstance(item, str) or not item for item in active_aspiration_refs)
+            or len(active_aspiration_refs) != len(set(active_aspiration_refs))
+        ):
+            raise ValueError("life development choice aspiration capability is malformed")
+        source_refs = json.loads(source_refs_json)
+        if not isinstance(source_refs, list):
+            raise ValueError("life development choice source refs are malformed")
+
+        no_op_schema = _provider_schema(CharacterChoiceNoOpDraft)
+        accept_schema = _provider_schema(CharacterChoiceAcceptDraft)
+        accept_properties = _required_object_properties(accept_schema)
+
+        participant_schema = accept_properties.get("participant_refs")
+        if not isinstance(participant_schema, dict):
+            raise ValueError("life development choice participant schema is incomplete")
+        participant_items = participant_schema.get("items")
+        if not isinstance(participant_items, dict):
+            raise ValueError("life development choice participant items are incomplete")
+        accept_properties["participant_refs"] = {
+            **deepcopy(participant_schema),
+            "maxItems": len(entity_refs) if entity_refs else 0,
+            "uniqueItems": True,
+            "items": (
+                {**deepcopy(participant_items), "enum": list(entity_refs)}
+                if entity_refs
+                else deepcopy(participant_items)
+            ),
+        }
+
+        aspiration_schema = accept_properties.get("crystallized_aspiration_source_ref")
+        if not isinstance(aspiration_schema, dict):
+            raise ValueError("life development choice aspiration schema is incomplete")
+        if active_aspiration_refs:
+            aspiration_variants = aspiration_schema.get("anyOf")
+            if not isinstance(aspiration_variants, list):
+                raise ValueError("life development choice aspiration variants are incomplete")
+            accept_properties["crystallized_aspiration_source_ref"] = {
+                "anyOf": [
+                    {
+                        **deepcopy(item),
+                        "enum": list(active_aspiration_refs),
+                    }
+                    if isinstance(item, dict) and item.get("type") == "string"
+                    else deepcopy(item)
+                    for item in aspiration_variants
+                ]
+            }
+        else:
+            accept_properties["crystallized_aspiration_source_ref"] = {"type": "null"}
+
+        opens_at = accept_properties.get("opens_at")
+        closes_at = accept_properties.get("closes_at")
+        if not isinstance(opens_at, dict) or not isinstance(closes_at, dict):
+            raise ValueError("life development choice timing schema is incomplete")
+        accept_schema["allOf"] = [
+            {
+                "anyOf": [
+                    {
+                        "not": {
+                            "anyOf": [
+                                {"required": ["opens_at"]},
+                                {"required": ["closes_at"]},
+                            ]
+                        }
+                    },
+                    {
+                        "properties": {
+                            "opens_at": {"type": "null"},
+                            "closes_at": {"type": "null"},
+                        },
+                        "required": ["opens_at", "closes_at"],
+                    },
+                    {
+                        "properties": {
+                            "opens_at": _non_null_schema(opens_at, field_name="opens_at"),
+                            "closes_at": _non_null_schema(closes_at, field_name="closes_at"),
+                        },
+                        "required": ["opens_at", "closes_at"],
+                    },
+                ]
+            }
+        ]
+
+        payload_schema = {
+            "type": "object",
+            "properties": {
+                "completion": {
+                    "anyOf": [no_op_schema, accept_schema],
+                }
+            },
+            "required": ["completion"],
+            "additionalProperties": False,
+        }
+        return _compile_generic_decision_contract(
+            purpose="life_development_choice",
+            tool_name=_LIFE_DEVELOPMENT_TOOL_NAME,
+            payload_schema=payload_schema,
+            capability_identity=capability_payload,
+            source_refs=tuple(source_refs),
+            recall_allowed=recall_allowed,
+            description=(
+                "Return the complete source-bound life-development choice. The "
+                "character may accept this offered opportunity with a personally "
+                "authored intention, timing within the supplied window, and offered "
+                "participants, or choose no_op. The function constrains transport and "
+                "capability shape only; it does not choose for the character."
             ),
         )
 

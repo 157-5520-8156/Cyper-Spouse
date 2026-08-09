@@ -538,6 +538,16 @@ def _result(
     )
 
 
+def _life_choice_result(completion: dict[str, object]) -> str:
+    return _result(
+        status="decision",
+        decision={
+            "source_refs": ["source:private_self"],
+            "payload": {"completion": completion},
+        },
+    )
+
+
 @pytest.mark.asyncio
 async def test_consider_preserves_model_silence_without_substitute_message() -> None:
     model = _QueueModel(_result(status="silent"))
@@ -713,7 +723,7 @@ async def test_typed_proposal_in_generic_slot_keeps_its_authored_semantics() -> 
 
 @pytest.mark.asyncio
 async def test_life_choice_nested_payload_is_wrapped_without_changing_authored_choice() -> None:
-    model = _QueueModel(
+    model = _RequiredToolQueueModel(
         _result(
             status="decision",
             decision={
@@ -732,6 +742,198 @@ async def test_life_choice_nested_payload_is_wrapped_without_changing_authored_c
     )
 
     assert result["decision"]["payload"]["completion"]["decision"] == "no_op"
+
+
+@pytest.mark.asyncio
+async def test_life_choice_uses_one_versioned_forced_tool_and_preserves_accept_choice() -> None:
+    manifest = _life_development_manifest()
+    completion = {
+        "decision": "accept",
+        "intention_summary": "我想和朋友一起去看露天电影。",
+        "importance_bp": 5200,
+        "opens_at": (_NOW + timedelta(hours=2, minutes=30)).isoformat(),
+        "closes_at": (_NOW + timedelta(hours=3, minutes=30)).isoformat(),
+        "participant_refs": ["npc:friend"],
+        "crystallized_aspiration_source_ref": "aspiration:travel",
+    }
+    model = _RequiredToolQueueModel(_life_choice_result(completion))
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-v4-flash")
+
+    result = await role.consider(
+        await _request(
+            purpose="life_development_choice",
+            capability_manifest=manifest,
+        )
+    )
+
+    assert result["decision"]["payload"]["completion"]["decision"] == "accept"
+    assert result["decision"]["payload"]["completion"]["participant_refs"] == [
+        "npc:friend"
+    ]
+    assert model.tool_calls[0][1] == {
+        "type": "function",
+        "function": {"name": "character_role_life_development_choice_v1"},
+    }
+
+
+def test_life_choice_tool_schema_binds_participants_and_aspiration_sources() -> None:
+    manifest = _life_development_manifest()
+    contract = StructuredRoleToolContracts().life_development_choice(
+        capability_payload=manifest.payload,
+        source_refs=manifest.source_refs,
+        recall_allowed=False,
+    )
+    parameters = contract.provider_tools[0]["function"]["parameters"]
+    Draft202012Validator.check_schema(parameters)
+
+    decision_branch = parameters["anyOf"][0]
+    payload = decision_branch["properties"]["decision"]["properties"]["payload"]
+    completion = payload["properties"]["completion"]
+    accept = next(
+        branch
+        for branch in completion["anyOf"]
+        if branch["properties"]["decision"].get("const") == "accept"
+    )
+    assert accept["properties"]["participant_refs"]["items"]["enum"] == [
+        "npc:friend"
+    ]
+    assert accept["properties"]["participant_refs"]["uniqueItems"] is True
+    assert accept["properties"]["crystallized_aspiration_source_ref"]["anyOf"][0][
+        "enum"
+    ] == ["aspiration:travel"]
+
+    validator = Draft202012Validator(parameters)
+    valid = {
+        "status": "decision",
+        "summary": "I want to take this opportunity.",
+        "attended_source_refs": ["source:private_self"],
+        "decision": {
+            "source_refs": ["source:private_self"],
+            "payload": {
+                "completion": {
+                    "decision": "accept",
+                    "intention_summary": "和朋友去看电影。",
+                    "importance_bp": 5000,
+                    "participant_refs": ["npc:friend"],
+                    "crystallized_aspiration_source_ref": "aspiration:travel",
+                }
+            },
+        },
+        "recall_query": None,
+        "proposals": [],
+    }
+    assert list(validator.iter_errors(valid)) == []
+    invalid = json.loads(json.dumps(valid))
+    invalid["decision"]["payload"]["completion"]["participant_refs"] = [
+        "npc:not-offered"
+    ]
+    with pytest.raises(ValidationError):
+        validator.validate(invalid)
+    half_timing = json.loads(json.dumps(valid))
+    half_timing["decision"]["payload"]["completion"]["opens_at"] = (
+        _NOW + timedelta(hours=2)
+    ).isoformat()
+    with pytest.raises(ValidationError):
+        validator.validate(half_timing)
+
+    empty_participants = dict(manifest.payload)
+    empty_participants["external_opportunity"] = dict(
+        manifest.payload["external_opportunity"]
+    )
+    empty_participants["external_opportunity"]["entity_refs"] = []
+    empty_contract = StructuredRoleToolContracts().life_development_choice(
+        capability_payload=empty_participants,
+        source_refs=manifest.source_refs,
+        recall_allowed=False,
+    )
+    empty_parameters = empty_contract.provider_tools[0]["function"]["parameters"]
+    Draft202012Validator.check_schema(empty_parameters)
+    empty_decision_branch = empty_parameters["anyOf"][0]
+    empty_payload = empty_decision_branch["properties"]["decision"]["properties"]["payload"]
+    empty_accept = next(
+        branch
+        for branch in empty_payload["properties"]["completion"]["anyOf"]
+        if branch["properties"]["decision"].get("const") == "accept"
+    )
+    assert empty_accept["properties"]["participant_refs"]["maxItems"] == 0
+
+
+@pytest.mark.asyncio
+async def test_life_choice_required_tool_reaches_deepseek_http_boundary() -> None:
+    captured: dict[str, object] = {}
+    raw_result = _life_choice_result({"decision": "no_op"})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "character_role_life_development_choice_v1",
+                                        "arguments": raw_result,
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    model = DeepSeekChatModel(
+        "key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await StructuredCharacterRoleFaculty(
+            model=model,
+            model_id="deepseek-v4-flash",
+        ).consider(
+            await _request(
+                purpose="life_development_choice",
+                capability_manifest=_life_development_manifest(),
+            )
+        )
+    finally:
+        await model.aclose()
+
+    assert result["decision"]["payload"]["completion"]["decision"] == "no_op"
+    assert "response_format" not in captured
+    assert captured["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "character_role_life_development_choice_v1"},
+    }
+    tools = captured["tools"]
+    assert isinstance(tools, list) and len(tools) == 1
+    assert tools[0]["function"]["name"] == "character_role_life_development_choice_v1"
+
+
+@pytest.mark.asyncio
+async def test_life_choice_without_required_tool_support_fails_closed() -> None:
+    model = _QueueModel(_life_choice_result({"decision": "no_op"}))
+
+    with pytest.raises(StructuredRoleResultError) as raised:
+        await StructuredCharacterRoleFaculty(
+            model=model,
+            model_id="plain-json-only",
+        ).consider(
+            await _request(
+                purpose="life_development_choice",
+                capability_manifest=_life_development_manifest(),
+            )
+        )
+
+    assert raised.value.code == "required_tool_choice_unsupported"
+    assert model.calls == []
 
 
 @pytest.mark.asyncio
@@ -2218,6 +2420,7 @@ def test_structured_role_declares_every_builtin_capability_purpose_to_registry()
         "expression_reconsideration",
         "private_impression_reflection",
         "outcome_selection",
+        "life_development_choice",
     } <= registered
 
 
@@ -2779,7 +2982,7 @@ async def test_life_development_cross_field_failure_is_corrected_inside_one_inne
         "crystallized_aspiration_source_ref": "aspiration:travel",
     }
     corrected = {**invalid, "participant_refs": ["npc:friend"]}
-    model = _QueueModel(
+    model = _RequiredToolQueueModel(
         *(
             json.dumps(
                 {

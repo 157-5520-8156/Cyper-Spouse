@@ -165,7 +165,7 @@ class _CharacterModel(FakeCompanionModel):
     ) -> str:
         purpose = json.loads(messages[-1]["content"])["inner_turn"]["purpose"]
         expected_tools = {
-            "life_development_choice": None,
+            "life_development_choice": "character_role_life_development_choice_v1",
             "activity_lifecycle_choice": "character_role_activity_lifecycle_choice_v1",
             "outcome_selection": "character_role_outcome_selection_v1",
         }

@@ -1281,3 +1281,23 @@ commit：hash
   DeepSeek 首次成功率、QQ 回执、自由多轮对聊或 24 小时 soak；Matrix 仍为 `declaration_only`，生产发布继续
   标记 `manual_only`/`qualification_incomplete`。scenario runner 的 activity 专用 fixture 与真实 provider
   no-op HTTP 样本仍是后续证据补片，不在本次薄片中冒充已资格化。
+
+### 2026-08-09：Life development character choice required-tool 薄片
+
+- `life_development_choice` 现在使用独立的版本化 required tool
+  `character_role_life_development_choice_v1`。参数由现有
+  `CharacterChoiceNoOpDraft`/`CharacterChoiceAcceptDraft` 与 `_WireDecision`、`_WireRoleResult`
+  的 canonical typed schema 派生；角色仍自行决定接受或拒绝、意图摘要、重要性、可选时间窗口、参与者和
+  是否引用当前已提供的 aspiration source。系统不替角色接受机会，也不把接受结果直接当作活动结算或未来结果。
+- provider schema 会把 `participant_refs` 限定在当前 external opportunity 的 `entity_refs`，把
+  `crystallized_aspiration_source_ref` 限定在当前 active aspiration source；时间覆盖要求成对出现（或都省略），
+  窗口是否落在 offered window 内仍由同一 CharacterInterior 的 canonical materializer 做最终闭包。`no_op` 与
+  `accept` 是互斥的 typed 分支，nested recall 仍禁止；可用的外层 selective recall 选择不被迁移缩窄。
+- 声明支持 required tool 的 provider 不再对该 purpose 走普通 JSON；能力缺失保持精确的
+  `required_tool_choice_unsupported` 技术失败，不补 no-op、不伪造沉默。tool/schema/capability/contract identity
+  继续进入 CharacterInterior request identity；QQ Life fixture 已同步按 purpose 传递并断言唯一 tool/tool_choice。
+- 本薄片定向回归为 `213 passed, 1 warning`（结构化角色、DeepSeek-compatible HTTP body、Life production、QQ
+  host migration 和 LLM transport）；随后最终源码全量回归为 `4901 passed, 1 warning`。这些仍是
+  typed/fixture/公开宿主证据，不是真实 DeepSeek 首次成功率、自由对聊、QQ 回执或 24 小时 soak。Delayed
+  Trigger Matrix 中 `life.development` 继续保持 `limited` 与 `declaration_only`，没有因为工具接线而伪造生产
+  资格；真实 provider 资格仍是 `manual_only`/`qualification_incomplete`。

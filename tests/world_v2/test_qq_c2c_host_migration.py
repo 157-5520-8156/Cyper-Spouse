@@ -1760,6 +1760,15 @@ class _SelectingLifeEcologyModel:
                 "type": "function",
                 "function": {"name": "character_role_activity_lifecycle_choice_v1"},
             }
+        elif purpose == "life_development_choice":
+            assert tools and len(tools) == 1
+            assert tools[0]["function"]["name"] == (
+                "character_role_life_development_choice_v1"
+            )
+            assert tool_choice == {
+                "type": "function",
+                "function": {"name": "character_role_life_development_choice_v1"},
+            }
         else:
             assert tools is None
             assert tool_choice is None

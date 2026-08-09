@@ -978,6 +978,7 @@ class StructuredCharacterRoleFaculty:
             "private_impression_reflection",
             "outcome_selection",
             "activity_lifecycle_choice",
+            "life_development_choice",
         }:
             return None
         if not bool(getattr(self._model, "supports_required_tool_choice", False)):
@@ -1010,6 +1011,12 @@ class StructuredCharacterRoleFaculty:
                 )
             if request.purpose == "activity_lifecycle_choice":
                 return compiler.activity_lifecycle_choice(
+                    capability_payload=manifest.payload,
+                    source_refs=manifest.source_refs,
+                    recall_allowed=not request.recall_completed,
+                )
+            if request.purpose == "life_development_choice":
+                return compiler.life_development_choice(
                     capability_payload=manifest.payload,
                     source_refs=manifest.source_refs,
                     recall_allowed=not request.recall_completed,
