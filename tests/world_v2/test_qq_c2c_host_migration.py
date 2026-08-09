@@ -831,6 +831,146 @@ async def test_qq_scheduler_zero_background_budget_does_not_force_cognition(
 
 
 @pytest.mark.asyncio
+async def test_qq_scheduler_isolates_direct_post_tick_background_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry wake must not let the direct preflight bypass host isolation."""
+
+    retry_due = NOW + timedelta(minutes=10)
+
+    class _FailingPostTickHost:
+        def __init__(self) -> None:
+            self.logical_time = NOW
+            self.scheduled_kwargs: dict[str, object] | None = None
+            self.background_calls = 0
+
+        async def current_logical_time(self):  # type: ignore[no-untyped-def]
+            return self.logical_time
+
+        async def action_due_projection(self):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(logical_time=self.logical_time, actions=())
+
+        async def tick(self, tick):  # type: ignore[no-untyped-def]
+            self.logical_time = tick.logical_time_to
+            return SimpleNamespace(status="observed_only", authorized_action_ids=())
+
+        async def drain_background_once(self):  # type: ignore[no-untyped-def]
+            self.background_calls += 1
+            raise ValueError("historical background trigger")
+
+        async def drain_scheduled_work(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.scheduled_kwargs = kwargs
+            return SimpleNamespace(action_statuses=(), background_statuses=())
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        qq_c2c_host_module,
+        "next_expression_retry_due",
+        lambda _projection: retry_due,
+    )
+    monkeypatch.setattr(
+        qq_c2c_host_module,
+        "next_proactive_retry_due",
+        lambda _projection: None,
+        raising=False,
+    )
+    platform = _FailingPostTickHost()
+    host = QQC2CHost(
+        host=platform,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(tmp_path / "post-tick-background-failure.sqlite"),
+        ingress_now=lambda: NOW,
+        idle_heartbeat_seconds=3_600,
+    )
+    try:
+        drained = await host.scheduler_once(
+            observed_at=NOW + timedelta(minutes=11),
+            max_action_units=0,
+            max_background_units=1,
+        )
+    finally:
+        await host.aclose()
+
+    assert platform.background_calls == 1
+    assert drained.background_statuses == ("technical_failure:valueerror",)
+    assert platform.scheduled_kwargs is not None
+    assert platform.scheduled_kwargs["max_background_units"] == 0
+
+
+@pytest.mark.asyncio
+async def test_qq_scheduler_isolates_direct_pre_tick_background_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pre-tick bounded unit has the same technical-failure boundary."""
+
+    class _FailingPreTickHost:
+        def __init__(self) -> None:
+            self.logical_time = NOW
+            self.scheduled_kwargs: dict[str, object] | None = None
+            self.background_calls = 0
+
+        async def current_logical_time(self):  # type: ignore[no-untyped-def]
+            return self.logical_time
+
+        async def action_due_projection(self):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(logical_time=self.logical_time, actions=())
+
+        async def tick(self, tick):  # type: ignore[no-untyped-def]
+            self.logical_time = tick.logical_time_to
+            return SimpleNamespace(status="observed_only", authorized_action_ids=())
+
+        async def drain_background_once(self):  # type: ignore[no-untyped-def]
+            self.background_calls += 1
+            raise ValueError("historical background trigger")
+
+        async def drain_scheduled_work(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.scheduled_kwargs = kwargs
+            return SimpleNamespace(action_statuses=(), background_statuses=())
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        qq_c2c_host_module,
+        "next_expression_retry_due",
+        lambda _projection: None,
+    )
+    monkeypatch.setattr(
+        qq_c2c_host_module,
+        "next_proactive_retry_due",
+        lambda _projection: None,
+        raising=False,
+    )
+    platform = _FailingPreTickHost()
+    host = QQC2CHost(
+        host=platform,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(tmp_path / "pre-tick-background-failure.sqlite"),
+        ingress_now=lambda: NOW,
+        idle_heartbeat_seconds=3_600,
+    )
+    try:
+        drained = await host.scheduler_once(
+            observed_at=NOW + timedelta(seconds=1),
+            max_action_units=0,
+            max_background_units=1,
+        )
+    finally:
+        await host.aclose()
+
+    assert platform.background_calls == 1
+    assert drained.background_statuses == ("technical_failure:valueerror",)
+    assert platform.scheduled_kwargs is not None
+    assert platform.scheduled_kwargs["max_background_units"] == 0
+
+
+@pytest.mark.asyncio
 async def test_qq_scheduler_dispatches_retry_actions_before_more_background(
     tmp_path: Path,
 ) -> None:
@@ -2551,12 +2691,12 @@ async def test_restart_waits_for_foreign_reclaimed_attempt_that_crashed_before_m
         crash_before_retry_model,
     )
     try:
-        with pytest.raises(RuntimeError, match="after reclaim"):
-            await crashed.scheduler_once(
-                observed_at=NOW + timedelta(minutes=10, seconds=1),
-                max_action_units=8,
-                max_background_units=1,
-            )
+        crashed_result = await crashed.scheduler_once(
+            observed_at=NOW + timedelta(minutes=10, seconds=1),
+            max_action_units=8,
+            max_background_units=1,
+        )
+        assert crashed_result.background_statuses == ("technical_failure:runtimeerror",)
     finally:
         await crashed.aclose()
 

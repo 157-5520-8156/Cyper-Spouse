@@ -1735,6 +1735,26 @@ class QQC2CHost:
         )
         return await asyncio.shield(task)
 
+    async def _drain_direct_background_once(self) -> tuple[object | None, str | None]:
+        """Keep scheduler preflight inside the platform failure boundary.
+
+        The QQ adapter has two bounded preflight slots around the logical-clock
+        CAS.  They intentionally use the platform's background worker, but
+        they are outside ``WorldV2PlatformHost.drain_scheduled_work`` and must
+        therefore apply the same technical-failure isolation themselves.  A
+        failed unit remains the worker's durable retry concern; this scheduler
+        pass must continue to clock/action recovery instead of escaping with a
+        process-level exception.
+        """
+
+        try:
+            return await self._host.drain_background_once(), None
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - scheduler isolation boundary
+            _LOG.exception("world v2 direct background scheduler unit failed")
+            return None, "technical_failure:" + type(exc).__name__.lower()
+
     async def _scheduler_once_admitted(
         self,
         *,
@@ -1867,7 +1887,11 @@ class QQC2CHost:
                 # and durable claims simply wait for the next pass.
                 if self._visible_turn_in_flight():
                     break
-                result = await self._host.drain_background_once()
+                result, failure_status = await self._drain_direct_background_once()
+                if failure_status is not None:
+                    pre_background.append(failure_status)
+                    background_remaining -= 1
+                    continue
                 # Yield the event loop between durable units so a just-arrived
                 # visible turn can claim its batch before the next unit starts.
                 await asyncio.sleep(0)
@@ -2033,7 +2057,11 @@ class QQC2CHost:
                 for _ in range(post_tick_background_budget):
                     if self._visible_turn_in_flight():
                         break
-                    result = await self._host.drain_background_once()
+                    result, failure_status = await self._drain_direct_background_once()
+                    if failure_status is not None:
+                        post_tick_background.append(failure_status)
+                        background_remaining -= 1
+                        continue
                     await asyncio.sleep(0)
                     work_status = getattr(result, "work_status", None)
                     if result is None or (
