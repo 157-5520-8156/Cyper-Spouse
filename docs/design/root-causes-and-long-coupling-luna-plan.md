@@ -1572,3 +1572,13 @@ commit：hash
 - 该补片只修正身份/lineage，不宣称已经完成 L4 的 merge、epoch/expiry、跨 user/Life/NPC/Memory/Perception/Plan
   统一 consumer，也不改变真实 provider、QQ 回执、自由对聊或 24 小时资格门。全量回归基线为 `4942 passed, 1 warning`；
   两个提交后的受影响 lane 已单独复跑，发布状态继续 `manual_only`/`qualification_incomplete`。
+
+### 2026-08-09：统一审计校验保留 CharacterInterior lineage
+
+- `69a0847` 修复了一个横切的证据丢失：通用 `Deliberation._checked_output` 与严格 `ProposalAuditRecorder`
+  重建 `ModelOutput/ModelResultAudit` 时，曾把 provider transport 已返回的
+  `character_interior_lineage` 排除，主动联系等生产 lane 因而只能留下普通 model audit。现在该字段在 hostile-shape
+  校验、strict revalidation 和 durable audit 中原样保留；没有增加语义作者或放宽任何 source/CAS/Action 边界。
+- 红测断言 proactive `character_interior_lineage.opportunity_ref` 等于 canonical `causal-opportunity.1` 身份；主动联系
+  与审计/Deliberation 相关回归分别为 `77 passed`、`134 passed`，ruff/diff-check 通过。该证据补片仍不是真实
+  DeepSeek/QQ/24 小时资格；发布状态不变。
