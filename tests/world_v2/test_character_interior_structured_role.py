@@ -762,7 +762,7 @@ async def test_outcome_selection_is_one_capability_bound_interior_decision() -> 
         "candidate:unexpected-invitation",
         kind="outcome_selection",
     )
-    model = _QueueModel(
+    model = _RequiredToolQueueModel(
         _result(
             status="decision",
             decision={
@@ -797,7 +797,7 @@ async def test_outcome_selection_is_one_capability_bound_interior_decision() -> 
 @pytest.mark.asyncio
 async def test_outcome_selection_rejects_a_candidate_outside_the_manifest() -> None:
     role = StructuredCharacterRoleFaculty(
-        model=_QueueModel(
+        model=_RequiredToolQueueModel(
             _result(
                 status="decision",
                 decision={
@@ -824,6 +824,225 @@ async def test_outcome_selection_rejects_a_candidate_outside_the_manifest() -> N
         )
 
     assert raised.value.code == "selected_token_not_offered"
+
+
+@pytest.mark.asyncio
+async def test_outcome_selection_uses_one_versioned_forced_tool() -> None:
+    manifest = _manifest(
+        "candidate:quiet-afternoon",
+        "candidate:unexpected-invitation",
+        kind="outcome_selection",
+    )
+    model = _RequiredToolQueueModel(
+        _result(
+            status="decision",
+            decision={
+                "source_refs": ["source:private_self"],
+                "payload": {
+                    "selected_token": "candidate:unexpected-invitation",
+                    "character_life_direction": None,
+                },
+            },
+        )
+    )
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-v4-flash")
+
+    result = await role.consider(
+        await _request(purpose="outcome_selection", capability_manifest=manifest)
+    )
+
+    assert result["decision"]["payload"]["selected_token"] == (
+        "candidate:unexpected-invitation"
+    )
+    assert len(model.tool_calls) == 1
+    tools, tool_choice = model.tool_calls[0]
+    assert tool_choice == {
+        "type": "function",
+        "function": {"name": "character_role_outcome_selection_v1"},
+    }
+    assert len(tools) == 1
+    assert tools[0]["function"]["name"] == "character_role_outcome_selection_v1"
+
+
+def test_outcome_selection_tool_schema_closes_offered_tokens_and_direction() -> None:
+    contract = StructuredRoleToolContracts().outcome_selection(
+        capability_payload=_manifest(
+            "candidate:quiet-afternoon",
+            "candidate:unexpected-invitation",
+            kind="outcome_selection",
+        ).payload,
+        source_refs=("source:private_self",),
+        recall_allowed=True,
+    )
+    parameters = contract.provider_tools[0]["function"]["parameters"]
+    Draft202012Validator.check_schema(parameters)
+    decision = next(
+        branch
+        for branch in parameters["anyOf"]
+        if branch["properties"]["status"]["enum"] == ["decision"]
+    )
+    payload = decision["properties"]["decision"]["properties"]["payload"]
+    assert payload["properties"]["selected_token"]["enum"] == [
+        "candidate:quiet-afternoon",
+        "candidate:unexpected-invitation",
+    ]
+    decision_source_refs = decision["properties"]["decision"]["properties"]["source_refs"]
+    assert decision_source_refs["minItems"] == 1
+    assert decision_source_refs["maxItems"] == 1
+    assert decision_source_refs["items"]["enum"] == ["source:private_self"]
+    assert decision_source_refs["prefixItems"] == [{"const": "source:private_self"}]
+    assert payload["properties"]["character_life_direction"] == {"type": "null"}
+    assert set(parameters["anyOf"][1]["properties"]["status"]["enum"]) == {
+        "recall_request"
+    }
+
+    direction_contract = StructuredRoleToolContracts().outcome_selection(
+        capability_payload={
+            **_manifest(
+                "candidate:quiet-afternoon",
+                "candidate:unexpected-invitation",
+                kind="outcome_selection",
+            ).payload,
+            "allow_character_life_direction": True,
+        },
+        source_refs=("source:private_self",),
+        recall_allowed=False,
+    )
+    direction_parameters = direction_contract.provider_tools[0]["function"]["parameters"]
+    Draft202012Validator.check_schema(direction_parameters)
+    direction_branch = direction_parameters["anyOf"][0]
+    direction_payload = direction_branch["properties"]["decision"]["properties"]["payload"]
+    assert direction_payload["properties"]["character_life_direction"].get("anyOf")
+    assert len(direction_parameters["anyOf"]) == 1
+    Draft202012Validator(direction_parameters).validate(
+        {
+            "status": "decision",
+            "summary": "A possibility feels worth carrying.",
+            "attended_source_refs": [],
+            "decision": {
+                "source_refs": ["source:private_self"],
+                "payload": {
+                    "selected_token": "candidate:unexpected-invitation",
+                    "character_life_direction": {
+                        "coordinate_ref": "biography:direction.new-project",
+                        "summary": "keep making room for work that feels like mine",
+                        "context_tags": ["direction.experiment"],
+                        "replaces_context_tag_prefixes": ["direction.old-plan"],
+                        "privacy_class": "personal",
+                    },
+                },
+            },
+            "recall_query": None,
+            "proposals": [],
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_outcome_selection_without_required_tool_support_fails_closed() -> None:
+    model = _QueueModel(
+        _result(
+            status="decision",
+            decision={
+                "source_refs": ["source:private_self"],
+                "payload": {
+                    "selected_token": "candidate:offered",
+                    "character_life_direction": None,
+                },
+            },
+        )
+    )
+
+    with pytest.raises(StructuredRoleResultError) as raised:
+        await StructuredCharacterRoleFaculty(
+            model=model,
+            model_id="plain-json-only",
+        ).consider(
+            await _request(
+                purpose="outcome_selection",
+                capability_manifest=_manifest(
+                    "candidate:offered",
+                    kind="outcome_selection",
+                ),
+            )
+        )
+
+    assert raised.value.code == "required_tool_choice_unsupported"
+    assert model.calls == []
+
+
+@pytest.mark.asyncio
+async def test_outcome_selection_required_tool_reaches_deepseek_http_boundary() -> None:
+    captured: dict[str, object] = {}
+    raw_result = _result(
+        status="decision",
+        decision={
+            "source_refs": ["source:private_self"],
+            "payload": {
+                "selected_token": "candidate:unexpected-invitation",
+                "character_life_direction": None,
+            },
+        },
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "character_role_outcome_selection_v1",
+                                        "arguments": raw_result,
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    model = DeepSeekChatModel(
+        "key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await StructuredCharacterRoleFaculty(
+            model=model,
+            model_id="deepseek-v4-flash",
+        ).consider(
+            await _request(
+                purpose="outcome_selection",
+                capability_manifest=_manifest(
+                    "candidate:quiet-afternoon",
+                    "candidate:unexpected-invitation",
+                    kind="outcome_selection",
+                ),
+            )
+        )
+    finally:
+        await model.aclose()
+
+    assert result["decision"]["payload"]["selected_token"] == (
+        "candidate:unexpected-invitation"
+    )
+    assert "response_format" not in captured
+    assert captured["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "character_role_outcome_selection_v1"},
+    }
+    tools = captured["tools"]
+    assert isinstance(tools, list) and len(tools) == 1
+    assert tools[0]["function"]["name"] == "character_role_outcome_selection_v1"
 
 
 @pytest.mark.asyncio

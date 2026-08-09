@@ -69,6 +69,22 @@ class _OpenWorldModel:
 
 class _OutcomeModel:
     model = "test-open-world-outcome-model"
+    supports_required_tool_choice = True
+
+    async def complete_json(
+        self,
+        messages,
+        *,
+        temperature: float = 0.8,
+        tools,
+        tool_choice,
+    ) -> str:  # type: ignore[no-untyped-def]
+        assert tools and tools[0]["function"]["name"] == "character_role_outcome_selection_v1"
+        assert tool_choice == {
+            "type": "function",
+            "function": {"name": "character_role_outcome_selection_v1"},
+        }
+        return await self.complete(messages, temperature=temperature)
 
     async def complete(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
         assert temperature == 0.8

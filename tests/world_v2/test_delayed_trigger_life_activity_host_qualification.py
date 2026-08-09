@@ -148,6 +148,7 @@ class _LifeSourceReviewer:
 
 class _CharacterModel(FakeCompanionModel):
     model = "fixture:life-activity-character"
+    supports_required_tool_choice = True
 
     def __init__(self) -> None:
         super().__init__()
@@ -162,7 +163,23 @@ class _CharacterModel(FakeCompanionModel):
         tools: list[dict[str, object]] | None = None,
         tool_choice: object | None = None,
     ) -> str:
-        del tools, tool_choice
+        purpose = json.loads(messages[-1]["content"])["inner_turn"]["purpose"]
+        expected_tools = {
+            "life_development_choice": None,
+            "activity_lifecycle_choice": None,
+            "outcome_selection": "character_role_outcome_selection_v1",
+        }
+        expected_name = expected_tools.get(purpose)
+        if expected_name is not None:
+            assert tools and len(tools) == 1
+            assert tools[0]["function"]["name"] == expected_name
+            assert tool_choice == {
+                "type": "function",
+                "function": {"name": expected_name},
+            }
+        else:
+            assert tools is None
+            assert tool_choice is None
         return await self.complete(messages, temperature=temperature)
 
     async def complete(

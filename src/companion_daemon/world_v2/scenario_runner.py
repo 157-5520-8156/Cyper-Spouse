@@ -494,12 +494,20 @@ class _FixedCharacterInteriorScenarioModel(FakeCompanionModel):
         tool_choice: object | None = None,
     ) -> str:
         if tools is not None:
+            request = json.loads(messages[-1]["content"])
+            purpose = request.get("inner_turn", {}).get("purpose")
+            expected_tool = {
+                "world_stimulus_appraisal": (
+                    "character_role_world_stimulus_appraisal_v1"
+                ),
+                "outcome_selection": "character_role_outcome_selection_v1",
+            }.get(purpose)
             if tool_choice != {
                 "type": "function",
-                "function": {"name": "character_role_world_stimulus_appraisal_v1"},
+                "function": {"name": expected_tool},
             }:
                 raise ScenarioVerificationError(
-                    "world stimulus fixture received an unexpected required-tool choice"
+                    "scenario fixture received an unexpected required-tool choice"
                 )
         return await self.complete(messages, temperature=temperature)
 

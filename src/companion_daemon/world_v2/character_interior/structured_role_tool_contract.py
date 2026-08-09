@@ -21,6 +21,7 @@ _CONTRACT_VERSION = "1"
 _PROACTIVE_TOOL_NAME = "character_role_proactive_contact_v1"
 _WORLD_STIMULUS_TOOL_NAME = "character_role_world_stimulus_appraisal_v1"
 _PRIVATE_IMPRESSION_TOOL_NAME = "character_role_private_impression_reflection_v1"
+_OUTCOME_SELECTION_TOOL_NAME = "character_role_outcome_selection_v1"
 
 
 def _canonical_json(value: object) -> str:
@@ -393,6 +394,7 @@ class StructuredRoleToolContracts:
         from ..expression_draft import ExpressionDraft
         from .structured_role import (
             _PrivateImpressionProposal,
+            _OutcomeSelectionPayload,
             _WorldStimulusAppraisalResult,
             _WireRoleResult,
         )
@@ -400,6 +402,7 @@ class StructuredRoleToolContracts:
         _compiled_provider_schema(ExpressionDraft)
         _compiled_provider_schema(_WorldStimulusAppraisalResult)
         _compiled_provider_schema(_PrivateImpressionProposal)
+        _compiled_provider_schema(_OutcomeSelectionPayload)
         _compiled_provider_schema(_WireRoleResult)
 
     @classmethod
@@ -473,6 +476,27 @@ class StructuredRoleToolContracts:
 
         return self._cached_private_impression_reflection(
             _canonical_json(capability_payload),
+            recall_allowed,
+        )
+
+    def outcome_selection(
+        self,
+        *,
+        capability_payload: Mapping[str, object],
+        source_refs: tuple[str, ...] = (),
+        recall_allowed: bool,
+    ) -> StructuredRoleToolContract:
+        """Compile one source-bound external outcome choice.
+
+        The provider sees only the exact candidates and optional direction
+        capability already admitted by the world runtime.  It cannot invent a
+        candidate, settle an occurrence, or grant a biographical transition.
+        Those remain downstream authority decisions.
+        """
+
+        return self._cached_outcome_selection(
+            _canonical_json(capability_payload),
+            _canonical_json(source_refs),
             recall_allowed,
         )
 
@@ -935,6 +959,198 @@ class StructuredRoleToolContracts:
             provider_tool_choice={
                 "type": "function",
                 "function": {"name": _PRIVATE_IMPRESSION_TOOL_NAME},
+            },
+            identity=identity,
+        )
+
+    @staticmethod
+    @lru_cache(maxsize=32)
+    def _cached_outcome_selection(
+        capability_payload_json: str,
+        source_refs_json: str,
+        recall_allowed: bool,
+    ) -> StructuredRoleToolContract:
+        from .structured_role import _OutcomeSelectionPayload, _WireRoleResult
+
+        capability_payload = json.loads(capability_payload_json)
+        if not isinstance(capability_payload, dict):
+            raise ValueError("outcome selection capability must be one object")
+        source_refs = json.loads(source_refs_json)
+        if (
+            not isinstance(source_refs, list)
+            or any(not isinstance(item, str) or not item for item in source_refs)
+            or len(source_refs) != len(set(source_refs))
+            or len(source_refs) > 64
+        ):
+            raise ValueError("outcome selection source refs are malformed")
+        offered_tokens = capability_payload.get("offered_tokens")
+        if (
+            not isinstance(offered_tokens, list)
+            or not offered_tokens
+            or any(not isinstance(item, str) or not item for item in offered_tokens)
+            or len(offered_tokens) != len(set(offered_tokens))
+        ):
+            raise ValueError("outcome selection offered tokens are malformed")
+        allow_direction = capability_payload.get("allow_character_life_direction", False)
+        if not isinstance(allow_direction, bool):
+            raise ValueError("outcome selection direction capability is malformed")
+
+        role_schema = _provider_schema(_WireRoleResult)
+        role_properties = _required_object_properties(role_schema)
+        decision_schema = role_properties.get("decision")
+        if not isinstance(decision_schema, dict):
+            raise ValueError("canonical role schema has no decision")
+        variants = decision_schema.get("anyOf")
+        decision_object = (
+            next(
+                (
+                    item
+                    for item in variants
+                    if isinstance(item, dict) and item.get("type") == "object"
+                ),
+                None,
+            )
+            if isinstance(variants, list)
+            else decision_schema
+        )
+        if not isinstance(decision_object, dict):
+            raise ValueError("canonical role decision schema is incomplete")
+        decision_properties = _required_object_properties(decision_object)
+        if source_refs:
+            source_ref_schema = decision_properties.get("source_refs")
+            if not isinstance(source_ref_schema, dict):
+                raise ValueError("outcome selection source-ref schema is incomplete")
+            source_ref_items = source_ref_schema.get("items")
+            if not isinstance(source_ref_items, dict):
+                raise ValueError("outcome selection source-ref items are incomplete")
+            decision_properties["source_refs"] = {
+                **deepcopy(source_ref_schema),
+                "minItems": len(source_refs),
+                "maxItems": len(source_refs),
+                "items": {**deepcopy(source_ref_items), "enum": list(source_refs)},
+                "prefixItems": [{"const": item} for item in source_refs],
+            }
+
+        payload_schema = _provider_schema(_OutcomeSelectionPayload)
+        payload_properties = _required_object_properties(payload_schema)
+        selected = payload_properties.get("selected_token")
+        if not isinstance(selected, dict):
+            raise ValueError("outcome selection token schema is incomplete")
+        payload_properties["selected_token"] = {
+            **deepcopy(selected),
+            "enum": list(offered_tokens),
+        }
+        if not allow_direction:
+            payload_properties["character_life_direction"] = {"type": "null"}
+        payload_schema["required"] = ["selected_token", "character_life_direction"]
+        decision_properties["payload"] = payload_schema
+        decision_object["required"] = ["source_refs", "payload"]
+
+        common = {
+            key: deepcopy(role_properties[key])
+            for key in (
+                "summary",
+                "attended_source_refs",
+                "recall_query",
+                "proposals",
+            )
+        }
+        required = [
+            "status",
+            "summary",
+            "attended_source_refs",
+            "decision",
+            "recall_query",
+            "proposals",
+        ]
+        decision_branch = {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["decision"]},
+                **common,
+                "decision": decision_object,
+            },
+            "required": required,
+            "additionalProperties": False,
+        }
+        decision_branch["properties"]["recall_query"] = {"type": "null"}
+        decision_branch["properties"]["proposals"] = {
+            **deepcopy(common["proposals"]),
+            "maxItems": 0,
+        }
+        branches: list[dict[str, object]] = [decision_branch]
+        if recall_allowed:
+            branches.append(
+                {
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "string", "enum": ["recall_request"]},
+                        "summary": deepcopy(common["summary"]),
+                        "attended_source_refs": deepcopy(common["attended_source_refs"]),
+                        "decision": {"type": "null"},
+                        "recall_query": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1024,
+                        },
+                        "proposals": {
+                            **deepcopy(common["proposals"]),
+                            "maxItems": 0,
+                        },
+                    },
+                    "required": required,
+                    "additionalProperties": False,
+                }
+            )
+        parameters = {"type": "object", "anyOf": branches}
+        function = {
+            "name": _OUTCOME_SELECTION_TOOL_NAME,
+            "description": (
+                "Return the complete source-bound outcome_selection role result. "
+                "Select one offered candidate or request one bounded recall. The "
+                "function constrains transport and capability shape only; the "
+                "character owns which candidate, if any, matters."
+            ),
+            "parameters": parameters,
+        }
+        provider_tools = ({"type": "function", "function": function},)
+        schema_digest = "sha256:" + sha256(_canonical_json(parameters).encode("utf-8")).hexdigest()
+        capabilities_digest = "sha256:" + sha256(
+            _canonical_json(
+                {"payload": capability_payload, "source_refs": source_refs}
+            ).encode("utf-8")
+        ).hexdigest()
+        contract_digest = (
+            "sha256:"
+            + sha256(
+                _canonical_json(
+                    {
+                        "purpose": "outcome_selection",
+                        "tool_name": _OUTCOME_SELECTION_TOOL_NAME,
+                        "version": _CONTRACT_VERSION,
+                        "schema_sha256": schema_digest,
+                        "capabilities_sha256": capabilities_digest,
+                        "recall_allowed": recall_allowed,
+                    }
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        identity = StructuredRoleToolContractIdentity(
+            contract_id="character-role-forced-tool",
+            purpose="outcome_selection",
+            tool_name=_OUTCOME_SELECTION_TOOL_NAME,
+            version=_CONTRACT_VERSION,
+            schema_sha256=schema_digest,
+            capabilities_sha256=capabilities_digest,
+            contract_sha256=contract_digest,
+            recall_allowed=str(recall_allowed).lower(),
+        )
+        return StructuredRoleToolContract(
+            purpose="outcome_selection",
+            provider_tools=provider_tools,
+            provider_tool_choice={
+                "type": "function",
+                "function": {"name": _OUTCOME_SELECTION_TOOL_NAME},
             },
             identity=identity,
         )

@@ -28,6 +28,7 @@ from pydantic import (
 from companion_daemon.llm import model_call_scope
 
 from ..model_completion import ChatCompletionModel
+from ..character_outcome_contract import CharacterLifeDirectionDraft
 from ..proposal_envelope import AspirationTransitionPayload
 from ..schema_core import canonicalize_json_value
 from ..structured_completion import complete_json_object
@@ -327,6 +328,20 @@ def _validate_outcome_selection_payload(
         replaces_context_tag_prefixes=parsed.replaces_context_tag_prefixes,
         privacy_class=parsed.privacy_class,
     )
+
+
+class _OutcomeSelectionPayload(BaseModel):
+    """Canonical role-authored outcome choice payload.
+
+    The offered candidate set and the optional direction capability are
+    specialized by the transport compiler.  This model only defines the
+    complete semantic wire; it does not select a candidate or a direction.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    selected_token: str = Field(min_length=1, max_length=512)
+    character_life_direction: CharacterLifeDirectionDraft | None = None
 
 
 def _validate_memory_retention_payload(
@@ -944,6 +959,7 @@ class StructuredCharacterRoleFaculty:
             "proactive_contact",
             "world_stimulus_appraisal",
             "private_impression_reflection",
+            "outcome_selection",
         }:
             return None
         if not bool(getattr(self._model, "supports_required_tool_choice", False)):
@@ -969,8 +985,14 @@ class StructuredCharacterRoleFaculty:
                     capability_payload=manifest.payload,
                     recall_allowed=not request.recall_completed,
                 )
-            return compiler.private_impression_reflection(
+            if request.purpose == "private_impression_reflection":
+                return compiler.private_impression_reflection(
+                    capability_payload=manifest.payload,
+                    recall_allowed=not request.recall_completed,
+                )
+            return compiler.outcome_selection(
                 capability_payload=manifest.payload,
+                source_refs=manifest.source_refs,
                 recall_allowed=not request.recall_completed,
             )
         except (TypeError, ValueError) as exc:

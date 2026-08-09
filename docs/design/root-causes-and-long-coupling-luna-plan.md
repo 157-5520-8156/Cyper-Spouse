@@ -1246,3 +1246,21 @@ commit：hash
 - 这只是一个后台 purpose 的协议可靠性薄片，不代表其他 background purpose 已全部迁移，也不代表真实
   DeepSeek 首次成功率、QQ 回执、自由对聊或 24 小时 soak 已资格化。Matrix 仍为 `declaration_only`，真实
   provider/生产 daemon 资格继续标记 `manual_only`/`qualification_incomplete`。
+
+### 2026-08-09：outcome selection required-tool 薄片
+
+- `outcome_selection` 现在使用独立的版本化 required tool
+  `character_role_outcome_selection_v1`。工具参数由 `_OutcomeSelectionPayload`、`_WireDecision` 与
+  `_WireRoleResult` 的 canonical typed schema 派生；当前 occurrence 提供的 `offered_tokens` 会被
+  capability 专门化为唯一可选枚举，`allow_character_life_direction` 为 false 时只允许显式 `null`。
+  角色仍自行决定选哪个候选或请求一次受限回忆；系统不替它选第一项、不生成候选、不把选择直接当作结算或人生方向。
+- 下游 `OutcomeMaterializer` 继续负责候选来源、观察绑定、隐私、CAS、proposal/settlement 与 effect-once；
+  required tool 只负责运输形状和能力闭包。声明支持 required tool 的 provider 不再回落普通 JSON；能力缺失保持
+  精确的 `required_tool_choice_unsupported` 技术失败。
+- 本薄片验证了角色 public seam、DeepSeek-compatible HTTP body、候选枚举/来源绑定/方向约束、能力缺失
+  fail-closed，并更新 outcome e2e、Life activity public-host 与冷重放 fixture 使其真实传递唯一
+  tool/tool_choice。当前 revision 的完整源码回归为 `4892 passed, 1 warning`；这不把 MockTransport 或
+  scripted fixture 当作真实 provider 成功率证明。
+- 这仍只是一个背景 purpose 的协议可靠性薄片，不代表 Life Development、Activity Lifecycle、Memory、Perception
+  等其余模型调用全部迁移，也不代表真实 DeepSeek 首次成功率、流式碎片、QQ 回执、自由对聊或 24 小时 soak 已
+  资格化。Matrix 继续为 `declaration_only`，发布状态保持 `manual_only`/`qualification_incomplete`。
