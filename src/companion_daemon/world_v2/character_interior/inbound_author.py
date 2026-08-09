@@ -68,6 +68,7 @@ from .inbound_wire import (
     source_closure_violation,
 )
 from ..deliberation import (
+    AuthoredCandidateInvocationAudit,
     ModelInput,
     ModelOutput,
     ModelUsageProvenance,
@@ -673,6 +674,37 @@ class _CombinedInteriorStreamProvider:
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._provider, name)
+
+
+def _retired_stream_candidate_audits(
+    retirement: PhysicalProviderInvocationAudit | None,
+) -> tuple[AuthoredCandidateInvocationAudit, ...]:
+    """Record a complete rejected stream without binding it to the winner.
+
+    A cancelled or unresolved stream has no response bytes and therefore is
+    not a returned model candidate.  Once the physical call completed, its
+    bytes are a candidate that validation rejected before the same author
+    selected the corrected result.  Keeping that lineage as an authored
+    candidate lets strict audit persist it without pretending the corrected
+    result is the stream tail.
+    """
+
+    if retirement is None or retirement.outcome != "completed":
+        return ()
+    if retirement.response_hash is None:
+        return ()
+    return (
+        AuthoredCandidateInvocationAudit(
+            purpose="paired_cognition_stream",
+            model_call_id=retirement.model_call_id,
+            request_hash=retirement.request_hash,
+            response_hash=retirement.response_hash,
+            model_id=retirement.model_id,
+            model_version=retirement.model_version,
+            outcome="validation_rejected",
+            usage=retirement.usage,
+        ),
+    )
 
 
 class _FailedExpressionDetail:
@@ -1666,18 +1698,19 @@ class _InboundCharacterAuthor:
             for output in (appraisal_output, expression_output)
         ):
             # The same character's bounded correction replaced the rejected
-            # stream before any head was authorized.  Return that complete
+            # stream before any head was authorized. Return that complete
             # corrected decision as a normal result and make the speculative
             # original continuation permanently unavailable. The corrected
-            # candidate is an independent author call: it carries no stream
-            # physical terminal, so the strict audit's tail binding does not
-            # apply (2026-08-08; the retired stream's own failure is already
-            # recorded on the rejected attempt).
+            # candidate is an independent author call: its predecessor is
+            # either an incomplete provider call (no candidate bytes) or a
+            # returned candidate rejected by validation. It must not be
+            # attached as the corrected result's physical stream tail.
             self._interior_streams.pop(key, None)
             return merged.model_copy(
                 update={
-                    "physical_provider_audits": (
-                        (stream.retirement,) if stream.retirement is not None else ()
+                    "physical_provider_audits": (),
+                    "authored_candidate_audits": _retired_stream_candidate_audits(
+                        stream.retirement
                     ),
                 }
             )

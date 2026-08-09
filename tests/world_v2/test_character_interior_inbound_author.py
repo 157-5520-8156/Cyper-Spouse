@@ -64,7 +64,9 @@ from companion_daemon.world_v2.recall_embedding import OpenAICompatibleRecallEmb
 from companion_daemon.world_v2.recall_index import FeatureHashRecallEmbedding
 from companion_daemon.world_v2.character_interior.inbound_author import (
     _InboundCharacterAuthor as InboundCharacterAuthor,
+    _retired_stream_candidate_audits,
 )
+from companion_daemon.world_v2.deliberation import PhysicalProviderInvocationAudit
 from companion_daemon.world_v2.world_turn_runtime import InboundTurn
 
 _PRIVATE_RECALL_SOURCE_REF = "event:impression:private-recall:sha256:" + "d" * 64
@@ -2098,13 +2100,43 @@ async def test_streamed_correction_retires_old_physical_session_before_reselecti
 
     assert provider.correction_saw_stream_cancelling is True
     assert output.semantic_stream_part is None
-    assert len(output.physical_provider_audits) == 1
-    assert output.physical_provider_audits[0].outcome == "unresolved"
-    assert output.physical_provider_audits[0].usage_status == "unresolved"
+    # The corrected full decision is independent of the retired stream. An
+    # incomplete predecessor cannot be attached to the successful result's
+    # physical tail audit, nor can it be promoted to a returned candidate.
+    assert output.physical_provider_audits == ()
+    assert output.authored_candidate_audits == ()
     with pytest.raises(RuntimeError, match="continuation is unavailable"):
         await author.propose_stream_tail(
             request.model_copy(update={"call_id": "call:retired-tail"})
         )
+
+
+def test_completed_retired_stream_is_recorded_as_rejected_candidate() -> None:
+    retirement = PhysicalProviderInvocationAudit(
+        model_call_id="model-call:retired-stream",
+        request_hash="a" * 64,
+        model_id="model:stream",
+        model_version="stream.1",
+        outcome="completed",
+        response_hash="b" * 64,
+        usage_status="provider_reported",
+        usage=_metered_usage(
+            ref="usage:retired-stream",
+            input_tokens=12,
+            output_tokens=8,
+        ),
+        semantic_model_call_ids=(
+            "model-call:retired-stream:head",
+            "model-call:retired-stream:tail",
+        ),
+    )
+
+    candidates = _retired_stream_candidate_audits(retirement)
+
+    assert len(candidates) == 1
+    assert candidates[0].model_call_id == retirement.model_call_id
+    assert candidates[0].response_hash == retirement.response_hash
+    assert candidates[0].outcome == "validation_rejected"
 
 
 class _ForcedMissingAffectProvider(_ToolIdentityCombinedProvider):
