@@ -1501,3 +1501,11 @@ commit：hash
   provider request、1 个 ActionProviderAccepted/ActionAuthorized、0 failures、cold replay 与 live projection
   一致，roundtrip `3471.465 ms`。这只证明 beta capture/账本闭环的单样本；24 小时 soak 需在该修复提交后重新显式
   启动，仍不改变 `manual_only`/`qualification_incomplete`。
+
+### 2026-08-09：Delayed Trigger 公开宿主生命周期边界复核
+
+- 完整 Delayed Trigger Matrix 与公开宿主集合第一次复跑为 `47 passed, 1 failed`：失败发生在
+  `expression.multibeat_due` 的重复冷重启检查，语义断言没有失败，而是测试自身的 15 秒生命周期安全窗口在完整收集负载下
+  取消了仍在关闭的宿主任务。单测独立运行也接近该窗口，证明它不是可以忽略的偶发日志。
+- 将该测试专用窗口调为 60 秒，并明确它只是“卡住的恢复循环”上限，不是延迟资格或成功率放宽；没有减少重复 tick、drain、重启、回执、冷重放或 effect-once 断言。修复后公开宿主 + Matrix 为 `48 passed`，静态 verifier 仍为 `28 delayed trigger mechanisms`。
+- 同一最终源码的临时 real-provider 24 小时 supervisor 已重新启动，使用临时 SQLite、OneBot loopback、隔离端口，不触碰旧生产 daemon。首轮为 HTTP 200、`action_authorized`、roundtrip `3367.027 ms`；最终报告尚未生成，故资格仍是 `manual_only`/`qualification_incomplete`，不能据此上线。

@@ -45,7 +45,11 @@ HOST_QUALIFICATION_DECLARATIONS = {
     ),
 }
 
-HOST_LIFECYCLE_TIMEOUT_SECONDS = 15.0
+# Rebuilding a public host intentionally exercises SQLite cold recovery and
+# scheduler-lane shutdown on every step.  Under the complete qualification
+# collection those lifecycle operations can take several seconds each; the
+# timeout is a safety bound for a stuck recovery loop, not a latency claim.
+HOST_LIFECYCLE_TIMEOUT_SECONDS = 60.0
 _CATALOG = Path("configs/delayed_trigger_qualification.v1.yaml")
 
 
