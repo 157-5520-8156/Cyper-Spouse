@@ -1329,3 +1329,13 @@ commit：hash
 - 该报告绑定 revision `cb572962` 且生成时工作树仍 dirty，未连接真实 QQ、未测试 100 次 forced-tool/stream、没有
   24 小时 soak，也没有把 character-choice/措辞质量当作自动 gate。因此它只能证明隔离 transport/CAS/replay 的一小段，
   不能证明当前最终工作树或生产 daemon 已资格化；状态继续为 `manual_only`/`qualification_incomplete`。
+
+### 2026-08-09：提交后 revision acceptance
+
+- 提交 `d9a3be4f63bd43469b17c9bc3ed9c2a668bf7061` 后重新运行同一隔离 acceptance（生成时间
+  `2026-08-09T04:23:18Z`）：2 次进程启动、scheduler failures `0`、确定性不变量通过；7 个 provider-backed turn
+  的 round-trip 为约 `0.72–4.85s`，均值约 `3.47s`，重启后的重复可见 effect/model request 均为 `0`，cold replay
+  与 live head 一致。
+- 报告仍是临时 SQLite、OneBot loopback capture、外部 provider；工作树 dirty 只反映用户保留的 `.idea`/`training`
+  文件，真实 QQ 未连接。它没有覆盖 100 次 forced-tool/stream、24 小时 soak 或自由对话质量，因此发布资格仍为
+  `manual_only`/`qualification_incomplete`，不得把这次短跑写成生产健康证明。
