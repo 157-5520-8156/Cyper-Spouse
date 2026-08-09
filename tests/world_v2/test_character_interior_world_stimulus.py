@@ -723,6 +723,17 @@ async def test_source_bound_opportunity_advance_and_health_are_one_causal_view()
     assert health.claimed_count == 0
     assert ledger.project().trigger_processes
 
+    model_audit = next(
+        item
+        for item in ledger.project().model_result_audits
+        if json.loads(item.audit_json)["character_interior_lineage"]["purpose"]
+        == "world_stimulus_appraisal"
+    )
+    audit_json = json.loads(model_audit.audit_json)
+    assert audit_json["character_interior_lineage"]["opportunity_ref"] == (
+        result.opportunity_ref
+    )
+
     replay = await runtime.advance_once(SOURCE_REF)
     assert replay.status == "idle"
     assert model.calls == 1

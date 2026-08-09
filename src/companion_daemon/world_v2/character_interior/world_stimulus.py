@@ -1267,6 +1267,10 @@ class CharacterInteriorWorldStimulusRuntime:
             )
         if audit is None:
             cursor = _cursor(current)
+            opportunity_identity = self._opportunity_identity(
+                process=active,
+                source_refs=(source_event.event_id,),
+            )
             manifest = await self._manifest(
                 process=active,
                 source_event=source_event,
@@ -1282,7 +1286,7 @@ class CharacterInteriorWorldStimulusRuntime:
                     logical_time=current.logical_time or source_event.logical_time,
                     purpose=PURPOSE,
                     source_refs=(source_event.event_id,),
-                    stimulus_ref=f"stimulus:{active.trigger_id}:{active.claim_lease.attempt_id}",
+                    stimulus_ref=opportunity_identity.opportunity_ref,
                     capability_manifest=manifest,
                     context_note=(
                         "A committed change is available for the character's own private "
