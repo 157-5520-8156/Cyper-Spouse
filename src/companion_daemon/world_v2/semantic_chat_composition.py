@@ -1405,11 +1405,12 @@ def build_semantic_chat_composition(
         if openai_inventory_secondary is not None:
             owned.append(openai_inventory_secondary)
         source_review_authority = SourceReviewAuthority(
-            # The official structured-output route is faster and more schema
-            # reliable for the synchronous visible path. Audited Qwen remains
-            # an independent availability fallback.
-            primary=openai_source_reviewer,
-            secondary=openrouter_source_reviewer,
+            # The live-qualified Qwen route won every captured source-review
+            # call in the current deployment evidence. Keep the independently
+            # qualified direct OpenAI route as the serial reserve; this is
+            # transport availability ordering, never a second semantic vote.
+            primary=openrouter_source_reviewer,
+            secondary=openai_source_reviewer,
             hedge_after_seconds=settings.world_v2_source_review_hedge_after_seconds,
             deadline_seconds=settings.world_v2_source_review_deadline_seconds,
             caller_timeout_seconds=SOURCE_REVIEW_CALL_TIMEOUT_SECONDS,
@@ -1432,8 +1433,8 @@ def build_semantic_chat_composition(
         # correction. This separately isolated authority reviews that fresh
         # candidate; it is not a backup character author.
         recovery_source_closure_model = SourceReviewAuthority(
-            primary=openai_recovery_source_reviewer,
-            secondary=openrouter_recovery_source_reviewer,
+            primary=openrouter_recovery_source_reviewer,
+            secondary=openai_recovery_source_reviewer,
             hedge_after_seconds=settings.world_v2_source_review_hedge_after_seconds,
             deadline_seconds=settings.world_v2_source_review_deadline_seconds,
             caller_timeout_seconds=SOURCE_REVIEW_CALL_TIMEOUT_SECONDS,

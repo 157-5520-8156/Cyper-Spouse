@@ -465,11 +465,11 @@ async def test_production_composition_keeps_unverified_inventory_out_of_every_ca
     main_authority = composition.source_closure_model
     assert isinstance(main_authority, SourceReviewAuthority)
     assert isinstance(main_authority.primary, StructuredSourceReviewModel)
-    assert main_authority.primary.model == "gpt-4.1-mini"
-    assert main_authority.primary.base_url == "https://api.openai.com/v1"
+    assert main_authority.primary.model == "qwen/qwen-plus"
+    assert main_authority.primary.base_url == "https://openrouter.ai/api/v1"
     assert main_authority.primary.proxy_url == "http://127.0.0.1:7890"
     assert isinstance(main_authority.secondary, OpenAICompatibleChatModel)
-    assert main_authority.secondary.model == "qwen/qwen-plus"
+    assert main_authority.secondary.model == "gpt-4.1-mini"
     assert main_authority.secondary.reasoning_effort == ""
     assert main_authority.hedge_after_seconds == 3.5
     assert main_authority.deadline_seconds == 19.0
@@ -532,10 +532,10 @@ async def test_production_composition_keeps_unverified_inventory_out_of_every_ca
     assert isinstance(recovery_authority, SourceReviewAuthority)
     assert recovery_authority is not main_authority
     assert recovery_authority.primary is not main_authority.primary
-    assert recovery_authority.primary.model == "gpt-4.1-mini"
-    assert recovery_authority.primary.provider == "openai"
+    assert recovery_authority.primary.model == "qwen/qwen-plus"
+    assert recovery_authority.primary.provider == "openrouter"
     assert isinstance(recovery_authority.secondary, StructuredSourceReviewModel)
-    assert recovery_authority.secondary.model == "qwen/qwen-plus"
+    assert recovery_authority.secondary.model == "gpt-4.1-mini"
     assert (
         recovery_authority.supports_strict_output_contract(
             "candidate-external-proposition-coverage.5"
@@ -579,9 +579,31 @@ async def test_production_composition_keeps_unverified_inventory_out_of_every_ca
         "secondary",
     )
     assert health["source_review_authority"]["lane_models"] == {
-        "primary": "gpt-4.1-mini",
-        "secondary": "qwen/qwen-plus",
+        "primary": "qwen/qwen-plus",
+        "secondary": "gpt-4.1-mini",
     }
+    await composition.aclose()
+
+
+@pytest.mark.asyncio
+async def test_production_source_review_prefers_the_qualified_live_winner() -> None:
+    composition = build_semantic_chat_composition(
+        settings=Settings(
+            _env_file=None,
+            DEEPSEEK_API_KEY="deepseek-test-key",
+            OPENAI_API_KEY="openai-test-key",
+            OPENROUTER_API_KEY="openrouter-test-key",
+            WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+        ),
+        model_id_prefix="test",
+    )
+
+    authority = composition.source_closure_model
+    assert isinstance(authority, SourceReviewAuthority)
+    assert authority.primary.model == "qwen/qwen-plus"
+    assert authority.primary.provider == "openrouter"
+    assert authority.secondary.model == "gpt-4.1-mini"
+    assert authority.secondary.provider == "openai"
     await composition.aclose()
 
 
@@ -1428,9 +1450,9 @@ async def test_production_source_authority_finishes_inside_its_22_second_caller(
 
     main_authority = composition.source_closure_model
     assert isinstance(main_authority, SourceReviewAuthority)
-    assert main_authority.primary.model == "gpt-4.1-mini"
+    assert main_authority.primary.model == "qwen/qwen-plus"
     assert main_authority.primary.reasoning_effort == ""
-    assert main_authority.secondary.model == "qwen/qwen-plus"
+    assert main_authority.secondary.model == "gpt-4.1-mini"
     assert main_authority.secondary.reasoning_effort == ""
     assert main_authority.configured_deadline_seconds == 30.0
     assert main_authority.caller_timeout_seconds == 22.0
@@ -1500,7 +1522,7 @@ def test_world_v2_has_no_configured_backup_character_model() -> None:
     assert settings.world_v2_source_inventory_model == "openai/gpt-5.4-nano"
     assert settings.world_v2_source_inventory_fallback_model == "openai/gpt-5.4-mini"
     assert settings.world_v2_source_inventory_timeout_seconds == 10.0
-    assert settings.world_v2_source_review_hedge_after_seconds == 8.0
+    assert settings.world_v2_source_review_hedge_after_seconds == 4.0
     assert settings.world_v2_source_review_deadline_seconds == 30.0
 
 

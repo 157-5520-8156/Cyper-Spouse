@@ -559,7 +559,9 @@ class Settings(BaseSettings):
         # Historical setting name retained for deployment compatibility. It is
         # now the primary review attempt timeout; the reserve reviewer is not
         # started until that call has failed or been cancelled at this bound.
-        default=8.0,
+        # Four seconds is shorter than the observed dead-route interval while
+        # still allowing the qualified Qwen primary to complete normally.
+        default=4.0,
         ge=0.1,
         le=15.0,
         alias="WORLD_V2_SOURCE_REVIEW_HEDGE_AFTER_SECONDS",
