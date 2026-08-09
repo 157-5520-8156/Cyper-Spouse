@@ -1595,3 +1595,8 @@ commit：hash
 - 24 小时 supervisor 仍在同一最终源码的临时库/OneBot loopback 中运行，当前只有 `2/24` 个低频样本，尚无终态报告；
   旧生产 daemon 仍不得按本计划自动重启或替换。后续只有在人工授权下，才可审阅 24h wall-clock、成本、账本增长、
   provider usage、冷重放和正式 receipt 证据，并决定是否推进 release gate。
+- 同一 HEAD 的隔离人工对话 probe（临时 SQLite、关闭 recall embedding）完成 5 轮：5/5 可见回复均为
+  `action_authorized`，端到端耗时约 `6.94–22.63s`（中位数约 `13.16s`）。其中观察到一次 provider 结构首轮失败后由同一角色纠正、一次 combined envelope 候选被拒，以及一次
+  `world_stimulus_appraisal` 的 stale deliberation revision；后者作为 `authority_submission_failed`
+  技术失败保留 claim，未伪造角色语义，重启后 replay/live semantic hash 仍一致且没有重复 Action。该 probe
+  仅用于当前用户体验和失败恢复观察，不是自然度、首次成功率、真实 QQ 回执或上线资格证明。
