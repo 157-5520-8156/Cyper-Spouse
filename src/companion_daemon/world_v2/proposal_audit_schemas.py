@@ -167,8 +167,27 @@ class RecordedCharacterInteriorTurnLineage(FrozenModel):
                 raise ValueError("causal opportunity lineage source refs are not canonical")
             if any(value is None for value in causal_fields):
                 raise ValueError("causal opportunity lineage is incomplete")
-            if self.causal_contract_version != "causal-opportunity.1":
-                raise ValueError("unsupported causal opportunity lineage contract")
+            try:
+                # Import lazily: the world schema module imports this audit
+                # contract while the CharacterInterior package is still
+                # initializing.  The identity implementation remains the
+                # single hash authority; this avoids a package-init cycle.
+                from .character_interior.run_result import CausalOpportunityIdentity
+
+                identity = CausalOpportunityIdentity.from_source_refs(
+                    world_id=self.causal_world_id,
+                    actor_ref=self.causal_actor_ref,
+                    purpose=self.purpose,
+                    source_refs=self.causal_source_refs,
+                    epoch=self.causal_epoch,
+                    contract_version=self.causal_contract_version,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError("causal opportunity lineage identity is invalid") from exc
+            if self.opportunity_ref != identity.opportunity_ref:
+                raise ValueError(
+                    "causal opportunity lineage opportunity_ref is not canonical"
+                )
         return self
 
 

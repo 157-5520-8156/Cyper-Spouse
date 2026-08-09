@@ -17,6 +17,7 @@ from companion_daemon.world_v2.proposal_audit_schemas import (
 from companion_daemon.world_v2.character_interior.audit import (
     recorded_character_interior_model_result,
 )
+from companion_daemon.world_v2.character_interior.run_result import CausalOpportunityIdentity
 from companion_daemon.world_v2.character_interior.contracts import (
     InnerDecision,
     _InstantPrivateSelf,
@@ -108,6 +109,77 @@ def test_character_interior_lineage_is_durable_in_audit_7_and_round_trips() -> N
         json.loads(payload.audit_json)["character_interior_lineage"]["decision_hash"]
         == "sha256:" + "2" * 64
     )
+
+
+def _causal_lineage(identity: CausalOpportunityIdentity) -> RecordedCharacterInteriorTurnLineage:
+    payload = _lineage().model_dump(mode="python")
+    payload.update(
+        {
+            "purpose": identity.purpose,
+            "opportunity_ref": identity.opportunity_ref,
+            "causal_world_id": identity.world_id,
+            "causal_source_refs": identity.source_refs,
+            "causal_epoch": identity.epoch,
+            "causal_actor_ref": identity.actor_ref,
+            "causal_contract_version": identity.contract_version,
+        }
+    )
+    return RecordedCharacterInteriorTurnLineage.model_validate(payload)
+
+
+def test_causal_lineage_reconstructs_and_binds_the_authoritative_opportunity_ref() -> None:
+    identity = CausalOpportunityIdentity.from_source_refs(
+        world_id="world:test",
+        actor_ref="actor:companion",
+        purpose="world_stimulus_appraisal",
+        source_refs=("source:a", "source:b"),
+        epoch="epoch:1",
+    )
+
+    lineage = _causal_lineage(identity)
+
+    assert lineage.opportunity_ref == identity.opportunity_ref
+    assert RecordedCharacterInteriorTurnLineage.model_validate(
+        lineage.model_dump(mode="python")
+    ) == lineage
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("opportunity_ref", "opportunity:causal:forged"),
+        ("causal_source_refs", ("source:a", "source:c")),
+        ("causal_source_refs", ("source:b", "source:a")),
+        ("causal_actor_ref", "actor:other"),
+        ("purpose", "other-purpose"),
+        ("causal_epoch", "epoch:2"),
+        ("causal_contract_version", "causal-opportunity.2"),
+    ),
+)
+def test_causal_lineage_rejects_any_forged_identity_coordinate(field: str, value: object) -> None:
+    identity = CausalOpportunityIdentity.from_source_refs(
+        world_id="world:test",
+        actor_ref="actor:companion",
+        purpose="world_stimulus_appraisal",
+        source_refs=("source:a", "source:b"),
+        epoch="epoch:1",
+    )
+    payload = _lineage().model_dump(mode="python")
+    payload.update(
+        {
+            "purpose": identity.purpose,
+            "opportunity_ref": identity.opportunity_ref,
+            "causal_world_id": identity.world_id,
+            "causal_source_refs": identity.source_refs,
+            "causal_epoch": identity.epoch,
+            "causal_actor_ref": identity.actor_ref,
+            "causal_contract_version": identity.contract_version,
+        }
+    )
+    payload[field] = value
+
+    with pytest.raises(ValueError, match="causal opportunity"):
+        RecordedCharacterInteriorTurnLineage.model_validate(payload)
 
 
 def test_audit_7_cannot_claim_missing_character_interior_lineage() -> None:
