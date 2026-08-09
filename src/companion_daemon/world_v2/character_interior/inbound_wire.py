@@ -9,6 +9,7 @@ without importing ``CompanionEngine`` or inheriting its legacy turn logic.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable
 from collections import OrderedDict
 from contextlib import AbstractContextManager
 from contextvars import ContextVar
@@ -153,6 +154,7 @@ _MISSING_SOURCE_CLOSURE_REASON = "non_authoritative_diagnostic_omitted"
 # canned acknowledgement, but the wait stays bounded.
 _WORLD_CLAIM_REPAIR_TIMEOUT_SECONDS = 8.0
 _MAX_RECOVERY_CONTEXTS = 64
+_OPTIONAL_INVENTORY_CANCEL_GRACE_SECONDS = 0.1
 
 
 @dataclass(slots=True)
@@ -6675,6 +6677,90 @@ class _InventorySourceDeclarationGuardResult(NamedTuple):
     usage: ModelUsageProvenance | None
 
 
+def _task_result_or_exception(task: asyncio.Task[object]) -> object:
+    try:
+        return task.result()
+    except BaseException as exc:
+        return exc
+
+
+def _optional_inventory_budget_exhausted() -> ValidationTechnicalFailure:
+    availability_failure = InventoryAvailabilityExhausted(
+        {
+            "primary": "provider_timeout",
+            "secondary": "provider_timeout",
+        }
+    )
+    technical_failure = ValidationTechnicalFailure("source_review_timeout")
+    technical_failure.__cause__ = availability_failure
+    return technical_failure
+
+
+def _observe_detached_task(task: asyncio.Task[object]) -> None:
+    """Consume a late optional task result after its caller has moved on."""
+
+    try:
+        task.result()
+    except BaseException:
+        pass
+
+
+async def _cancel_optional_inventory_task(task: asyncio.Task[object]) -> object:
+    """Cancel a late decomposition probe without holding the V7 verdict."""
+
+    if task.done():
+        return _task_result_or_exception(task)
+    task.cancel("optional_inventory_not_ready")
+    done, _pending = await asyncio.wait(
+        (task,),
+        timeout=_OPTIONAL_INVENTORY_CANCEL_GRACE_SECONDS,
+    )
+    if not done:
+        task.add_done_callback(_observe_detached_task)
+        return _optional_inventory_budget_exhausted()
+    # The task was still pending when this branch chose to cancel it. Treat
+    # every cancellation result as optional availability loss, while keeping
+    # a raced successful result available to the caller for semantic review.
+    result = _task_result_or_exception(task)
+    return result if not isinstance(result, BaseException) else _optional_inventory_budget_exhausted()
+
+
+async def _run_inventory_guard_and_initial_review(
+    *,
+    inventory_guard: Awaitable[_InventorySourceDeclarationGuardResult],
+    initial_review: Awaitable[SourceClosureReviewResult],
+) -> tuple[object, object]:
+    """Release a complete V7 result when optional Inventory is still slow.
+
+    Inventory can enrich a V7 packet only when it arrives in time. It is not a
+    verdict authority, so a complete independent V7 review is equivalent to
+    the established Inventory-unavailable fallback once the optional probe
+    misses that race. The cancelled task is drained or explicitly observed;
+    no provider coroutine is left unowned by this boundary.
+    """
+
+    inventory_task = asyncio.create_task(inventory_guard)
+    review_task = asyncio.create_task(initial_review)
+    try:
+        done, _pending = await asyncio.wait(
+            (inventory_task, review_task),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if review_task in done:
+            initial_outcome = _task_result_or_exception(review_task)
+            guard_outcome = await _cancel_optional_inventory_task(inventory_task)
+            return guard_outcome, initial_outcome
+
+        guard_outcome = _task_result_or_exception(inventory_task)
+        initial_done, _pending = await asyncio.wait((review_task,))
+        assert initial_done == {review_task}
+        return guard_outcome, _task_result_or_exception(review_task)
+    except asyncio.CancelledError:
+        await _cancel_optional_inventory_task(inventory_task)
+        await _cancel_optional_inventory_task(review_task)
+        raise
+
+
 _INVENTORY_SOURCE_FREE_ROUTE_ROLES: frozenset[_CandidatePropositionSemanticRole] = frozenset(
     {
         "immediate_private_state",
@@ -6860,8 +6946,8 @@ async def review_expression_with_candidate_external_coverage(
         # is released from Inventory alone: if it locates a source-relevant
         # proposition that the first verdict may have omitted, one enriched V7
         # pass remains mandatory before acceptance.
-        guard_outcome, initial_outcome = await asyncio.gather(
-            _inventory_source_declaration_guard(
+        guard_outcome, initial_outcome = await _run_inventory_guard_and_initial_review(
+            inventory_guard=_inventory_source_declaration_guard(
                 inventory_model=inventory_model,
                 request=request,
                 raw=raw,
@@ -6870,7 +6956,7 @@ async def review_expression_with_candidate_external_coverage(
                 source_ref_aliases=source_ref_aliases,
                 effect_bearing_only=effect_bearing_only,
             ),
-            review_expression_source_closure(
+            initial_review=review_expression_source_closure(
                 reviewer=reviewer,
                 report_relative_reviewer=report_relative_reviewer,
                 request=request,
@@ -6881,7 +6967,6 @@ async def review_expression_with_candidate_external_coverage(
                 allow_report_relative_adjudication=allow_report_relative_adjudication,
                 effect_bearing_only=effect_bearing_only,
             ),
-            return_exceptions=True,
         )
         guard_failure = guard_outcome if isinstance(guard_outcome, BaseException) else None
         initial_failure = initial_outcome if isinstance(initial_outcome, BaseException) else None

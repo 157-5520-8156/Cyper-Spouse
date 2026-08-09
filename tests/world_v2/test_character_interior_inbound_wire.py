@@ -9856,6 +9856,48 @@ async def test_inventory_and_initial_v7_start_in_parallel_for_source_free_candid
 
 
 @pytest.mark.asyncio
+async def test_completed_v7_does_not_wait_for_slow_optional_inventory() -> None:
+    subjective = "你这么一问，我忽然有点想你。"
+
+    class _SlowInventory(_StrictInventorySequenceJsonModel):
+        def __init__(self) -> None:
+            super().__init__([_inventory_v5([])])
+            self.cancelled = False
+
+        async def complete_json(
+            self,
+            messages: list[dict[str, str]],
+            *,
+            temperature: float = 0.8,
+        ) -> str:
+            self.calls.append((messages, temperature))
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+
+    inventory = _SlowInventory()
+    reviewer = _FullSourceReviewSequenceJsonModel([_source_closure_review()])
+
+    result = await asyncio.wait_for(
+        review_expression_with_candidate_external_coverage(
+            reviewer=reviewer,
+            inventory_model=inventory,
+            request=_qq_request(),
+            raw=_candidate_coverage_raw(subjective),
+            identity_frame=None,
+        ),
+        timeout=1.0,
+    )
+
+    assert result.review is not None
+    assert result.review.decision == "supported"
+    assert inventory.cancelled is True
+    assert len(reviewer.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_inventory_route_keeps_initial_v7_rejection_without_enriched_rerun() -> None:
     """A complete negative verdict is safe and cannot be weakened by another pass."""
 
