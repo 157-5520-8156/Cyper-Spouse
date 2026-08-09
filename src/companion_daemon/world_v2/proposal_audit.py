@@ -453,6 +453,7 @@ def _strict_audit(value: ModelResultAudit) -> ModelResultAudit:
         attempted_model_version=value.attempted_model_version,
         request_hash=value.request_hash,
         response_hash=value.response_hash,
+        character_interior_lineage=value.character_interior_lineage,
         status=value.status,
         failure_code=value.failure_code,
         slot=value.slot,

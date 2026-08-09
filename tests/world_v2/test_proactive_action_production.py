@@ -21,6 +21,7 @@ from companion_daemon.world_v2.character_interior.inbound_wire import (
 )
 from companion_daemon.world_v2.character_interior import CharacterInterior
 from companion_daemon.world_v2.character_interior.contracts import FACET_NAMES
+from companion_daemon.world_v2.character_interior.run_result import CausalOpportunityIdentity
 from companion_daemon.world_v2.character_interior.structured_role import (
     StructuredCharacterRoleFaculty,
 )
@@ -1494,6 +1495,19 @@ async def test_visible_proactive_expression_is_bound_to_its_semantic_opportunity
     assert user["inner_turn"]["trigger_ref"] == proposal["trigger_ref"]
     assert user["capability_manifest"]["source_refs"] == [proposal["trigger_ref"]]
     assert set(user["inner_life_snapshot"]["faculties"]) == set(FACET_NAMES)
+    model_audits = [json.loads(item.audit_json) for item in ledger.project().model_result_audits]
+    model_audit = next(
+        item for item in model_audits if "character_interior_lineage" in item
+    )
+    assert model_audit["character_interior_lineage"]["opportunity_ref"] == (
+        CausalOpportunityIdentity(
+            world_id=WORLD,
+            actor_ref="actor:companion",
+            purpose="proactive_contact",
+            source_refs=(proposal["trigger_ref"],),
+            epoch=proposal["trigger_ref"],
+        ).opportunity_ref
+    )
 
 
 @pytest.mark.asyncio

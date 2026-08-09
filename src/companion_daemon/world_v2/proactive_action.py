@@ -21,6 +21,7 @@ from pydantic import Field
 from .accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from .character_interior import CharacterInterior, InteriorOpportunity
 from .character_interior.audit import recorded_character_interior_lineage
+from .character_interior.run_result import CausalOpportunityIdentity
 from .character_interior.contracts import _InteriorCapabilityManifest
 from .character_interior.inbound_wire import (
     review_candidate_external_proposition_coverage,
@@ -414,8 +415,15 @@ class _CharacterInteriorProactiveTransport:
         logical_time: datetime,
         capability: _InteriorCapabilityManifest,
     ) -> InteriorOpportunity:
+        opportunity_identity = CausalOpportunityIdentity(
+            world_id=self._world_id,
+            actor_ref=self._actor_ref,
+            purpose="proactive_contact",
+            source_refs=tuple(sorted(set(source_refs))),
+            epoch=trigger_ref,
+        )
         return InteriorOpportunity(
-            opportunity_ref=f"opportunity:proactive:{attempt_id}",
+            opportunity_ref=opportunity_identity.opportunity_ref,
             inner_turn_ref=attempt_id,
             world_id=self._world_id,
             actor_ref=self._actor_ref,

@@ -765,6 +765,14 @@ def _checked_output(value: object) -> ModelOutput:
             "model_id": getattr(value, "model_id", None),
             "model_version": getattr(value, "model_version", None),
             "raw_proposal": raw,
+            "character_interior_lineage": (
+                lineage.model_dump(mode="python")
+                if isinstance(
+                    (lineage := getattr(value, "character_interior_lineage", None)),
+                    RecordedCharacterInteriorTurnLineage,
+                )
+                else lineage
+            ),
             "input_tokens": getattr(value, "input_tokens", None),
             "output_tokens": getattr(value, "output_tokens", None),
             "winning_model_call_id": getattr(value, "winning_model_call_id", None),
