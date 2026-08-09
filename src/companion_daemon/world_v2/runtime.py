@@ -2327,6 +2327,18 @@ class WorldRuntime:
             ),
             None,
         )
+        if (
+            action.kind == "typing"
+            and self._pinned_turn is not None
+            and self._pinned_turn.expression_episode_mode == "stream"
+            and self._pinned_turn.has_expression_episode_tail(located[0].event_id)
+        ):
+            # The typing prelude has already crossed the provider boundary and
+            # its receipt is durably settled before this hook runs.  Do not
+            # hold the next authored beat behind the same stream's tail audit:
+            # the visible beat's own receipt will join that audit, while the
+            # typing pulse remains best-effort and non-semantic.
+            return
         if process is not None and (
             process.state == "open"
             or process.claim_lease is None

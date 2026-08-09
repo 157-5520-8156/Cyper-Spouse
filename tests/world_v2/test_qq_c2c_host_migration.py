@@ -1585,8 +1585,9 @@ class _StreamingExpressionModel(_OneExpressionModel):
     model = "fixture:one-streaming-expression"
     reports_exact_request_emission = True
 
-    def __init__(self) -> None:
+    def __init__(self, *, leading_typing: bool = False) -> None:
         super().__init__({"modality": "text", "text": "unused"})
+        self.leading_typing = leading_typing
         self.stream_calls = 0
         self.tail_release = asyncio.Event()
         self.tail_releases = [self.tail_release]
@@ -1630,6 +1631,8 @@ class _StreamingExpressionModel(_OneExpressionModel):
             "confidence": 7000,
             "world_claims": [],
         }
+        if self.leading_typing:
+            first["leading_typing_beat"] = {"modality": "typing"}
         raw = json.dumps(
             {
                 "protocol": "character-interior-events.1",
@@ -2328,6 +2331,66 @@ async def test_qq_stream_mode_sends_two_units_from_one_role_author_request(
     assert _visible(delivery) == [
         ("10001", "第一条先发。"),
         ("10001", "第二条再跟上。"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_qq_stream_mode_dispatches_model_selected_typing_before_visible_text(
+    tmp_path: Path,
+) -> None:
+    model = _StreamingExpressionModel(leading_typing=True)
+    delivery = _Delivery()
+    host = build_qq_c2c_host(
+        settings=Settings(
+            _env_file=None,
+            database_path=tmp_path / "qq-unit-stream-typing.sqlite",
+            PRIMARY_USER_ID="geoff",
+            QQ_ADAPTER="napcat",
+            WORLD_V2_EXPRESSION_EPISODE_MODE="stream",
+            WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
+        ),
+        recipient_id="10001",
+        bootstrap_at=NOW,
+        model=model,
+        delivery=delivery,
+        use_configured_recall_embedding=False,
+    )
+    inbound_task: asyncio.Task[object] | None = None
+    try:
+        inbound_task = asyncio.create_task(
+            host.inbound_text(
+                message_id="qq-stream-typing-1",
+                recipient_id="10001",
+                text="你分两条回我试试",
+                observed_at=NOW,
+            )
+        )
+        for _ in range(200):
+            if len(delivery.sent) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert delivery.sent == [
+            ("10001", "typing:composing"),
+            ("10001", "第一条先发。"),
+        ]
+        model.tail_release.set()
+        result = await asyncio.wait_for(inbound_task, timeout=2)
+        projection = host._host._application._ledger.project()  # type: ignore[attr-defined]
+    finally:
+        model.tail_release.set()
+        if inbound_task is not None and not inbound_task.done():
+            inbound_task.cancel()
+        await asyncio.gather(
+            *(task for task in (inbound_task,) if task is not None),
+            return_exceptions=True,
+        )
+        await host.aclose()
+
+    assert result.status == "action_authorized"
+    assert [item.kind for item in projection.actions[:2]] == ["typing", "reply"]
+    assert [item.state for item in projection.actions[:2]] == [
+        "provider_accepted",
+        "provider_accepted",
     ]
 
 
