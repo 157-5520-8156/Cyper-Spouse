@@ -131,7 +131,7 @@ class _StrictInventoryAndCoverageInjectedModel(_InjectedModel):
 
 @pytest.mark.asyncio
 async def test_remote_production_composes_without_reviewer_when_redundancy_is_disabled() -> None:
-    """Redundancy off is a legal pure-deterministic deployment (2026-08-07)."""
+    """The unsafe author-only route is available only by explicit opt-out."""
 
     composition = build_semantic_chat_composition(
         settings=Settings(
@@ -139,9 +139,31 @@ async def test_remote_production_composes_without_reviewer_when_redundancy_is_di
             DEEPSEEK_API_KEY="deepseek-test-key",
             OPENAI_API_KEY="openai-test-key",
             WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=False,
+            WORLD_V2_CHAT_SOURCE_REVIEW_ENABLED=False,
         ),
         model_id_prefix="test",
     )
+    await composition.aclose()
+
+
+@pytest.mark.asyncio
+async def test_remote_production_keeps_chat_source_review_when_redundancy_is_disabled() -> None:
+    """A single review lane still guards visible World-bound expression facts."""
+
+    composition = build_semantic_chat_composition(
+        settings=Settings(
+            _env_file=None,
+            DEEPSEEK_API_KEY="deepseek-test-key",
+            OPENAI_API_KEY="openai-test-key",
+            OPENROUTER_API_KEY="openrouter-test-key",
+            WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=False,
+            WORLD_V2_CHAT_SOURCE_REVIEW_ENABLED=True,
+        ),
+        model_id_prefix="test",
+    )
+
+    assert isinstance(composition.source_closure_model, SourceReviewAuthority)
+    assert composition.proactive_source_authority_health()["status"] == "ready"
     await composition.aclose()
 
 
@@ -897,7 +919,7 @@ async def test_proactive_source_authority_refuses_an_explicit_author_self_review
 
 @pytest.mark.asyncio
 async def test_remote_production_composition_runs_pure_deterministic_without_reviewer_keys() -> None:
-    """No review keys is a legal deployment: the author contract owns truth."""
+    """No review keys require an explicit degraded author-only opt-out."""
 
     composition = build_semantic_chat_composition(
         settings=Settings(
@@ -905,6 +927,7 @@ async def test_remote_production_composition_runs_pure_deterministic_without_rev
             DEEPSEEK_API_KEY="deepseek-test-key",
             OPENAI_API_KEY=None,
             OPENROUTER_API_KEY=None,
+            WORLD_V2_CHAT_SOURCE_REVIEW_ENABLED=False,
         ),
         model_id_prefix="test",
     )
@@ -1362,6 +1385,7 @@ def test_world_v2_has_no_configured_backup_character_model() -> None:
 
     assert not hasattr(settings, "world_v2_fallback_model")
     assert settings.world_v2_source_review_redundancy_enabled is False
+    assert settings.world_v2_chat_source_review_enabled is True
     assert settings.world_v2_source_review_secondary_model == "qwen/qwen-plus"
     assert settings.world_v2_source_review_fallback_model == "gpt-4.1-mini"
     assert settings.world_v2_source_review_recovery_model == "qwen/qwen-plus"

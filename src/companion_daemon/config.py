@@ -469,6 +469,15 @@ class Settings(BaseSettings):
         default=False,
         alias="WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED",
     )
+    world_v2_chat_source_review_enabled: bool = Field(
+        default=True,
+        alias="WORLD_V2_CHAT_SOURCE_REVIEW_ENABLED",
+        description=(
+            "Install an independent source-closure authority for visible CharacterInterior "
+            "chat candidates. This is separate from the redundant reviewer/fallback policy; "
+            "disabling it is an explicit unsafe/degraded deployment choice."
+        ),
+    )
     # Life Ecology source closure is a hard dependency of life_development
     # (fail-closed when the reviewer is absent), independent of the retired
     # interactive chat review lane. Default on so the event machine keeps

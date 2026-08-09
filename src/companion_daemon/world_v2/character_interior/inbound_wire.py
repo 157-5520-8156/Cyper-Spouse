@@ -2535,6 +2535,10 @@ _SOURCE_CLOSURE_REVIEW_SYSTEM = (
     "it cannot prove an unlisted activity, object, encounter, recollection, or occurrence "
     "history even when those details would be plausible for that age, season, residence, or "
     "Life Arc. "
+    "For avoidance of doubt, a concrete first-person report such as 'I spent the afternoon in a "
+    "bookstore' or 'I brewed tea on the balcony today' is an external companion-life activity "
+    "and must be rejected as undeclared when world_claims is empty; it is not private mental "
+    "continuity merely because the speaker also says it felt pleasant. "
     "The request includes a machine-readable epistemic_authority_contract. Apply it "
     "proposition by proposition: never add v or p merely because an attended source does not "
     "prove the character's present or immediate-retrospective feeling, thought, hesitation, "
@@ -4511,6 +4515,15 @@ async def review_expression_source_closure(
                         "bodily_or_physical_status",
                         "world_occurrence_or_settled_history",
                     ],
+                },
+                "first_person_external_experience": {
+                    "source_required": True,
+                    "examples": [
+                        "I spent the afternoon in a bookstore.",
+                        "I brewed tea on the balcony today.",
+                    ],
+                    "not_private_mental_continuity": True,
+                    "empty_world_claims_result": "undeclared_external_assertion",
                 },
                 "current_counterpart_report": {
                     "permits_natural_visible_uptake_without_world_claim": True,
@@ -6802,16 +6815,17 @@ async def review_expression_with_candidate_external_coverage(
     source_ref_aliases: SourceRefAliasTable | None = None,
     allow_report_relative_adjudication: bool = True,
     effect_bearing_only: bool = False,
+    review_claim_free_candidates: bool = False,
 ) -> SourceClosureReviewResult:
     """Use one visible authority, then audit only declared claim coordinates."""
 
     if inventory_model is None:
-        # Production review lane: audit only the declared world_claim records.
-        # Claim-free expressions short-circuit with a zero-call deterministic
-        # pass; the model is the author of truth (closed-scope source refs are
-        # mechanically enforced at materialization), and this lane is a fast
-        # local second opinion on declared claims, not a full visible-text
-        # audit. RR.3 report-relative adjudication is retired.
+        # Inventory V5 is an optional semantic decomposition optimization.  A
+        # production chat lane must still be able to audit omitted factual
+        # clauses when that optimization is unavailable; otherwise a claim-free
+        # draft can smuggle an external first-person episode through a zero-call
+        # pass.  Historical fixtures keep the declared-claims-only behavior by
+        # leaving the explicit production switch off.
         return await review_expression_source_closure(
             reviewer=reviewer,
             report_relative_reviewer=None,
@@ -6820,8 +6834,8 @@ async def review_expression_with_candidate_external_coverage(
             identity_frame=identity_frame,
             model_visible_context_json=model_visible_context_json,
             source_ref_aliases=source_ref_aliases,
-            allow_report_relative_adjudication=False,
-            declared_claims_only=True,
+            allow_report_relative_adjudication=allow_report_relative_adjudication,
+            declared_claims_only=not review_claim_free_candidates,
             effect_bearing_only=effect_bearing_only,
         )
 
@@ -8633,6 +8647,7 @@ class _ExpressionDraftWire:
         source_closure_reviewer: ChatCompletionModel | None = None,
         report_relative_reviewer: ChatCompletionModel | None = None,
         candidate_external_proposition_inventory_model: ChatCompletionModel | None = None,
+        review_claim_free_candidates: bool = False,
         source_closure_reselection_lane: SourceClosureReselectionLane | None = None,
         recovery_prompt_mode: Literal["ordinary", "contextual_failure"] = "ordinary",
         contextual_grounding_reviewer: ChatCompletionModel | None = None,
@@ -8659,6 +8674,7 @@ class _ExpressionDraftWire:
         self._candidate_external_proposition_inventory_model = (
             candidate_external_proposition_inventory_model
         )
+        self._review_claim_free_candidates = review_claim_free_candidates
         self._source_closure_reselection_lane = source_closure_reselection_lane
         self._recovery_prompt_mode = recovery_prompt_mode
         self._contextual_grounding_reviewer = contextual_grounding_reviewer
@@ -9823,6 +9839,7 @@ class _ExpressionDraftWire:
                 identity_frame=self._identity_frame,
                 model_visible_context_json=private_state_context_json,
                 source_ref_aliases=source_ref_aliases,
+                review_claim_free_candidates=self._review_claim_free_candidates,
             )
             report_relative_adjudication_used = review_result.report_relative_adjudication_used
             if review_result.usage is not None:
@@ -9962,6 +9979,7 @@ class _ExpressionDraftWire:
                     identity_frame=self._identity_frame,
                     model_visible_context_json=private_state_context_json,
                     source_ref_aliases=source_ref_aliases,
+                    review_claim_free_candidates=self._review_claim_free_candidates,
                     # The corrected raw is a fresh authored candidate. Its
                     # own primary finding may merit one narrow factual review;
                     # a prior candidate's narrow decision cannot consume it.
@@ -10096,6 +10114,7 @@ class _ExpressionDraftWire:
                     identity_frame=self._identity_frame,
                     model_visible_context_json=private_state_context_json,
                     source_ref_aliases=source_ref_aliases,
+                    review_claim_free_candidates=self._review_claim_free_candidates,
                     allow_report_relative_adjudication=True,
                 )
                 report_relative_adjudication_used = (
@@ -10876,6 +10895,7 @@ class _RoutedExpressionDraftWire:
         source_closure_reviewer: ChatCompletionModel | None = None,
         report_relative_reviewer: ChatCompletionModel | None = None,
         candidate_external_proposition_inventory_model: ChatCompletionModel | None = None,
+        review_claim_free_candidates: bool = False,
         source_closure_reselection_lane: SourceClosureReselectionLane | None = None,
         recall_coordinator: RecallCoordinator | None = None,
         recovery_context_store: _ExpressionRecoveryContextStore | None = None,
@@ -10896,6 +10916,7 @@ class _RoutedExpressionDraftWire:
             candidate_external_proposition_inventory_model=(
                 candidate_external_proposition_inventory_model
             ),
+            review_claim_free_candidates=review_claim_free_candidates,
             source_closure_reselection_lane=source_closure_reselection_lane,
             recall_coordinator=recall_coordinator,
             recovery_context_store=shared_recovery_contexts,
@@ -10915,6 +10936,7 @@ class _RoutedExpressionDraftWire:
                 candidate_external_proposition_inventory_model=(
                     candidate_external_proposition_inventory_model
                 ),
+                review_claim_free_candidates=review_claim_free_candidates,
                 source_closure_reselection_lane=source_closure_reselection_lane,
                 recall_coordinator=recall_coordinator,
                 recovery_context_store=shared_recovery_contexts,

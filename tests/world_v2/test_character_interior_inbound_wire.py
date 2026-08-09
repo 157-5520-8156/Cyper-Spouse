@@ -18022,6 +18022,51 @@ async def test_v8_lane_claim_free_expression_skips_reviewer_call() -> None:
 
 
 @pytest.mark.asyncio
+async def test_production_review_audits_claim_free_external_expression_without_inventory() -> None:
+    """A production reviewer must still see omitted first-person world claims.
+
+    Inventory V5 is an optional decomposition optimization.  Its absence must
+    not silently turn a visible source-bound expression into a zero-call pass.
+    """
+
+    visible_fact = "我今天傍晚在书店靠窗坐了一会儿。"
+    reviewer = _SequenceJsonModel(
+        [
+            _source_closure_review(
+                unsupported_boundaries=("visible_text",),
+                visible_text_failures=("undeclared_external_assertion",),
+                visible_span=visible_fact,
+            )
+        ]
+    )
+
+    result = await review_expression_with_candidate_external_coverage(
+        reviewer=reviewer,
+        inventory_model=None,
+        request=_v8_request(),
+        raw=_v8_reply(text=visible_fact, claims=[]),
+        identity_frame=None,
+        review_claim_free_candidates=True,
+    )
+
+    assert result.review is not None
+    assert result.review.decision == "unsupported"
+    assert len(reviewer.calls) == 1
+    packet = json.loads(reviewer.calls[0][0][-1]["content"])
+    assert packet["output_contract"]["contract"] == "source-closure-review.7"
+    assert packet["visible_text"] == visible_fact
+    assert packet["epistemic_authority_contract"]["first_person_external_experience"] == {
+        "source_required": True,
+        "examples": [
+            "I spent the afternoon in a bookstore.",
+            "I brewed tea on the balcony today.",
+        ],
+        "not_private_mental_continuity": True,
+        "empty_world_claims_result": "undeclared_external_assertion",
+    }
+
+
+@pytest.mark.asyncio
 async def test_v8_lane_supported_declared_claim_passes_with_one_reviewer_call() -> None:
     reviewer = _SequenceJsonModel([_source_closure_review()])
     output = await _ExpressionDraftWire(

@@ -567,6 +567,12 @@ RSS/NWS/USGS → hub 采集/去重/嵌入/聚类 → attention 影子/实时注�
 - 来源审核：`source_review_authority.py`（有界串行故障转移）、`structured_source_review_model.py`
   （严格 wire schema）、`source_review_qualification`（CONTEXT.md：2026-08-01 Inventory V5
   已资格化，Coverage V5 dormant）。
+- 可见对话的来源边界：生产组合由独立的
+  `WORLD_V2_CHAT_SOURCE_REVIEW_ENABLED` 显式控制（默认开启）；Inventory V5 可用时先做候选
+  外部命题分解，不可用时仍回落到完整 source review，而不是把没有 `world_claims` 的可见文本
+  当成“没有事实”直接放行。该 reviewer 只判断来源闭包，不替角色选择内容；不支持的候选仍走同一
+  角色的一次受约束纠正，失败则是技术失败。关闭该开关是明确的 degraded/unsafe 部署选择，不能
+  被 `WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=false` 静默触发。
 - 审计证据：`private_self_expression_audit.py`（私密自我 → 表达的因果链只读证据）。
 - 记忆撤回审查：`memory_withdrawal_review.py`（Fact 撤回后的检索记忆来源审查）。
 - 记忆保留选择：`fact_memory_retention` 与 `experience_memory_retention` 现在通过

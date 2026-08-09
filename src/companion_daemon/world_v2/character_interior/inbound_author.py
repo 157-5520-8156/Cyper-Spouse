@@ -1111,6 +1111,7 @@ class _PairedExpressionMaterializer:
                 identity_frame=self._owner._identity_frame,
                 model_visible_context_json=pending.private_state_context_json,
                 source_ref_aliases=pending.source_ref_aliases,
+                review_claim_free_candidates=self._owner._review_claim_free_candidates,
             )
             report_relative_adjudication_used = review_result.report_relative_adjudication_used
             if review_result.usage is not None:
@@ -1209,6 +1210,7 @@ class _PairedExpressionMaterializer:
                     identity_frame=self._owner._identity_frame,
                     model_visible_context_json=pending.private_state_context_json,
                     source_ref_aliases=pending.source_ref_aliases,
+                    review_claim_free_candidates=self._owner._review_claim_free_candidates,
                     # The repaired raw has a distinct author invocation and
                     # therefore its own single narrow-review allowance.
                     allow_report_relative_adjudication=True,
@@ -1311,6 +1313,7 @@ class _InboundCharacterAuthor:
         source_closure_model: ChatCompletionModel | None = None,
         report_relative_source_closure_model: ChatCompletionModel | None = None,
         candidate_external_proposition_inventory_model: ChatCompletionModel | None = None,
+        review_claim_free_candidates: bool = False,
         source_closure_reselection_lane: SourceClosureReselectionLane | None = None,
         expression_episode_observer_model: ChatCompletionModel | None = None,
         contextual_failsafe_model: ChatCompletionModel | None = None,
@@ -1373,6 +1376,7 @@ class _InboundCharacterAuthor:
         self._candidate_external_proposition_inventory_model = (
             candidate_external_proposition_inventory_model
         )
+        self._review_claim_free_candidates = review_claim_free_candidates
         self._recall: RecallCoordinator | None = None
         self._character_interior_recall_delegate = False
         recovery_contexts = _ExpressionRecoveryContextStore()
@@ -1388,6 +1392,7 @@ class _InboundCharacterAuthor:
             candidate_external_proposition_inventory_model=(
                 candidate_external_proposition_inventory_model
             ),
+            review_claim_free_candidates=review_claim_free_candidates,
             source_closure_reselection_lane=source_closure_reselection_lane,
             recovery_context_store=recovery_contexts,
             require_explicit_authored_decision_fields=(require_explicit_authored_decision_fields),
@@ -1405,6 +1410,7 @@ class _InboundCharacterAuthor:
                 candidate_external_proposition_inventory_model=(
                     candidate_external_proposition_inventory_model
                 ),
+                review_claim_free_candidates=review_claim_free_candidates,
                 source_closure_reselection_lane=source_closure_reselection_lane,
                 recovery_context_store=recovery_contexts,
                 require_explicit_authored_decision_fields=(
@@ -1427,6 +1433,7 @@ class _InboundCharacterAuthor:
             candidate_external_proposition_inventory_model=(
                 candidate_external_proposition_inventory_model
             ),
+            review_claim_free_candidates=review_claim_free_candidates,
             source_closure_reselection_lane=source_closure_reselection_lane,
             recovery_context_store=recovery_contexts,
             require_explicit_authored_decision_fields=(require_explicit_authored_decision_fields),
@@ -1761,6 +1768,7 @@ class _InboundCharacterAuthor:
                             identity_frame=self._identity_frame,
                             model_visible_context_json=private_state_context_json,
                             source_ref_aliases=source_ref_aliases,
+                            review_claim_free_candidates=self._review_claim_free_candidates,
                         )
                     )
                 except ValidationTechnicalFailure as exc:
@@ -2454,6 +2462,7 @@ class _InboundCharacterAuthor:
                 identity_frame=self._identity_frame,
                 model_visible_context_json=detail.private_state_context_json,
                 source_ref_aliases=detail.source_ref_aliases,
+                review_claim_free_candidates=self._review_claim_free_candidates,
             )
             if review_result.usage is not None:
                 usage = _combine_usage(

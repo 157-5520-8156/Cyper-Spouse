@@ -860,12 +860,10 @@ def build_semantic_chat_composition(
             "CharacterInterior cannot install an implicit backup character author; "
             "provider failure must enter its durable technical-failure lifecycle"
         )
-    # Source review is an explicit deployment capability, not a hard startup
-    # requirement. With redundancy disabled, the interactive path runs pure
-    # deterministic truth boundaries (closed-scope refs are mechanically
-    # enforced at materialization) and the author contract owns hallucination
-    # defense. An explicitly injected reviewer still must be independent of
-    # every author.
+    # Source review is an explicit deployment capability. It is a hard
+    # boundary for visible World-bound expression facts; the redundant-route
+    # switch must not silently turn that boundary off. An explicitly injected
+    # reviewer still must be independent of every author.
     if source_closure_model is not None and any(
         not _reviewer_is_independent(
             author=author,
@@ -878,7 +876,7 @@ def build_semantic_chat_composition(
     if (
         flash_model is None
         and settings.deepseek_api_key
-        and settings.world_v2_source_review_redundancy_enabled
+        and settings.world_v2_chat_source_review_enabled
     ):
         _preflight_production_source_review(
             settings=settings,
@@ -977,7 +975,8 @@ def build_semantic_chat_composition(
         auto_flash
         and not source_closure_was_injected
         and (
-            settings.world_v2_source_review_redundancy_enabled
+            settings.world_v2_chat_source_review_enabled
+            or settings.world_v2_source_review_redundancy_enabled
             or settings.world_v2_life_source_review_enabled
         )
         and settings.openrouter_api_key
@@ -1302,14 +1301,13 @@ def build_semantic_chat_composition(
         # isolating their circuit/runtime health, route suppression and active
         # task ownership from visible/proactive conversation review.
         life_source_review_authority = source_review_authority.fork_isolated_runtime()
-        # Interactive chat review is retired (2026-08-07): with redundancy
-        # off, the chat author lane runs pure deterministic and only the Life
-        # Ecology reviewer stays installed. The authority is still built (it
-        # is the life reviewer's runtime), but the chat wire never receives
-        # it.
+        # Chat source review is controlled by its own explicit deployment
+        # flag. Redundancy only describes the availability policy of the
+        # installed authority; it must not disable the visible factual
+        # boundary and let an author-only lane invent life episodes.
         resolved_source_closure_model = (
             source_review_authority
-            if settings.world_v2_source_review_redundancy_enabled
+            if settings.world_v2_chat_source_review_enabled
             else None
         )
         # The same DeepSeek character owns any one permitted source-bound
@@ -1435,7 +1433,7 @@ def build_semantic_chat_composition(
     if (
         auto_flash
         and settings.deepseek_api_key
-        and settings.world_v2_source_review_redundancy_enabled
+        and settings.world_v2_chat_source_review_enabled
     ):
         if proactive_reviewer is None:
             raise ValueError(
@@ -1684,6 +1682,7 @@ def build_semantic_chat_composition(
         ),
         expression_capabilities=expression_capabilities,
         identity_frame=identity_frame,
+        review_claim_free_candidates=settings.world_v2_chat_source_review_enabled,
         turn_store=character_interior_turn_store,
         turn_owner_id=character_interior_turn_owner_id,
         # A provider object may expose a historical ``fallback`` attribute,

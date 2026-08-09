@@ -46,10 +46,10 @@ class InteractiveTurnBudgetPolicy:
     """Composition-owned timing policy for one interactive reply."""
 
     # Normal latency is still whatever the winning provider actually takes;
-    # this is only the cancellation ceiling. Interactive source review is
-    # retired (2026-08-07): the author call is the only semantic provider on
-    # the critical path, so the ceiling no longer needs to cover review
-    # retry chains.
+    # this is only the cancellation ceiling. When visible chat source review
+    # is explicitly installed, its bounded review/reselection windows are
+    # tracked separately below; they do not silently renew the ordinary
+    # author deadline.
     total_seconds: float = 12.0
     hedge_after_seconds: float = 2.0
     acceptance_dispatch_reserve_seconds: float = 1.0

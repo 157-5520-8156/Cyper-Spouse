@@ -1610,3 +1610,25 @@ commit：hash
   `world_stimulus_appraisal` 的 stale deliberation revision；后者作为 `authority_submission_failed`
   技术失败保留 claim，未伪造角色语义，重启后 replay/live semantic hash 仍一致且没有重复 Action。该 probe
   仅用于当前用户体验和失败恢复观察，不是自然度、首次成功率、真实 QQ 回执或上线资格证明。
+
+### 2026-08-09：真实对聊发现 claim-free 外部经历边界（当前工作树补片）
+
+- 重新从隔离临时 SQLite 启动 `scripts/chat_with_world_v2.py`，显式设置
+  `WORLD_V2_CHAT_SOURCE_REVIEW_ENABLED=true`、`WORLD_V2_SOURCE_INVENTORY_ENABLED=false`、关闭
+  semantic recall embedding；这次不是单元测试，也没有接真实 QQ 投递。
+- 当前工作树随后完成全量回归：`4944 passed, 1 warning`；这是源码与公开测试链的证据，不能替代
+  真实 provider 首次合法率、正式 QQ 回执或长时间运行资格。
+- 旧路径在一次自然提问中曾让角色写出“傍晚在书店靠窗坐、喝桂花乌龙”等第一人称外部经历，
+  但 `world_claims=[]`。这不是允许的私密感受，而是没有来源的生活事实。修复后的生产路径在
+  Inventory 缺失时仍调用完整 source reviewer，并在审查契约中明确“在书店/阳台泡茶”等具体
+  第一人称经历需要来源，不能以“感觉很好”降级成心理连续性；没有来源就拒绝，不由宿主改写
+  成 `silent`、`now` 或模板回复。
+- 当前四轮手工对话证据为：外部经历提问安全拒绝并持久化 technical/deferred（约 10.8s）；
+  两轮只谈当下感受/当前对话成功授权（约 8.7s、6.4s）；另一轮追问安全 deferred（约
+  11.8s）。这说明边界已挡住已知幻觉，但当前可见成功率与延迟都不能称生产达标，且一次纠正
+  仍可能因预算/模型输出失败进入技术终态。
+- 新增的 `WORLD_V2_CHAT_SOURCE_REVIEW_ENABLED` 与测试只闭合“Inventory 不可用时不零调用放行
+  claim-free 外部事实”这一条 P1；它**不等于**所有 source review 质量、所有 purpose 首次合法率
+  或自然对话质量已资格化。真实 DeepSeek 100 次 forced-tool/stream、正式 QQ 回执、24 小时
+  soak 与自由对聊质量门仍保持 `manual_only`/`qualification_incomplete`；旧 production daemon
+  的 §20 重启/替换人工门不变。

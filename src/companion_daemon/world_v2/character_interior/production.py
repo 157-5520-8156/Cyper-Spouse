@@ -930,6 +930,7 @@ def compose_production_character_interior(
     thinking_model_id: str | None,
     expression_capabilities: ExpressionDraftCapabilities,
     identity_frame: CompanionIdentityFrame,
+    review_claim_free_candidates: bool = False,
     turn_store: _CharacterInteriorTurnStore | None = None,
     turn_owner_id: str = "character-interior:production",
 ) -> CharacterInterior:
@@ -958,6 +959,7 @@ def compose_production_character_interior(
         thinking_model_id=thinking_model_id,
         expression_capabilities=expression_capabilities,
         identity_frame=identity_frame,
+        review_claim_free_candidates=review_claim_free_candidates,
         require_explicit_authored_decision_fields=True,
     )
     inbound_turn = InboundTurnFaculty(
