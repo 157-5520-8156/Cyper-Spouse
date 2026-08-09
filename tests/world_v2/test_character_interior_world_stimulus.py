@@ -112,6 +112,7 @@ class _Projection:
 
 class _RoleModel:
     model = "fixture-character-author"
+    supports_required_tool_choice = True
 
     def __init__(
         self,
@@ -221,6 +222,21 @@ class _RoleModel:
             },
             ensure_ascii=False,
         )
+
+    async def complete_json(
+        self,
+        messages,
+        *,
+        temperature=0.8,
+        tools,
+        tool_choice,
+    ):  # type: ignore[no-untyped-def]
+        assert tools
+        assert tool_choice == {
+            "type": "function",
+            "function": {"name": "character_role_world_stimulus_appraisal_v1"},
+        }
+        return await self.complete(messages, temperature=temperature)
 
 
 def _runtime_for_ledger(

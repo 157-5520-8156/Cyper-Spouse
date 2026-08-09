@@ -940,7 +940,7 @@ class StructuredCharacterRoleFaculty:
         self,
         request: _InteriorRoleRequest,
     ) -> StructuredRoleToolContract | None:
-        if request.purpose != "proactive_contact":
+        if request.purpose not in {"proactive_contact", "world_stimulus_appraisal"}:
             return None
         if not bool(getattr(self._model, "supports_required_tool_choice", False)):
             raise StructuredRoleResultError(
@@ -954,14 +954,20 @@ class StructuredCharacterRoleFaculty:
                 detail=_FAILURE_DETAILS["capability_manifest_required"],
             )
         try:
-            return StructuredRoleToolContracts().proactive_contact(
+            compiler = StructuredRoleToolContracts()
+            if request.purpose == "proactive_contact":
+                return compiler.proactive_contact(
+                    capability_payload=manifest.payload,
+                    recall_allowed=not request.recall_completed,
+                )
+            return compiler.world_stimulus_appraisal(
                 capability_payload=manifest.payload,
                 recall_allowed=not request.recall_completed,
             )
         except (TypeError, ValueError) as exc:
             raise StructuredRoleResultError(
                 "role_result_schema_invalid",
-                detail=f"proactive forced-tool contract is invalid: {exc}",
+                detail=f"{request.purpose} forced-tool contract is invalid: {exc}",
             ) from exc
 
     @staticmethod

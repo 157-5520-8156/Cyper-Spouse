@@ -15,6 +15,9 @@ from companion_daemon.world_v2.character_interior import (
     InteriorOpportunity,
     InteriorStimulus,
 )
+from companion_daemon.world_v2.character_interior.structured_role import (
+    StructuredRoleResultError,
+)
 from companion_daemon.world_v2.schemas import ProjectionCursor
 from companion_daemon.world_v2.character_interior.turn_store import (
     open_sqlite_character_interior_turn_store,
@@ -881,6 +884,26 @@ async def test_valid_model_silence_is_not_confused_with_technical_failure() -> N
     assert failed_result.failure_code == "role_faculty_unavailable"
     assert failed_result.summary is None
     assert failed_result.decision is None
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_role_capability_failure_preserves_exact_code() -> None:
+    class _UnsupportedRole(_Role):
+        async def consider(self, request):  # type: ignore[no-untyped-def]
+            self.consider_requests.append(request)
+            raise StructuredRoleResultError(
+                "required_tool_choice_unsupported",
+                detail="this fixture deliberately lacks required-tool support",
+            )
+
+    role = _UnsupportedRole()
+    interior = CharacterInterior(projection=_Projection(), role=role)
+
+    result = await interior.consider(_opportunity())
+
+    assert result.status == "technical_failure"
+    assert result.failure_code == "required_tool_choice_unsupported"
+    assert len(role.consider_requests) == 1
 
 
 @pytest.mark.asyncio

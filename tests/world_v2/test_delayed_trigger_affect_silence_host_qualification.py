@@ -90,6 +90,7 @@ def _observation_ref(messages: list[dict[str, str]]) -> str | None:
 
 class _QualifiedRoleModel:
     model = "fixture:affect-silence-public-host"
+    supports_required_tool_choice = True
 
     def __init__(self, *, inbound_affect: bool, silence_choice: str = "no_change") -> None:
         self.inbound_affect = inbound_affect
@@ -193,6 +194,21 @@ class _QualifiedRoleModel:
             {"AppraisalDraft": appraisal, "ExpressionDraft": expression},
             ensure_ascii=False,
         )
+
+    async def complete_json(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        tools: object | None = None,
+        tool_choice: object | None = None,
+    ) -> str:
+        if tools is not None:
+            assert tool_choice == {
+                "type": "function",
+                "function": {"name": "character_role_world_stimulus_appraisal_v1"},
+            }
+        return await self.complete(messages, temperature=temperature)
 
 
 class _ProductionDeliveryInterceptor:

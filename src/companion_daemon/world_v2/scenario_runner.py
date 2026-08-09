@@ -261,7 +261,7 @@ class ScenarioVerificationError(AssertionError):
 # .53 hash was stale (the per-case verification predicates and replay checks
 # still pass, but the aggregate request/room/replay manifest moved), so this
 # is an explicit audited rebaseline rather than weakening the drift guard.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.54"
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.55"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
@@ -303,8 +303,13 @@ FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.54"
 # recovery changes produced the stable manifest below.  Every frozen case
 # passed its explicit event/action/replay predicates; only the aggregate
 # manifest changed from the stale .53 value.
+# 2026-08-09 2nd: world-stimulus appraisal now requires the versioned
+# character_role_world_stimulus_appraisal_v1 function.  The fixed scenario
+# model advertises and receives that transport; visible predicates remain
+# unchanged, but request/audit rows (and therefore the aggregate manifest)
+# move.  This is an explicit protocol rebaseline, not a relaxed assertion.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "7726c9567b27348c183567991dc08b54c862c255379ec1e5b77c20e1554e888c"
+    "34902d7bb453f37e12b12d76e0714792106e6f3d434bf6495b3bdcf916035783"
 )
 
 
@@ -379,6 +384,7 @@ class _FixedCharacterInteriorScenarioModel(FakeCompanionModel):
     """
 
     model = "fixture-character-author"
+    supports_required_tool_choice = True
 
     def __init__(self) -> None:
         super().__init__()
@@ -478,6 +484,24 @@ class _FixedCharacterInteriorScenarioModel(FakeCompanionModel):
             },
             ensure_ascii=False,
         )
+
+    async def complete_json(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        tools: object | None = None,
+        tool_choice: object | None = None,
+    ) -> str:
+        if tools is not None:
+            if tool_choice != {
+                "type": "function",
+                "function": {"name": "character_role_world_stimulus_appraisal_v1"},
+            }:
+                raise ScenarioVerificationError(
+                    "world stimulus fixture received an unexpected required-tool choice"
+                )
+        return await self.complete(messages, temperature=temperature)
 
 
 class _FixedDelayedExpressionModel:

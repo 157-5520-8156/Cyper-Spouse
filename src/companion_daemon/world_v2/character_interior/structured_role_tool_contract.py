@@ -7,6 +7,7 @@ only; it never supplies a character choice or repairs semantic output.
 
 from __future__ import annotations
 
+from collections.abc import Mapping as ABCMapping
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import lru_cache
@@ -14,12 +15,29 @@ from hashlib import sha256
 import json
 from typing import Mapping
 
+from ..schema_core import canonicalize_json_value
+
 _CONTRACT_VERSION = "1"
 _PROACTIVE_TOOL_NAME = "character_role_proactive_contact_v1"
+_WORLD_STIMULUS_TOOL_NAME = "character_role_world_stimulus_appraisal_v1"
 
 
 def _canonical_json(value: object) -> str:
+    value = _canonical_json_value(value)
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _canonical_json_value(value: object) -> object:
+    """Turn frozen capability mappings into stable JSON without changing meaning."""
+
+    if isinstance(value, ABCMapping):
+        return {
+            key: _canonical_json_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (tuple, list)):
+        return [_canonical_json_value(item) for item in value]
+    return canonicalize_json_value(value)
 
 
 def _inline_refs(schema: object, definitions: dict[str, object]) -> object:
@@ -372,9 +390,10 @@ class StructuredRoleToolContracts:
         """Compile canonical Pydantic wires outside provider-entry budgets."""
 
         from ..expression_draft import ExpressionDraft
-        from .structured_role import _WireRoleResult
+        from .structured_role import _WorldStimulusAppraisalResult, _WireRoleResult
 
         _compiled_provider_schema(ExpressionDraft)
+        _compiled_provider_schema(_WorldStimulusAppraisalResult)
         _compiled_provider_schema(_WireRoleResult)
 
     @classmethod
@@ -409,6 +428,26 @@ class StructuredRoleToolContracts:
             raise ValueError("proactive capability lacks expression capabilities")
         return self._cached_proactive_contact(
             _canonical_json(expression_capabilities),
+            recall_allowed,
+        )
+
+    def world_stimulus_appraisal(
+        self,
+        *,
+        capability_payload: Mapping[str, object],
+        recall_allowed: bool,
+    ) -> StructuredRoleToolContract:
+        """Compile the typed appraisal proposal envelope for one pinned wake.
+
+        The payload schema is derived from ``_WorldStimulusAppraisalResult``;
+        capability-dependent affect/relationship/source checks remain in the
+        CharacterInterior materializer.  The provider contract therefore
+        closes transport and typed field shape without choosing whether the
+        character activates an appraisal, changes Affect, or does nothing.
+        """
+
+        return self._cached_world_stimulus_appraisal(
+            _canonical_json(capability_payload),
             recall_allowed,
         )
 
@@ -561,6 +600,142 @@ class StructuredRoleToolContracts:
             provider_tool_choice={
                 "type": "function",
                 "function": {"name": _PROACTIVE_TOOL_NAME},
+            },
+            identity=identity,
+        )
+
+    @staticmethod
+    @lru_cache(maxsize=32)
+    def _cached_world_stimulus_appraisal(
+        capability_payload_json: str,
+        recall_allowed: bool,
+    ) -> StructuredRoleToolContract:
+        # These imports are intentionally local: structured_role imports this
+        # compiler during module initialization, while the canonical payload
+        # model lives in structured_role itself.
+        from .structured_role import _WorldStimulusAppraisalResult, _WireRoleResult
+
+        capability_payload = json.loads(capability_payload_json)
+        if not isinstance(capability_payload, dict):
+            raise ValueError("world stimulus capability must be one object")
+        role_schema = _provider_schema(_WireRoleResult)
+        role_properties = _required_object_properties(role_schema)
+        common = {
+            key: deepcopy(role_properties[key])
+            for key in (
+                "summary",
+                "attended_source_refs",
+            )
+        }
+        proposal_schema = _provider_schema(_WorldStimulusAppraisalResult)
+        proposal_branch_properties = {
+            **common,
+            "decision": {"type": "null"},
+            "recall_query": {"type": "null"},
+            "proposals": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 1,
+                "items": proposal_schema,
+            },
+        }
+
+        branches: list[dict[str, object]] = []
+        for status in ("no_change", "transition"):
+            branches.append(
+                {
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "string", "enum": [status]},
+                        **deepcopy(proposal_branch_properties),
+                    },
+                    "required": [
+                        "status",
+                        "summary",
+                        "attended_source_refs",
+                        "decision",
+                        "recall_query",
+                        "proposals",
+                    ],
+                    "additionalProperties": False,
+                }
+            )
+        if recall_allowed:
+            branches.append(
+                {
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "string", "enum": ["recall_request"]},
+                        "summary": deepcopy(common["summary"]),
+                        "attended_source_refs": deepcopy(common["attended_source_refs"]),
+                        "decision": {"type": "null"},
+                        "recall_query": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1024,
+                        },
+                        "proposals": {"type": "array", "maxItems": 0},
+                    },
+                    "required": [
+                        "status",
+                        "summary",
+                        "attended_source_refs",
+                        "decision",
+                        "recall_query",
+                        "proposals",
+                    ],
+                    "additionalProperties": False,
+                }
+            )
+
+        parameters = {"type": "object", "anyOf": branches}
+        function = {
+            "name": _WORLD_STIMULUS_TOOL_NAME,
+            "description": (
+                "Return the complete source-bound world_stimulus_appraisal role result. "
+                "The character may choose no_change or a transition, including any legal "
+                "Affect, relationship, aspiration, or experience proposal. The function "
+                "constrains transport and typed shape only; it does not choose the appraisal "
+                "or supply semantic values."
+            ),
+            "parameters": parameters,
+        }
+        provider_tools = ({"type": "function", "function": function},)
+        schema_digest = "sha256:" + sha256(_canonical_json(parameters).encode("utf-8")).hexdigest()
+        capabilities_digest = (
+            "sha256:" + sha256(_canonical_json(capability_payload).encode("utf-8")).hexdigest()
+        )
+        contract_digest = (
+            "sha256:"
+            + sha256(
+                _canonical_json(
+                    {
+                        "purpose": "world_stimulus_appraisal",
+                        "tool_name": _WORLD_STIMULUS_TOOL_NAME,
+                        "version": _CONTRACT_VERSION,
+                        "schema_sha256": schema_digest,
+                        "capabilities_sha256": capabilities_digest,
+                        "recall_allowed": recall_allowed,
+                    }
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        identity = StructuredRoleToolContractIdentity(
+            contract_id="character-role-forced-tool",
+            purpose="world_stimulus_appraisal",
+            tool_name=_WORLD_STIMULUS_TOOL_NAME,
+            version=_CONTRACT_VERSION,
+            schema_sha256=schema_digest,
+            capabilities_sha256=capabilities_digest,
+            contract_sha256=contract_digest,
+            recall_allowed=str(recall_allowed).lower(),
+        )
+        return StructuredRoleToolContract(
+            purpose="world_stimulus_appraisal",
+            provider_tools=provider_tools,
+            provider_tool_choice={
+                "type": "function",
+                "function": {"name": _WORLD_STIMULUS_TOOL_NAME},
             },
             identity=identity,
         )

@@ -58,6 +58,15 @@ from .turn_store import (
 
 
 _CACHE_LIMIT = 128
+_NON_RETRYABLE_ROLE_ERRORS = frozenset(
+    {
+        # These describe a host/provider capability or wiring defect.  Asking
+        # the character model to correct them cannot change the unavailable
+        # capability and would erase the useful terminal failure code.
+        "required_tool_choice_unsupported",
+        "capability_manifest_required",
+    }
+)
 
 
 def _digest(value: object) -> str:
@@ -1655,6 +1664,11 @@ class CharacterInterior:
             try:
                 raw = await _resolve(method(current_request))
             except _RoleResultContractError as exc:
+                if exc.code in _NON_RETRYABLE_ROLE_ERRORS:
+                    raise _InteriorTechnicalError(
+                        exc.code,
+                        snapshot=current_request.snapshot,
+                    ) from exc
                 structural_failure_code = exc.code
                 structural_failure_detail = exc.detail
             except Exception as exc:
@@ -1711,6 +1725,11 @@ class CharacterInterior:
             try:
                 corrected_raw = await _resolve(method(corrected_request))
             except _RoleResultContractError as correction_exc:
+                if correction_exc.code in _NON_RETRYABLE_ROLE_ERRORS:
+                    raise _InteriorTechnicalError(
+                        correction_exc.code,
+                        snapshot=current_request.snapshot,
+                    ) from correction_exc
                 raise _InteriorTechnicalError(
                     "invalid_role_result_after_correction",
                     snapshot=current_request.snapshot,

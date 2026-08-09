@@ -207,6 +207,66 @@ def _proactive_manifest() -> _InteriorCapabilityManifest:
     )
 
 
+def _world_stimulus_manifest() -> _InteriorCapabilityManifest:
+    payload_json = json.dumps(
+        {
+            "contract": "character-interior-world-stimulus-capability.1",
+            "process_kind": "settled_world_appraisal",
+            "stimulus_kind": "settled_world_occurrence",
+            "source_event": {
+                "event_id": "source:world-occurrence",
+                "event_type": "WorldOccurrenceSettled",
+            },
+            "result_choices": ["no_change", "activate"],
+            "relationship_subject_refs": [],
+            "active_affect_heads": [],
+            "affect_target_lower_bounds": {"bounds": []},
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return _InteriorCapabilityManifest(
+        capability_ref="capability:world-stimulus:test",
+        capability_kind="world_stimulus_appraisal",
+        payload_json=payload_json,
+        payload_hash="sha256:" + hashlib.sha256(payload_json.encode()).hexdigest(),
+        source_refs=("source:private_self", "source:world-occurrence"),
+    )
+
+
+def _world_stimulus_no_change_result() -> str:
+    return json.dumps(
+        {
+            "status": "no_change",
+            "summary": "这次变化没有让我需要立刻调整什么。",
+            "attended_source_refs": ["source:private_self"],
+            "decision": None,
+            "recall_query": None,
+            "proposals": [
+                {
+                    "proposal_type": "world_stimulus_appraisal_result",
+                    "decision": "no_change",
+                    "brief_rationale": "我看到了，但现在没有形成新的感受。",
+                    "behavior_tendency": "继续做自己的事",
+                    "stance": "暂时保持原来的看法",
+                    "display_strategy": "不对外表达",
+                    "confidence": 5600,
+                    "meaning_candidates": None,
+                    "attribution": None,
+                    "severity": None,
+                    "expiry": None,
+                    "affect_transition": None,
+                    "relationship_signal": None,
+                    "aspiration_transition": None,
+                    "experience_transition": None,
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+
 def _proactive_provider_payload_schema() -> dict[str, object]:
     contract = StructuredRoleToolContracts().proactive_contact(
         capability_payload=_proactive_manifest().payload,
@@ -721,6 +781,120 @@ async def test_proactive_contact_is_one_capability_bound_interior_decision() -> 
 
 
 @pytest.mark.asyncio
+async def test_world_stimulus_appraisal_uses_one_versioned_forced_tool() -> None:
+    model = _RequiredToolQueueModel(_world_stimulus_no_change_result())
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-v4-flash")
+
+    result = await role.experience(
+        await _request(
+            phase="experience",
+            purpose="world_stimulus_appraisal",
+            capability_manifest=_world_stimulus_manifest(),
+        )
+    )
+
+    assert result["status"] == "no_change"
+    assert result["proposals"][0]["proposal_type"] == "world_stimulus_appraisal_result"
+    assert len(model.tool_calls) == 1
+    tools, tool_choice = model.tool_calls[0]
+    assert tool_choice == {
+        "type": "function",
+        "function": {"name": "character_role_world_stimulus_appraisal_v1"},
+    }
+    assert len(tools) == 1
+    assert tools[0]["function"]["name"] == "character_role_world_stimulus_appraisal_v1"
+
+
+@pytest.mark.asyncio
+async def test_world_stimulus_required_tool_reaches_deepseek_http_boundary() -> None:
+    captured: dict[str, object] = {}
+    raw_result = _world_stimulus_no_change_result()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "character_role_world_stimulus_appraisal_v1",
+                                        "arguments": raw_result,
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    model = DeepSeekChatModel(
+        "key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await StructuredCharacterRoleFaculty(
+            model=model,
+            model_id="deepseek-v4-flash",
+        ).experience(
+            await _request(
+                phase="experience",
+                purpose="world_stimulus_appraisal",
+                capability_manifest=_world_stimulus_manifest(),
+            )
+        )
+    finally:
+        await model.aclose()
+
+    assert result["status"] == "no_change"
+    assert "response_format" not in captured
+    assert captured["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "character_role_world_stimulus_appraisal_v1"},
+    }
+    tools = captured["tools"]
+    assert isinstance(tools, list) and len(tools) == 1
+    assert tools[0]["type"] == "function"
+    assert tools[0]["function"]["name"] == "character_role_world_stimulus_appraisal_v1"
+
+
+def test_world_stimulus_tool_schema_keeps_no_change_and_transition_open() -> None:
+    compiler = StructuredRoleToolContracts()
+    contract = compiler.world_stimulus_appraisal(
+        capability_payload=_world_stimulus_manifest().payload,
+        recall_allowed=True,
+    )
+    function = contract.provider_tools[0]["function"]
+    parameters = function["parameters"]
+    Draft202012Validator.check_schema(parameters)
+
+    assert parameters["type"] == "object"
+    branches = parameters["anyOf"]
+    statuses = {
+        status
+        for branch in branches
+        for status in branch["properties"]["status"]["enum"]
+    }
+    assert {"no_change", "transition", "recall_request"} <= statuses
+    proposal_items = next(
+        branch["properties"]["proposals"]["items"]
+        for branch in branches
+        if branch["properties"]["status"]["enum"] == ["no_change"]
+    )
+    assert proposal_items["properties"]["proposal_type"]["const"] == (
+        "world_stimulus_appraisal_result"
+    )
+
+
+@pytest.mark.asyncio
 async def test_proactive_contact_uses_one_versioned_forced_tool_at_http_boundary() -> None:
     captured: dict[str, object] = {}
     raw_result = _result(
@@ -1045,6 +1219,26 @@ async def test_proactive_contact_without_required_tool_support_fails_closed() ->
             await _request(
                 purpose="proactive_contact",
                 capability_manifest=_proactive_manifest(),
+            )
+        )
+
+    assert raised.value.code == "required_tool_choice_unsupported"
+    assert model.calls == []
+
+
+@pytest.mark.asyncio
+async def test_world_stimulus_without_required_tool_support_fails_closed() -> None:
+    model = _QueueModel(_world_stimulus_no_change_result())
+
+    with pytest.raises(StructuredRoleResultError) as raised:
+        await StructuredCharacterRoleFaculty(
+            model=model,
+            model_id="plain-json-only",
+        ).experience(
+            await _request(
+                phase="experience",
+                purpose="world_stimulus_appraisal",
+                capability_manifest=_world_stimulus_manifest(),
             )
         )
 
@@ -2065,7 +2259,7 @@ def test_fixture_composition_installs_the_structured_author_as_primary() -> None
 @pytest.mark.asyncio
 async def test_bare_world_stimulus_proposal_is_rejected_without_host_authored_envelope() -> None:
 
-    model = _QueueModel(
+    model = _RequiredToolQueueModel(
         json.dumps(
             {
                 "proposal_type": "world_stimulus_appraisal_result",

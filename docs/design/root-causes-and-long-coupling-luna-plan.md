@@ -1200,3 +1200,28 @@ commit：hash
   缺少、嵌套伪造、顶层边界不完整、重复候选或不匹配的 contract 会安全地不计入证据，而不是冒充成功。
 - 这只闭合隔离验收的证据采集缺口，不等于真实 DeepSeek 首次成功率、QQ 回执、自由多轮对聊或 24 小时
   soak 已资格化；发布状态继续保持 `manual_only`/`qualification_incomplete`。
+
+### 2026-08-09：world stimulus appraisal required-tool 薄片
+
+- `world_stimulus_appraisal` 已接入独立的版本化 required tool
+  `character_role_world_stimulus_appraisal_v1`。provider 参数由现有
+  `_WorldStimulusAppraisalResult` 与 `_WireRoleResult` 的 typed schema 派生，工具层只固定
+  `status`/proposal envelope、`no_change`/`transition`/可用的 `recall_request` 运输形状；具体
+  appraisal、Affect、关系、aspiration、experience 以及是否改变状态仍由角色模型决定。
+- 该目的不再对声明支持 required tool 的 provider 走普通 JSON；不具备 required-tool 能力时明确记录
+  `required_tool_choice_unsupported`，不补默认、不伪造 `no_change`，也不把技术失败转写成角色沉默。
+  provider 工具名、schema/capability/contract digest 与当前 request identity 绑定；source closure、
+  capability、CAS、接受与后续 reducer 仍沿原链路执行。
+- 通过的证据包括：结构化角色 public seam、DeepSeek-compatible HTTP body（无 response_format、确实
+  发送唯一 function/tool_choice）、no-change/transition/recall schema 检查、world-stimulus runtime、
+  affect/silence public-host 及相关 Life/Perception/Relationship 回归；本轮定向跨模块为
+  `101 + 274` 项，ruff 与 `git diff --check` 通过。
+- 这只是 CharacterInterior 的一个后台 purpose 薄片，不能写成所有 background purpose 已完成 required-tool
+  迁移；真实 DeepSeek 首次成功率、流式碎片、QQ 回执、自由对聊与 24 小时 soak 仍是
+  `manual_only`/`qualification_incomplete`。Matrix 继续是 `declaration_only`，不因本地 fixture 或
+  MockTransport 绿灯而改变发布状态。
+- 不可纠正的 provider 能力缺失在 `CharacterInterior` 外层保留精确的
+  `required_tool_choice_unsupported`，不会浪费一次角色纠正调用或改写成泛化失败；冻结离线场景模型也显式
+  接入同一工具边界，并将机制基线从 `.54` 审计重基线为 `.55`。
+- 合并后的完整套件回归为 `4885 passed, 1 warning`；该数字只记录本次源码回归，不代表真实 provider
+  成功率或生产 daemon 健康度。
