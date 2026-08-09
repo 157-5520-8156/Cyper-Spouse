@@ -758,14 +758,16 @@ class PrivateImpressionTriggerRuntime:
         self._source = source
         self._technical_failure_trigger_ids: set[str] = set()
 
-    async def drain_one(self) -> PrivateImpressionRunResult:
-        result = await self._drain_one_impl()
-        return await self._attach_opportunity_lineage(result)
-
     async def advance_due_once(self) -> PrivateImpressionRunResult:
         """Route one due private-impression opportunity through this seam."""
 
-        return await self.drain_one()
+        result = await self._drain_one_impl()
+        return await self._attach_opportunity_lineage(result)
+
+    async def drain_one(self) -> PrivateImpressionRunResult:
+        """Compatibility entry point for replay/tests; production uses ``advance_due_once``."""
+
+        return await self.advance_due_once()
 
     async def _drain_one_impl(self) -> PrivateImpressionRunResult:
         projection = await _project(self._ledger)

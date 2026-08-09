@@ -85,6 +85,7 @@ from .run_result import (
     CausalOpportunityIdentity,
     CausalOpportunityWindow,
     CharacterInteriorRunResult,
+    merge_causal_opportunity_identities,
 )
 from .core import CharacterInterior
 from .experience_transitions import (
@@ -1230,13 +1231,15 @@ class CharacterInteriorWorldStimulusRuntime:
         # here, and a restart simply reuses the durable trigger lease.
         self._technical_failure_deferred_until: dict[str, float] = {}
 
-    async def drain_one(self) -> CharacterInteriorRunResult:
-        return await self._run_one()
-
     async def advance_due_once(self) -> CharacterInteriorRunResult:
         """Route one due opportunity for the background producer/consumer seam."""
 
         return await self._run_one()
+
+    async def drain_one(self) -> CharacterInteriorRunResult:
+        """Compatibility entry point for replay/tests; production uses ``advance_due_once``."""
+
+        return await self.advance_due_once()
 
     async def advance_once(
         self,
@@ -1858,13 +1861,18 @@ class CharacterInteriorWorldStimulusRuntime:
         canonical_refs = tuple(sorted(set(source_refs)))
         if not canonical_refs:
             raise ValueError("causal opportunity requires source refs")
-        return CausalOpportunityIdentity.from_source_refs(
-            world_id=self._ledger.world_id,
-            actor_ref=self._companion_actor_ref,
-            purpose=PURPOSE,
-            source_refs=canonical_refs,
-            epoch=canonical_refs[0],
-            contract_version=CAUSAL_OPPORTUNITY_CONTRACT_VERSION,
+        return merge_causal_opportunity_identities(
+            [
+                CausalOpportunityIdentity.from_source_refs(
+                    world_id=self._ledger.world_id,
+                    actor_ref=self._companion_actor_ref,
+                    purpose=PURPOSE,
+                    source_refs=(source_ref,),
+                    epoch=canonical_refs[0],
+                    contract_version=CAUSAL_OPPORTUNITY_CONTRACT_VERSION,
+                )
+                for source_ref in canonical_refs
+            ]
         )
 
     async def _attach_opportunity_lineage(
