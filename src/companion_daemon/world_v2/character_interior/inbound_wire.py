@@ -729,7 +729,11 @@ def expression_draft_shape_contract(*, include_world_claims: bool = True) -> str
         "importance_bp, wait_seconds, and expires_after_seconds. "
         "response_expectation_assessment, when required by Context, uses status "
         "(fulfilled, superseded, still_pending, or uncertain) and reason. Do not add fields "
-        "from a different chat or response schema."
+        "from a different chat or response schema. Visible beats may contain factual "
+        "first-person life claims only when the same draft emits matching world_claims with "
+        "pinned source_refs. If Context has no such source, do not state a concrete current or "
+        "past activity, place, or person as true; use a feeling, hypothetical, or plainly say "
+        "that you do not have such a sourced event."
     )
     if not include_world_claims:
         return contract

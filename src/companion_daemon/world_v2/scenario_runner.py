@@ -261,7 +261,7 @@ class ScenarioVerificationError(AssertionError):
 # .53 hash was stale (the per-case verification predicates and replay checks
 # still pass, but the aggregate request/room/replay manifest moved), so this
 # is an explicit audited rebaseline rather than weakening the drift guard.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.55"
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.56"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
@@ -308,8 +308,13 @@ FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.55"
 # model advertises and receives that transport; visible predicates remain
 # unchanged, but request/audit rows (and therefore the aggregate manifest)
 # move.  This is an explicit protocol rebaseline, not a relaxed assertion.
+# 2026-08-09 3rd: the expression contract now states that first-person life
+# facts require matching pinned world_claims.  The fixed suite's visible
+# predicates remain unchanged, while its prompt/audit material moves.  Keep
+# the drift guard explicit rather than weakening it for this intentional
+# source-boundary change.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "34902d7bb453f37e12b12d76e0714792106e6f3d434bf6495b3bdcf916035783"
+    "fd6fef01c2fb9f0011a888add6370c041249124996645b4494c089218ec550c9"
 )
 
 

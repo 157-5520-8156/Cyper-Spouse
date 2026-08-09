@@ -1301,3 +1301,31 @@ commit：hash
   typed/fixture/公开宿主证据，不是真实 DeepSeek 首次成功率、自由对聊、QQ 回执或 24 小时 soak。Delayed
   Trigger Matrix 中 `life.development` 继续保持 `limited` 与 `declaration_only`，没有因为工具接线而伪造生产
   资格；真实 provider 资格仍是 `manual_only`/`qualification_incomplete`。
+
+### 2026-08-09：隔离真实 provider 自由对聊与证据记录器
+
+- 使用当前 `cb572962` 在临时 SQLite、`QQC2CHost` console delivery、真实 `deepseek-v4-flash` 上进行了人工输入式
+  对话；没有连接旧生产 daemon，也没有 QQ 外发。首轮未加新提示边界时完成 15 轮：上下文连续、可生成多气泡和
+  sticker、用户纠正后角色会改口，单轮可见回复耗时约 `4.6–7.0s`（均值约 `5.88s`），明显没有达到秒回。
+- 这次对聊发现一个真实 P1 体验/事实边界：当用户要求“讲今天遇到的小事”时，角色编造了“买豆浆”的个人经历；
+  追问后承认是临时编造。可见文字里的第一人称生活事实没有经过 `world_claims`，因此不能把“被追问后能纠正”当作
+  通过。`expression_draft_shape_contract` 已补充明确要求：可见气泡中的事实性第一人称经历必须同时有同一份带
+  `pinned source_refs` 的 `world_claims`；无来源时只能表达感受、假设或明确没有该经历。
+- 之后在同一隔离方式下做了 3 轮针对性复测，并启用 `scripts/chat_with_world_v2.py --jsonl`：角色在明确要求不编造时
+  未再给出无来源经历，单轮耗时 `3.55s/5.55s/5.18s`；每轮 JSONL 都保存了 user/role units、status、latency、usage
+  budget、cursor、semantic hash 与冷重放一致性（`replay_matches_live=true`）。该记录器还支持显式 bounded
+  background drain 与关闭 semantic recall embedding，便于后续无人值守证据采集。
+- 这仍是隔离真实 provider 的少量人工样本，不是 100 次工具资格、生产 QQ 回执或 24 小时 soak；发布状态继续为
+  `manual_only`/`qualification_incomplete`。下一步必须扩大真实 provider 样本，并继续检查未被用户追问时的事实闭包，
+  而不是只看结构化测试是否通过。
+- 该事实边界提示也会进入冻结离线场景的 prompt/audit manifest；已按项目的显式漂移门将机制基线从 `.55` 重基线为
+  `.56`（manifest `fd6fef01…ec550c9`）。这是记录协议/提示输入变化，不是放宽场景断言；完整源码回归仍需重新通过。
+
+### 2026-08-09：隔离 daemon acceptance（非生产资格）
+
+- 在临时 SQLite、OneBot loopback capture 和外部 DeepSeek provider 下完成了一次隔离 acceptance：两个 daemon
+  进程启动、7 次 provider-backed turn、scheduler failure `0`、重复可见 effect/model request `0`，冷重放与 live
+  head 一致；provider-accepted action 共 `7` 次。可见回复 round-trip 约 `0.73–4.77s`，均值约 `4.01s`。
+- 该报告绑定 revision `cb572962` 且生成时工作树仍 dirty，未连接真实 QQ、未测试 100 次 forced-tool/stream、没有
+  24 小时 soak，也没有把 character-choice/措辞质量当作自动 gate。因此它只能证明隔离 transport/CAS/replay 的一小段，
+  不能证明当前最终工作树或生产 daemon 已资格化；状态继续为 `manual_only`/`qualification_incomplete`。

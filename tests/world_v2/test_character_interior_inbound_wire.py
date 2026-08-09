@@ -121,6 +121,7 @@ def test_private_turn_state_contract_does_not_license_invented_life_context() ->
     contract = expression_draft_shape_contract()
 
     assert "do not invent a current activity, place, bodily event" in contract
+    assert "Visible beats may contain factual first-person life claims only" in contract
     assert "only what the pinned Context presents" in contract
     assert "optimize the conversation" in contract
 
