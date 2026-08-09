@@ -78,13 +78,18 @@ from .contracts import (
     _InteriorCapabilityManifest,
     InteriorStimulus,
 )
-from .audit import causal_opportunity_lineage_fields
+from .audit import (
+    causal_opportunity_lineage_fields,
+    technical_character_interior_model_result,
+)
 from .run_result import (
     CAUSAL_OPPORTUNITY_CONTRACT_VERSION,
     CausalOpportunityHealth,
     CausalOpportunityIdentity,
+    CausalOpportunityPolicy,
     CausalOpportunityWindow,
     CharacterInteriorRunResult,
+    causal_opportunity_policy_from_attempt_id,
     merge_causal_opportunity_identities,
 )
 from .core import CharacterInterior
@@ -302,6 +307,7 @@ class _WorldStimulusOpportunityBatch:
 class _WorldStimulusLocatedSource:
     process: TriggerProcess
     source_event: WorldEvent
+    policy: CausalOpportunityPolicy
 
 
 def _group_world_stimulus_sources(
@@ -334,6 +340,7 @@ def _group_world_stimulus_sources(
         for candidate in remaining:
             if (
                 candidate.process.process_kind == anchor.process.process_kind
+                and candidate.policy.policy_ref == anchor.policy.policy_ref
                 and abs(
                     (candidate.source_event.logical_time - anchor.source_event.logical_time)
                     .total_seconds()
@@ -1248,7 +1255,7 @@ class CharacterInteriorWorldStimulusRuntime:
             not owner_id
             or not companion_actor_ref
             or lease_seconds <= 0
-            or merge_window_seconds <= 0
+            or merge_window_seconds < 0
             or expiry_seconds <= 0
         ):
             raise ValueError("world stimulus runtime composition is incomplete")
@@ -1271,8 +1278,14 @@ class CharacterInteriorWorldStimulusRuntime:
             companion_actor_ref=companion_actor_ref,
         )
         self._lease_seconds = lease_seconds
-        self._merge_window_seconds = merge_window_seconds
-        self._expiry_seconds = expiry_seconds
+        self._policy = CausalOpportunityPolicy(
+            merge_window_seconds=merge_window_seconds,
+            expiry_seconds=expiry_seconds,
+        )
+        # Retain these names as read-only diagnostic compatibility for old
+        # fixtures; routing uses the immutable policy below.
+        self._merge_window_seconds = self._policy.merge_window_seconds
+        self._expiry_seconds = self._policy.expiry_seconds
         self._source = source
         # Technical scheduling state only.  A malformed/provider-failed
         # trigger must not monopolize the host's bounded background budget;
@@ -1362,7 +1375,10 @@ class CharacterInteriorWorldStimulusRuntime:
                 and (outcome.endswith(":accepted") or ":accepted:" in outcome)
                 for process, outcome in zip(processes, outcomes, strict=True)
             ),
-            technical_failure_count=deferred,
+            technical_failure_count=sum(
+                self._process_has_technical_failure(projection, process)
+                for process in processes
+            ),
         )
 
     def _health_opportunity_identities(
@@ -1384,6 +1400,7 @@ class CharacterInteriorWorldStimulusRuntime:
                 identities[process.trigger_id] = self._opportunity_identity(
                     process=process,
                     source_refs=(process.source_evidence_ref,),
+                    policy=self._policy_for_process(process),
                 )
                 continue
             located = self._health_source_event(process.source_evidence_ref)
@@ -1391,22 +1408,33 @@ class CharacterInteriorWorldStimulusRuntime:
                 identities[process.trigger_id] = self._opportunity_identity(
                     process=process,
                     source_refs=(process.source_evidence_ref,),
+                    policy=self._policy_for_process(process),
                 )
                 continue
             unresolved.append(
-                _WorldStimulusLocatedSource(process=process, source_event=located)
+                _WorldStimulusLocatedSource(
+                    process=process,
+                    source_event=located,
+                    policy=self._policy_for_process(process),
+                )
             )
-        for group in _group_world_stimulus_sources(
-            tuple(unresolved),
-            merge_window_seconds=self._merge_window_seconds,
-        ):
-            anchor = group[0].process
-            identity = self._opportunity_identity(
-                process=anchor,
-                source_refs=tuple(item.source_event.event_id for item in group),
-            )
-            for item in group:
-                identities[item.process.trigger_id] = identity
+        unresolved_by_policy: dict[str, list[_WorldStimulusLocatedSource]] = {}
+        for item in unresolved:
+            unresolved_by_policy.setdefault(item.policy.policy_ref, []).append(item)
+        for policy_ref in sorted(unresolved_by_policy):
+            policy_sources = tuple(unresolved_by_policy[policy_ref])
+            for group in _group_world_stimulus_sources(
+                policy_sources,
+                merge_window_seconds=policy_sources[0].policy.merge_window_seconds,
+            ):
+                anchor = group[0].process
+                identity = self._opportunity_identity(
+                    process=anchor,
+                    source_refs=tuple(item.source_event.event_id for item in group),
+                    policy=group[0].policy,
+                )
+                for item in group:
+                    identities[item.process.trigger_id] = identity
         return identities
 
     def _durable_opportunity_identity(
@@ -1431,6 +1459,7 @@ class CharacterInteriorWorldStimulusRuntime:
             ):
                 continue
             try:
+                policy = CausalOpportunityPolicy.from_ref(lineage.causal_policy_ref)
                 identity = CausalOpportunityIdentity.from_source_refs(
                     world_id=lineage.causal_world_id,
                     actor_ref=lineage.causal_actor_ref,
@@ -1438,8 +1467,11 @@ class CharacterInteriorWorldStimulusRuntime:
                     source_refs=lineage.causal_source_refs,
                     epoch=lineage.causal_epoch,
                     contract_version=lineage.causal_contract_version,
+                    policy=policy,
                 )
             except (TypeError, ValueError):
+                continue
+            if identity.policy_version != lineage.causal_policy_version:
                 continue
             if identity.opportunity_ref != lineage.opportunity_ref:
                 continue
@@ -1464,6 +1496,30 @@ class CharacterInteriorWorldStimulusRuntime:
             source_event.event_id if source_event is not None else "",
             process.trigger_id,
         )
+
+    def _policy_for_process(self, process: TriggerProcess) -> CausalOpportunityPolicy:
+        lease = process.claim_lease
+        if lease is None:
+            return self._policy
+        try:
+            persisted = causal_opportunity_policy_from_attempt_id(lease.attempt_id)
+        except ValueError as exc:
+            raise ValueError("causal opportunity claim has an invalid durable policy") from exc
+        return persisted or self._policy
+
+    @staticmethod
+    def _process_has_technical_failure(projection: object, process: TriggerProcess) -> bool:
+        attempt_ids = set(process.attempt_ids)
+        for item in projection.model_result_audits:
+            if item.trigger_ref != process.source_evidence_ref or item.attempt_id not in attempt_ids:
+                continue
+            try:
+                audit = RecordedModelResultAudit.model_validate_json(item.audit_json)
+            except ValueError:
+                continue
+            if audit.failure_code is not None:
+                return True
+        return False
 
     async def _run_one(
         self,
@@ -1583,6 +1639,7 @@ class CharacterInteriorWorldStimulusRuntime:
             if self._opportunity_is_expired(
                 source_events=batch.source_events,
                 at=current.logical_time or source_event.logical_time,
+                policy=identity.opportunity_policy,
             ):
                 await self._complete_opportunity_processes(
                     processes=active_processes,
@@ -1622,6 +1679,11 @@ class CharacterInteriorWorldStimulusRuntime:
                     active.trigger_id,
                     transition.failure_code,
                 )
+                await self._record_technical_failure(
+                    process=active,
+                    source_event=source_event,
+                    failure_code=transition.failure_code or "interior_technical_failure",
+                )
                 return result(work_status="technical_failure")
             if transition.status == "model_no_change" and not transition.proposal_refs:
                 await self._complete_opportunity_processes(
@@ -1631,6 +1693,11 @@ class CharacterInteriorWorldStimulusRuntime:
                 )
                 return result(work_status="no_change")
             if len(transition.proposal_refs) != 1:
+                await self._record_technical_failure(
+                    process=active,
+                    source_event=source_event,
+                    failure_code="invalid_proposal_count",
+                )
                 return result(work_status="technical_failure")
             proposal_id = transition.proposal_refs[0]
             after = await self._project()
@@ -1682,6 +1749,11 @@ class CharacterInteriorWorldStimulusRuntime:
             # A stale head or incomplete content authority is a technical
             # failure, never a character choice.  The source trigger remains
             # claimed/recoverable and no local after-image is invented.
+            await self._record_technical_failure(
+                process=active,
+                source_event=source_event,
+                failure_code="experience_settlement_failure",
+            )
             return result(work_status="technical_failure")
         aspiration = await self._process_aspiration(
             audit_cursor=audit_cursor,
@@ -1690,6 +1762,11 @@ class CharacterInteriorWorldStimulusRuntime:
             source_event=authority_source_event,
         )
         if aspiration.status not in {"no_change", "accepted"}:
+            await self._record_technical_failure(
+                process=active,
+                source_event=source_event,
+                failure_code="aspiration_settlement_failure",
+            )
             return result(work_status="technical_failure")
         # Settle the optional relationship signal while the exact historical
         # source trigger is still claimed. Appraisal acceptance terminalizes
@@ -1708,6 +1785,11 @@ class CharacterInteriorWorldStimulusRuntime:
             if relationship_status not in {"no_change", "accepted"}:
                 # The exact source trigger stays claimed/retryable. Contention
                 # and settlement errors are never converted into a choice.
+                await self._record_technical_failure(
+                    process=active,
+                    source_event=source_event,
+                    failure_code="relationship_settlement_failure",
+                )
                 return result(work_status="technical_failure")
         current_cursor = _cursor(await self._project())
         try:
@@ -1728,6 +1810,11 @@ class CharacterInteriorWorldStimulusRuntime:
                 "trigger=%s error=%s",
                 active.trigger_id,
                 exc,
+            )
+            await self._record_technical_failure(
+                process=active,
+                source_event=source_event,
+                failure_code="emotion_settlement_failure",
             )
             return result(work_status="technical_failure")
         emotion_status = emotion.status
@@ -1766,20 +1853,24 @@ class CharacterInteriorWorldStimulusRuntime:
 
         if process.state == "terminal":
             source_event = await self._source_event(process, cursor=_cursor(projection))
+            policy = self._policy_for_process(process)
             return _WorldStimulusOpportunityBatch(
                 processes=(process,),
                 source_events=(source_event,),
                 identity=self._opportunity_identity(
                     process=process,
                     source_refs=(source_event.event_id,),
+                    policy=policy,
                 ),
             )
+        policy = self._policy_for_process(process)
         candidates = tuple(
             item
             for item in projection.trigger_processes
             if item.process_kind == process.process_kind
             and item.state != "terminal"
             and item.source_evidence_ref is not None
+            and self._policy_for_process(item).policy_ref == policy.policy_ref
         )
         located: list[tuple[TriggerProcess, WorldEvent]] = []
         for candidate in candidates:
@@ -1791,10 +1882,14 @@ class CharacterInteriorWorldStimulusRuntime:
             )
         groups = _group_world_stimulus_sources(
             tuple(
-                _WorldStimulusLocatedSource(process=candidate, source_event=source_event)
+                _WorldStimulusLocatedSource(
+                    process=candidate,
+                    source_event=source_event,
+                    policy=policy,
+                )
                 for candidate, source_event in located
             ),
-            merge_window_seconds=self._merge_window_seconds,
+            merge_window_seconds=policy.merge_window_seconds,
         )
         selected_group = next(
             (
@@ -1811,6 +1906,7 @@ class CharacterInteriorWorldStimulusRuntime:
         identity = self._opportunity_identity(
             process=selected_processes[0],
             source_refs=tuple(item.event_id for item in selected_events),
+            policy=policy,
         )
         return _WorldStimulusOpportunityBatch(
             processes=selected_processes,
@@ -1823,10 +1919,11 @@ class CharacterInteriorWorldStimulusRuntime:
         *,
         source_events: tuple[WorldEvent, ...],
         at: datetime,
+        policy: CausalOpportunityPolicy,
     ) -> bool:
         anchor = min(event.logical_time for event in source_events)
         return CausalOpportunityWindow(
-            expires_at=anchor + timedelta(seconds=self._expiry_seconds),
+            expires_at=anchor + timedelta(seconds=policy.expiry_seconds),
         ).is_expired(at)
 
     async def _complete_opportunity_processes(
@@ -1954,6 +2051,7 @@ class CharacterInteriorWorldStimulusRuntime:
         *,
         process: TriggerProcess,
         source_refs: tuple[str, ...],
+        policy: CausalOpportunityPolicy | None = None,
     ) -> CausalOpportunityIdentity:
         canonical_refs = tuple(sorted(set(source_refs)))
         if not canonical_refs:
@@ -1967,6 +2065,7 @@ class CharacterInteriorWorldStimulusRuntime:
                     source_refs=(source_ref,),
                     epoch=canonical_refs[0],
                     contract_version=CAUSAL_OPPORTUNITY_CONTRACT_VERSION,
+                    policy=policy or self._policy_for_process(process),
                 )
                 for source_ref in canonical_refs
             ]
@@ -2377,8 +2476,11 @@ class CharacterInteriorWorldStimulusRuntime:
                 if lease.owner_id == self._owner_id:
                     return process, False
                 return None, False
-        attempt_id = "attempt:character-interior-world-stimulus:" + _digest(
-            {"trigger_id": process.trigger_id, "attempt": len(process.attempt_ids) + 1}
+        attempt_id = (
+            "attempt:character-interior-world-stimulus:"
+            + _digest({"trigger_id": process.trigger_id, "attempt": len(process.attempt_ids) + 1})
+            + ":policy="
+            + self._policy_for_process(process).policy_ref
         )
         claimed = process.model_copy(
             update={
@@ -2606,6 +2708,7 @@ class CharacterInteriorWorldStimulusRuntime:
             ):
                 continue
             try:
+                policy = CausalOpportunityPolicy.from_ref(lineage.causal_policy_ref)
                 durable_identity = CausalOpportunityIdentity.from_source_refs(
                     world_id=lineage.causal_world_id,
                     actor_ref=lineage.causal_actor_ref,
@@ -2613,8 +2716,11 @@ class CharacterInteriorWorldStimulusRuntime:
                     source_refs=lineage.causal_source_refs,
                     epoch=lineage.causal_epoch,
                     contract_version=lineage.causal_contract_version,
+                    policy=policy,
                 )
             except (TypeError, ValueError):
+                continue
+            if durable_identity.policy_version != lineage.causal_policy_version:
                 continue
             if durable_identity.opportunity_ref != lineage.opportunity_ref:
                 continue
@@ -2638,6 +2744,8 @@ class CharacterInteriorWorldStimulusRuntime:
                     "source_refs",
                     "epoch",
                     "contract_version",
+                    "policy_version",
+                    "policy_ref",
                 )
             ):
                 exact_matches.append((durable_identity.opportunity_ref, proposal))
@@ -2647,6 +2755,8 @@ class CharacterInteriorWorldStimulusRuntime:
                 and durable_identity.purpose == identity.purpose
                 and durable_identity.epoch == identity.epoch
                 and durable_identity.contract_version == identity.contract_version
+                and durable_identity.policy_version == identity.policy_version
+                and durable_identity.policy_ref == identity.policy_ref
                 and source_ref in identity.source_refs
                 and set(identity.source_refs).issubset(durable_identity.source_refs)
             ):
@@ -2670,6 +2780,56 @@ class CharacterInteriorWorldStimulusRuntime:
         if self._ledger.blocks_event_loop:
             return await asyncio.to_thread(run)
         return run()
+
+    async def _record_technical_failure(
+        self,
+        *,
+        process: TriggerProcess,
+        source_event: WorldEvent,
+        failure_code: str,
+    ) -> None:
+        if process.claim_lease is None:
+            raise ValueError("technical failure audit requires a claimed process")
+        current = await self._project()
+        model_payload = technical_character_interior_model_result(
+            purpose=PURPOSE,
+            trigger_ref=source_event.event_id,
+            attempt_id=process.claim_lease.attempt_id,
+            evaluated_world_revision=current.world_revision,
+            failure_code=failure_code,
+        )
+        if any(
+            item.model_result_ref == model_payload.model_result_ref
+            for item in current.model_result_audits
+        ):
+            return
+        at = current.logical_time or source_event.logical_time
+        payload = model_payload.model_dump(mode="json")
+        identity = domain_idempotency_key(
+            event_type="ModelResultRecorded",
+            world_id=self._ledger.world_id,
+            payload=payload,
+        )
+        event = WorldEvent.from_payload(
+            schema_version="world-v2.1",
+            event_id="event:character-interior-world-stimulus:technical:" + model_payload.model_result_ref,
+            world_id=self._ledger.world_id,
+            event_type="ModelResultRecorded",
+            logical_time=at,
+            created_at=max(source_event.created_at, at),
+            actor=self._owner_id,
+            source=self._source,
+            trace_id=source_event.trace_id,
+            causation_id=source_event.event_id,
+            correlation_id=source_event.correlation_id,
+            idempotency_key=identity or "world-v2:character-interior-world-stimulus:technical:" + model_payload.model_result_ref,
+            payload=payload,
+        )
+        await self._commit(
+            (event,),
+            cursor=_cursor(current),
+            commit_id="commit:character-interior-world-stimulus:technical:" + model_payload.model_result_ref,
+        )
 
     async def _complete(self, *, process, source_event, cursor, outcome_ref):
         if process.claim_lease is None:

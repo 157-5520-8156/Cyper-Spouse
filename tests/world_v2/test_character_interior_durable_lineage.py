@@ -122,6 +122,8 @@ def _causal_lineage(identity: CausalOpportunityIdentity) -> RecordedCharacterInt
             "causal_epoch": identity.epoch,
             "causal_actor_ref": identity.actor_ref,
             "causal_contract_version": identity.contract_version,
+            "causal_policy_version": identity.policy_version,
+            "causal_policy_ref": identity.policy_ref,
         }
     )
     return RecordedCharacterInteriorTurnLineage.model_validate(payload)
@@ -154,6 +156,11 @@ def test_causal_lineage_reconstructs_and_binds_the_authoritative_opportunity_ref
         ("purpose", "other-purpose"),
         ("causal_epoch", "epoch:2"),
         ("causal_contract_version", "causal-opportunity.2"),
+        (
+            "causal_policy_ref",
+            "causal-opportunity-policy.1:merge=300:expiry=604801",
+        ),
+        ("causal_policy_version", "causal-opportunity-policy.2"),
     ),
 )
 def test_causal_lineage_rejects_any_forged_identity_coordinate(field: str, value: object) -> None:
@@ -174,6 +181,8 @@ def test_causal_lineage_rejects_any_forged_identity_coordinate(field: str, value
             "causal_epoch": identity.epoch,
             "causal_actor_ref": identity.actor_ref,
             "causal_contract_version": identity.contract_version,
+            "causal_policy_version": identity.policy_version,
+            "causal_policy_ref": identity.policy_ref,
         }
     )
     payload[field] = value

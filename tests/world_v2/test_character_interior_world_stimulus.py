@@ -29,6 +29,8 @@ from companion_daemon.world_v2.character_interior.world_stimulus import (
 from companion_daemon.world_v2.character_interior.run_result import (
     CausalOpportunityWindow,
     CausalOpportunityIdentity,
+    CausalOpportunityPolicy,
+    causal_opportunity_policy_from_attempt_id,
 )
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.immediate_emotion_proposal_worker import (
@@ -148,6 +150,105 @@ def test_causal_opportunity_window_expiry_is_explicit_and_clock_only_is_not_an_e
         epoch=SOURCE_REF,
     )
     assert identity.model_copy().epoch == SOURCE_REF
+
+
+def test_causal_opportunity_policy_is_restart_readable_and_identity_bound() -> None:
+    policy = CausalOpportunityPolicy(merge_window_seconds=240, expiry_seconds=900)
+    identity = CausalOpportunityIdentity.from_source_refs(
+        world_id=WORLD_ID,
+        actor_ref="actor:companion",
+        purpose="world_stimulus_appraisal",
+        source_refs=(SOURCE_REF,),
+        epoch=SOURCE_REF,
+        policy=policy,
+    )
+
+    restarted_policy = causal_opportunity_policy_from_attempt_id(
+        "attempt:test:policy=" + policy.policy_ref
+    )
+    changed_policy_identity = CausalOpportunityIdentity.from_source_refs(
+        world_id=WORLD_ID,
+        actor_ref="actor:companion",
+        purpose="world_stimulus_appraisal",
+        source_refs=(SOURCE_REF,),
+        epoch=SOURCE_REF,
+        policy=CausalOpportunityPolicy(merge_window_seconds=240, expiry_seconds=901),
+    )
+
+    assert restarted_policy == policy
+    assert identity.policy_version == policy.policy_version
+    assert identity.policy_ref == policy.policy_ref
+    assert identity.opportunity_ref != changed_policy_identity.opportunity_ref
+    with pytest.raises(ValueError, match="same policy"):
+        identity.merge(changed_policy_identity)
+
+
+@pytest.mark.asyncio
+async def test_claimed_policy_survives_restart_and_new_policy_fails_closed() -> None:
+    old_policy = CausalOpportunityPolicy(merge_window_seconds=240, expiry_seconds=900)
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID, accepted_batch_issuer=issuer)
+    seed_through_proposal(ledger)
+    commit(ledger, settlement_batch())
+    runtime, ledger, _projection = _runtime_for_ledger(
+        ledger=ledger,
+        issuer=issuer,
+        model=_RoleModel(decision="no_change"),
+        source_ref=SOURCE_REF,
+        companion_actor_ref="actor:companion",
+        merge_window_seconds=old_policy.merge_window_seconds,
+        expiry_seconds=old_policy.expiry_seconds,
+    )
+
+    # Claim one durable process under the old policy.
+    process = next(
+        item
+        for item in ledger.project().trigger_processes
+        if item.process_kind == "npc_world_appraisal"
+    )
+    source_event = await runtime._source_event(  # noqa: SLF001 - restart seam
+        process,
+        cursor=ProjectionCursor(
+            world_revision=ledger.project().world_revision,
+            deliberation_revision=ledger.project().deliberation_revision,
+            ledger_sequence=ledger.project().ledger_sequence,
+        ),
+    )
+    claimed, _ = await runtime._claim_or_reclaim(  # noqa: SLF001 - restart seam
+        process=process,
+        source_event=source_event,
+        projection=ledger.project(),
+    )
+    assert claimed is not None
+    assert causal_opportunity_policy_from_attempt_id(claimed.claim_lease.attempt_id) == old_policy
+
+    restarted, _ledger, _projection = _runtime_for_ledger(
+        ledger=ledger,
+        issuer=issuer,
+        model=_RoleModel(decision="no_change"),
+        source_ref=SOURCE_REF,
+        companion_actor_ref="actor:companion",
+    )
+    batch = await restarted._opportunity_batch(  # noqa: SLF001 - restart seam
+        process=claimed,
+        projection=ledger.project(),
+    )
+    new_policy_identity = CausalOpportunityIdentity.from_source_refs(
+        world_id=WORLD_ID,
+        actor_ref="actor:companion",
+        purpose="world_stimulus_appraisal",
+        source_refs=(SOURCE_REF,),
+        epoch=SOURCE_REF,
+        policy=CausalOpportunityPolicy(merge_window_seconds=240, expiry_seconds=901),
+    )
+
+    assert batch.identity.opportunity_policy == old_policy
+    assert batch.identity.opportunity_ref != new_policy_identity.opportunity_ref
+    assert restarted._opportunity_is_expired(  # noqa: SLF001 - policy seam
+        source_events=(source_event,),
+        at=source_event.logical_time + timedelta(seconds=900),
+        policy=batch.identity.opportunity_policy,
+    )
 
 
 class _Projection:
@@ -322,6 +423,8 @@ def _runtime_for_ledger(
     worker_wrapper=None,
     settle_relationship: bool = False,
     relationship_acceptance: RelationshipAcceptanceRuntime | None = None,
+    merge_window_seconds: int = 300,
+    expiry_seconds: int = 7 * 24 * 60 * 60,
 ):  # type: ignore[no-untyped-def]
     appraisal_worker = AppraisalProposalWorker(
         compiler=AppraisalProposalCompiler(
@@ -362,6 +465,8 @@ def _runtime_for_ledger(
         ),
         owner_id="worker:appraisal",
         companion_actor_ref=companion_actor_ref,
+        merge_window_seconds=merge_window_seconds,
+        expiry_seconds=expiry_seconds,
         relationship_settlement=(
             _WorldStimulusRelationshipSignalSettlement(
                 ledger=ledger,
@@ -787,6 +892,13 @@ async def test_source_bound_opportunity_advance_and_health_are_one_causal_view()
         audit_json["character_interior_lineage"]["causal_contract_version"]
         == "causal-opportunity.1"
     )
+    assert (
+        audit_json["character_interior_lineage"]["causal_policy_version"]
+        == "causal-opportunity-policy.1"
+    )
+    assert audit_json["character_interior_lineage"]["causal_policy_ref"] == (
+        "causal-opportunity-policy.1:merge=300:expiry=604800"
+    )
 
     replay = await runtime.advance_once(SOURCE_REF)
     assert replay.status == "idle"
@@ -806,7 +918,10 @@ async def test_source_bound_opportunity_rejects_a_different_actor() -> None:
 async def test_expired_opportunity_is_terminal_and_distinct_from_character_no_change() -> None:
     model = _RoleModel(decision="no_change")
     runtime, ledger, _projection = _runtime(model=model)
-    runtime._expiry_seconds = 1  # noqa: SLF001 - explicit clock seam fixture
+    runtime._policy = CausalOpportunityPolicy(  # noqa: SLF001 - explicit policy seam fixture
+        merge_window_seconds=runtime._policy.merge_window_seconds,  # noqa: SLF001
+        expiry_seconds=1,
+    )
     current = ledger.project().logical_time
     assert current is not None
     later = current + timedelta(seconds=2)
@@ -1031,6 +1146,8 @@ async def test_merged_opportunity_replay_finds_a_durable_audit_from_any_source_r
             "causal_epoch": merged_identity.epoch,
             "causal_actor_ref": merged_identity.actor_ref,
             "causal_contract_version": merged_identity.contract_version,
+            "causal_policy_version": merged_identity.policy_version,
+            "causal_policy_ref": merged_identity.policy_ref,
         }
     )
     replay_projection = SimpleNamespace(
@@ -1070,6 +1187,8 @@ def _replay_projection_with_causal_lineage(ledger, identity):  # type: ignore[no
             "causal_epoch": identity.epoch,
             "causal_actor_ref": identity.actor_ref,
             "causal_contract_version": identity.contract_version,
+            "causal_policy_version": identity.policy_version,
+            "causal_policy_ref": identity.policy_ref,
         }
     )
     return SimpleNamespace(
@@ -1409,6 +1528,7 @@ async def test_provider_failure_stays_technical_and_leaves_trigger_retryable() -
     )
     assert process.state == "claimed"
     assert not ledger.project().proposal_audits
+    assert runtime.health_snapshot(WORLD_ID).technical_failure_count == 1
 
 
 @pytest.mark.asyncio

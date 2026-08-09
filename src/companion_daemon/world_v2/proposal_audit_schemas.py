@@ -125,6 +125,18 @@ class RecordedCharacterInteriorTurnLineage(FrozenModel):
         max_length=128,
         exclude_if=lambda value: value is None,
     )
+    causal_policy_version: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        exclude_if=lambda value: value is None,
+    )
+    causal_policy_ref: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        exclude_if=lambda value: value is None,
+    )
     snapshot_id: str = Field(min_length=1, max_length=128)
     snapshot_hash: str = Field(pattern=_HASH)
     capability_ref: str = Field(min_length=1, max_length=512)
@@ -158,6 +170,8 @@ class RecordedCharacterInteriorTurnLineage(FrozenModel):
             self.causal_epoch,
             self.causal_actor_ref,
             self.causal_contract_version,
+            self.causal_policy_version,
+            self.causal_policy_ref,
         )
         if not self.causal_source_refs:
             if any(value is not None for value in causal_fields):
@@ -173,7 +187,9 @@ class RecordedCharacterInteriorTurnLineage(FrozenModel):
                 # initializing.  The identity implementation remains the
                 # single hash authority; this avoids a package-init cycle.
                 from .character_interior.run_result import CausalOpportunityIdentity
+                from .character_interior.run_result import CausalOpportunityPolicy
 
+                policy = CausalOpportunityPolicy.from_ref(self.causal_policy_ref)
                 identity = CausalOpportunityIdentity.from_source_refs(
                     world_id=self.causal_world_id,
                     actor_ref=self.causal_actor_ref,
@@ -181,9 +197,12 @@ class RecordedCharacterInteriorTurnLineage(FrozenModel):
                     source_refs=self.causal_source_refs,
                     epoch=self.causal_epoch,
                     contract_version=self.causal_contract_version,
+                    policy=policy,
                 )
             except (TypeError, ValueError) as exc:
                 raise ValueError("causal opportunity lineage identity is invalid") from exc
+            if identity.policy_version != self.causal_policy_version:
+                raise ValueError("causal opportunity lineage policy version is not canonical")
             if self.opportunity_ref != identity.opportunity_ref:
                 raise ValueError(
                     "causal opportunity lineage opportunity_ref is not canonical"

@@ -49,6 +49,8 @@ def causal_opportunity_lineage_fields(
         "causal_epoch": identity.epoch,
         "causal_actor_ref": identity.actor_ref,
         "causal_contract_version": identity.contract_version,
+        "causal_policy_version": identity.policy_version,
+        "causal_policy_ref": identity.policy_ref,
     }
 
 
@@ -196,8 +198,69 @@ def recorded_character_interior_model_result(
     )
 
 
+def technical_character_interior_model_result(
+    *,
+    purpose: str,
+    trigger_ref: str,
+    attempt_id: str,
+    evaluated_world_revision: int,
+    failure_code: str,
+) -> ModelResultRecordedPayload:
+    """Create content-free durable evidence for a retryable technical failure."""
+
+    identity_material = {
+        "purpose": purpose,
+        "trigger_ref": trigger_ref,
+        "attempt_id": attempt_id,
+        "failure_code": failure_code,
+    }
+    model_call_id = "model-call:character-interior:technical:" + sha256(
+        canonical_json(identity_material)
+    )
+    response_hash = None
+    result_ref = "model-result:" + sha256(
+        canonical_json({"model_call_id": model_call_id, "response_hash": response_hash})
+    )
+    audit = RecordedModelResultAudit(
+        model_call_id=model_call_id,
+        model_result_ref=result_ref,
+        attempt_id=attempt_id,
+        route=RecordedModelRoute(
+            tier="thinking",
+            reason_code=f"{purpose}.technical_failure",
+            router_version="character-interior.1",
+        ),
+        request_hash=sha256(canonical_json(identity_material)),
+        status="main_exception",
+        failure_code=failure_code,
+        slot="primary",
+        outcome="invalid",
+    )
+    audit_json = model_audit_json(audit)
+    deliberation_identity = {
+        "capsule_id": sha256(canonical_json({"purpose": purpose, "trigger_ref": trigger_ref})),
+        "proposal_hash": None,
+        "attempt_audits": [json.loads(audit_json)],
+    }
+    return ModelResultRecordedPayload(
+        audit_contract="model-result-audit.3",
+        model_result_ref=audit.model_result_ref,
+        deliberation_result_id="deliberation:" + sha256(canonical_json(deliberation_identity)),
+        model_call_id=audit.model_call_id,
+        attempt_id=attempt_id,
+        capsule_id=deliberation_identity["capsule_id"],
+        trigger_ref=trigger_ref,
+        evaluated_world_revision=evaluated_world_revision,
+        attempt_index=0,
+        attempt_count=1,
+        audit_json=audit_json,
+        audit_hash=sha256(audit_json),
+    )
+
+
 __all__ = [
     "causal_opportunity_lineage_fields",
     "recorded_character_interior_lineage",
     "recorded_character_interior_model_result",
+    "technical_character_interior_model_result",
 ]
