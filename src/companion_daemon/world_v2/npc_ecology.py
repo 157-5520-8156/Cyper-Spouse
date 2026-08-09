@@ -33,7 +33,10 @@ from .life_events import (
 from .life_content_events import LifeContentRecordedPayload
 from .life_author_seed import ReviewedLifeSeedCatalog
 from .npc_identity_view import NpcIdentityView, npc_identity_views
-from .npc_relationship_view import npc_relationship_readings
+from .npc_relationship_view import (
+    npc_relationship_readings,
+    npc_shared_history_evidence,
+)
 from .occurrence_content_coordinator import (
     OccurrenceContentCommitRequest,
     OccurrenceContentCoordinator,
@@ -280,6 +283,11 @@ class NpcEcology:
             for item in getattr(projection, "npcs", ())
         ):
             raise ValueError("source-closed NPC identity is unavailable")
+        shared_history = npc_shared_history_evidence(
+            projection,
+            protagonist_actor_ref=self._protagonist,
+            npc_refs=requested_refs,
+        )
         identities = npc_identity_views(
             projection,
             content_store=self._store,
@@ -288,6 +296,7 @@ class NpcEcology:
                 protagonist_actor_ref=self._protagonist,
                 npc_refs=requested_refs,
             ),
+            shared_history=shared_history,
             reviewed_identity_summaries=(
                 {
                     item.stable_identity_ref: item.identity_summary
@@ -695,9 +704,19 @@ class NpcEcology:
         selected_identity = next(
             item for item in snapshot.identities if item.npc_ref == selected_npc_ref
         )
+        npc_private_capsule = selected_identity.model_dump(mode="json")
+        # Keep the old deterministic reading available to compatibility
+        # consumers, but do not present it as actor evidence.  The actor gets
+        # neutral shared-history facts instead and keeps its own subjective
+        # relationship state in the private capsule.
+        npc_private_capsule.pop("protagonist_relationship", None)
+        shared_history_evidence = npc_private_capsule.pop(
+            "shared_history_with_protagonist", None
+        )
         payload = {
             "stimulus": stimulus.model_dump(mode="json"),
-            "npc_private_capsule": selected_identity.model_dump(mode="json"),
+            "npc_private_capsule": npc_private_capsule,
+            "shared_history_evidence": shared_history_evidence,
             "public_world": {
                 "logical_time": (
                     snapshot.logical_time.isoformat()

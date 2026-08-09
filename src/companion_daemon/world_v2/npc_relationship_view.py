@@ -1,4 +1,4 @@
-"""Per-NPC relationship reading: a pure projection over lived shared history.
+"""Per-NPC shared-history evidence and legacy relationship compatibility.
 
 ``relationship_states`` describes the slow variables of the user
 relationship.  This module provides the narrower, observable side of an NPC
@@ -7,16 +7,11 @@ deterministic, rebuildable view over already-settled shared World Events,
 never a second write authority and never a reader of the protagonist's
 private Appraisal/Affect.
 
-Per registered NPC it reads:
-
-* ``familiarity_bp`` — how much settled shared history exists at all;
-* ``closeness_bp``   — a resting 3_000bp baseline warmed by recent settled
-  shared occurrences.
-
-All arithmetic is integer and every input is committed authority (settled
-occurrence events, accepted appraisals), so any weight policy consuming the
-reading stays exactly replayable through its recorded draw, and the advisory
-stays ledger-backed.
+The primary seam is :class:`SharedHistoryEvidence`: settled shared-event
+count, last occurrence time, and exact settlement sources.  It deliberately
+does not assign a relationship meaning.  ``NpcRelationshipReading`` remains
+as a compatibility projection for retired/dashboard consumers; new actor
+capsules must use the neutral evidence instead.
 """
 
 from __future__ import annotations
@@ -58,6 +53,65 @@ class NpcRelationshipReading(FrozenModel):
     source_event_refs: tuple[str, ...] = ()
 
 
+class SharedHistoryEvidence(FrozenModel):
+    """Neutral, actor-scoped evidence of settled shared occurrences."""
+
+    npc_ref: str
+    settled_shared_count: int
+    last_shared_at: datetime | None = None
+    source_event_refs: tuple[str, ...] = ()
+
+
+def npc_shared_history_evidence(
+    projection,
+    *,
+    protagonist_actor_ref: str,
+    npc_refs: tuple[str, ...] | None = None,
+) -> tuple[SharedHistoryEvidence, ...]:
+    """Project only settled events both the protagonist and NPC participated in."""
+
+    if not protagonist_actor_ref:
+        raise ValueError("NPC shared-history evidence requires the protagonist actor ref")
+    requested_refs = None if npc_refs is None else frozenset(npc_refs)
+    npcs = tuple(
+        item
+        for item in getattr(projection, "npcs", ())
+        if requested_refs is None or f"npc:{item.npc_id}" in requested_refs
+    )
+    occurrences = tuple(getattr(projection, "world_occurrences", ()))
+    evidence: list[SharedHistoryEvidence] = []
+    for npc in npcs:
+        npc_ref = f"npc:{npc.npc_id}"
+        participant_refs = {npc_ref}
+        edge = getattr(npc, "promotion_edge", None)
+        if edge is not None:
+            participant_refs.add(edge.provisional_entity_ref)
+        source_refs: list[str] = []
+        last_shared_at: datetime | None = None
+        for occurrence in occurrences:
+            if (
+                occurrence.status != "settled"
+                or occurrence.settled_at is None
+                or occurrence.settlement_event_ref is None
+                or not participant_refs.intersection(occurrence.participant_refs)
+                or protagonist_actor_ref not in occurrence.participant_refs
+            ):
+                continue
+            source_refs.append(occurrence.settlement_event_ref)
+            if last_shared_at is None or occurrence.settled_at > last_shared_at:
+                last_shared_at = occurrence.settled_at
+        evidence.append(
+            SharedHistoryEvidence(
+                npc_ref=npc_ref,
+                settled_shared_count=len(source_refs),
+                last_shared_at=last_shared_at,
+                source_event_refs=tuple(dict.fromkeys(source_refs)),
+            )
+        )
+    evidence.sort(key=lambda item: item.npc_ref)
+    return tuple(evidence)
+
+
 def npc_relationship_readings(
     projection,
     *,
@@ -84,29 +138,28 @@ def npc_relationship_readings(
     if logical_time is None or not npcs:
         return ()
     occurrences = tuple(getattr(projection, "world_occurrences", ()))
+    shared_history = npc_shared_history_evidence(
+        projection,
+        protagonist_actor_ref=protagonist_actor_ref,
+        npc_refs=npc_refs,
+    )
+    shared_by_ref = {item.npc_ref: item for item in shared_history}
+    settled_at_by_ref = {
+        occurrence.settlement_event_ref: occurrence.settled_at
+        for occurrence in occurrences
+        if occurrence.settlement_event_ref is not None and occurrence.settled_at is not None
+    }
     readings: list[NpcRelationshipReading] = []
     for npc in npcs:
         npc_ref = f"npc:{npc.npc_id}"
-        recent = older = 0
-        last_shared: datetime | None = None
-        sources: list[str] = []
-        for occurrence in occurrences:
-            if (
-                occurrence.status != "settled"
-                or occurrence.settled_at is None
-                or occurrence.settlement_event_ref is None
-                or npc_ref not in occurrence.participant_refs
-                or protagonist_actor_ref not in occurrence.participant_refs
-            ):
-                continue
-            if logical_time - occurrence.settled_at <= _RECENT_WINDOW:
-                recent += 1
-            else:
-                older += 1
-            sources.append(occurrence.settlement_event_ref)
-            if last_shared is None or occurrence.settled_at > last_shared:
-                last_shared = occurrence.settled_at
-        shared_count = recent + older
+        evidence = shared_by_ref[npc_ref]
+        recent = sum(
+            logical_time - settled_at_by_ref[ref] <= _RECENT_WINDOW
+            for ref in evidence.source_event_refs
+            if ref in settled_at_by_ref
+        )
+        shared_count = evidence.settled_shared_count
+        older = max(shared_count - recent, 0)
         closeness = (
             RESTING_CLOSENESS_BP
             + recent * _RECENT_SHARED_BP
@@ -117,8 +170,8 @@ def npc_relationship_readings(
             closeness_bp=max(0, min(10_000, closeness)),
             familiarity_bp=max(0, min(10_000, shared_count * _FAMILIARITY_PER_SHARED_BP)),
             settled_shared_count=shared_count,
-            last_shared_at=last_shared,
-            source_event_refs=tuple(dict.fromkeys(sources)),
+            last_shared_at=evidence.last_shared_at,
+            source_event_refs=evidence.source_event_refs,
         ))
     readings.sort(key=lambda item: item.npc_ref)
     return tuple(readings)

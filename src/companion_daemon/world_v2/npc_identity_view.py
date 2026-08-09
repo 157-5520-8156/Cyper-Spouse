@@ -13,7 +13,11 @@ from datetime import datetime
 from pydantic import Field
 
 from .life_content_store import ImmutableLifeContentStore
-from .npc_relationship_view import NpcRelationshipReading, npc_relationship_by_ref
+from .npc_relationship_view import (
+    NpcRelationshipReading,
+    SharedHistoryEvidence,
+    npc_relationship_by_ref,
+)
 from .schema_core import FrozenModel
 from .schemas import NpcSocialVariables
 
@@ -41,6 +45,7 @@ class NpcIdentityView(FrozenModel):
     source_refs: tuple[str, ...] = Field(min_length=1)
     private_source_refs: tuple[str, ...] = ()
     last_shared_at: datetime | None = None
+    shared_history_with_protagonist: SharedHistoryEvidence | None = None
 
 
 def npc_identity_views(
@@ -48,6 +53,7 @@ def npc_identity_views(
     *,
     content_store: ImmutableLifeContentStore,
     relationships: tuple[NpcRelationshipReading, ...] | None = None,
+    shared_history: tuple[SharedHistoryEvidence, ...] | None = None,
     reviewed_identity_summaries: dict[str, str] | None = None,
     npc_refs: tuple[str, ...] | None = None,
 ) -> tuple[NpcIdentityView, ...]:
@@ -56,6 +62,9 @@ def npc_identity_views(
     relationship_by_ref = npc_relationship_by_ref(
         relationships if relationships is not None else ()
     )
+    shared_history_by_ref = {
+        item.npc_ref: item for item in (shared_history if shared_history is not None else ())
+    }
     occurrences = tuple(getattr(projection, "world_occurrences", ()))
     experiences = tuple(getattr(projection, "experiences", ()))
     plans = tuple(getattr(projection, "plans", ()))
@@ -263,6 +272,7 @@ def npc_identity_views(
                 active_plan_refs=active_plan_refs,
                 current_location_ref=getattr(npc, "current_location_ref", None),
                 protagonist_relationship=relationship,
+                shared_history_with_protagonist=shared_history_by_ref.get(npc_ref),
                 npc_relationship_to_protagonist=(
                     subjective.relationship_to_subject
                     if subjective is not None and inner_state is not None

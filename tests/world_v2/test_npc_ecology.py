@@ -366,6 +366,8 @@ async def test_npc_advance_request_contains_only_the_selected_actor_capsule() ->
     assert actor_payload["authority"]["selected_npc_ref"] == "npc:lin"
     assert actor_payload["public_world"]["available_npc_refs"] == ["npc:lin"]
     assert "identity:npc:mei" not in actor.calls[0][1]["content"]
+    assert "protagonist_relationship" not in actor_payload["npc_private_capsule"]
+    assert "shared_history_evidence" in actor_payload
 
 
 @pytest.mark.asyncio

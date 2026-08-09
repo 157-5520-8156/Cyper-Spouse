@@ -17,8 +17,10 @@ from companion_daemon.world_v2.npc_initiative_weight_policy import (
 )
 from companion_daemon.world_v2.npc_relationship_view import (
     RESTING_CLOSENESS_BP,
+    SharedHistoryEvidence,
     npc_relationship_advisories,
     npc_relationship_readings,
+    npc_shared_history_evidence,
 )
 from companion_daemon.world_v2.schemas import (
     DueWindow,
@@ -159,6 +161,30 @@ def test_solo_npc_occurrence_is_not_shared_history_with_protagonist() -> None:
     assert reading.closeness_bp == RESTING_CLOSENESS_BP
     assert reading.familiarity_bp == 0
     assert reading.source_event_refs == ()
+
+
+def test_shared_history_evidence_is_neutral_and_source_closed() -> None:
+    evidence = npc_shared_history_evidence(
+        _Projection(
+            npcs=(_npc(),),
+            world_occurrences=(
+                _settled_occurrence(occurrence_id="o1", settled_at=NOW - timedelta(days=1)),
+                _settled_occurrence(occurrence_id="o2", settled_at=NOW - timedelta(days=20)),
+            ),
+        ),
+        protagonist_actor_ref="agent:companion",
+    )
+
+    assert evidence == (
+        SharedHistoryEvidence(
+            npc_ref="npc:literature-fan",
+            settled_shared_count=2,
+            last_shared_at=NOW - timedelta(days=1),
+            source_event_refs=("event:settled:o1", "event:settled:o2"),
+        ),
+    )
+    assert "closeness_bp" not in type(evidence[0]).model_fields
+    assert "familiarity_bp" not in type(evidence[0]).model_fields
 
 
 def _candidate(kind: str) -> NpcInitiativeCandidate:
