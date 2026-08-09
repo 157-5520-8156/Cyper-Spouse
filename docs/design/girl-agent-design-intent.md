@@ -493,7 +493,7 @@ biographical → activity → aftermath → life_development → npc_initiative 
 |---|---|---|---|
 | 视觉证据作者 | 从已审核的视觉证据附件 + 结算后果声明图像证据（含录制抽签阈值与日常节奏） | [active]（default） | `life_visual_evidence_author.py` |
 | PhotoCandidate 生态 | 从**已提交**的生活证据派生照片机会；replay-safe；类别冷却 | [active]（limited-production） | `event_ecology_media.py` |
-| 选片 | 角色决定选哪张、要不要 | [active]（limited-production） | `media_selection_worker.py`、`media_selection_acceptance_runtime.py` |
+| 选片 | 角色决定选哪张、要不要；CharacterInterior 通过 `character_role_media_selection_v1` required tool 运输 `select|no_op` 与候选 token，工具只闭合能力和来源，不替角色选候选 | [active]（limited-production） | `media_selection_worker.py`、`media_selection_acceptance_runtime.py`、`character_interior/structured_role_tool_contract.py` |
 | 计划/渲染/审查/投递 | 全链路 v2 媒体 vertical（receipt-bound、修复一次、预览永不等同投递） | [active]（limited-production：需显式预览部署 + 预置授权 grant + operator approval；自动投递未全局启用） | `media_planning_runtime.py`、`media_execution_runtime.py`、`media_continuation_runtime.py`、`media_delivery_runtime.py` |
 | 隐私分层 | ordinary / personal / intimate 路由 | [active] | 顶层 `media_eligibility.py`（`MediaEligibilityRouter`） |
 | P3 私密车道（suggestive/private） | 高私密分轨渲染 | **[disconnected]**：`PrivateRenderContract` 存在但部署**未安装** private prompt author/专用生成器，fail-closed | `media_eligibility.py` 引用、CONTEXT.md Private Render Contract 词条 |

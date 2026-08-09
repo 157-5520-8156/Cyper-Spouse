@@ -1442,3 +1442,19 @@ commit：hash
   负责来源失效、候选 CAS、proposal/acceptance、effect-once 和技术重试。
 - 结构化角色与生产 builder 回归 `142 passed`；真实 DeepSeek、QQ 回执、自由对聊与 24 小时
   soak 仍未资格化，发布状态继续 `manual_only`/`qualification_incomplete`。
+
+### 2026-08-09：media selection required-tool 薄片
+
+- `media_selection` 现在接入统一 CharacterInterior required-tool 编译器，使用版本化工具
+  `character_role_media_selection_v1`。参数由 `_MediaSelectionPayload`、`_WireDecision` 与
+  `_WireRoleResult` 派生；`select` 分支的 `selected_token` 只允许当前媒体 capability 提供的
+  opaque candidate token，`no_op` 保持最小 `{decision: "no_op"}`，不把 JSON `null` 解释权交给宿主。
+- 角色仍拥有“选择哪一个候选”以及“明确不选”的语义决定权；媒体候选发现、source closure、随机
+  注意力、Proposal/Acceptance、隐私上限、CAS、effect-once 和投递回执仍由原有 media worker/runtime
+  负责。required tool 只解决运输和能力闭包，不打开媒体投递或替角色做选择。
+- 声明支持 required tool 的 provider 不再走普通 JSON；能力缺失保持精确的
+  `required_tool_choice_unsupported`。本薄片覆盖角色正例、能力失败、候选枚举和 DeepSeek-compatible
+  HTTP body；相关角色/媒体回归为 `125 passed`，ruff 与 `git diff --check` 通过。
+- 媒体链仍是 limited-production；真实 DeepSeek 首次成功率、QQ/媒体回执、多轮对聊质量和 24 小时
+  soak 没有由本薄片资格化，Matrix 仍为 `declaration_only`，发布状态继续
+  `manual_only`/`qualification_incomplete`。

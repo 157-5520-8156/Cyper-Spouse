@@ -603,7 +603,7 @@ async def test_consider_preserves_model_silence_without_substitute_message() -> 
 @pytest.mark.asyncio
 async def test_decision_is_source_capability_and_author_lineage_bound() -> None:
     manifest = _manifest("media-token:1", "media-token:2")
-    model = _QueueModel(
+    model = _RequiredToolQueueModel(
         _result(
             status="decision",
             decision={
@@ -647,7 +647,7 @@ async def test_decision_is_source_capability_and_author_lineage_bound() -> None:
 async def test_bare_decision_payload_requires_explicit_decision_source_refs() -> None:
 
     manifest = _manifest("media-token:1", "media-token:2")
-    model = _QueueModel(
+    model = _RequiredToolQueueModel(
         _result(
             status="decision",
             decision={
@@ -665,7 +665,7 @@ async def test_bare_decision_payload_requires_explicit_decision_source_refs() ->
 @pytest.mark.asyncio
 async def test_bare_decision_payload_without_attended_sources_stays_invalid() -> None:
     manifest = _manifest("media-token:1", "media-token:2")
-    model = _QueueModel(
+    model = _RequiredToolQueueModel(
         json.dumps(
             {
                 "status": "decision",
@@ -2858,7 +2858,7 @@ def test_structured_role_declares_every_builtin_capability_purpose_to_registry()
 @pytest.mark.asyncio
 async def test_media_no_op_is_an_explicit_character_decision_without_a_token() -> None:
     manifest = _manifest("media-token:1")
-    model = _QueueModel(
+    model = _RequiredToolQueueModel(
         _result(
             status="decision",
             decision={
@@ -2880,9 +2880,153 @@ async def test_media_no_op_is_an_explicit_character_decision_without_a_token() -
 
 
 @pytest.mark.asyncio
+async def test_media_selection_uses_required_tool_and_offered_candidate_enum() -> None:
+    manifest = _manifest("media-token:1", "media-token:2")
+    model = _RequiredToolQueueModel(
+        _result(
+            status="decision",
+            decision={
+                "source_refs": ["source:private_self"],
+                "payload": {
+                    "decision": "select",
+                    "selected_token": "media-token:2",
+                },
+            },
+        )
+    )
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-v4-flash")
+
+    result = await role.consider(
+        await _request(purpose="media_selection", capability_manifest=manifest)
+    )
+
+    assert result["decision"]["payload"]["selected_token"] == "media-token:2"
+    tools, tool_choice = model.tool_calls[0]
+    assert tools[0]["function"]["name"] == "character_role_media_selection_v1"
+    payload_schema = tools[0]["function"]["parameters"]["anyOf"][0]["properties"][
+        "decision"
+    ]["properties"]["payload"]
+    select_branch = next(
+        branch
+        for branch in payload_schema["anyOf"]
+        if branch["properties"]["decision"]["enum"] == ["select"]
+    )
+    assert select_branch["properties"]["selected_token"]["enum"] == [
+        "media-token:1",
+        "media-token:2",
+    ]
+    assert tool_choice == {
+        "type": "function",
+        "function": {"name": "character_role_media_selection_v1"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_media_selection_without_required_tool_support_fails_closed() -> None:
+    model = _QueueModel(
+        _result(
+            status="decision",
+            decision={
+                "source_refs": ["source:private_self"],
+                "payload": {"decision": "no_op"},
+            },
+        )
+    )
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-chat")
+
+    with pytest.raises(StructuredRoleResultError) as raised:
+        await role.consider(
+            await _request(
+                purpose="media_selection",
+                capability_manifest=_manifest("media-token:1"),
+            )
+        )
+
+    assert raised.value.code == "required_tool_choice_unsupported"
+    assert model.calls == []
+
+
+def test_media_selection_rejects_conflicting_candidate_token_views() -> None:
+    with pytest.raises(ValueError, match="token views disagree"):
+        StructuredRoleToolContracts().media_selection(
+            capability_payload={
+                "offered_tokens": ["media-token:offered"],
+                "candidates": [{"token": "media-token:candidate"}],
+            },
+            source_refs=("source:private_self",),
+            recall_allowed=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_media_selection_required_tool_reaches_deepseek_http_boundary() -> None:
+    captured: dict[str, object] = {}
+    raw_result = _result(
+        status="decision",
+        decision={
+            "source_refs": ["source:private_self"],
+            "payload": {"decision": "no_op"},
+        },
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "character_role_media_selection_v1",
+                                        "arguments": raw_result,
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    model = DeepSeekChatModel(
+        "key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await _ProductionStructuredCharacterRoleFaculty(
+            model=model,
+            model_id="deepseek-v4-flash",
+        ).consider(
+            await _request(
+                purpose="media_selection",
+                capability_manifest=_manifest("media-token:1"),
+            )
+        )
+    finally:
+        await model.aclose()
+
+    assert result["decision"]["payload"]["decision"] == "no_op"
+    assert "response_format" not in captured
+    assert captured["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "character_role_media_selection_v1"},
+    }
+    tools = captured["tools"]
+    assert isinstance(tools, list) and len(tools) == 1
+    assert tools[0]["function"]["name"] == "character_role_media_selection_v1"
+
+
+@pytest.mark.asyncio
 async def test_media_generic_silence_is_rejected_in_favor_of_explicit_no_op() -> None:
     role = StructuredCharacterRoleFaculty(
-        model=_QueueModel(_result(status="silent")),
+        model=_RequiredToolQueueModel(_result(status="silent")),
         model_id="deepseek-chat",
     )
 
@@ -2900,7 +3044,7 @@ async def test_media_generic_silence_is_rejected_in_favor_of_explicit_no_op() ->
 @pytest.mark.asyncio
 async def test_media_select_requires_the_selected_candidate_source_closure() -> None:
     manifest = _source_bound_media_manifest()
-    model = _QueueModel(
+    model = _RequiredToolQueueModel(
         _result(
             status="decision",
             decision={
@@ -2960,7 +3104,7 @@ async def test_experience_allows_private_transition_without_expression_script() 
 
 @pytest.mark.asyncio
 async def test_unoffered_token_is_a_precise_structural_failure() -> None:
-    model = _QueueModel(
+    model = _RequiredToolQueueModel(
         _result(
             status="decision",
             decision={
@@ -3046,7 +3190,11 @@ async def test_pure_capability_purposes_reject_domain_proposals(
         '"proposals": [{"proposal_type":"affect","source_refs":["source:private_self"]}]',
     )
     role = StructuredCharacterRoleFaculty(
-        model=_QueueModel(response),
+        model=(
+            _RequiredToolQueueModel(response)
+            if purpose == "media_selection"
+            else _QueueModel(response)
+        ),
         model_id="deepseek-chat",
     )
 
@@ -3296,7 +3444,7 @@ async def test_additional_purpose_contract_extends_structure_not_role_behavior()
 
 @pytest.mark.asyncio
 async def test_core_requested_correction_uses_same_author_and_names_exact_failure() -> None:
-    model = _QueueModel(
+    model = _RequiredToolQueueModel(
         _result(
             status="decision",
             decision={
@@ -3345,7 +3493,7 @@ async def test_core_requested_correction_uses_same_author_and_names_exact_failur
 
 @pytest.mark.asyncio
 async def test_character_interior_performs_same_author_structural_correction() -> None:
-    model = _QueueModel(
+    model = _RequiredToolQueueModel(
         _result(
             status="decision",
             decision={

@@ -434,6 +434,28 @@ class _ActivityLifecyclePayload(BaseModel):
         return self
 
 
+class _MediaSelectionPayload(BaseModel):
+    """Canonical role-authored media select/no-op payload.
+
+    Candidate tokens are specialized from the pinned media capability by the
+    transport compiler.  The model still owns whether to select a candidate
+    or explicitly decline the opportunity.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    decision: Literal["no_op", "select"]
+    selected_token: str | None = Field(default=None, min_length=1, max_length=512)
+
+    @model_validator(mode="after")
+    def choice_shape_is_closed(self) -> "_MediaSelectionPayload":
+        if self.decision == "no_op" and self.selected_token is not None:
+            raise ValueError("media no_op cannot carry a selected token")
+        if self.decision == "select" and not self.selected_token:
+            raise ValueError("media select requires a selected token")
+        return self
+
+
 def _validate_memory_retention_payload(
     payload: Mapping[str, object],
     _offered_tokens: frozenset[str],
@@ -1047,6 +1069,7 @@ class StructuredCharacterRoleFaculty:
         request: _InteriorRoleRequest,
     ) -> StructuredRoleToolContract | None:
         if request.purpose not in {
+            "media_selection",
             "proactive_contact",
             "world_stimulus_appraisal",
             "private_impression_reflection",
@@ -1072,6 +1095,12 @@ class StructuredCharacterRoleFaculty:
             )
         try:
             compiler = StructuredRoleToolContracts()
+            if request.purpose == "media_selection":
+                return compiler.media_selection(
+                    capability_payload=manifest.payload,
+                    source_refs=manifest.source_refs,
+                    recall_allowed=not request.recall_completed,
+                )
             if request.purpose == "proactive_contact":
                 return compiler.proactive_contact(
                     capability_payload=manifest.payload,

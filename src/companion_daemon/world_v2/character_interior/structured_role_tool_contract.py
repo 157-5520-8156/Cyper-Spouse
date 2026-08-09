@@ -18,6 +18,7 @@ from typing import Mapping
 from ..schema_core import canonicalize_json_value
 
 _CONTRACT_VERSION = "1"
+_MEDIA_SELECTION_TOOL_NAME = "character_role_media_selection_v1"
 _PROACTIVE_TOOL_NAME = "character_role_proactive_contact_v1"
 _WORLD_STIMULUS_TOOL_NAME = "character_role_world_stimulus_appraisal_v1"
 _PRIVATE_IMPRESSION_TOOL_NAME = "character_role_private_impression_reflection_v1"
@@ -562,6 +563,7 @@ class StructuredRoleToolContracts:
         from .structured_role import (
             _ActivityLifecyclePayload,
             _ExpressionReconsiderationPayload,
+            _MediaSelectionPayload,
             _MemoryRetentionPayload,
             _MemoryWithdrawalReviewPayload,
             _PrivateImpressionProposal,
@@ -577,6 +579,7 @@ class StructuredRoleToolContracts:
         _compiled_provider_schema(ExpressionDraft)
         _compiled_provider_schema(_ActivityLifecyclePayload)
         _compiled_provider_schema(_ExpressionReconsiderationPayload)
+        _compiled_provider_schema(_MediaSelectionPayload)
         _compiled_provider_schema(_MemoryRetentionPayload)
         _compiled_provider_schema(_MemoryWithdrawalReviewPayload)
         _compiled_provider_schema(_WorldStimulusAppraisalResult)
@@ -618,6 +621,21 @@ class StructuredRoleToolContracts:
             raise ValueError("proactive capability lacks expression capabilities")
         return self._cached_proactive_contact(
             _canonical_json(expression_capabilities),
+            recall_allowed,
+        )
+
+    def media_selection(
+        self,
+        *,
+        capability_payload: Mapping[str, object],
+        source_refs: tuple[str, ...] = (),
+        recall_allowed: bool,
+    ) -> StructuredRoleToolContract:
+        """Compile the role's select/no-op choice over media candidates."""
+
+        return self._cached_media_selection(
+            _canonical_json(capability_payload),
+            _canonical_json(source_refs),
             recall_allowed,
         )
 
@@ -758,6 +776,91 @@ class StructuredRoleToolContracts:
             _canonical_json(capability_payload),
             _canonical_json(source_refs),
             recall_allowed,
+        )
+
+    @staticmethod
+    @lru_cache(maxsize=32)
+    def _cached_media_selection(
+        capability_payload_json: str,
+        source_refs_json: str,
+        recall_allowed: bool,
+    ) -> StructuredRoleToolContract:
+        from .structured_role import _MediaSelectionPayload
+
+        capability_payload = json.loads(capability_payload_json)
+        if not isinstance(capability_payload, dict):
+            raise ValueError("media selection capability must be one object")
+        def _tokens(raw_items: object) -> list[str]:
+            if not isinstance(raw_items, list):
+                return []
+            return [
+                token
+                for item in raw_items
+                if isinstance(
+                    token := (
+                        item
+                        if isinstance(item, str)
+                        else item.get("token") if isinstance(item, dict) else None
+                    ),
+                    str,
+                )
+                and token
+            ]
+
+        offered_tokens = _tokens(capability_payload.get("offered_tokens"))
+        candidate_tokens = _tokens(capability_payload.get("candidates"))
+        if offered_tokens and candidate_tokens and set(offered_tokens) != set(candidate_tokens):
+            raise ValueError("media selection token views disagree")
+        offered = [*offered_tokens, *candidate_tokens]
+        if (
+            not offered
+            or any(not isinstance(item, str) or not item for item in offered)
+        ):
+            raise ValueError("media selection offered tokens are malformed")
+        offered = list(dict.fromkeys(offered))
+        source_refs = json.loads(source_refs_json)
+        if not isinstance(source_refs, list):
+            raise ValueError("media selection source refs are malformed")
+        payload_schema = _provider_schema(_MediaSelectionPayload)
+        properties = _required_object_properties(payload_schema)
+        selected = properties.get("selected_token")
+        if not isinstance(selected, dict):
+            raise ValueError("media selection selected-token schema is incomplete")
+        non_null_selected = _non_null_schema(selected, field_name="selected_token")
+        # Keep no_op minimal, matching the local materializer.  A provider
+        # must not send an explicit JSON null and rely on the host to decide
+        # what that means.
+        payload_schema["required"] = ["decision"]
+        payload_schema["anyOf"] = [
+            {
+                "properties": {"decision": {"enum": ["no_op"]}},
+                "required": ["decision"],
+                "not": {"required": ["selected_token"]},
+            },
+            {
+                "properties": {
+                    "decision": {"enum": ["select"]},
+                    "selected_token": {
+                        **deepcopy(non_null_selected),
+                        "enum": list(offered),
+                    },
+                },
+                "required": ["decision", "selected_token"],
+            },
+        ]
+        return _compile_generic_decision_contract(
+            purpose="media_selection",
+            tool_name=_MEDIA_SELECTION_TOOL_NAME,
+            payload_schema=payload_schema,
+            capability_identity=capability_payload,
+            source_refs=tuple(source_refs),
+            recall_allowed=recall_allowed,
+            description=(
+                "Return the complete source-bound media selection choice. The "
+                "character may select one offered media candidate or explicitly "
+                "choose no_op; the function constrains capability and transport "
+                "shape only and does not choose for the character."
+            ),
         )
 
     @staticmethod
