@@ -1637,3 +1637,25 @@ commit：hash
   同一独立 report-relative authority；生产构造函数默认启用 claim-free 审查，历史低层 fixture
   仍可显式 opt out。预算/报告相对路径/来源闭包相关回归为 `617 passed`；这只证明边界与预算契约，
   不把真实 provider 的首次成功率或延迟目标升级为资格。
+
+### 2026-08-09：private impression source-token 闭包与 provider-view 薄片
+
+- 旧 daemon 的历史日志以及当前可复现的 typed contract 轨迹都显示，private impression 模型容易把
+  长的 `source_ref`/`authority_event_ref` 原样带回，或把 appraisal、affect 等普通证据 token 当作要
+  被 consolidate/supersede 的 predecessor；本地随后才拒绝
+  `predecessor_refs ⊄ existing_impression_refs`。这不是角色应被宿主替换选择，而是 capability 运输把
+  不可执行的候选集合暴露给了 provider。
+- `private_impression_reflection` capability 现在额外派生
+  `existing_impression_short_tokens`。required-tool 的 `predecessor_refs` 枚举只来自该集合，
+  `source_refs` 仍可从完整的 offered short-token 集合中由角色选择；host 继续把 token 映射回完整
+  authority refs，并执行 anchor、来源闭包、CAS、接受与 effect-once。没有新增 silent/retain 默认或
+  第二语义作者。
+- 发给 provider 的 capability view 不再包含 `token_map`、`anchor_source_refs` 或完整 source/event
+  identity；反射材料只保留 `short_token`、source kind 和去身份化的语义值。完整 capsule 仍在 pinned
+  host manifest 中用于验证，capability payload hash/contract identity 仍进入 request identity。
+  因而这是减少无意义 echo 失败的 model-view 投影，不是删除来源证据或放宽来源边界。
+- 红测覆盖非法 predecessor token；绿测覆盖 production-like capability 派生、唯一 required tool、
+  DeepSeek-compatible HTTP body，以及 provider view 不泄露 authority refs。private-impression 与
+  structured-role 相关回归为 `123 passed`，ruff 与 `git diff --check` 通过。该数字是本地
+  typed/fixture evidence；真实 DeepSeek 首次成功率、QQ 回执、自由对聊质量和 24 小时 soak 仍为
+  `manual_only`/`qualification_incomplete`，正在运行的临时 soak 不能提前计入资格。

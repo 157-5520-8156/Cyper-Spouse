@@ -621,6 +621,11 @@ def _private_impression_capability(
     # derived deterministically from capsule source order, so proposal
     # identity is stable across retries and provider output ordering.
     short_tokens = [f"s{index}" for index in range(len(capsule.sources))]
+    existing_impression_short_tokens = [
+        token
+        for token, item in zip(short_tokens, capsule.sources, strict=True)
+        if item.source_kind == "existing_impression"
+    ]
     token_map = {
         token: item.source_ref
         for token, item in zip(short_tokens, capsule.sources, strict=True)
@@ -636,6 +641,12 @@ def _private_impression_capability(
             for index, item in enumerate(capsule.sources)
         ],
         "short_tokens": short_tokens,
+        # Predecessors are a narrower role-owned choice than the offered
+        # evidence set: only existing private impressions may be retired or
+        # consolidated.  Keep that distinction in the provider contract so a
+        # structurally valid tool call cannot select an appraisal/affect token
+        # and wait for the host to reject it later.
+        "existing_impression_short_tokens": existing_impression_short_tokens,
         "token_map": token_map,
         "anchor_source_refs": anchor_source_refs,
         "anchor_short_tokens": [

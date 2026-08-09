@@ -190,6 +190,7 @@ def _manifest(*tokens: str, kind: str = "media_selection") -> _InteriorCapabilit
             {
                 "short_tokens": list(tokens),
                 "anchor_short_tokens": list(tokens[:1]),
+                "existing_impression_short_tokens": list(tokens[1:]),
                 "expiry_conditions": [
                     "until_appraisal_contradicted",
                     "until_counter_evidence",
@@ -269,6 +270,7 @@ def _private_impression_manifest() -> _InteriorCapabilityManifest:
             "offered_tokens": ["s0", "s1", "s2"],
             "short_tokens": ["s0", "s1", "s2"],
             "anchor_short_tokens": ["s0"],
+            "existing_impression_short_tokens": ["s2"],
             "expiry_conditions": [
                 "until_appraisal_contradicted",
                 "until_counter_evidence",
@@ -1582,6 +1584,72 @@ async def test_private_impression_reflection_uses_one_versioned_forced_tool() ->
     assert tools[0]["function"]["name"] == "character_role_private_impression_reflection_v1"
 
 
+@pytest.mark.asyncio
+async def test_private_impression_provider_view_uses_tokens_not_authority_refs() -> None:
+    secret_source = "private-impression:secret-compiled-source"
+    secret_event = "event:secret-private-impression"
+    payload = {
+        "contract": "character-interior-private-impression-capability.1",
+        "reflection_capsule": {
+            "sources": [{"source_ref": secret_source, "authority_event_ref": secret_event}]
+        },
+        "reflection_sources": [
+            {
+                "source_ref": secret_source,
+                "authority_event_ref": secret_event,
+                "source_kind": "existing_impression",
+                "short_token": "s0",
+                "value_json": json.dumps(
+                    {
+                        "impression_id": "impression:secret",
+                        "reflection_summary": "A tentative meaning remains open.",
+                        "confidence_bp": 5100,
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+        ],
+        "short_tokens": ["s0"],
+        "existing_impression_short_tokens": ["s0"],
+        "anchor_short_tokens": ["s0"],
+        "token_map": {"s0": secret_source},
+        "anchor_source_refs": [secret_source],
+        "expiry_conditions": ["until_counter_evidence"],
+    }
+    payload_json = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    manifest = _InteriorCapabilityManifest(
+        capability_ref="capability:private-impression:provider-view",
+        capability_kind="private_impression_reflection",
+        payload_json=payload_json,
+        payload_hash="sha256:" + hashlib.sha256(payload_json.encode()).hexdigest(),
+        source_refs=("source:private_self",),
+    )
+    model = _RequiredToolQueueModel(_private_impression_result(status="transition"))
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-v4-flash")
+
+    await role.experience(
+        await _request(
+            phase="experience",
+            purpose="private_impression_reflection",
+            capability_manifest=manifest,
+        )
+    )
+
+    messages = model.calls[0][0]
+    provider_user_content = messages[1]["content"]
+    assert secret_source not in provider_user_content
+    assert secret_event not in provider_user_content
+    assert "impression:secret" not in provider_user_content
+    assert '"short_token":"s0"' in provider_user_content
+    assert "A tentative meaning remains open." in provider_user_content
+    assert '"token_map"' not in provider_user_content
+
+
 def test_private_impression_tool_schema_preserves_no_change_tokens_and_expiry() -> None:
     contract = StructuredRoleToolContracts().private_impression_reflection(
         capability_payload=_private_impression_manifest().payload,
@@ -1603,11 +1671,7 @@ def test_private_impression_tool_schema_preserves_no_change_tokens_and_expiry() 
     )
     proposal = transition["properties"]["proposals"]["items"]
     assert proposal["properties"]["source_refs"]["items"]["enum"] == ["s0", "s1", "s2"]
-    assert proposal["properties"]["predecessor_refs"]["items"]["enum"] == [
-        "s0",
-        "s1",
-        "s2",
-    ]
+    assert proposal["properties"]["predecessor_refs"]["items"]["enum"] == ["s2"]
     assert proposal["properties"]["expiry_condition"]["enum"] == [
         "until_appraisal_contradicted",
         "until_counter_evidence",
@@ -1620,6 +1684,24 @@ def test_private_impression_tool_schema_preserves_no_change_tokens_and_expiry() 
         if branch["properties"]["status"]["enum"] == ["no_change"]
     )
     assert no_change["properties"]["proposals"]["maxItems"] == 0
+
+
+def test_private_impression_tool_schema_rejects_nonexistent_predecessor_token() -> None:
+    contract = StructuredRoleToolContracts().private_impression_reflection(
+        capability_payload=_private_impression_manifest().payload,
+        recall_allowed=False,
+    )
+    parameters = contract.provider_tools[0]["function"]["parameters"]
+    invalid = json.loads(_private_impression_result(status="transition"))
+    invalid["proposals"][0].update(
+        {
+            "decision": "consolidate",
+            "predecessor_refs": ["s1"],
+            "source_refs": ["s0", "s1"],
+        }
+    )
+    errors = list(Draft202012Validator(parameters).iter_errors(invalid))
+    assert errors
 
 
 @pytest.mark.asyncio

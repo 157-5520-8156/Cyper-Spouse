@@ -89,6 +89,97 @@ def _hash_text(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+_PRIVATE_IMPRESSION_IDENTITY_KEYS = frozenset(
+    {
+        "source",
+        "sources",
+        "source_ref",
+        "source_refs",
+        "authority_event_ref",
+        "token_map",
+        "anchor_source_refs",
+        "id",
+        "ids",
+        "hash",
+        "hashes",
+    }
+)
+
+
+def _redact_private_impression_material(value: object) -> object:
+    """Keep reflection meaning while removing authority identities from prompts.
+
+    The complete capsule remains pinned in the host manifest and is still used
+    for token-to-ref materialization.  This projection is only the provider
+    view: long refs and event IDs are not useful semantic choices and asking a
+    model to echo them creates avoidable source-closure failures.
+    """
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _redact_private_impression_material(item)
+            for key, item in value.items()
+            if str(key).lower() not in _PRIVATE_IMPRESSION_IDENTITY_KEYS
+            and not str(key).lower().endswith(("_ref", "_refs", "_id", "_ids"))
+        }
+    if isinstance(value, list):
+        return [_redact_private_impression_material(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_private_impression_material(item) for item in value)
+    return value
+
+
+def _private_impression_provider_payload(
+    payload: Mapping[str, object],
+) -> dict[str, object]:
+    """Build the private-impression capability projection sent to the model."""
+
+    projected = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"reflection_capsule", "token_map", "anchor_source_refs"}
+    }
+    raw_sources = payload.get("reflection_sources")
+    if isinstance(raw_sources, list):
+        sources: list[dict[str, object]] = []
+        for raw_source in raw_sources:
+            if not isinstance(raw_source, Mapping):
+                continue
+            short_token = raw_source.get("short_token")
+            source_kind = raw_source.get("source_kind")
+            if not isinstance(short_token, str) or not isinstance(source_kind, str):
+                continue
+            source_view: dict[str, object] = {
+                "short_token": short_token,
+                "source_kind": source_kind,
+            }
+            value_json = raw_source.get("value_json")
+            if isinstance(value_json, str):
+                try:
+                    decoded_value = json.loads(value_json)
+                except json.JSONDecodeError:
+                    decoded_value = None
+                if decoded_value is not None:
+                    source_view["value"] = _redact_private_impression_material(
+                        decoded_value
+                    )
+            sources.append(source_view)
+        projected["reflection_sources"] = sources
+        projected["reflection_capsule"] = {
+            "source_count": len(sources),
+            "anchor_short_tokens": list(
+                payload.get("anchor_short_tokens", ())
+                if isinstance(payload.get("anchor_short_tokens"), list)
+                else ()
+            ),
+        }
+    projected["source_identity_policy"] = (
+        "Choose supplied short tokens. Full source and authority refs are host-bound "
+        "and must not be echoed by the character."
+    )
+    return projected
+
+
 class StructuredRoleResultError(_RoleResultContractError):
     """A model-authored result that violates the structural role contract."""
 
@@ -2290,12 +2381,15 @@ class StructuredCharacterRoleFaculty:
     ) -> dict[str, object]:
         if manifest is None:
             return {"availability": "unavailable"}
+        payload = dict(manifest.payload)
+        if manifest.capability_kind == "private_impression_reflection":
+            payload = _private_impression_provider_payload(payload)
         return {
             "availability": "available",
             "capability_ref": manifest.capability_ref,
             "capability_kind": manifest.capability_kind,
             "payload_hash": manifest.payload_hash,
-            "payload": dict(manifest.payload),
+            "payload": payload,
             "source_refs": list(manifest.source_refs),
         }
 
@@ -2377,7 +2471,7 @@ class StructuredCharacterRoleFaculty:
                 "decision": "retain|consolidate|supersede",
                 "predecessor_refs": (
                     "selected existing-impression short tokens from "
-                    "capability_manifest.payload.short_tokens"
+                    "capability_manifest.payload.existing_impression_short_tokens"
                 ),
                 "source_refs": (
                     "selected offered short tokens from "
@@ -2385,7 +2479,7 @@ class StructuredCharacterRoleFaculty:
                     "anchor_short_tokens entry must be included"
                 ),
                 "cross_field_rules": (
-                    "predecessor_refs are the exact offered short tokens, every "
+                    "predecessor_refs are existing-impression short tokens, every "
                     "predecessor must also be listed in source_refs, retain has no "
                     "predecessors, and consolidate/supersede has at least one"
                 ),

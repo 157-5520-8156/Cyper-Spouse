@@ -1245,6 +1245,9 @@ class StructuredRoleToolContracts:
             raise ValueError("private impression capability must be one object")
         short_tokens = capability_payload.get("short_tokens")
         anchor_short_tokens = capability_payload.get("anchor_short_tokens")
+        existing_impression_short_tokens = capability_payload.get(
+            "existing_impression_short_tokens"
+        )
         expiry_conditions = capability_payload.get("expiry_conditions")
         if (
             not isinstance(short_tokens, list)
@@ -1256,6 +1259,13 @@ class StructuredRoleToolContracts:
                 not isinstance(item, str) or item not in short_tokens
                 for item in anchor_short_tokens
             )
+            or not isinstance(existing_impression_short_tokens, list)
+            or any(
+                not isinstance(item, str) or item not in short_tokens
+                for item in existing_impression_short_tokens
+            )
+            or len(existing_impression_short_tokens)
+            != len(set(existing_impression_short_tokens))
             or not isinstance(expiry_conditions, list)
             or not expiry_conditions
             or any(not isinstance(item, str) or not item for item in expiry_conditions)
@@ -1275,7 +1285,12 @@ class StructuredRoleToolContracts:
             field = proposal_properties.get(field_name)
             if not isinstance(field, dict) or not isinstance(field.get("items"), dict):
                 raise ValueError(f"private impression {field_name} schema is incomplete")
-            field["items"] = {**deepcopy(field["items"]), "enum": list(short_tokens)}
+            allowed_tokens = (
+                existing_impression_short_tokens
+                if field_name == "predecessor_refs"
+                else short_tokens
+            )
+            field["items"] = {**deepcopy(field["items"]), "enum": list(allowed_tokens)}
         expiry_field = proposal_properties.get("expiry_condition")
         if not isinstance(expiry_field, dict):
             raise ValueError("private impression expiry schema is incomplete")
