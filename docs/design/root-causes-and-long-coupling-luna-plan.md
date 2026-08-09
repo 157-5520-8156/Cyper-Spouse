@@ -1521,3 +1521,13 @@ commit：hash
   `multi-call provider metering is partial` 诊断，需在 100 轮报告中按物理 provider usage 复核，不能用可见成功数替代。
   本采样只补充 stream 行为证据，不证明真实 QQ 回执、100 次首次成功率或 24 小时 soak；发布状态继续为
   `manual_only`/`qualification_incomplete`。
+
+### 2026-08-09：stream 批次的 console receipt 边界（不计入资格）
+
+- 另启动过一组临时 SQLite 的真实 stream 批次，完成 12 轮；每轮当下均为 `action_authorized`，且
+  `replay_matches_live=true`。但该入口是 console delivery，没有正式平台 receipt seam。
+- 后续 scheduler 在等待窗口结束后，将其中 4 个已 `provider_accepted` 的 Action 正确标为
+  `provider_accepted_without_terminal_receipt`/`unknown`。这证明回执缺失会被保守记录，并不证明模型或 stream
+  失败；批次随后主动停止，避免继续消耗成本和制造伪资格样本。
+- 该 12 轮只保留为 stream/冷重放/无回执边界证据，不计入真实 QQ 回执或 100 次首次成功率；正式资格必须经过
+  `WorldV2PlatformHost.receipt` 或真实 transport callback，并继续保持 `manual_only`/`qualification_incomplete`。
