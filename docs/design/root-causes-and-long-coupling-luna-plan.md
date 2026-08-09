@@ -1583,6 +1583,16 @@ commit：hash
   与审计/Deliberation 相关回归分别为 `77 passed`、`134 passed`，ruff/diff-check 通过。该证据补片仍不是真实
   DeepSeek/QQ/24 小时资格；发布状态不变。
 
+### 2026-08-09：Outcome source→opportunity identity 补片
+
+- `599c15d` 将 `outcome_selection` 的 `InteriorOpportunity.opportunity_ref` 从每次 provider `call_id` 派生的
+  临时值改为 `causal-opportunity.1`：actor、purpose、当前 `OutcomeObservation` source 和同一 source epoch
+  共同形成稳定身份。它只提供 lineage/重放诊断，不替角色选择 candidate，也不改变 Outcome acceptance authority。
+- Outcome recovery E2E 现在断言 `ModelResult` 中的 CharacterInterior lineage 与该 canonical opportunity 完全一致；
+  observation→CharacterInterior→OutcomeProposal→settlement→下一轮 Context 的回归及 Life/Activity 相关套件为
+  `16 passed`，ruff/diff-check 通过。跨多个 observation 的 merge/expiry/epoch 以及 Memory/Perception/NPC
+  producer 仍未声称统一完成，真实 provider/QQ/24 小时资格不受此补片升级。
+
 ### 2026-08-09：当前 HEAD 的回归与隔离 100 样本终态
 
 - 当前 HEAD `7c06b60` 之后的源码全量回归为 `4942 passed, 1 warning`；冻结离线场景完整套件、CharacterInterior
