@@ -6,7 +6,7 @@ import json
 from time import perf_counter_ns
 
 import httpx
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, ValidationError
 import pytest
 
 from companion_daemon.llm import DeepSeekChatModel
@@ -1043,6 +1043,219 @@ async def test_outcome_selection_required_tool_reaches_deepseek_http_boundary() 
     tools = captured["tools"]
     assert isinstance(tools, list) and len(tools) == 1
     assert tools[0]["function"]["name"] == "character_role_outcome_selection_v1"
+
+
+def _activity_lifecycle_result(
+    *,
+    decision: str = "select",
+    selected_token: str | None = "opening:second",
+) -> str:
+    payload: dict[str, object] = {"decision": decision}
+    if decision == "select":
+        payload["selected_token"] = selected_token
+    return _result(
+        status="decision",
+        decision={
+            "source_refs": ["source:private_self"],
+            "payload": payload,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_activity_lifecycle_choice_is_role_owned_and_capability_bound() -> None:
+    manifest = _manifest(
+        "opening:first",
+        "opening:second",
+        kind="activity_lifecycle_choice",
+    )
+    model = _RequiredToolQueueModel(
+        _activity_lifecycle_result(selected_token="opening:second")
+    )
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-v4-flash")
+
+    result = await role.consider(
+        await _request(
+            purpose="activity_lifecycle_choice",
+            capability_manifest=manifest,
+        )
+    )
+
+    assert result["decision"] == {
+        "contract": "character-interior-purpose-decision.1",
+        "purpose": "activity_lifecycle_choice",
+        "source_refs": ["source:private_self"],
+        "capability_ref": manifest.capability_ref,
+        "capability_payload_hash": manifest.payload_hash,
+        "payload": {
+            "contract": "character-interior-activity-lifecycle-choice.1",
+            "decision": "select",
+            "selected_token": "opening:second",
+        },
+    }
+    assert model.tool_calls[0][1] == {
+        "type": "function",
+        "function": {"name": "character_role_activity_lifecycle_choice_v1"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_activity_lifecycle_choice_preserves_role_owned_no_op() -> None:
+    manifest = _manifest("opening:first", kind="activity_lifecycle_choice")
+    model = _RequiredToolQueueModel(_activity_lifecycle_result(decision="no_op"))
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-v4-flash")
+
+    result = await role.consider(
+        await _request(
+            purpose="activity_lifecycle_choice",
+            capability_manifest=manifest,
+        )
+    )
+
+    assert result["decision"]["payload"] == {
+        "contract": "character-interior-activity-lifecycle-choice.1",
+        "decision": "no_op",
+    }
+
+
+def test_activity_lifecycle_choice_tool_schema_closes_tokens_and_no_op_shape() -> None:
+    contract = StructuredRoleToolContracts().activity_lifecycle_choice(
+        capability_payload=_manifest(
+            "opening:first",
+            "opening:second",
+            kind="activity_lifecycle_choice",
+        ).payload,
+        source_refs=("source:private_self",),
+        recall_allowed=False,
+    )
+    parameters = contract.provider_tools[0]["function"]["parameters"]
+    Draft202012Validator.check_schema(parameters)
+    assert len(parameters["anyOf"]) == 1
+    decision_branch = parameters["anyOf"][0]
+    payload = decision_branch["properties"]["decision"]["properties"]["payload"]
+    assert payload["properties"]["selected_token"]["anyOf"]
+    select_branch = next(
+        branch
+        for branch in payload["anyOf"]
+        if branch["properties"]["decision"]["enum"] == ["select"]
+    )
+    assert select_branch["properties"]["selected_token"]["enum"] == [
+        "opening:first",
+        "opening:second",
+    ]
+    Draft202012Validator(parameters).validate(
+        {
+            "status": "decision",
+            "summary": "I am not taking this opening today.",
+            "attended_source_refs": ["source:private_self"],
+            "decision": {
+                "source_refs": ["source:private_self"],
+                "payload": {"decision": "no_op"},
+            },
+            "recall_query": None,
+            "proposals": [],
+        }
+    )
+    with pytest.raises(ValidationError):
+        Draft202012Validator(parameters).validate(
+            {
+                "status": "decision",
+                "summary": "I choose an unavailable opening.",
+                "attended_source_refs": [],
+                "decision": {
+                    "source_refs": ["source:private_self"],
+                    "payload": {
+                        "decision": "select",
+                        "selected_token": "opening:not-offered",
+                    },
+                },
+                "recall_query": None,
+                "proposals": [],
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_activity_lifecycle_choice_required_tool_reaches_deepseek_http_boundary() -> None:
+    captured: dict[str, object] = {}
+    raw_result = _activity_lifecycle_result(selected_token="opening:second")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "character_role_activity_lifecycle_choice_v1",
+                                        "arguments": raw_result,
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    model = DeepSeekChatModel(
+        "key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await StructuredCharacterRoleFaculty(
+            model=model,
+            model_id="deepseek-v4-flash",
+        ).consider(
+            await _request(
+                purpose="activity_lifecycle_choice",
+                capability_manifest=_manifest(
+                    "opening:first",
+                    "opening:second",
+                    kind="activity_lifecycle_choice",
+                ),
+            )
+        )
+    finally:
+        await model.aclose()
+
+    assert result["decision"]["payload"]["selected_token"] == "opening:second"
+    assert "response_format" not in captured
+    assert captured["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "character_role_activity_lifecycle_choice_v1"},
+    }
+    tools = captured["tools"]
+    assert isinstance(tools, list) and len(tools) == 1
+    assert tools[0]["function"]["name"] == "character_role_activity_lifecycle_choice_v1"
+
+
+@pytest.mark.asyncio
+async def test_activity_lifecycle_choice_without_required_tool_support_fails_closed() -> None:
+    model = _QueueModel(_activity_lifecycle_result())
+    role = StructuredCharacterRoleFaculty(model=model, model_id="plain-json-only")
+
+    with pytest.raises(StructuredRoleResultError) as raised:
+        await role.consider(
+            await _request(
+                purpose="activity_lifecycle_choice",
+                capability_manifest=_manifest(
+                    "opening:first",
+                    kind="activity_lifecycle_choice",
+                ),
+            )
+        )
+
+    assert raised.value.code == "required_tool_choice_unsupported"
+    assert model.calls == []
 
 
 @pytest.mark.asyncio

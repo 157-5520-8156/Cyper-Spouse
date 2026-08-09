@@ -1264,3 +1264,20 @@ commit：hash
 - 这仍只是一个背景 purpose 的协议可靠性薄片，不代表 Life Development、Activity Lifecycle、Memory、Perception
   等其余模型调用全部迁移，也不代表真实 DeepSeek 首次成功率、流式碎片、QQ 回执、自由对聊或 24 小时 soak 已
   资格化。Matrix 继续为 `declaration_only`，发布状态保持 `manual_only`/`qualification_incomplete`。
+
+### 2026-08-09：activity lifecycle choice required-tool 薄片
+
+- `activity_lifecycle_choice` 现在使用版本化 required tool
+  `character_role_activity_lifecycle_choice_v1`。参数由 `_ActivityLifecyclePayload`、`_WireDecision` 与
+  `_WireRoleResult` 的 canonical typed schema 派生；当前 activity catalog 提供的 `offered_tokens` 被
+  capability 专门化为唯一可选枚举，角色仍自行决定 `select` 某个 opening 或明确 `no_op`。
+- `no_op` 保持生产物化器的最小形状 `{"decision":"no_op"}`，不会把 `selected_token: null` 当作另一种隐含语义；
+  `select` 必须携带一个当前 capability 的 token。wake source refs、capability hash、tool/schema/contract
+  identity 仍绑定到 CharacterInterior request，系统只负责 catalog、权限、CAS、接受和 effect-once。
+- 声明支持 required tool 的 provider 不再回落普通 JSON；能力缺失保持精确的
+  `required_tool_choice_unsupported` 技术失败。结构化角色、DeepSeek-compatible HTTP body、Life activity
+  runtime、QQ production composition 和 public-host activity/aftermath 场景均已迁移到同一工具边界。
+- 当前源码全量回归为 `4897 passed, 1 warning`。该数字只证明本地 typed/fixture/公开宿主链路，不证明真实
+  DeepSeek 首次成功率、QQ 回执、自由多轮对聊或 24 小时 soak；Matrix 仍为 `declaration_only`，生产发布继续
+  标记 `manual_only`/`qualification_incomplete`。scenario runner 的 activity 专用 fixture 与真实 provider
+  no-op HTTP 样本仍是后续证据补片，不在本次薄片中冒充已资格化。

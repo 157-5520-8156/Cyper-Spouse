@@ -259,6 +259,25 @@ class _SupportingSourceReviewer:
 
 class _SelectFirstLifecycle:
     model = "test-production-select-lifecycle"
+    supports_required_tool_choice = True
+
+    async def complete_json(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.2,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> str:
+        assert tools and len(tools) == 1
+        assert tools[0]["function"]["name"] == (
+            "character_role_activity_lifecycle_choice_v1"
+        )
+        assert tool_choice == {
+            "type": "function",
+            "function": {"name": "character_role_activity_lifecycle_choice_v1"},
+        }
+        return await self.complete(messages, temperature=temperature)
 
     async def complete(
         self,

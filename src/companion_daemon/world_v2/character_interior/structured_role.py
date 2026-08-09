@@ -344,6 +344,23 @@ class _OutcomeSelectionPayload(BaseModel):
     character_life_direction: CharacterLifeDirectionDraft | None = None
 
 
+class _ActivityLifecyclePayload(BaseModel):
+    """Canonical role-authored activity opening choice payload."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    decision: Literal["no_op", "select"]
+    selected_token: str | None = None
+
+    @model_validator(mode="after")
+    def choice_shape_is_closed(self) -> "_ActivityLifecyclePayload":
+        if self.decision == "no_op" and self.selected_token is not None:
+            raise ValueError("activity no_op cannot carry a selected token")
+        if self.decision == "select" and not self.selected_token:
+            raise ValueError("activity select requires a selected token")
+        return self
+
+
 def _validate_memory_retention_payload(
     payload: Mapping[str, object],
     _offered_tokens: frozenset[str],
@@ -960,6 +977,7 @@ class StructuredCharacterRoleFaculty:
             "world_stimulus_appraisal",
             "private_impression_reflection",
             "outcome_selection",
+            "activity_lifecycle_choice",
         }:
             return None
         if not bool(getattr(self._model, "supports_required_tool_choice", False)):
@@ -988,6 +1006,12 @@ class StructuredCharacterRoleFaculty:
             if request.purpose == "private_impression_reflection":
                 return compiler.private_impression_reflection(
                     capability_payload=manifest.payload,
+                    recall_allowed=not request.recall_completed,
+                )
+            if request.purpose == "activity_lifecycle_choice":
+                return compiler.activity_lifecycle_choice(
+                    capability_payload=manifest.payload,
+                    source_refs=manifest.source_refs,
                     recall_allowed=not request.recall_completed,
                 )
             return compiler.outcome_selection(
