@@ -261,7 +261,7 @@ class ScenarioVerificationError(AssertionError):
 # .53 hash was stale (the per-case verification predicates and replay checks
 # still pass, but the aggregate request/room/replay manifest moved), so this
 # is an explicit audited rebaseline rather than weakening the drift guard.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.59"
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.60"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
@@ -327,8 +327,13 @@ FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.59"
 # now use the canonical source→opportunity identity.  These are lineage-only
 # changes: the frozen event/action/replay predicates remain unchanged, while
 # durable audit rows (and therefore the aggregate manifest) move again.
+# 2026-08-10: the NPC world-impact fixture now replays the focused actor capsule
+# and neutral shared-history projection.  The complete before/after row audit
+# changed only that fixture's replay hash; its output, events, actions, trigger
+# kinds, model-call counts, restart evidence, and verification predicates are
+# byte-identical.  Keep the aggregate drift guard and bind the audited replay.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "8d20d11b429b5a5bc9167072ed371740a430f15733aa425b63ae6e70c385b80d"
+    "902abb32309f90a24f88232a848eec82847c2a17935c47e2d9dc223f8e7223f2"
 )
 
 
