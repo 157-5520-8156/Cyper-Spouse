@@ -83,6 +83,7 @@ class CausalOpportunitySource(FrozenModel):
     source_ref: str = Field(min_length=1)
     process_ref: str = Field(min_length=1)
     process_kind: str = Field(min_length=1)
+    causal_key: str = Field(min_length=1)
     logical_time: datetime
     policy: CausalOpportunityPolicy
 
@@ -129,6 +130,7 @@ class CausalOpportunityRuntime:
             for candidate in remaining:
                 if (
                     candidate.process_kind == anchor.process_kind
+                    and candidate.causal_key == anchor.causal_key
                     and candidate.policy.policy_ref == anchor.policy.policy_ref
                     and abs(
                         (candidate.logical_time - anchor.logical_time).total_seconds()

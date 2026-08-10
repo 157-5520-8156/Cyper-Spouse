@@ -637,6 +637,7 @@ class _PrivateImpressionLocatedSource:
             source_ref=self.source_event.event_id,
             process_ref=self.process.trigger_id,
             process_kind=self.process.process_kind,
+            causal_key=self.source_event.correlation_id,
             logical_time=self.source_event.logical_time,
             policy=self.policy,
         )
@@ -931,6 +932,7 @@ class PrivateImpressionTriggerRuntime:
                     source_ref=source_event_item.event_id,
                     process_ref=process_item.trigger_id,
                     process_kind=process_item.process_kind,
+                    causal_key=source_event_item.correlation_id,
                     logical_time=source_event_item.logical_time,
                     policy=policy,
                 )

@@ -148,6 +148,7 @@ def test_shared_causal_opportunity_runtime_routes_sources_deterministically() ->
             source_ref="source:c",
             process_ref="trigger:c",
             process_kind="world_stimulus",
+            causal_key="correlation:shared",
             logical_time=NOW + timedelta(seconds=480),
             policy=policy,
         ),
@@ -155,6 +156,7 @@ def test_shared_causal_opportunity_runtime_routes_sources_deterministically() ->
             source_ref="source:a",
             process_ref="trigger:a",
             process_kind="world_stimulus",
+            causal_key="correlation:shared",
             logical_time=NOW,
             policy=policy,
         ),
@@ -162,6 +164,7 @@ def test_shared_causal_opportunity_runtime_routes_sources_deterministically() ->
             source_ref="source:b",
             process_ref="trigger:b",
             process_kind="world_stimulus",
+            causal_key="correlation:shared",
             logical_time=NOW + timedelta(seconds=240),
             policy=policy,
         ),
@@ -178,6 +181,33 @@ def test_shared_causal_opportunity_runtime_routes_sources_deterministically() ->
     assert identity.purpose == "world_stimulus_appraisal"
     assert not runtime.is_expired(groups[0], at=NOW + timedelta(seconds=899))
     assert runtime.is_expired(groups[0], at=NOW + timedelta(seconds=900))
+
+
+def test_causal_opportunity_does_not_merge_independent_correlations_in_one_window() -> None:
+    policy = CausalOpportunityPolicy(merge_window_seconds=300, expiry_seconds=900)
+    runtime = CausalOpportunityRuntime(
+        world_id=WORLD_ID,
+        actor_ref="actor:companion",
+        purpose="world_stimulus_appraisal",
+    )
+    sources = tuple(
+        CausalOpportunitySource(
+            source_ref=f"source:{index}",
+            process_ref=f"trigger:{index}",
+            process_kind="world_stimulus",
+            causal_key=f"correlation:{index}",
+            logical_time=NOW + timedelta(seconds=index * 30),
+            policy=policy,
+        )
+        for index in range(2)
+    )
+
+    groups = runtime.group_sources(sources)
+
+    assert tuple(tuple(item.source_ref for item in group) for group in groups) == (
+        ("source:0",),
+        ("source:1",),
+    )
 
 
 def test_causal_opportunity_window_expiry_is_explicit_and_clock_only_is_not_an_epoch() -> None:

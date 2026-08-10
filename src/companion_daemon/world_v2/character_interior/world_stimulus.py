@@ -316,6 +316,7 @@ class _WorldStimulusLocatedSource:
             source_ref=self.source_event.event_id,
             process_ref=self.process.trigger_id,
             process_kind=self.process.process_kind,
+            causal_key=self.source_event.correlation_id,
             logical_time=self.source_event.logical_time,
             policy=self.policy,
         )
@@ -1941,6 +1942,7 @@ class CharacterInteriorWorldStimulusRuntime:
                     source_ref=event.event_id,
                     process_ref=event.event_id,
                     process_kind="world_stimulus",
+                    causal_key=event.correlation_id,
                     logical_time=event.logical_time,
                     policy=policy,
                 )
