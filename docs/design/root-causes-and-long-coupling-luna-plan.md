@@ -1808,7 +1808,8 @@ commit：hash
   ingress/burst/interruption/restart 请求全部 HTTP 200，4 个角色选择形成完整 Proposal→Action→provider-accepted
   receipt，最终 5 个 Action；三条 burst 保留全部 source 并合并为一个 Action，重复 source 在重启后 6ms 返回且
   model/effect 均不重复，cold replay 与 live head 一致。普通可见终态约 `8.9–10.5s`；这仍明显高于首 Beat
-  `<=2s` 目标，主要剩余时间在独立 source review，而不是 Provider TTFT。
+  `<=2s` 目标。本次四个 accepted candidate 均未声明需要 source review 的外部事实，因此不能把全部延迟归因于
+  reviewer；Provider 首 token、完整 tool call、本地验收/持久化与按需 source review 仍需逐阶段继续压缩和量化。
 - 该验收最终退出码仍为 `2`，确定性失败码为 `causal.inner_life_snapshot_not_correlated`。报告证明 5 次
   provider request 看到了 canonical Inner Life Snapshot，durable 侧也有 4 条完整 accepted chain；失败发生在
   acceptance harness 反向重建 forced-tool request hash 时无法与 durable `ModelResult.request_hash` 相等。
