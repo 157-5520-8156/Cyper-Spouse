@@ -1767,3 +1767,54 @@ commit：hash
 - 分层测试的实测基线为：Character tier 627 tests 约 33 秒，host tier 136 tests 约 205 秒，完整套件
   4950 tests 约 14 分 42 秒。日常改动使用 `uv run python scripts/test_fast.py --tier character` 或
   `--last-failed`；完整套件仍是提交门禁，因为 host/SQLite/冷重放测试不能安全地盲目并行化。
+
+### 2026-08-10：B/C/D/E 主线集成与真实交互复核（仍不升级资格）
+
+- Provider/QQ transport 薄片已把 source-review lane 健康选择、inventory 空结果、typing receipt、过期流丢弃、
+  correction lineage 与实测 RTT 预算接回同一入站链；技术失败不会再被记成角色沉默。另增加独立、平台署名的
+  `System Notice`：只有 durable 技术失败才发送固定系统提示，它不进入 Character Expression、World、Memory、
+  Relationship、Affect 或 shared history，并以 cooldown、receipt 与 restart effect-once 约束重复发送。
+- 真实流式消息轰炸定位出 DeepSeek 偶发在同一 tool event 中重复输出相同 `"type":"head"` 字段。旧增量解析会
+  立即将其当冲突并打开一次 correction，随后可能以 `authored_subcall_timeout` 终结。现在只折叠值完全相同的重复
+  JSON 成员；值冲突仍 fail-closed。三次独立临时库、每次六条 50ms burst 的复测均为
+  `action_authorized`，分别产生 `1/3/1` 个文本气泡，耗时 `10.258s/9.122s/11.373s`，live/replay 一致，
+  且未再打开 correction。
+- L4 已引入 canonical `CausalOpportunityRuntime`、merge/expiry/epoch/policy/restart lineage，并迁移当前明确 owner
+  的一批生产 consumer；主线额外要求 world-stimulus 合并必须共享 immutable event `correlation_id`，避免同一
+  时间窗内无关结果互相吞并。它仍不是 L4 全源迁移：media/attachment/perception、部分 fact/memory/life aftermath
+  callsite 与 pre-claim policy 证据尚未全部统一。
+- L11 本轮只接纳了安全的 actor-scoped NPC capsule、focused occurrence source closure 与 neutral shared-history
+  projection。现有基线没有可用的 NPC communication/opportunity producer，D ownership 内也没有第二真实
+  consumer，因此没有创建通信空壳、synthetic delivered receipt 或新增生产模型调用；L11 状态仍是
+  `audit_complete` / `implementation_blocked_by_missing_existing_producer_and_second_consumer`。
+- Media 保留 CharacterInterior `select/no_op` 作为唯一选择权威。隔离 E 证据通过显式 `OPENAI_PROXY_URL` 完成
+  一次真实 1536×1024 PNG render，render 约 `67.8s`，artifact/inspection/restart/effect-once/cold replay 闭合；
+  未发送真实 QQ。并发相同 idempotency key 已在本地锁内收敛为一次真实 render，诊断只保留 stage、异常类、
+  HTTP status、endpoint hostname、耗时与 hash，不保存 key/header/body/prompt/base64。
+- 反向业务核对的当前结论：连续入站、多气泡、burst 合并、打断、重启与明确技术提示已能在隔离真实 Provider
+  下形成用户可见结果，Affect/private-turn 接受链也产生了真实事件；但真实短跑里的 Life Ecology 仍近乎空白，
+  durable memory、关系变化、
+  proactive、NPC 与 media 尚未证明会以自然频率持续出现在用户对话中。因此当前版本是“核心聊天链可用、生活感
+  机制仍部分可见”，不是设计文档 L4–L13 全部完成。
+
+### 2026-08-10：最终本地门禁与隔离 Provider 失败证据
+
+- 修复后完整本地门禁为 `5027 passed, 1 warning`，耗时 `379.88s`；ruff、`git diff --check` 与
+  Delayed Trigger 静态声明 `28 mechanisms` 均通过。冻结 120 场景仅 `npc_world_impact.01` 的 replay hash 因
+  focused actor projection 改变；输出、事件、Action、trigger、模型调用、restart 和所有显式谓词均不变，故
+  基线显式升为 `.60` 并绑定 `902abb32309f90a24f88232a848eec82847c2a17935c47e2d9dc223f8e7223f2`。
+- 最终树隔离验收 `/tmp/girl-agent-final-acceptance-20260810.json` 使用临时 SQLite、两次 daemon 进程、
+  DeepSeek hash proxy、真实 source-review authorities 与 OneBot loopback；未触碰生产数据库或真实 QQ。7 个
+  ingress/burst/interruption/restart 请求全部 HTTP 200，4 个角色选择形成完整 Proposal→Action→provider-accepted
+  receipt，最终 5 个 Action；三条 burst 保留全部 source 并合并为一个 Action，重复 source 在重启后 6ms 返回且
+  model/effect 均不重复，cold replay 与 live head 一致。普通可见终态约 `8.9–10.5s`；这仍明显高于首 Beat
+  `<=2s` 目标，主要剩余时间在独立 source review，而不是 Provider TTFT。
+- 该验收最终退出码仍为 `2`，确定性失败码为 `causal.inner_life_snapshot_not_correlated`。报告证明 5 次
+  provider request 看到了 canonical Inner Life Snapshot，durable 侧也有 4 条完整 accepted chain；失败发生在
+  acceptance harness 反向重建 forced-tool request hash 时无法与 durable `ModelResult.request_hash` 相等。
+  不允许用 hash union、用户文本猜测或放宽 invariant 把它伪造为通过；需后续增加由真实 provider emission 到
+  durable lineage 的单一可验证 identity seam。
+- 发布状态继续为 `manual_only` / `qualification_incomplete`。未完成门包括：真实 QQ 用户体验与 terminal receipt、
+  100 次最终树 forced-tool/stream 样本、24 小时 wall-clock soak、上述 request identity 证据、稳定首 Beat 延迟、
+  L4 全源迁移、L11 producer/第二 consumer，以及 Life/Memory/Relationship/Proactive/NPC/Media 的自然可感知频率。
+  旧 production daemon 与生产数据库不得在 §20 人工门前自动重启、替换或迁移。
