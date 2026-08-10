@@ -3237,6 +3237,12 @@ class _InboundCharacterAuthor:
                 raise forced_transport_error
             value = _parse_combined(raw)
         except (TypeError, ValueError) as exc:
+            logger.warning(
+                "combined cognition envelope rejected before bounded correction "
+                "error_type=%s detail=%s",
+                type(exc).__name__,
+                str(exc)[:300],
+            )
             failed_key = _failed_cache_key(expression_request)
             self._failed_combined.add(failed_key)
             self._remember_failed_expression(

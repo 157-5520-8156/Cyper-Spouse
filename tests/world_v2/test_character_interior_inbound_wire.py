@@ -814,6 +814,37 @@ def test_fast_canonical_stream_rejects_duplicate_semantic_fields() -> None:
         _stream_first_expression(raw)
 
 
+def test_fast_canonical_stream_collapses_identical_transport_fields() -> None:
+    raw_prefix = (
+        '{"result_kind":"decision","protocol":"character-interior-events.1",'
+        '"appraisal_draft":{},"events":['
+        '{"type":"head","type":"head","timing_choice":"now",'
+        '"stance":"reply","brief_rationale":"chosen","world_claims":[],'
+        '"beat":{"modality":"text","text":"我在听。"}}'
+    )
+
+    first = _incremental_first_expression(raw_prefix, forced_tool=True)
+
+    assert first is not None
+    parsed = json.loads(first)
+    assert parsed["expression_draft"]["beats"] == [
+        {"modality": "text", "text": "我在听。"}
+    ]
+
+
+def test_fast_canonical_stream_rejects_conflicting_transport_fields() -> None:
+    raw_prefix = (
+        '{"result_kind":"decision","protocol":"character-interior-events.1",'
+        '"appraisal_draft":{},"events":['
+        '{"type":"head","type":"end","timing_choice":"now",'
+        '"stance":"reply","brief_rationale":"chosen","world_claims":[],'
+        '"beat":{"modality":"text","text":"这条不能授权。"}}'
+    )
+
+    with pytest.raises(ValueError, match="conflicting duplicated field: type"):
+        _incremental_first_expression(raw_prefix, forced_tool=True)
+
+
 def test_fast_canonical_stream_rejects_duplicate_fields_inside_first_beat() -> None:
     raw_prefix = (
         '{"timing_choice":"now","stance":"reply","brief_rationale":"chosen",'

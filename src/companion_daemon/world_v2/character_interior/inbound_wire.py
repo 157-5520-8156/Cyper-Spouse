@@ -7977,12 +7977,23 @@ def _canonical_stream_partition(
 
 
 def _unique_stream_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    """Reject last-key-wins ambiguity at every streamed JSON object depth."""
+    """Collapse identical transport repetition; reject semantic ambiguity.
+
+    Some OpenAI-compatible tool streams occasionally repeat a member with
+    the exact same JSON value across adjacent deltas.  Treating that byte-level
+    repetition as a new role choice needlessly opens the one corrective lane.
+    Conflicting duplicate values remain invalid: the host never applies
+    last-key-wins semantics to authored state.
+    """
 
     value: dict[str, object] = {}
     for key, item in pairs:
         if key in value:
-            raise ValueError(f"canonical expression stream duplicated field: {key}")
+            if value[key] == item:
+                continue
+            raise ValueError(
+                f"canonical expression stream conflicting duplicated field: {key}"
+            )
         value[key] = item
     return value
 
@@ -9004,6 +9015,12 @@ class _ExpressionDraftWire:
                         # object remains invalid, the complete raw bytes are
                         # handed to the bounded same-role correction path.
                         incremental_parse_error = exc
+                        logger.warning(
+                            "incremental character stream head rejected "
+                            "error_type=%s detail=%s",
+                            type(exc).__name__,
+                            str(exc)[:300],
+                        )
                         if not head_future.done():
                             # Release only an invalid, non-visible carrier so
                             # a provider that waits for the callback before

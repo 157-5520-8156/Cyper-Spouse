@@ -1690,6 +1690,51 @@ async def test_forced_stream_releases_head_before_later_tool_argument_frames() -
     assert tail.semantic_stream_part == "tail"
 
 
+class _RepeatedIdenticalFieldStreamingProvider(_ForcedStreamingCombinedProvider):
+    async def complete_json_stream_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        on_text_delta=None,  # type: ignore[no-untyped-def]
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> tuple[str, ModelUsageProvenance]:
+        del messages, temperature
+        self.calls.append((tools, tool_choice))
+        raw = json.dumps(
+            self.payload(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).replace('"type":"head"', '"type":"head","type":"head"', 1)
+        if on_text_delta is not None:
+            on_text_delta(raw)
+        return raw, _metered_usage(
+            ref="usage:repeated-identical-field-stream",
+            input_tokens=20,
+            output_tokens=10,
+        )
+
+
+@pytest.mark.asyncio
+async def test_forced_stream_identical_repeated_field_does_not_open_correction() -> None:
+    provider = _RepeatedIdenticalFieldStreamingProvider()
+    author = InboundCharacterAuthor(flash_model=provider)
+    request = _request(revision=3, call="call:repeated-field-stream")
+
+    head = await asyncio.wait_for(author.propose_stream_head(request), timeout=0.5)
+    tail = await asyncio.wait_for(
+        author.propose_stream_tail(
+            request.model_copy(update={"call_id": "call:repeated-field-tail"})
+        ),
+        timeout=0.5,
+    )
+
+    assert head.semantic_stream_part == "head"
+    assert tail.semantic_stream_part == "tail"
+    assert len(provider.calls) == 1
+
+
 class _PermutedForcedStreamingProvider(_ForcedStreamingCombinedProvider):
     def __init__(self, order: tuple[str, ...]) -> None:
         super().__init__()
