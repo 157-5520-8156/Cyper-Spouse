@@ -29,6 +29,8 @@ the preview lane fails closed downstream.
 
 from __future__ import annotations
 
+import asyncio
+from contextvars import ContextVar
 from datetime import datetime, UTC
 import hashlib
 import json
@@ -154,7 +156,7 @@ def sanitize_media_provider_error(
     if not isinstance(status_code, int):
         status_code = None
     retry_after = getattr(exception, "retry_after", None)
-    if not isinstance(retry_after, (int, float, str)):
+    if not isinstance(retry_after, (int, float)):
         retry_after = None
     return {
         "schema_version": "world-v2.media-provider-diagnostic.v1",
@@ -177,25 +179,24 @@ def sanitize_media_provider_error(
 
 
 class MediaProviderDiagnosticRecorder:
-    """Small in-process bridge from provider wrappers to durable transport."""
+    """Task-local bridge from provider wrappers to durable transport."""
 
     def __init__(self) -> None:
-        self._lock = RLock()
-        self._latest: dict[str, object] | None = None
+        self._latest: ContextVar[dict[str, object] | None] = ContextVar(
+            f"media_provider_diagnostic_{id(self)}", default=None
+        )
 
     def clear(self) -> None:
-        with self._lock:
-            self._latest = None
+        self._latest.set(None)
 
     def record(self, diagnostic: dict[str, object]) -> None:
-        with self._lock:
-            self._latest = dict(diagnostic)
+        self._latest.set(dict(diagnostic))
 
     def consume(self) -> dict[str, object] | None:
-        with self._lock:
-            value = dict(self._latest) if self._latest is not None else None
-            self._latest = None
-            return value
+        current = self._latest.get()
+        value = dict(current) if current is not None else None
+        self._latest.set(None)
+        return value
 
 
 class SQLiteDurableMediaProviderTransport:
@@ -226,6 +227,10 @@ class SQLiteDurableMediaProviderTransport:
         self._now = now or (lambda: datetime.now(UTC))
         self._diagnostic_recorder = diagnostic_recorder
         self._lock = RLock()
+        # Image provider calls are expensive and not transactionally
+        # cancellable. Serialize this low-volume lane so receipt lookup and
+        # provider dispatch form one in-process idempotency boundary.
+        self._send_lock = asyncio.Lock()
         self._database_write_lock = sqlite_write_lock(path)
         # Autocommit like every other sidecar on this file: an implicit open
         # transaction would pin the shared WAL checkpoint.
@@ -276,19 +281,20 @@ class SQLiteDurableMediaProviderTransport:
     async def send(
         self, request: MediaProviderDispatchRequest
     ) -> PlatformDispatchReceipt:
-        stored = self._stored_receipt(
-            idempotency_key=request.idempotency_key,
-            request_fingerprint=request.fingerprint,
-        )
-        if stored is not None:
-            return stored
-        if request.kind in {"media_render", "media_repair"}:
-            return await self._render(request)
-        if request.kind == "media_inspection":
-            return self._inspect(request)
-        raise ValueError(
-            "durable media provider transport does not dispatch this Action kind"
-        )
+        async with self._send_lock:
+            stored = self._stored_receipt(
+                idempotency_key=request.idempotency_key,
+                request_fingerprint=request.fingerprint,
+            )
+            if stored is not None:
+                return stored
+            if request.kind in {"media_render", "media_repair"}:
+                return await self._render(request)
+            if request.kind == "media_inspection":
+                return self._inspect(request)
+            raise ValueError(
+                "durable media provider transport does not dispatch this Action kind"
+            )
 
     async def lookup(
         self, *, idempotency_key: str, request_fingerprint: str

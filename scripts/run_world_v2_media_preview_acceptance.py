@@ -184,21 +184,25 @@ def _require_scratch_path(path: Path, scratch_root: Path) -> Path:
 def _qualification_fields(
     *, status: object, deterministic_selection_double: bool
 ) -> dict[str, object]:
-    """Derive qualification flags without allowing a failed phase to qualify."""
+    """Derive isolated evidence flags without crossing the manual release gate."""
 
+    isolated_complete = status == "isolated_acceptance_complete"
     if deterministic_selection_double:
         scope = "downstream_provider_stages_only"
-    elif status == "qualification_complete":
-        scope = "full_chain"
+    elif isolated_complete:
+        scope = "isolated_full_chain"
     else:
         scope = "character_selection_only"
-    complete = status == "qualification_complete" and not deterministic_selection_double
+    character_selection_qualified = isolated_complete and not deterministic_selection_double
     return {
         "status": status,
         "qualification_scope": scope,
-        "character_selection_qualified": complete,
+        "character_selection_qualified": character_selection_qualified,
         "deterministic_selection_double": deterministic_selection_double,
-        "qualification_complete": complete,
+        "isolated_acceptance_complete": isolated_complete,
+        "manual_only": True,
+        "qualification_incomplete": True,
+        "qualification_complete": False,
     }
 
 
@@ -618,7 +622,7 @@ async def _close_app(app: object | None) -> None:
     if errors:
         raise RuntimeError(
             "application close failed: "
-            + "; ".join(f"{type(error).__name__}: {error}" for error in errors)
+            + "; ".join(type(error).__name__ for error in errors)
         ) from errors[-1]
 
 
@@ -1158,12 +1162,12 @@ async def _probe_grant_rejection(
                 "label": label,
                 "fail_closed": True,
                 "exception": type(exc).__name__,
-                "reason": str(exc)[:300],
+                "reason_code": "acceptance_probe_rejected",
             }
         return {
             "label": label,
             "fail_closed": False,
-            "unexpected_result": str(result),
+            "unexpected_result_type": type(result).__name__,
         }
     finally:
         await _close_app(app)
@@ -1230,7 +1234,7 @@ def _expired_approval_probe(now: datetime) -> dict[str, object]:
         return {
             "fail_closed": True,
             "exception": type(exc).__name__,
-            "reason": str(exc)[:300],
+            "reason_code": "expired_approval_rejected",
         }
     return {"fail_closed": False, "reason": "expired approval was unexpectedly accepted"}
 
@@ -1671,7 +1675,7 @@ async def _run_phase(
                     fingerprint_probe = {
                         "fail_closed": True,
                         "exception": type(exc).__name__,
-                        "reason": str(exc)[:300],
+                        "reason_code": "fingerprint_conflict_rejected",
                     }
             report.update(
                 {
@@ -1822,7 +1826,7 @@ async def _run_phase(
                 fingerprint_probe = {
                     "fail_closed": True,
                     "exception": type(exc).__name__,
-                    "reason": str(exc)[:300],
+                    "reason_code": "fingerprint_conflict_rejected",
                 }
         report["fail_closed"]["different_fingerprint"] = fingerprint_probe
         report["fail_closed"]["expired_approval"] = _expired_approval_probe(now)
@@ -1937,8 +1941,11 @@ async def _run_phase(
             return report
         report.update(
             {
-                "status": "qualification_complete",
-                "qualification_complete": not deterministic_selection_double,
+                "status": "isolated_acceptance_complete",
+                "isolated_acceptance_complete": True,
+                "manual_only": True,
+                "qualification_incomplete": True,
+                "qualification_complete": False,
                 "character_selection_qualified": not deterministic_selection_double,
                 "no_op_is_failure": False,
             }
@@ -1954,6 +1961,10 @@ def _base_report(*, scratch_root: Path, settings: Settings) -> dict[str, object]
         "qualification_scope": "not_started",
         "character_selection_qualified": False,
         "deterministic_selection_double": False,
+        "isolated_acceptance_complete": False,
+        "manual_only": True,
+        "qualification_incomplete": True,
+        "qualification_complete": False,
         "scratch_root": str(scratch_root),
         "scratch_dbs": [],
         "report_path": str(scratch_root / "qualification-report.json"),
@@ -2053,7 +2064,10 @@ async def main() -> int:
             report["fail_closed"] = real_phase.get("fail_closed")
             report["usage_cost"] = real_phase.get("usage_cost")
             report["provider_failure_semantics"] = real_phase.get("provider_failure_semantics")
-            if real_phase.get("status") not in {"qualification_complete", "legal_character_no_op"}:
+            if real_phase.get("status") not in {
+                "isolated_acceptance_complete",
+                "legal_character_no_op",
+            }:
                 report["current_failure"] = real_phase.get("failure") or real_phase.get(
                     "failure_details"
                 )
@@ -2069,10 +2083,10 @@ async def main() -> int:
                     "capabilities_sha256": tool_contract.get("capabilities_sha256"),
                     "contract_sha256": tool_contract.get("contract_sha256"),
                 }
-            if real_phase.get("status") == "qualification_complete":
+            if real_phase.get("status") == "isolated_acceptance_complete":
                 report.update(
                     _qualification_fields(
-                        status="qualification_complete",
+                        status="isolated_acceptance_complete",
                         deterministic_selection_double=False,
                     )
                 )
@@ -2113,7 +2127,7 @@ async def main() -> int:
                     }
                 )
                 if downstream.get("status") not in {
-                    "qualification_complete",
+                    "isolated_acceptance_complete",
                     "legal_character_no_op",
                 }:
                     exit_code = 5
@@ -2142,7 +2156,7 @@ async def main() -> int:
                 "status": "harness_exception",
                 "failure": {
                     "type": type(exc).__name__,
-                    "reason": str(exc)[:500],
+                    "reason_code": "unhandled_harness_exception",
                 },
             }
         )
@@ -2153,7 +2167,10 @@ async def main() -> int:
         try:
             _write_json(report_path, report)
         except Exception as exc:
-            report["report_write_error"] = f"{type(exc).__name__}: {exc}"
+            report["report_write_error"] = {
+                "type": type(exc).__name__,
+                "reason_code": "report_write_failed",
+            }
         with _cwd(original_cwd):
             print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, default=str))
     return exit_code

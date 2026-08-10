@@ -93,6 +93,9 @@ def test_base_report_contains_git_sha_and_starts_unqualified(tmp_path: Path) -> 
     assert report["qualification_scope"] == "not_started"
     assert report["character_selection_qualified"] is False
     assert report["deterministic_selection_double"] is False
+    assert report["manual_only"] is True
+    assert report["qualification_incomplete"] is True
+    assert report["qualification_complete"] is False
 
 
 def test_failed_render_cannot_claim_qualification_complete() -> None:
@@ -102,7 +105,7 @@ def test_failed_render_cannot_claim_qualification_complete() -> None:
         status="preview_not_generated", deterministic_selection_double=False
     )
     downstream = harness._qualification_fields(
-        status="qualification_complete", deterministic_selection_double=True
+        status="isolated_acceptance_complete", deterministic_selection_double=True
     )
     assert failed["qualification_complete"] is False
     assert failed["qualification_scope"] == "character_selection_only"
@@ -110,6 +113,14 @@ def test_failed_render_cannot_claim_qualification_complete() -> None:
     assert downstream["qualification_complete"] is False
     assert downstream["qualification_scope"] == "downstream_provider_stages_only"
     assert downstream["deterministic_selection_double"] is True
+
+    isolated = harness._qualification_fields(
+        status="isolated_acceptance_complete", deterministic_selection_double=False
+    )
+    assert isolated["isolated_acceptance_complete"] is True
+    assert isolated["qualification_complete"] is False
+    assert isolated["manual_only"] is True
+    assert isolated["qualification_incomplete"] is True
 
 
 def test_real_selection_no_op_is_reported_as_no_op_not_select() -> None:

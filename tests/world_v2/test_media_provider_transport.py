@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -74,9 +75,44 @@ class _Renderer:
         )
 
 
+class _BlockingRenderer(_Renderer):
+    def __init__(self, *, image: Path) -> None:
+        super().__init__(image=image)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def render(self, plan):  # type: ignore[no-untyped-def]
+        self.started.set()
+        await self.release.wait()
+        return await super().render(plan)
+
+
 def _parse_plan_stub(payload):  # type: ignore[no-untyped-def]
     assert payload == json.loads(_PLAN_BODY)
     return object()
+
+
+@pytest.mark.asyncio
+async def test_provider_diagnostics_remain_bound_to_the_calling_task() -> None:
+    recorder = MediaProviderDiagnosticRecorder()
+    first_recorded = asyncio.Event()
+
+    async def first() -> dict[str, object] | None:
+        recorder.record({"stage": "image_generation"})
+        first_recorded.set()
+        await asyncio.sleep(0)
+        return recorder.consume()
+
+    async def second() -> dict[str, object] | None:
+        await first_recorded.wait()
+        recorder.record({"stage": "media_inspection"})
+        await asyncio.sleep(0)
+        return recorder.consume()
+
+    first_result, second_result = await asyncio.gather(first(), second())
+
+    assert first_result == {"stage": "image_generation"}
+    assert second_result == {"stage": "media_inspection"}
 
 
 @pytest.fixture()
@@ -163,6 +199,40 @@ async def test_render_then_inspection_replay_survive_restart(
     assert inspection.repairable is False
     assert media_provider_result_hash(inspection) == inspection_receipt.raw_payload_hash
     restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_idempotency_key_renders_exactly_once(
+    tmp_path: Path, image: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        event_media.MediaPlan, "from_payload", staticmethod(_parse_plan_stub)
+    )
+    renderer = _BlockingRenderer(image=image)
+    transport = SQLiteDurableMediaProviderTransport(
+        path=str(tmp_path / "transport-concurrent.sqlite"),
+        world_id="world:transport",
+        renderer=renderer,
+        now=lambda: NOW,
+    )
+    request = _request(
+        kind="media_render",
+        action_id="action:media-render:concurrent",
+        idempotency_key="media-render:plan:concurrent",
+        body=_PLAN_BODY,
+        content_type="application/vnd.world-v2.media-plan+json",
+    )
+
+    first = asyncio.create_task(transport.send(request))
+    await asyncio.wait_for(renderer.started.wait(), timeout=1)
+    second = asyncio.create_task(transport.send(request))
+    await asyncio.sleep(0)
+    renderer.release.set()
+    first_receipt, second_receipt = await asyncio.gather(first, second)
+
+    assert first_receipt == second_receipt
+    assert renderer.calls == 1
+    transport.close()
 
 
 @pytest.mark.asyncio
