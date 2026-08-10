@@ -50,6 +50,9 @@ FIXTURE = Path(__file__).with_name("fixtures") / "private_self_expression_target
         "hedge_cancelled",
         "hedge_lost",
         "budget_exhausted",
+        "completed",
+        "cancelled",
+        "unresolved",
     ),
 )
 def test_model_result_attempt_audit_accepts_every_recorded_projection_outcome(

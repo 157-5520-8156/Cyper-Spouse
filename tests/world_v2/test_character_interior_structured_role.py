@@ -1704,6 +1704,27 @@ def test_private_impression_tool_schema_rejects_nonexistent_predecessor_token() 
     assert errors
 
 
+@pytest.mark.parametrize("decision", ("consolidate", "supersede"))
+def test_private_impression_tool_schema_requires_a_predecessor_for_replacement(
+    decision: str,
+) -> None:
+    contract = StructuredRoleToolContracts().private_impression_reflection(
+        capability_payload=_private_impression_manifest().payload,
+        recall_allowed=False,
+    )
+    parameters = contract.provider_tools[0]["function"]["parameters"]
+    invalid = json.loads(_private_impression_result(status="transition"))
+    invalid["proposals"][0].update(
+        {
+            "decision": decision,
+            "predecessor_refs": [],
+            "source_refs": ["s0"],
+        }
+    )
+
+    assert list(Draft202012Validator(parameters).iter_errors(invalid))
+
+
 @pytest.mark.asyncio
 async def test_private_impression_required_tool_reaches_deepseek_http_boundary() -> None:
     captured: dict[str, object] = {}

@@ -1311,6 +1311,40 @@ class StructuredRoleToolContracts:
             "confidence_bp",
             "expiry_condition",
         ]
+        transition_shapes: list[dict[str, object]] = [
+            {
+                "properties": {
+                    "decision": {"type": "string", "enum": ["retain"]},
+                    "predecessor_refs": {"maxItems": 0},
+                },
+                "required": ["decision", "predecessor_refs"],
+            }
+        ]
+        if existing_impression_short_tokens:
+            transition_shapes.append(
+                {
+                    "properties": {
+                        "decision": {
+                            "type": "string",
+                            "enum": ["consolidate", "supersede"],
+                        },
+                        "predecessor_refs": {"minItems": 1},
+                        # JSON Schema cannot compare two arbitrary arrays item
+                        # by item. Requiring an existing-impression token in
+                        # both arrays closes the common one-predecessor wire;
+                        # the canonical Pydantic validator still enforces the
+                        # complete predecessor subset for every candidate.
+                        "source_refs": {
+                            "contains": {
+                                "enum": list(existing_impression_short_tokens),
+                            },
+                            "minContains": 1,
+                        },
+                    },
+                    "required": ["decision", "predecessor_refs", "source_refs"],
+                }
+            )
+        proposal_schema["anyOf"] = transition_shapes
 
         common = {
             key: deepcopy(role_properties[key])

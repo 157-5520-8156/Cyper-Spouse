@@ -358,6 +358,9 @@ class ModelResultAttemptAudit(FrozenModel):
             "hedge_cancelled",
             "hedge_lost",
             "budget_exhausted",
+            "completed",
+            "cancelled",
+            "unresolved",
         ]
         | None
     ) = None
