@@ -721,7 +721,7 @@ def test_v51_aspiration_head_hash_is_verified_then_cold_replayed_into_v52(
 
     migrated = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
     projection = migrated.project()
-    assert projection.reducer_bundle_version == "world-v2-reducers.52"
+    assert projection.reducer_bundle_version == "world-v2-reducers.53"
     assert projection == expected_v52
     assert migrated.rebuild() == projection
     migrated.close()

@@ -261,7 +261,7 @@ class ScenarioVerificationError(AssertionError):
 # .53 hash was stale (the per-case verification predicates and replay checks
 # still pass, but the aggregate request/room/replay manifest moved), so this
 # is an explicit audited rebaseline rather than weakening the drift guard.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.60"
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.61"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
@@ -332,8 +332,14 @@ FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.60"
 # changed only that fixture's replay hash; its output, events, actions, trigger
 # kinds, model-call counts, restart evidence, and verification predicates are
 # byte-identical.  Keep the aggregate drift guard and bind the audited replay.
+# 2026-08-11: reducer .53 adds the default-excluded role-owned media-request
+# coordinate plus its durable TriggerProcess authority.  The final bridge also
+# requires a correlated durable media terminal before completing that trigger.
+# The frozen suite has no media deployment or request, so every visible/event/
+# action predicate is unchanged; the authenticated reducer identity and
+# versioned contract material intentionally move the aggregate replay manifest.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "902abb32309f90a24f88232a848eec82847c2a17935c47e2d9dc223f8e7223f2"
+    "0c841ebe07e534b9c039fef1ec2b7fd06b8ca68e5015ab493ceec4d713a73e4e"
 )
 
 

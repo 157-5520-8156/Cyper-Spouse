@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field, model_validator
 
@@ -126,6 +126,9 @@ class ExpressionPlanAcceptanceManifest(FrozenModel):
     terminal_policy: str = Field(min_length=1, max_length=128)
     beats: tuple[ExpressionPlanBeatManifest, ...] = Field(min_length=1, max_length=32)
     response_expectation: ResponseExpectationAuthority | None = None
+    media_request: Literal["none", "consider_available_candidate"] = Field(
+        default="none", exclude_if=lambda value: value == "none"
+    )
     manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
@@ -199,6 +202,8 @@ def build_expression_plan_manifest(
             for item in material.beats
         ),
     }
+    if material.media_request != "none":
+        values["media_request"] = material.media_request
     values["manifest_hash"] = canonical_expression_plan_manifest_hash(values)
     return ExpressionPlanAcceptanceManifest.model_validate(values, strict=True)
 

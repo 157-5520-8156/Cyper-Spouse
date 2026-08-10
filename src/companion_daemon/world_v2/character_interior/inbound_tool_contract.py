@@ -194,6 +194,14 @@ def _capability_expression_schema(
     if not isinstance(modality, dict):
         raise ValueError("ExpressionDraft beat schema has no modality")
     modality["enum"] = list(capabilities.modalities)
+    media_request = properties.get("media_request")
+    if not isinstance(media_request, dict):
+        raise ValueError("ExpressionDraft canonical schema has no media_request")
+    media_request["enum"] = (
+        ["none", "consider_available_candidate"]
+        if capabilities.media_request_mode == "candidate_only"
+        else ["none"]
+    )
     def constrain_option_ids(field: object, option_ids: list[str]) -> None:
         if not isinstance(field, dict) or not option_ids:
             return

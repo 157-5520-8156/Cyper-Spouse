@@ -23,6 +23,7 @@ from companion_daemon.world_v2.character_interior.inbound_appraisal_wire import 
 from companion_daemon.world_v2.expression_draft import (
     ExpressionDraft,
     QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+    qq_expression_capabilities,
 )
 
 
@@ -67,6 +68,29 @@ def test_after_recall_contract_cannot_reopen_recall() -> None:
 
     with pytest.raises(ValueError, match="recall"):
         contract.unwrap(json.dumps({"result_kind": "recall", "recall_request": {}}))
+
+
+def test_media_enabled_inbound_contract_requires_an_explicit_role_owned_choice() -> None:
+    contract = InboundToolContracts().contract_for(
+        phase="initial",
+        capabilities=qq_expression_capabilities(
+            "napcat", media_request_available=True
+        ),
+        recall_allowed=False,
+    )
+    parameters = contract.provider_tools[0]["function"]["parameters"]
+    decision = next(
+        branch
+        for branch in parameters["anyOf"]
+        if branch["properties"]["result_kind"]["enum"] == ["decision"]
+    )
+    expression = decision["properties"]["expression_draft"]
+
+    assert "media_request" in expression["required"]
+    assert expression["properties"]["media_request"]["enum"] == [
+        "none",
+        "consider_available_candidate",
+    ]
 
 
 def test_stream_contract_preserves_append_only_expression_event_transport() -> None:

@@ -1463,6 +1463,35 @@ class QQC2CHost:
                     ),
                     outcome.status,
                 )
+            media_request_lookup = getattr(self._host, "media_request_for_actions", None)
+            media_advance = getattr(self._host, "drain_media_preview_once", None)
+            if (
+                (dispatch_ack_recorded or visible_reply_recorded)
+                and callable(media_request_lookup)
+                and callable(media_advance)
+                and await media_request_lookup(action_ids)
+            ):
+                try:
+                    media_result = await media_advance(
+                        trace_id=inbound.trace_id + ":media-request",
+                        correlation_id=batch.batch_id,
+                    )
+                    _LOG.info(
+                        "world v2 role-owned media wake batch=%s status=%s reason=%s",
+                        batch.batch_id,
+                        getattr(media_result, "status", "unknown"),
+                        getattr(media_result, "reason_code", None),
+                    )
+                except Exception as exc:
+                    # The text receipt is already durable.  A media-lane
+                    # technical failure stays separate and must never turn the
+                    # character's delivered expression into a failed ingress.
+                    _LOG.error(
+                        "world v2 role-owned media wake failed batch=%s error=%s",
+                        batch.batch_id,
+                        type(exc).__name__,
+                        exc_info=(type(exc), exc, exc.__traceback__),
+                    )
         notice_failure_code = (
             "reply_dispatch_terminal_failure"
             if dispatch_terminal_failure
@@ -2546,6 +2575,7 @@ def build_qq_c2c_host(
     expression_capabilities = qq_expression_capabilities(
         settings.qq_adapter,
         recorded_cadence_mode=getattr(settings, "world_v2_recorded_cadence_mode", "off"),
+        media_request_available=media_preview is not None,
     )
     interactive_turn_budget_policy = interactive_turn_budget_policy or InteractiveTurnBudgetPolicy()
     usage_store = WorldV2UsageStore(path=str(settings.database_path))

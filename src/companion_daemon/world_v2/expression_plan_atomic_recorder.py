@@ -83,7 +83,13 @@ class ExpressionPlanAtomicRecorder:
                 ))
         raw.append((
             "ExpressionPlanAccepted", "plan", material.plan_id,
-            ExpressionPlanAcceptedPayload(acceptance_id=acceptance_id, proposal_id=material.proposal_id, expression_change_id=material.expression_change_id, plan_id=material.plan_id).model_dump(mode="json"), True,
+            ExpressionPlanAcceptedPayload(
+                acceptance_id=acceptance_id,
+                proposal_id=material.proposal_id,
+                expression_change_id=material.expression_change_id,
+                plan_id=material.plan_id,
+                media_request=material.media_request,
+            ).model_dump(mode="json"), True,
         ))
         for item in material.beats:
             raw.extend((

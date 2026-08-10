@@ -2254,6 +2254,7 @@ def _validate_authorized_expression_plan_manifest_batch(
         or plan.proposal_id != manifest.proposal_id
         or plan.expression_change_id != manifest.expression_change_id
         or plan.plan_id != manifest.plan_id
+        or plan.media_request != manifest.media_request
     ):
         raise ValueError("expression_plan.plan_does_not_match_manifest")
     for offset, item in enumerate(manifest.beats):

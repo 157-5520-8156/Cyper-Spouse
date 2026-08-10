@@ -14,6 +14,9 @@ from companion_daemon.world_v2.expression_plan_acceptance import (
     derive_expression_plan_material,
 )
 from companion_daemon.world_v2.expression_plan_atomic_recorder import ExpressionPlanAtomicRecorder
+from companion_daemon.world_v2.expression_plan_manifest import (
+    canonical_expression_plan_manifest_hash,
+)
 from companion_daemon.world_v2.expression_payload_store import (
     InMemoryImmutableExpressionPayloadStore,
     SQLiteImmutableExpressionPayloadStore,
@@ -21,6 +24,7 @@ from companion_daemon.world_v2.expression_payload_store import (
     expression_payload_hash,
 )
 from companion_daemon.world_v2.ledger_payload_reader import LedgerAuthorizedPayloadReader
+from companion_daemon.world_v2.minimal_reply_events import ExpressionPlanAcceptedPayload
 from companion_daemon.world_v2.proposal_audit_schemas import ProposalAuditProjection, canonical_json
 from companion_daemon.world_v2.proposal_envelope import (
     CanonicalTypedPayload,
@@ -35,6 +39,7 @@ from companion_daemon.world_v2.schemas import (
     BudgetAccount,
     CommittedWorldEventRef,
     ProjectionCursor,
+    WorldEvent,
 )
 
 
@@ -503,6 +508,107 @@ def test_accepted_expression_plan_materializes_all_beats_actions_dependencies_an
     assert tuple(action.action_id for action in state.pending_actions) == tuple(
         item.action.action_id for item in material.beats
     )
+
+
+def test_role_owned_media_request_survives_acceptance_and_durable_plan_event() -> None:
+    proposal = _proposal()
+    change = proposal.proposed_changes[0]
+    payload = {**change.payload.value(), "media_request": "consider_available_candidate"}
+    change = change.model_copy(
+        update={
+            "payload": CanonicalTypedPayload.from_value(
+                payload_schema="expression_plan_transition.v1", value=payload
+            )
+        }
+    )
+    proposal = proposal.model_copy(update={"proposed_changes": (change,)})
+    audit = _audit().model_copy(
+        update={
+            "proposal_json": canonical_json(proposal.model_dump(mode="json")),
+            "proposal_hash": proposal.proposal_hash,
+        }
+    )
+    material = derive_expression_plan_material(
+        audit=audit,
+        cursor=ProjectionCursor(world_revision=4, deliberation_revision=2, ledger_sequence=7),
+        world_id=WORLD,
+        policy=_policy(),
+        account=BudgetAccount(
+            account_id="account:chat:1", category="chat", window_id="window:1", limit=1000
+        ),
+        logical_time=NOW,
+        created_at=NOW,
+        trace_id="trace:media-request",
+        correlation_id="correlation:media-request",
+    )
+
+    assert material.media_request == "consider_available_candidate"
+    issuer = AcceptedLedgerBatchIssuer()
+    handle = ExpressionPlanAtomicRecorder(batch_issuer=issuer).prepare_batch(
+        acceptance_id="acceptance:expression:media-request",
+        material=material,
+        actor="agent:companion",
+        source="test",
+    )
+    events, _ = issuer.verify(handle=handle, world_id=WORLD, expected_cursor=material.cursor)
+    acceptance = next(item for item in events if item.event_type == "AcceptanceRecorded")
+    assert acceptance.payload()["media_request"] == (
+        "consider_available_candidate"
+    )
+    plan_event = next(item for item in events if item.event_type == "ExpressionPlanAccepted")
+    payload = ExpressionPlanAcceptedPayload.model_validate_json(plan_event.payload_json)
+    assert payload.media_request == "consider_available_candidate"
+
+
+def test_acceptance_manifest_cannot_elevate_a_role_owned_media_request() -> None:
+    material = _material()
+    issuer = AcceptedLedgerBatchIssuer()
+    handle = ExpressionPlanAtomicRecorder(batch_issuer=issuer).prepare_batch(
+        acceptance_id="acceptance:expression:no-media",
+        material=material,
+        actor="agent:companion",
+        source="test",
+    )
+    events, _ = issuer.verify(handle=handle, world_id=WORLD, expected_cursor=material.cursor)
+    acceptance = next(item for item in events if item.event_type == "AcceptanceRecorded")
+    forged_payload = {
+        **acceptance.payload(),
+        "media_request": "consider_available_candidate",
+    }
+    forged_payload["manifest_hash"] = canonical_expression_plan_manifest_hash(
+        forged_payload
+    )
+    forged = WorldEvent.from_payload(
+        schema_version=acceptance.schema_version,
+        event_id="event:acceptance:forged-media-request",
+        event_type=acceptance.event_type,
+        world_id=acceptance.world_id,
+        logical_time=acceptance.logical_time,
+        created_at=acceptance.created_at,
+        actor=acceptance.actor,
+        source=acceptance.source,
+        trace_id=acceptance.trace_id,
+        causation_id=acceptance.causation_id,
+        correlation_id=acceptance.correlation_id,
+        idempotency_key="acceptance:forged-media-request",
+        payload=forged_payload,
+    )
+    state = ReducerState(
+        proposal_audits=(_audit(),),
+        committed_world_event_refs=tuple(
+            CommittedWorldEventRef(
+                event_id=f"event:prior:{index}",
+                event_type="WorldStarted",
+                world_revision=index + 1,
+                payload_hash="c" * 64,
+                logical_time=NOW,
+            )
+            for index in range(4)
+        ),
+    )
+
+    with pytest.raises(ValueError, match="manifest does not exactly bind proposal"):
+        reduce_event(state, forged)
 
 
 def test_sidecar_payloads_are_stored_outside_ledger_and_descriptor_authorized(tmp_path) -> None:

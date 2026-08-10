@@ -563,6 +563,7 @@ class TriggerProcess(FrozenModel):
         "expression_reconsideration",
         "media_continuation",
         "media_repair",
+        "media_request",
         "media_delivery_interaction",
         "external_result_deliberation",
         "life_ecology",
@@ -614,6 +615,7 @@ class TriggerProcess(FrozenModel):
                 "expression_reconsideration",
                 "media_continuation",
                 "media_repair",
+                "media_request",
                 "media_delivery_interaction",
                 "external_result_deliberation",
                 "life_ecology",
@@ -1179,6 +1181,9 @@ class ExpressionPlanManifestRef(FrozenModel):
     plan_id: str = Field(min_length=1)
     ordering_policy: str = Field(min_length=1, max_length=128)
     terminal_policy: str = Field(min_length=1, max_length=128)
+    media_request: Literal["none", "consider_available_candidate"] = Field(
+        default="none", exclude_if=lambda value: value == "none"
+    )
     beats: tuple[ExpressionPlanManifestBeatRef, ...] = Field(min_length=1, max_length=32)
     manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     acceptance_event_ref: str = Field(min_length=1)
@@ -5792,7 +5797,7 @@ from .external_perception_acceptance_manifest import (  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.52"
+    reducer_bundle_version: str = "world-v2-reducers.53"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)

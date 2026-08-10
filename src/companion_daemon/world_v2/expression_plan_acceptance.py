@@ -112,6 +112,7 @@ class ExpressionPlanAcceptanceMaterial(FrozenModel):
     recorded_cadence_mode: Literal["off", "shadow", "on"] = "off"
     recorded_draw_refs: tuple[str, ...] = ()
     response_expectation: ResponseExpectationAuthority | None = None
+    media_request: Literal["none", "consider_available_candidate"] = "none"
 
     @model_validator(mode="after")
     def material_is_closed(self) -> "ExpressionPlanAcceptanceMaterial":
@@ -430,6 +431,9 @@ def derive_expression_plan_material(
             not_before=logical_time + timedelta(seconds=expectation.wait_seconds),
             expires_at=logical_time + timedelta(seconds=expectation.expires_after_seconds),
         )
+    media_request = payload.get("media_request", "none")
+    if media_request not in {"none", "consider_available_candidate"}:
+        raise ExpressionPlanAcceptanceError("media_request_invalid")
     if cadence_mode == "on" and len(materialized) > 1:
         due = tuple(item.action.not_before for item in materialized)
         if due[0] is not None or any(item is None for item in due[1:]) or any(
@@ -457,6 +461,7 @@ def derive_expression_plan_material(
         recorded_cadence_mode=cadence_mode,
         recorded_draw_refs=draw_refs,
         response_expectation=response_expectation,
+        media_request=media_request,
     )
     _LOG.info(
         "expression plan materialized plan_id=%s beat_count=%d cadence=%s mode=%s",

@@ -181,6 +181,7 @@ from .media_preview_conductor import (
     MediaPreviewConductor,
     MediaPreviewConductorResult,
 )
+from .media_request_runtime import MediaRequestRuntime
 from .media_auto_delivery import (
     MediaAutoDeliveryComposition,
     MediaAutoDeliveryRunResult,
@@ -932,6 +933,14 @@ class WorldV2TurnApplication:
             )
             else None
         )
+        self._media_request_runtime = (
+            MediaRequestRuntime(
+                ledger=ledger,
+                conductor=self._media_preview_conductor,
+            )
+            if self._media_preview_conductor is not None
+            else None
+        )
         self._media_delivery = media_delivery
         self._media_auto_delivery = (
             MediaAutoDeliveryWorker(
@@ -987,6 +996,12 @@ class WorldV2TurnApplication:
         if not payload.content_type.startswith("text/"):
             return None
         return len(payload.body)
+
+    async def media_request_for_actions(self, action_ids: tuple[str, ...]) -> bool:
+        """Resolve the durable role-owned media wake bound to visible Actions."""
+        if self._media_request_runtime is None:
+            return False
+        return await self._media_request_runtime.request_for_actions(action_ids)
 
     async def inbound(
         self,
@@ -1802,6 +1817,19 @@ class WorldV2TurnApplication:
                 status="idle",
                 reason_code="media_preview.logical_time_unavailable",
             )
+        if self._media_request_runtime is not None:
+            request = await self._media_request_runtime.advance_once(
+                logical_time=logical_time,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+            )
+            if request.handled:
+                if request.preview is not None:
+                    return request.preview
+                return MediaPreviewConductorResult(
+                    status=("blocked" if request.status == "blocked" else "in_progress"),
+                    reason_code=request.reason_code,
+                )
         return await self._media_preview_conductor.advance_once(
             logical_time=logical_time,
             trace_id=trace_id,

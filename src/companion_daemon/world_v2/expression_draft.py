@@ -45,6 +45,7 @@ from .schema_core import FrozenModel
 
 
 ExpressionModality = Literal["text", "reaction", "sticker", "typing"]
+MediaRequestChoice = Literal["none", "consider_available_candidate"]
 TimingChoice = Literal["now", "later", "silent"]
 TurnPosture = Literal["yield", "continue", "interject", "supersede"]
 EXPRESSION_DELAY_MAX_SECONDS = 86_400
@@ -102,6 +103,7 @@ class ExpressionDraftCapabilities(FrozenModel):
     private_turn_state_mode: Literal["legacy_optional", "required"] = "legacy_optional"
     recorded_cadence_mode: Literal["off", "shadow", "on"] = "off"
     cadence_policy_version: Literal["expression-cadence.1"] = CADENCE_POLICY_VERSION
+    media_request_mode: Literal["unavailable", "candidate_only"] = "unavailable"
 
     @model_validator(mode="after")
     def option_sets_match_modalities(self) -> "ExpressionDraftCapabilities":
@@ -143,7 +145,10 @@ class ExpressionDraftCapabilities(FrozenModel):
             # bindings and therefore are not executable yet.
             "later_modalities": ("text",),
             "private_turn_state_mode": self.private_turn_state_mode,
+            "media_request_mode": self.media_request_mode,
         }
+        if self.media_request_mode == "candidate_only":
+            value["media_request_timing"] = "now_only"
         if self.recorded_cadence_mode != "off":
             value.update(
                 {
@@ -176,6 +181,8 @@ def required_authored_expression_fields(
         required.add("cadence")
     if require_turn_posture:
         required.add("turn_posture")
+    if capabilities.media_request_mode == "candidate_only":
+        required.add("media_request")
     return frozenset(required)
 
 
@@ -210,7 +217,10 @@ QQ_NAPCAT_EXPRESSION_CAPABILITIES = ExpressionDraftCapabilities(
 
 
 def qq_expression_capabilities(
-    adapter: str, *, recorded_cadence_mode: Literal["off", "shadow", "on"] = "off"
+    adapter: str,
+    *,
+    recorded_cadence_mode: Literal["off", "shadow", "on"] = "off",
+    media_request_available: bool = False,
 ) -> ExpressionDraftCapabilities:
     """Return only modalities proven by the configured QQ transport dialect."""
 
@@ -223,6 +233,9 @@ def qq_expression_capabilities(
         update={
             "recorded_cadence_mode": recorded_cadence_mode,
             "private_turn_state_mode": "required",
+            "media_request_mode": (
+                "candidate_only" if media_request_available else "unavailable"
+            ),
         }
     )
 
@@ -323,9 +336,16 @@ class ExpressionDraft(FrozenModel):
     response_expectation: ResponseExpectationDraft | None = None
     response_expectation_assessment: ResponseExpectationAssessmentDraft | None = None
     world_claims: tuple[WorldClaimDraft, ...] = Field(default=(), max_length=8)
+    # A role-owned request to wake the existing source-closed media-selection
+    # lane.  It is deliberately not a render instruction, delivery claim, or
+    # provider call: CharacterInterior still makes the later select/no-op
+    # decision over exact PhotoCandidate tokens.
+    media_request: MediaRequestChoice = "none"
 
     @model_validator(mode="after")
     def timing_and_visible_expression_are_orthogonal_but_complete(self) -> "ExpressionDraft":
+        if self.media_request != "none" and self.timing_choice != "now":
+            raise ValueError("media request requires an immediate expression")
         visible_content_seen = any(beat.modality != "typing" for beat in self.beats)
         if self.turn_posture == "interject" and self.timing_choice != "now":
             raise ValueError("interject posture requires an immediate expression")
@@ -376,6 +396,11 @@ def validate_expression_draft_capabilities(
 
     if len(draft.beats) > capabilities.max_beats:
         raise ValueError("expression draft exceeds the deployment beat limit")
+    if (
+        draft.media_request == "consider_available_candidate"
+        and capabilities.media_request_mode != "candidate_only"
+    ):
+        raise ValueError("media request is unavailable in this deployment")
     if draft.timing_choice == "later" and len(draft.beats) > capabilities.max_later_beats:
         raise ValueError("later expression exceeds the installed deferred-effect limit")
     if draft.timing_choice == "later" and any(item.modality != "text" for item in draft.beats):
@@ -2022,6 +2047,10 @@ def materialize_expression_draft(
     # set of TypedChange/ExpressionPlan/Beat/Intent identities for the same
     # model-selected visible effect.
     identity_draft.pop("private_turn_state", None)
+    if draft.media_request == "none":
+        # The unavailable/default media coordinate must not mint new proposal
+        # identities for otherwise identical historical text turns.
+        identity_draft.pop("media_request", None)
     if capabilities.recorded_cadence_mode == "off":
         identity_draft.pop("cadence", None)
     identity = _digest(
@@ -2184,6 +2213,11 @@ def materialize_expression_draft(
                     else None
                 ),
                 "world_claims": [item.model_dump(mode="json") for item in draft.world_claims],
+                **(
+                    {"media_request": draft.media_request}
+                    if draft.media_request != "none"
+                    else {}
+                ),
             },
         ),
     )

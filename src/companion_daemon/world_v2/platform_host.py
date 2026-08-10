@@ -258,6 +258,11 @@ class WorldV2PlatformHost:
 
         return await self._application.delivered_text_character_count(action_id)
 
+    async def media_request_for_actions(self, action_ids: tuple[str, ...]) -> bool:
+        """Return only the accepted role-owned media wake for these Actions."""
+
+        return await self._application.media_request_for_actions(action_ids)
+
     async def tick(self, tick: PlatformClockTick):
         """Advance logical time through the application-owned clock command."""
 

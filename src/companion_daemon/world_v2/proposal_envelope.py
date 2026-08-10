@@ -1189,6 +1189,11 @@ class ExpressionPlanPayload(FrozenModel):
     event_share_plan_claim_v2: EventSharePlanClaimBindingV2 | None = None
     proactive_source_plan_binding_v2: ProactiveExpressionPlanSourceBindingV2 | None = None
     world_claims: list[ExpressionPlanWorldClaim] = Field(default_factory=list, max_length=8)
+    # Omit the default from canonical proposal bytes so historical proposals
+    # retain their original proposal hash during cold replay.
+    media_request: Literal["none", "consider_available_candidate"] = Field(
+        default="none", exclude_if=lambda value: value == "none"
+    )
 
 
 class PhotoCandidatePayload(FrozenModel):

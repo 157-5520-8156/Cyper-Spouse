@@ -71,6 +71,11 @@ class ExpressionPlanAcceptedPayload(FrozenModel):
     proposal_id: str = Field(min_length=1, max_length=256)
     expression_change_id: str = Field(min_length=1, max_length=256)
     plan_id: str = Field(min_length=1, max_length=512)
+    # Keep the historical event bytes unchanged when no media wake was
+    # selected.  Non-default role intent remains explicit and durable.
+    media_request: Literal["none", "consider_available_candidate"] = Field(
+        default="none", exclude_if=lambda value: value == "none"
+    )
 
 
 class ExpressionBeatAuthorizedPayload(FrozenModel):

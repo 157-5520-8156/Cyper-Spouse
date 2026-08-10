@@ -147,6 +147,16 @@ def test_production_qq_capabilities_require_the_model_owned_private_state() -> N
     assert qq_expression_capabilities("text-only").private_turn_state_mode == "required"
 
 
+def test_qq_media_request_capability_is_enabled_only_by_a_real_deployment() -> None:
+    unavailable = qq_expression_capabilities("napcat")
+    available = qq_expression_capabilities("napcat", media_request_available=True)
+
+    assert unavailable.media_request_mode == "unavailable"
+    assert available.media_request_mode == "candidate_only"
+    assert available.prompt_value()["media_request_mode"] == "candidate_only"
+    assert available.prompt_value()["media_request_timing"] == "now_only"
+
+
 def test_private_turn_state_contract_does_not_license_invented_life_context() -> None:
     contract = expression_draft_shape_contract()
 

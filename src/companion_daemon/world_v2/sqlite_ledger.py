@@ -63,6 +63,7 @@ from .reducers import (
     REDUCER_BUNDLE_VERSION,
     V48_REDUCER_BUNDLE_VERSION,
     V50_REDUCER_BUNDLE_VERSION,
+    V51_REDUCER_BUNDLE_VERSION,
     ReducerState,
     RevisionClass,
     _expression_beat_semantic_dump,
@@ -3036,6 +3037,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.47",
                 V48_REDUCER_BUNDLE_VERSION,
                 V50_REDUCER_BUNDLE_VERSION,
+                V51_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -3060,6 +3062,7 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.47",
                     V48_REDUCER_BUNDLE_VERSION,
                     V50_REDUCER_BUNDLE_VERSION,
+                    V51_REDUCER_BUNDLE_VERSION,
                     PREVIOUS_REDUCER_BUNDLE_VERSION,
                 }:
                     canonical_legacy_state = json.dumps(
@@ -3389,6 +3392,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.47",
                 V48_REDUCER_BUNDLE_VERSION,
                 V50_REDUCER_BUNDLE_VERSION,
+                V51_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
             }:
                 state = ReducerState.model_validate_json(

@@ -656,6 +656,71 @@ async def test_qq_provider_ack_is_recorded_but_not_claimed_as_user_visible(
 
 
 @pytest.mark.asyncio
+async def test_delivered_role_owned_media_request_wakes_existing_media_conductor(
+    tmp_path: Path,
+) -> None:
+    clock = {"now": NOW}
+    media_wakes: list[tuple[str, str]] = []
+
+    class _MediaRequestHost:
+        async def inbound(self, _inbound):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                status="action_authorized",
+                authorized_action_ids=("action:media-request",),
+                scheduled_action_ids=(),
+            )
+
+        async def drain_action(self, action_id: str) -> ActionPumpResult:
+            return ActionPumpResult(
+                action_id=action_id,
+                action_kind="reply",
+                status="settled",
+                provider_status="delivered",
+            )
+
+        async def delivered_text_character_count(self, _action_id: str) -> int:
+            return 8
+
+        async def media_request_for_actions(self, action_ids: tuple[str, ...]) -> bool:
+            assert action_ids == ("action:media-request",)
+            return True
+
+        async def drain_media_preview_once(
+            self, *, trace_id: str, correlation_id: str
+        ) -> SimpleNamespace:
+            media_wakes.append((trace_id, correlation_id))
+            return SimpleNamespace(status="planned", reason_code=None)
+
+        def close(self) -> None:
+            return None
+
+    async def advance(seconds: float) -> None:
+        clock["now"] += timedelta(seconds=seconds)
+
+    host = QQC2CHost(
+        host=_MediaRequestHost(),  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(tmp_path / "media-request-wake.sqlite"),
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=advance,
+    )
+    try:
+        result = await host.inbound_text(
+            message_id="media-request-wake",
+            recipient_id="10001",
+            text="给我看看吧",
+            observed_at=NOW,
+        )
+    finally:
+        await host.aclose()
+
+    assert result.status == "action_authorized"
+    assert len(media_wakes) == 1
+    assert media_wakes[0][0].endswith(":media-request")
+
+
+@pytest.mark.asyncio
 async def test_qq_verified_scheduled_delivery_records_visibility_without_fake_latency(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

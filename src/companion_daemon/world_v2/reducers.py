@@ -566,8 +566,9 @@ _V47_REDUCER_BUNDLE_VERSION = "world-v2-reducers.47"
 V48_REDUCER_BUNDLE_VERSION = "world-v2-reducers.48"
 _V49_REDUCER_BUNDLE_VERSION = "world-v2-reducers.49"
 V50_REDUCER_BUNDLE_VERSION = "world-v2-reducers.50"
-PREVIOUS_REDUCER_BUNDLE_VERSION = "world-v2-reducers.51"
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.52"
+V51_REDUCER_BUNDLE_VERSION = "world-v2-reducers.51"
+PREVIOUS_REDUCER_BUNDLE_VERSION = "world-v2-reducers.52"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.53"
 _CONTEXTUAL_LIFE_SOURCE_EVENT_TYPES = frozenset(
     {
         "ObservationRecorded",
@@ -625,6 +626,7 @@ def _experience_semantic_dump(
         V48_REDUCER_BUNDLE_VERSION,
         _V49_REDUCER_BUNDLE_VERSION,
         V50_REDUCER_BUNDLE_VERSION,
+        V51_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     } and isinstance(experience, LegacyExperienceProjection):
@@ -653,6 +655,7 @@ def _actor_authority_transition_semantic_dump(
         V48_REDUCER_BUNDLE_VERSION,
         _V49_REDUCER_BUNDLE_VERSION,
         V50_REDUCER_BUNDLE_VERSION,
+        V51_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -681,6 +684,7 @@ def _life_arc_semantic_dump(
         V48_REDUCER_BUNDLE_VERSION,
         _V49_REDUCER_BUNDLE_VERSION,
         V50_REDUCER_BUNDLE_VERSION,
+        V51_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -702,7 +706,10 @@ def _aspiration_semantic_dump(
     """
 
     dumped = aspiration.model_dump(mode="json")
-    if reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+    if reducer_bundle_version not in {
+        PREVIOUS_REDUCER_BUNDLE_VERSION,
+        REDUCER_BUNDLE_VERSION,
+    }:
         for field in (
             "origin_kind",
             "tension_summary",
@@ -727,6 +734,7 @@ def _npc_semantic_dump(
     if reducer_bundle_version not in {
         # Promotion authority was introduced by .51, while .50 must retain
         # its pre-promotion projection bytes.
+        V51_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -743,6 +751,7 @@ def _npc_semantic_dump(
         V48_REDUCER_BUNDLE_VERSION,
         _V49_REDUCER_BUNDLE_VERSION,
         V50_REDUCER_BUNDLE_VERSION,
+        V51_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -771,6 +780,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         V48_REDUCER_BUNDLE_VERSION,
         _V49_REDUCER_BUNDLE_VERSION,
         V50_REDUCER_BUNDLE_VERSION,
+        V51_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -790,6 +800,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         V48_REDUCER_BUNDLE_VERSION,
         _V49_REDUCER_BUNDLE_VERSION,
         V50_REDUCER_BUNDLE_VERSION,
+        V51_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -802,6 +813,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         V48_REDUCER_BUNDLE_VERSION,
         _V49_REDUCER_BUNDLE_VERSION,
         V50_REDUCER_BUNDLE_VERSION,
+        V51_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -830,6 +842,7 @@ def _expression_plan_semantic_dump(
         V48_REDUCER_BUNDLE_VERSION,
         _V49_REDUCER_BUNDLE_VERSION,
         V50_REDUCER_BUNDLE_VERSION,
+        V51_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -859,6 +872,7 @@ def _expression_beat_semantic_dump(
         V48_REDUCER_BUNDLE_VERSION,
         _V49_REDUCER_BUNDLE_VERSION,
         V50_REDUCER_BUNDLE_VERSION,
+        V51_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -1653,6 +1667,7 @@ class ReducerState(FrozenModel):
             V48_REDUCER_BUNDLE_VERSION,
             _V49_REDUCER_BUNDLE_VERSION,
             V50_REDUCER_BUNDLE_VERSION,
+            V51_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
         }:
             # .33-.36 only add current-generation conditional fields. Their
@@ -1805,6 +1820,7 @@ class ReducerState(FrozenModel):
                                 V48_REDUCER_BUNDLE_VERSION,
                                 _V49_REDUCER_BUNDLE_VERSION,
                                 V50_REDUCER_BUNDLE_VERSION,
+                                V51_REDUCER_BUNDLE_VERSION,
                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                 REDUCER_BUNDLE_VERSION,
                             }
@@ -1892,6 +1908,7 @@ class ReducerState(FrozenModel):
                             if declared_reducer_bundle_version
                             in {
                                 V50_REDUCER_BUNDLE_VERSION,
+                                V51_REDUCER_BUNDLE_VERSION,
                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                 REDUCER_BUNDLE_VERSION,
                             }
@@ -1907,6 +1924,7 @@ class ReducerState(FrozenModel):
                                         V48_REDUCER_BUNDLE_VERSION,
                                         _V49_REDUCER_BUNDLE_VERSION,
                                         V50_REDUCER_BUNDLE_VERSION,
+                                        V51_REDUCER_BUNDLE_VERSION,
                                         PREVIOUS_REDUCER_BUNDLE_VERSION,
                                     }
                                     else {"settled_dynamic_life_direction_adopted": True}
@@ -1925,6 +1943,7 @@ class ReducerState(FrozenModel):
                                                 V48_REDUCER_BUNDLE_VERSION,
                                                 _V49_REDUCER_BUNDLE_VERSION,
                                                 V50_REDUCER_BUNDLE_VERSION,
+                                                V51_REDUCER_BUNDLE_VERSION,
                                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                             }
                                             else (
@@ -2039,6 +2058,7 @@ class ReducerState(FrozenModel):
             V48_REDUCER_BUNDLE_VERSION,
             _V49_REDUCER_BUNDLE_VERSION,
             V50_REDUCER_BUNDLE_VERSION,
+            V51_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -2070,6 +2090,7 @@ class ReducerState(FrozenModel):
                 V48_REDUCER_BUNDLE_VERSION,
                 _V49_REDUCER_BUNDLE_VERSION,
                 V50_REDUCER_BUNDLE_VERSION,
+                V51_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2098,6 +2119,7 @@ class ReducerState(FrozenModel):
             V48_REDUCER_BUNDLE_VERSION,
             _V49_REDUCER_BUNDLE_VERSION,
             V50_REDUCER_BUNDLE_VERSION,
+            V51_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -2125,6 +2147,7 @@ class ReducerState(FrozenModel):
                     V48_REDUCER_BUNDLE_VERSION,
                     _V49_REDUCER_BUNDLE_VERSION,
                     V50_REDUCER_BUNDLE_VERSION,
+                    V51_REDUCER_BUNDLE_VERSION,
                     PREVIOUS_REDUCER_BUNDLE_VERSION,
                     REDUCER_BUNDLE_VERSION,
                 }
@@ -2154,6 +2177,7 @@ class ReducerState(FrozenModel):
             V48_REDUCER_BUNDLE_VERSION,
             _V49_REDUCER_BUNDLE_VERSION,
             V50_REDUCER_BUNDLE_VERSION,
+            V51_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -2184,6 +2208,7 @@ class ReducerState(FrozenModel):
                 V48_REDUCER_BUNDLE_VERSION,
                 _V49_REDUCER_BUNDLE_VERSION,
                 V50_REDUCER_BUNDLE_VERSION,
+                V51_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2376,6 +2401,7 @@ class ReducerState(FrozenModel):
                 V48_REDUCER_BUNDLE_VERSION,
                 _V49_REDUCER_BUNDLE_VERSION,
                 V50_REDUCER_BUNDLE_VERSION,
+                V51_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2397,6 +2423,7 @@ class ReducerState(FrozenModel):
                 V48_REDUCER_BUNDLE_VERSION,
                 _V49_REDUCER_BUNDLE_VERSION,
                 V50_REDUCER_BUNDLE_VERSION,
+                V51_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -5448,6 +5475,7 @@ def _expression_plan_manifest_recorded(
         or payload.get("plan_id") != manifest.plan_id
         or payload.get("ordering_policy") != manifest.ordering_policy
         or payload.get("terminal_policy") != manifest.terminal_policy
+        or payload.get("media_request", "none") != manifest.media_request
         or payload.get("response_expectation")
         != (
             {
@@ -5560,6 +5588,7 @@ def _expression_plan_manifest_recorded(
                     plan_id=manifest.plan_id,
                     ordering_policy=manifest.ordering_policy,
                     terminal_policy=manifest.terminal_policy,
+                    media_request=manifest.media_request,
                     beats=tuple(refs),
                     manifest_hash=manifest.manifest_hash,
                     acceptance_event_ref=event.event_id,
@@ -6323,6 +6352,7 @@ def _expression_plan_accepted(state: ReducerState, event: WorldEvent) -> Reducer
             payload.proposal_id != generic.proposal_id
             or payload.expression_change_id != generic.expression_change_id
             or payload.plan_id != generic.plan_id
+            or payload.media_request != generic.media_request
             or any(item.plan_id == payload.plan_id for item in state.expression_plans)
             or (
                 {
@@ -6367,6 +6397,7 @@ def _expression_plan_accepted(state: ReducerState, event: WorldEvent) -> Reducer
         payload.proposal_id != manifest.proposal_id
         or payload.expression_change_id != manifest.expression_change_id
         or payload.plan_id != manifest.plan_id
+        or payload.media_request != "none"
         or any(item.plan_id == payload.plan_id for item in state.expression_plans)
     ):
         raise ValueError("minimal reply expression plan is not authorized")
@@ -9265,6 +9296,13 @@ def _trigger_process_completed(state: ReducerState, event: WorldEvent) -> Reduce
             "runtime_outcome_ref": event.payload().get("runtime_outcome_ref"),
         }
     )
+    if process.process_kind == "media_request" and completed.runtime_outcome_ref not in {
+        "media-request:planned",
+        "media-request:not_renderable",
+        "media-request:role_no_op",
+        "media-request:no_candidate",
+    }:
+        raise ValueError("media request completion has an invalid runtime outcome")
     if process.process_kind == "life_ecology":
         outcome_ref = completed.runtime_outcome_ref
         if not isinstance(outcome_ref, str) or not outcome_ref:
@@ -9892,6 +9930,7 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
         "relationship_adjustment",
         "outcome_deliberation",
         "expression_reconsideration",
+        "media_request",
         "life_ecology",
         "life_reflection",
         "memory_candidate_review",
@@ -9944,6 +9983,7 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
         "relationship_adjustment",
         "outcome_deliberation",
         "expression_reconsideration",
+        "media_request",
         "life_ecology",
         "life_reflection",
         "memory_candidate_review",
@@ -9968,6 +10008,51 @@ def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
         )
         if source is None or source.event_type != "ObservationRecorded":
             raise ValueError("social action trigger requires an exact observed message")
+    if process.process_kind == "media_request":
+        source = next(
+            (
+                item
+                for item in state.committed_world_event_refs
+                if item.event_id == process.source_evidence_ref
+            ),
+            None,
+        )
+        plan = next(
+            (
+                item
+                for item in state.expression_plans
+                if source is not None and item.event_ref == source.event_id
+            ),
+            None,
+        )
+        manifest = next(
+            (
+                item
+                for item in state.expression_plan_manifests
+                if plan is not None and item.acceptance_id == plan.acceptance_id
+            ),
+            None,
+        )
+        if (
+            source is None
+            or source.event_type != "ExpressionPlanAccepted"
+            or plan is None
+            or manifest is None
+            or manifest.media_request != "consider_available_candidate"
+        ):
+            raise ValueError("media request requires an exact accepted expression plan")
+        from .media_request_runtime import media_request_trigger_id
+
+        if (
+            process.trigger_id
+            != media_request_trigger_id(
+                world_id=event.world_id,
+                source_event_ref=source.event_id,
+                source_event_payload_hash=source.payload_hash,
+            )
+            or process.trigger_ref != f"media-request:{source.payload_hash}"
+        ):
+            raise ValueError("media request trigger identity is not deterministic")
     if process.process_kind == "memory_candidate_review":
         source = next(
             (

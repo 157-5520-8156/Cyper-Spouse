@@ -735,6 +735,9 @@ def expression_draft_shape_contract(*, include_world_claims: bool = True) -> str
         "brief_rationale are non-empty strings, brief_rationale in at most 120 characters; "
         "confidence is an integer from 0 through 10000, "
         "never a decimal fraction. "
+        "media_request is none or consider_available_candidate and must obey the supplied "
+        "expression_capabilities.media_request_mode; it is required when that mode is "
+        "candidate_only. A non-none media_request is executable only with timing_choice now. "
         "response_expectation, when chosen, uses hoped_response, pressure_bp, "
         "importance_bp, wait_seconds, and expires_after_seconds. "
         "response_expectation_assessment, when required by Context, uses status "
@@ -11130,6 +11133,20 @@ class _ExpressionDraftWire:
             + schema
             + " Use only the supplied expression_capabilities. Do not return host IDs, hashes, "
             "Actions, receipts, deliveries, consent, capabilities, or World mutations. "
+            "media_request is your own bounded choice, not a host inference from your wording. "
+            "When expression_capabilities.media_request_mode is unavailable, use none: no image "
+            "render or delivery can be started by this turn, so do not present one as underway or "
+            "guaranteed. When it is candidate_only, you may choose consider_available_candidate "
+            "only if you genuinely want the existing media lane to consider one already-open, "
+            "source-closed candidate. That choice is not a claim that a candidate exists or that "
+            "rendering or delivery succeeded; the later CharacterInterior media_selection choice, "
+            "privacy/grant/budget checks, provider result, and receipt remain authoritative. "
+            "Keep your visible wording consistent with that choice: choose "
+            "consider_available_candidate when you genuinely want the media lane to try now. "
+            "Even with that choice, do not claim that capture, rendering, or delivery has started "
+            "or will succeed; you may say only that you want to try or see whether a candidate is "
+            "available. If you choose none, do not imply any new image attempt. You may still "
+            "decline, defer, or discuss images without requesting one. "
             "Your present first-person feelings, thoughts, attention, desires, resistance, "
             "uncertainty, imagination, memory accessibility, self-evaluation, associations, "
             "conversational intention, and immediate retrospective continuity of those private "
@@ -11912,6 +11929,7 @@ _MINIMAL_REPLY_ACCOUNTED_EXPRESSION_FIELDS = frozenset(
         "response_expectation",
         "response_expectation_assessment",
         "world_claims",
+        "media_request",
     }
 )
 
@@ -11939,6 +11957,7 @@ def _is_lossless_minimal_reply_draft(draft: ExpressionDraft) -> bool:
         and draft.variation_profile is None
         and draft.response_expectation is None
         and not draft.world_claims
+        and draft.media_request == "none"
         and draft.stance in {"defer", "acknowledge_briefly", "answer_without_world_claims"}
     )
 
