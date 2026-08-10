@@ -30,11 +30,16 @@ the preview lane fails closed downstream.
 from __future__ import annotations
 
 from datetime import datetime, UTC
+import hashlib
 import json
 import logging
+import re
 import sqlite3
 from threading import RLock
 from typing import Callable
+from urllib.parse import urlsplit
+
+import httpx
 
 from .media_provider_results import (
     MediaProviderArtifactResult,
@@ -55,6 +60,142 @@ _LOG = logging.getLogger(__name__)
 _PLAN_CONTENT_TYPE = "application/vnd.world-v2.media-plan+json"
 _ARTIFACT_CONTENT_TYPE = "application/vnd.world-v2.media-artifact+json"
 _INSPECTION_CONTENT_TYPE = "application/vnd.world-v2.media-inspection+json"
+_SAFE_PROVIDER_CODE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,79}$")
+
+
+def _safe_label(value: object, *, limit: int = 120) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    value = value.strip()
+    if not value or any(ord(char) < 32 for char in value):
+        return None
+    return value[:limit]
+
+
+def _safe_endpoint_hostname(endpoint: object) -> str | None:
+    if not isinstance(endpoint, str) or not endpoint:
+        return None
+    try:
+        hostname = urlsplit(endpoint).hostname
+    except ValueError:
+        return None
+    return _safe_label(hostname, limit=253)
+
+
+def _timeout_class(exception: BaseException, cause: BaseException | None) -> str | None:
+    candidates = tuple(item for item in (cause, exception) if item is not None)
+    if any(isinstance(item, httpx.ConnectTimeout) for item in candidates):
+        return "connect"
+    if any(isinstance(item, httpx.ReadTimeout) for item in candidates):
+        return "read"
+    if any(isinstance(item, httpx.WriteTimeout) for item in candidates):
+        return "write"
+    if any(isinstance(item, httpx.PoolTimeout) for item in candidates):
+        return "pool"
+    if any(isinstance(item, httpx.TimeoutException) for item in candidates):
+        return "timeout"
+    detail = str(getattr(exception, "detail", ""))
+    for marker, category in (
+        ("ConnectTimeout", "connect"),
+        ("ReadTimeout", "read"),
+        ("WriteTimeout", "write"),
+        ("PoolTimeout", "pool"),
+        ("Timeout", "timeout"),
+    ):
+        if marker in detail or marker in type(exception).__name__:
+            return category
+    return None
+
+
+def _safe_provider_code(detail: object, secret_values: tuple[str, ...]) -> str | None:
+    if not isinstance(detail, str):
+        return None
+    candidate = detail.strip()
+    lowered = candidate.lower()
+    if any(secret and secret.lower() in lowered for secret in secret_values):
+        return None
+    if not _SAFE_PROVIDER_CODE.fullmatch(candidate):
+        return None
+    # Do not persist strings that are recognizably credential-like even when
+    # the caller did not pass the configured key to this seam.
+    if lowered.startswith(("sk-", "bearer-", "token-", "key-")):
+        return None
+    return candidate
+
+
+def sanitize_media_provider_error(
+    *,
+    stage: str,
+    exception: BaseException,
+    endpoint: object,
+    model: object,
+    proxy_configured: bool,
+    elapsed_ms: float,
+    secret_values: tuple[str, ...] = (),
+    timeout_seconds: float | None = None,
+) -> dict[str, object]:
+    """Convert a provider exception into a non-sensitive diagnostic record.
+
+    The legacy image/inspection adapters intentionally expose only a compact
+    ``ImageGenerationProviderError``.  Its chained ``httpx`` cause still
+    carries the useful timeout class, while the diagnostic sidecar records
+    endpoint/model/timing without retaining the exception message, request,
+    headers, prompt, response body, or image bytes.
+    """
+
+    cause = exception.__cause__ or exception.__context__
+    detail = getattr(exception, "detail", None)
+    response_hash = (
+        "sha256:" + hashlib.sha256(str(detail).encode("utf-8")).hexdigest()
+        if isinstance(detail, str) and detail
+        else None
+    )
+    status_code = getattr(exception, "status_code", None)
+    if not isinstance(status_code, int):
+        status_code = None
+    retry_after = getattr(exception, "retry_after", None)
+    if not isinstance(retry_after, (int, float, str)):
+        retry_after = None
+    return {
+        "schema_version": "world-v2.media-provider-diagnostic.v1",
+        "stage": _safe_label(stage, limit=80) or "unknown",
+        "exception_class": type(exception).__name__,
+        "cause_class": type(cause).__name__ if cause is not None else None,
+        "timeout_class": _timeout_class(exception, cause),
+        "http_status": status_code,
+        "provider": _safe_label(getattr(exception, "provider", None), limit=80),
+        "provider_error_type": _safe_label(getattr(exception, "kind", None), limit=80),
+        "provider_error_code": _safe_provider_code(detail, secret_values),
+        "endpoint_hostname": _safe_endpoint_hostname(endpoint),
+        "model": _safe_label(model, limit=160),
+        "proxy_configured": bool(proxy_configured),
+        "configured_timeout_seconds": timeout_seconds,
+        "elapsed_ms": round(max(0.0, float(elapsed_ms)), 1),
+        "retry_after": retry_after,
+        "response_hash": response_hash,
+    }
+
+
+class MediaProviderDiagnosticRecorder:
+    """Small in-process bridge from provider wrappers to durable transport."""
+
+    def __init__(self) -> None:
+        self._lock = RLock()
+        self._latest: dict[str, object] | None = None
+
+    def clear(self) -> None:
+        with self._lock:
+            self._latest = None
+
+    def record(self, diagnostic: dict[str, object]) -> None:
+        with self._lock:
+            self._latest = dict(diagnostic)
+
+    def consume(self) -> dict[str, object] | None:
+        with self._lock:
+            value = dict(self._latest) if self._latest is not None else None
+            self._latest = None
+            return value
 
 
 class SQLiteDurableMediaProviderTransport:
@@ -74,6 +215,7 @@ class SQLiteDurableMediaProviderTransport:
         world_id: str,
         renderer,  # companion_daemon.event_media.MediaRenderer (structural)
         now: Callable[[], datetime] | None = None,
+        diagnostic_recorder: MediaProviderDiagnosticRecorder | None = None,
     ) -> None:
         if not path or not world_id:
             raise ValueError("durable media provider transport needs path and world id")
@@ -82,6 +224,7 @@ class SQLiteDurableMediaProviderTransport:
         self._world_id = world_id
         self._renderer = renderer
         self._now = now or (lambda: datetime.now(UTC))
+        self._diagnostic_recorder = diagnostic_recorder
         self._lock = RLock()
         self._database_write_lock = sqlite_write_lock(path)
         # Autocommit like every other sidecar on this file: an implicit open
@@ -109,6 +252,16 @@ class SQLiteDurableMediaProviderTransport:
                     artifact_payload_ref TEXT NOT NULL,
                     inspection_json TEXT NOT NULL,
                     PRIMARY KEY (world_id, artifact_payload_ref)
+                )
+                """
+            )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS world_v2_media_provider_diagnostic (
+                    world_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    diagnostic_json TEXT NOT NULL,
+                    PRIMARY KEY (world_id, idempotency_key)
                 )
                 """
             )
@@ -143,6 +296,20 @@ class SQLiteDurableMediaProviderTransport:
         return self._stored_receipt(
             idempotency_key=idempotency_key, request_fingerprint=request_fingerprint
         )
+
+    def lookup_diagnostic(self, *, idempotency_key: str) -> dict[str, object] | None:
+        """Read the sanitized diagnostic bound to one durable provider attempt."""
+
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT diagnostic_json FROM world_v2_media_provider_diagnostic "
+                "WHERE world_id=? AND idempotency_key=?",
+                (self._world_id, idempotency_key),
+            ).fetchone()
+        if row is None:
+            return None
+        value = json.loads(str(row[0]))
+        return dict(value) if isinstance(value, dict) else None
 
     # -- MediaProviderResultTransport --------------------------------------
 
@@ -194,6 +361,8 @@ class SQLiteDurableMediaProviderTransport:
             plan = LegacyMediaPlan.from_payload(json.loads(request.body))
         except Exception:
             return self._persist_failure(request, error_class="invalid_frozen_plan")
+        if self._diagnostic_recorder is not None:
+            self._diagnostic_recorder.clear()
         try:
             rendered = await self._renderer.render(plan)
         except Exception as exc:  # provider/transport faults become terminal evidence
@@ -203,12 +372,19 @@ class SQLiteDurableMediaProviderTransport:
                 type(exc).__name__,
             )
             return self._persist_failure(
-                request, error_class=f"render_exception:{type(exc).__name__}"[:120]
+                request,
+                error_class=f"render_exception:{type(exc).__name__}"[:120],
+                diagnostic=self._consume_diagnostic(),
             )
         if isinstance(rendered, MediaRenderFailure):
             return self._persist_failure(
-                request, error_class=str(rendered.reason)[:120] or "render_failed"
+                request,
+                error_class=str(rendered.reason)[:120] or "render_failed",
+                diagnostic=self._consume_diagnostic(),
             )
+        # A transient failure may have been retried inside MediaRenderer and
+        # then recovered.  Do not carry that stale diagnostic into a success.
+        self._consume_diagnostic()
         import base64
 
         image_bytes = rendered.path.read_bytes()
@@ -316,7 +492,11 @@ class SQLiteDurableMediaProviderTransport:
     # -- durable rows ---------------------------------------------------------
 
     def _persist_failure(
-        self, request: MediaProviderDispatchRequest, *, error_class: str
+        self,
+        request: MediaProviderDispatchRequest,
+        *,
+        error_class: str,
+        diagnostic: dict[str, object] | None = None,
     ) -> PlatformDispatchReceipt:
         identity = media_digest(
             {"key": request.idempotency_key, "error": error_class, "fp": request.fingerprint}
@@ -331,7 +511,12 @@ class SQLiteDurableMediaProviderTransport:
             idempotency_key=request.idempotency_key,
             request_fingerprint=request.fingerprint,
         )
-        self._persist(request=request, receipt=receipt, result=None)
+        self._persist(
+            request=request,
+            receipt=receipt,
+            result=None,
+            diagnostic=diagnostic,
+        )
         return receipt
 
     def _persist(
@@ -341,6 +526,7 @@ class SQLiteDurableMediaProviderTransport:
         receipt: PlatformDispatchReceipt,
         result: MediaProviderExecutionResult | None,
         pending_inspection: tuple[str, dict[str, object]] | None = None,
+        diagnostic: dict[str, object] | None = None,
     ) -> None:
         with self._database_write_lock, self._lock:
             existing = self._connection.execute(
@@ -376,7 +562,27 @@ class SQLiteDurableMediaProviderTransport:
                         ),
                     ),
                 )
+            if diagnostic is not None:
+                self._connection.execute(
+                    "INSERT OR IGNORE INTO world_v2_media_provider_diagnostic "
+                    "(world_id, idempotency_key, diagnostic_json) VALUES (?, ?, ?)",
+                    (
+                        self._world_id,
+                        request.idempotency_key,
+                        json.dumps(
+                            diagnostic,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    ),
+                )
             self._connection.commit()
+
+    def _consume_diagnostic(self) -> dict[str, object] | None:
+        if self._diagnostic_recorder is None:
+            return None
+        return self._diagnostic_recorder.consume()
 
     def _stored_receipt(
         self, *, idempotency_key: str, request_fingerprint: str
@@ -396,4 +602,8 @@ class SQLiteDurableMediaProviderTransport:
         return PlatformDispatchReceipt.model_validate_json(str(row[1]))
 
 
-__all__ = ["SQLiteDurableMediaProviderTransport"]
+__all__ = [
+    "MediaProviderDiagnosticRecorder",
+    "SQLiteDurableMediaProviderTransport",
+    "sanitize_media_provider_error",
+]

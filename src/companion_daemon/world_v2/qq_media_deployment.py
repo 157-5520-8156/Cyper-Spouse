@@ -30,6 +30,7 @@ import json
 import logging
 from pathlib import Path
 import sqlite3
+import time
 
 import httpx
 
@@ -45,7 +46,11 @@ from .media_authority_provisioning import (
     MEDIA_RENDER_GRANT_ID,
 )
 from .media_auto_delivery import MediaAutoDeliveryComposition
-from .media_provider_transport import SQLiteDurableMediaProviderTransport
+from .media_provider_transport import (
+    MediaProviderDiagnosticRecorder,
+    SQLiteDurableMediaProviderTransport,
+    sanitize_media_provider_error,
+)
 from .media_v2 import SQLiteImmutableMediaPayloadStore
 from .production_turn_application import (
     MediaContinuationComposition,
@@ -167,6 +172,88 @@ class InspectorHardeningTransport(httpx.AsyncBaseTransport):
         await self._inner.aclose()
 
 
+class _DiagnosticImageGenerator:
+    """Record safe image-generation failures while preserving the legacy API."""
+
+    def __init__(
+        self,
+        delegate: object,
+        *,
+        recorder: MediaProviderDiagnosticRecorder,
+        endpoint: str,
+        model: str,
+        proxy_configured: bool,
+        api_key: str,
+    ) -> None:
+        self._delegate = delegate
+        self._recorder = recorder
+        self._endpoint = endpoint
+        self._model = model
+        self._proxy_configured = proxy_configured
+        self._api_key = api_key
+
+    async def generate(self, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        started = time.perf_counter()
+        try:
+            return await self._delegate.generate(*args, **kwargs)
+        except Exception as exc:
+            self._recorder.record(
+                sanitize_media_provider_error(
+                    stage="image_generation",
+                    exception=exc,
+                    endpoint=self._endpoint,
+                    model=self._model,
+                    proxy_configured=self._proxy_configured,
+                    elapsed_ms=(time.perf_counter() - started) * 1000,
+                    secret_values=(self._api_key,),
+                    timeout_seconds=180.0,
+                )
+            )
+            raise
+
+
+class _DiagnosticMediaInspector:
+    """Record safe visual-inspection failures while preserving the verdict path."""
+
+    def __init__(
+        self,
+        delegate: object,
+        *,
+        recorder: MediaProviderDiagnosticRecorder,
+        endpoint: str,
+        model: str,
+        proxy_configured: bool,
+        api_key: str,
+    ) -> None:
+        self._delegate = delegate
+        self._recorder = recorder
+        self._endpoint = endpoint
+        self._model = model
+        self._proxy_configured = proxy_configured
+        self._api_key = api_key
+
+    async def inspect(self, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        started = time.perf_counter()
+        try:
+            return await self._delegate.inspect(*args, **kwargs)
+        except Exception as exc:
+            self._recorder.record(
+                sanitize_media_provider_error(
+                    stage="media_inspection",
+                    exception=exc,
+                    endpoint=self._endpoint,
+                    model=self._model,
+                    proxy_configured=self._proxy_configured,
+                    elapsed_ms=(time.perf_counter() - started) * 1000,
+                    secret_values=(self._api_key,),
+                    # InspectorHardeningTransport overwrites the request
+                    # extensions with its proxy-sized 150s read/write bound.
+                    timeout_seconds=150.0,
+                )
+            )
+            raise
+
+
 def _provisioned_grants_present(*, database_path: Path, world_id: str) -> bool:
     """Cheap preflight: are the enforcement grants recorded for this world?
 
@@ -262,19 +349,34 @@ def build_qq_media_preview_deployment(
             path=str(database_path), world_id=world_id
         ),
     )
-    generator = OpenAIImageGenerator(
-        settings.openai_api_key,
-        base_url=settings.openai_base_url,
+    diagnostic_recorder = MediaProviderDiagnosticRecorder()
+    generator = _DiagnosticImageGenerator(
+        OpenAIImageGenerator(
+            settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            model=settings.image_model,
+            proxy_url=settings.openai_proxy_url,
+        ),
+        recorder=diagnostic_recorder,
+        endpoint=settings.openai_base_url,
         model=settings.image_model,
-        proxy_url=settings.openai_proxy_url,
+        proxy_configured=bool(settings.openai_proxy_url),
+        api_key=settings.openai_api_key,
     )
-    inspector = event_media.OpenAIMediaInspector(
-        settings.openai_api_key,
-        base_url=settings.openai_base_url,
+    inspector = _DiagnosticMediaInspector(
+        event_media.OpenAIMediaInspector(
+            settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            model=settings.world_v2_media_inspection_model,
+            # The hardening transport owns the proxy route, a proxy-sized read
+            # timeout, and normalization of malformed descriptive list fields.
+            transport=InspectorHardeningTransport(proxy_url=settings.openai_proxy_url),
+        ),
+        recorder=diagnostic_recorder,
+        endpoint=settings.openai_base_url,
         model=settings.world_v2_media_inspection_model,
-        # The hardening transport owns the proxy route, a proxy-sized read
-        # timeout, and normalization of malformed descriptive list fields.
-        transport=InspectorHardeningTransport(proxy_url=settings.openai_proxy_url),
+        proxy_configured=bool(settings.openai_proxy_url),
+        api_key=settings.openai_api_key,
     )
     # Composed directly rather than through the archived runtime module (the
     # platform reverse-architecture guard forbids that import).  No
@@ -288,7 +390,10 @@ def build_qq_media_preview_deployment(
         visual_identity_path=settings.visual_identity_path,
     )
     transport = SQLiteDurableMediaProviderTransport(
-        path=str(database_path), world_id=world_id, renderer=renderer
+        path=str(database_path),
+        world_id=world_id,
+        renderer=renderer,
+        diagnostic_recorder=diagnostic_recorder,
     )
     deployment = MediaPreviewDeployment(
         planner=planner,

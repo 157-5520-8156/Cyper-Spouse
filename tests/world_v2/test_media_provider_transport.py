@@ -16,6 +16,7 @@ from companion_daemon.world_v2.media_provider_results import (
     media_provider_result_hash,
 )
 from companion_daemon.world_v2.media_provider_transport import (
+    MediaProviderDiagnosticRecorder,
     SQLiteDurableMediaProviderTransport,
 )
 from companion_daemon.world_v2.platform_action_executor import (
@@ -198,6 +199,60 @@ async def test_render_failure_is_a_persisted_terminal_receipt(
         )
         is None
     )
+    transport.close()
+
+
+@pytest.mark.asyncio
+async def test_sanitized_provider_diagnostic_is_persisted_with_failed_receipt(
+    tmp_path: Path, image: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        event_media.MediaPlan, "from_payload", staticmethod(_parse_plan_stub)
+    )
+    recorder = MediaProviderDiagnosticRecorder()
+
+    class _DiagnosticFailureRenderer(_Renderer):
+        async def render(self, plan):  # type: ignore[no-untyped-def]
+            recorder.record(
+                {
+                    "schema_version": "world-v2.media-provider-diagnostic.v1",
+                    "stage": "image_generation",
+                    "exception_class": "ImageGenerationProviderError",
+                    "timeout_class": "read",
+                    "endpoint_hostname": "api.openai.com",
+                    "model": "gpt-image-2",
+                    "elapsed_ms": 150_556.7,
+                }
+            )
+            return await super().render(plan)
+
+    transport = SQLiteDurableMediaProviderTransport(
+        path=str(tmp_path / "transport-diagnostic.sqlite"),
+        world_id="world:transport",
+        renderer=_DiagnosticFailureRenderer(image=image, fail=True),
+        now=lambda: NOW,
+        diagnostic_recorder=recorder,
+    )
+    request = _request(
+        kind="media_render",
+        action_id="action:media-render:diagnostic",
+        idempotency_key="media-render:plan:diagnostic",
+        body=_PLAN_BODY,
+        content_type="application/vnd.world-v2.media-plan+json",
+    )
+
+    receipt = await transport.send(request)
+    assert receipt.status == "failed"
+    diagnostic = transport.lookup_diagnostic(
+        idempotency_key=request.idempotency_key
+    )
+    assert diagnostic is not None
+    assert diagnostic["stage"] == "image_generation"
+    assert diagnostic["timeout_class"] == "read"
+    # Effect-once: the diagnostic sidecar is bound to the same receipt and is
+    # not replaced by a later dispatch of the same idempotency key.
+    assert await transport.send(request) == receipt
+    assert transport.lookup_diagnostic(idempotency_key=request.idempotency_key) == diagnostic
     transport.close()
 
 
