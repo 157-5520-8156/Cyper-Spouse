@@ -101,6 +101,7 @@ from .recall_index import RecallCursor, RecallSourceBinding
 from .recall_runtime import RecallCoordinator
 from .schema_core import PrivacyClass
 from .schemas import (
+    AffectEpisodeProjection,
     AppraisalProjection,
     BudgetAccount,
     CommittedWorldEventRef,
@@ -374,6 +375,36 @@ def _normalize_observation_evidence(
         for evidence in evidence_refs
     )
     return item.model_copy(update={"evidence_refs": normalized})
+
+
+_CONTEXT_AFFECT_APPRAISAL_REF_LIMIT = 8
+
+
+def _compact_affect_episode_context_view(item: BaseModel) -> BaseModel:
+    """Bound the non-authoritative Affect read view without erasing history.
+
+    The durable Affect projection intentionally retains every accepted
+    appraisal reference.  A long, dense conversation can therefore make one
+    active episode larger than the Context Capsule's per-item safety limit.
+    Provider context needs the episode's current state plus representative
+    causal endpoints, not a copy of the immutable ledger history.  Keep the
+    opening reference and the newest references for each component; the full
+    lineage remains in the projection and its accepted events.
+    """
+
+    if not isinstance(item, AffectEpisodeProjection):
+        return item
+    components = []
+    changed = False
+    for component in item.components:
+        refs = component.appraisal_refs
+        if len(refs) <= _CONTEXT_AFFECT_APPRAISAL_REF_LIMIT:
+            components.append(component)
+            continue
+        retained = (refs[0], *refs[-(_CONTEXT_AFFECT_APPRAISAL_REF_LIMIT - 1) :])
+        components.append(component.model_copy(update={"appraisal_refs": retained}))
+        changed = True
+    return item.model_copy(update={"components": tuple(components)}) if changed else item
 
 
 def _typed_authority_claims(
@@ -1491,7 +1522,11 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             scoped_affect = None
         else:
             scoped_affect = tuple(
-                _normalize_observation_evidence(item, observation_aliases=observation_aliases)
+                _compact_affect_episode_context_view(
+                    _normalize_observation_evidence(
+                        item, observation_aliases=observation_aliases
+                    )
+                )
                 for item in active_affect
                 if all(
                     appraisal_by_id[ref.appraisal_id].subject_ref in subject_refs

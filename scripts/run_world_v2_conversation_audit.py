@@ -44,23 +44,42 @@ class AuditDelivery:
         return {"status": "ok", "data": {"message_id": f"world-v2-audit-{len(self.sent)}"}}
 
 
-async def run(*, database: Path, fixture: Path, output: Path) -> list[dict[str, object]]:
+def _journey_start(
+    document: dict[str, object],
+    *,
+    anchor_now: bool,
+    now: datetime | None = None,
+) -> datetime:
+    if anchor_now:
+        current = now or datetime.now(UTC)
+        if current.tzinfo is None or current.utcoffset() is None:
+            raise ValueError("journey audit now must be timezone-aware")
+        return current.astimezone(UTC).replace(microsecond=0)
+    fixture_start = document.get("started_at_local")
+    if fixture_start is None:
+        return datetime.now(UTC).replace(microsecond=0)
+    if not isinstance(fixture_start, str):
+        raise ValueError("fixture started_at_local must be an ISO-8601 string")
+    parsed_start = datetime.fromisoformat(fixture_start)
+    if parsed_start.tzinfo is None or parsed_start.utcoffset() is None:
+        raise ValueError("fixture started_at_local must include an explicit UTC offset")
+    return parsed_start.astimezone(UTC).replace(microsecond=0)
+
+
+async def run(
+    *,
+    database: Path,
+    fixture: Path,
+    output: Path,
+    anchor_now: bool = False,
+) -> list[dict[str, object]]:
     document = json.loads(fixture.read_text(encoding="utf-8"))
     turns = document["turns"]
     database.unlink(missing_ok=True)
     database.parent.mkdir(parents=True, exist_ok=True)
     output.parent.mkdir(parents=True, exist_ok=True)
     delivery = AuditDelivery()
-    fixture_start = document.get("started_at_local")
-    if fixture_start is not None:
-        if not isinstance(fixture_start, str):
-            raise ValueError("fixture started_at_local must be an ISO-8601 string")
-        parsed_start = datetime.fromisoformat(fixture_start)
-        if parsed_start.tzinfo is None or parsed_start.utcoffset() is None:
-            raise ValueError("fixture started_at_local must include an explicit UTC offset")
-        started_at = parsed_start.astimezone(UTC).replace(microsecond=0)
-    else:
-        started_at = datetime.now(UTC).replace(microsecond=0)
+    started_at = _journey_start(document, anchor_now=anchor_now)
     settings = Settings(database_path=database, PRIMARY_USER_ID="geoff")
     host = build_qq_c2c_host(
         settings=settings,
@@ -285,8 +304,24 @@ if __name__ == "__main__":
         action="store_true",
         help="Exit non-zero when the real-journey hard acceptance smoke gate fails.",
     )
+    parser.add_argument(
+        "--anchor-now",
+        action="store_true",
+        help=(
+            "Anchor the fixture's relative timeline at the current wall clock. "
+            "This avoids spending an interactive provider budget on a historical "
+            "timestamp; it does not change production scheduler intervals."
+        ),
+    )
     args = parser.parse_args()
-    result_rows = asyncio.run(run(database=args.database, fixture=args.fixture, output=args.output))
+    result_rows = asyncio.run(
+        run(
+            database=args.database,
+            fixture=args.fixture,
+            output=args.output,
+            anchor_now=args.anchor_now,
+        )
+    )
     turn_count = sum(isinstance(row.get("turn_id"), str) for row in result_rows)
     acceptance = (
         evaluate_conversation_acceptance(result_rows)

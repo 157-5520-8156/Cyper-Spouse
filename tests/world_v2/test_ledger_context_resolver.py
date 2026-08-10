@@ -21,6 +21,7 @@ from companion_daemon.world_v2.ledger_context_resolver import (
     ContextRelevanceScope,
     LedgerProjectionContextResolver,
     _bounded_domain_items,
+    _compact_affect_episode_context_view,
     context_capsule_compiler_from_ledger,
 )
 from companion_daemon.world_v2.recall_index import (
@@ -46,9 +47,24 @@ from test_appraisal_authority import (
     record_proposal,
 )
 from test_character_core_authority import initialized_character_ledger
+from test_affect_module import component, episode, meaning_ref
 
 
 NOW = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
+
+
+def test_affect_context_view_bounds_lineage_without_mutating_projection() -> None:
+    refs = tuple(
+        meaning_ref(appraisal_id=f"appraisal:{index}")
+        for index in range(80)
+    )
+    durable = episode().model_copy(update={"components": (component(refs=refs),)})
+
+    compacted = _compact_affect_episode_context_view(durable)
+
+    assert len(durable.components[0].appraisal_refs) == 80
+    assert len(compacted.components[0].appraisal_refs) == 8
+    assert compacted.components[0].appraisal_refs == (refs[0], *refs[-7:])
 
 
 def _event(world_id: str, event_id: str = "event:start") -> WorldEvent:
