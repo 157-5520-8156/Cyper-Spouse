@@ -4757,6 +4757,16 @@ async def review_expression_source_closure(
             attempted_model_version=last_primary_model_version,
             usage=last_primary_usage,
         ) from exc
+    if candidate_inventory_decomposition is not None:
+        retained_inventory_result = _retain_inventory_source_requirements_after_positive_v7(
+            result=primary_result,
+            inventory=candidate_inventory_decomposition,
+            draft=draft,
+        )
+        if retained_inventory_result is not None:
+            primary_result = retained_inventory_result
+            if retained_inventory_result.visible_authority_terminal_rejection:
+                return retained_inventory_result
     if not (
         allow_report_relative_adjudication
         and not declared_claims_only
@@ -6752,13 +6762,14 @@ async def _run_inventory_guard_and_initial_review(
     inventory_guard: Awaitable[_InventorySourceDeclarationGuardResult],
     initial_review: Awaitable[SourceClosureReviewResult],
 ) -> tuple[object, object]:
-    """Release a complete V7 result when optional Inventory is still slow.
+    """Race the two roles without letting a weak positive cancel decomposition.
 
-    Inventory can enrich a V7 packet only when it arrives in time. It is not a
-    verdict authority, so a complete independent V7 review is equivalent to
-    the established Inventory-unavailable fallback once the optional probe
-    misses that race. The cancelled task is drained or explicitly observed;
-    no provider coroutine is left unowned by this boundary.
+    A complete negative V7 verdict is monotonic and may cancel a slower
+    Inventory probe.  A positive V7 verdict is not equivalent to decomposing
+    the candidate: Inventory may still expose an omitted external proposition
+    that requires one enriched verdict.  In that case wait for the bounded
+    Inventory role instead of releasing a false positive.  Every cancelled
+    task is drained or explicitly observed by this boundary.
     """
 
     inventory_task = asyncio.create_task(inventory_guard)
@@ -6770,6 +6781,14 @@ async def _run_inventory_guard_and_initial_review(
         )
         if review_task in done:
             initial_outcome = _task_result_or_exception(review_task)
+            if (
+                isinstance(initial_outcome, SourceClosureReviewResult)
+                and initial_outcome.review is not None
+                and initial_outcome.review.decision == "supported"
+            ):
+                inventory_done, _pending = await asyncio.wait((inventory_task,))
+                assert inventory_done == {inventory_task}
+                return _task_result_or_exception(inventory_task), initial_outcome
             guard_outcome = await _cancel_optional_inventory_task(inventory_task)
             return guard_outcome, initial_outcome
 
@@ -6800,6 +6819,68 @@ def _inventory_requires_enriched_source_review(
     return any(
         proposition.semantic_role not in _INVENTORY_SOURCE_FREE_ROUTE_ROLES
         for proposition in inventory.propositions
+    )
+
+
+def _retain_inventory_source_requirements_after_positive_v7(
+    *,
+    result: SourceClosureReviewResult,
+    inventory: _CandidateExternalPropositionInventory,
+    draft: ExpressionDraft,
+) -> SourceClosureReviewResult | None:
+    """Intersect a positive V7 verdict with Inventory's typed source roles.
+
+    Inventory does not decide whether evidence entails prose, but it does own
+    the semantic capability classification that distinguishes immediate
+    private continuity from a source-bearing episode or external proposition.
+    When the authored draft declares no WorldClaim at all, a bare positive V7
+    verdict cannot erase those independently identified source requirements.
+    The host only preserves exact Inventory coordinates; it does not inspect
+    wording. Standalone/embedded propositions may still proceed to the
+    existing exact-report adjudicator, while an off-conversation companion
+    episode is terminally unclosed for this candidate.
+    """
+
+    if (
+        result.review is None
+        or result.review.decision != "supported"
+        or draft.world_claims
+        or inventory.wire_contract != "candidate-external-proposition-inventory.5"
+    ):
+        return None
+    unclosed = tuple(
+        proposition
+        for proposition in inventory.review_propositions
+        if proposition.semantic_role in _UNCLOSED_SEMANTIC_ROLE_ORDER
+    )
+    if not unclosed:
+        return None
+    roles = tuple(proposition.semantic_role for proposition in unclosed)
+    return SourceClosureReviewResult(
+        review=_ContextualClaimSupportReview(
+            decision="unsupported",
+            visible_text_failures=("undeclared_external_assertion",),
+            visible_findings=tuple(
+                SourceClosureVisibleFinding(
+                    category="undeclared_external_assertion",
+                    visible_span=proposition.locator.text,
+                    claim_index=None,
+                    source_relation="unclosed",
+                    source_refs=(),
+                )
+                for proposition in unclosed
+            ),
+            unclosed_semantic_role_counts=_count_unclosed_semantic_roles(roles),
+            brief_reason=(
+                "typed candidate inventory retained source-relevant coordinates "
+                "without any declared WorldClaim"
+            ),
+        ),
+        usage=result.usage,
+        visible_authority_exhaustive=True,
+        visible_authority_terminal_rejection=(
+            "source_bearing_private_episode" in roles
+        ),
     )
 
 

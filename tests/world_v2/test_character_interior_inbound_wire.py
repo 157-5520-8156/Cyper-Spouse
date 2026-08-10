@@ -9914,12 +9914,24 @@ async def test_inventory_and_initial_v7_start_in_parallel_for_source_free_candid
 
 
 @pytest.mark.asyncio
-async def test_completed_v7_does_not_wait_for_slow_optional_inventory() -> None:
-    subjective = "你这么一问，我忽然有点想你。"
+async def test_supported_v7_waits_for_inventory_before_releasing_external_episode() -> None:
+    unsupported = "下午看书的时候突然想到你，但当时没说。"
+    initial_review_completed = asyncio.Event()
 
-    class _SlowInventory(_StrictInventorySequenceJsonModel):
+    class _InventoryAfterInitialReview(_StrictInventorySequenceJsonModel):
         def __init__(self) -> None:
-            super().__init__([_inventory_v5([])])
+            super().__init__(
+                [
+                    _inventory_v5(
+                        [
+                            {
+                                "locator": _coverage_locator(unsupported),
+                                "semantic_role": "source_bearing_private_episode",
+                            }
+                        ]
+                    )
+                ]
+            )
             self.cancelled = False
 
         async def complete_json(
@@ -9930,29 +9942,60 @@ async def test_completed_v7_does_not_wait_for_slow_optional_inventory() -> None:
         ) -> str:
             self.calls.append((messages, temperature))
             try:
-                await asyncio.Future()
+                await initial_review_completed.wait()
+                # The initial V7 verdict wins the race.  A supported verdict
+                # must not cancel this semantically stronger decomposition.
+                await asyncio.sleep(0.05)
             except asyncio.CancelledError:
                 self.cancelled = True
                 raise
+            return self._replies.pop(0)
 
-    inventory = _SlowInventory()
-    reviewer = _FullSourceReviewSequenceJsonModel([_source_closure_review()])
+    class _InitialThenEnrichedReviewer(_FullSourceReviewSequenceJsonModel):
+        async def complete_json(
+            self,
+            messages: list[dict[str, str]],
+            *,
+            temperature: float = 0.8,
+        ) -> str:
+            self.calls.append((messages, temperature))
+            packet = json.loads(messages[-1]["content"])
+            reply = self._replies.pop(0)
+            if "candidate_inventory_decomposition" not in packet:
+                initial_review_completed.set()
+            return reply
+
+    inventory = _InventoryAfterInitialReview()
+    reviewer = _InitialThenEnrichedReviewer(
+        [
+            _source_closure_review(),
+            _source_closure_review(
+                unsupported_boundaries=("visible_text",),
+                visible_span=unsupported,
+            ),
+        ]
+    )
 
     result = await asyncio.wait_for(
         review_expression_with_candidate_external_coverage(
             reviewer=reviewer,
             inventory_model=inventory,
             request=_qq_request(),
-            raw=_candidate_coverage_raw(subjective),
+            raw=_candidate_coverage_raw(unsupported),
             identity_frame=None,
         ),
         timeout=1.0,
     )
 
     assert result.review is not None
-    assert result.review.decision == "supported"
-    assert inventory.cancelled is True
-    assert len(reviewer.calls) == 1
+    assert result.review.decision == "unsupported"
+    assert inventory.cancelled is False
+    assert len(inventory.calls) == 1
+    assert len(reviewer.calls) == 2
+    enriched_packet = json.loads(reviewer.calls[1][0][-1]["content"])
+    assert enriched_packet["candidate_inventory_decomposition"]["propositions"][0][
+        "semantic_role"
+    ] == "source_bearing_private_episode"
 
 
 @pytest.mark.asyncio
