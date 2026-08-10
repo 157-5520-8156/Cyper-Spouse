@@ -72,6 +72,7 @@ from .external_world_perception.production_attention import (
 from .expression_episode_lifecycle import next_expression_retry_due
 from .proactive_action import next_proactive_retry_due
 from .interactive_turn_budget import InteractiveTurnBudgetPolicy
+from .system_notice import SQLiteSystemNoticeDispatcher
 from .life_development_model_adapter import RoleBoundLifeDevelopmentModelAdapter
 from .recall_embedding import configured_recall_embedding
 from .recall_index import RecallEmbedding
@@ -231,6 +232,29 @@ class QQC2CIngressResult:
     canonical_user_id: str
 
 
+def _system_notice_failure_code(outcome: object) -> str | None:
+    """Map typed runtime failure coordinates to a platform Notice class."""
+
+    status = getattr(outcome, "status", None)
+    terminal_errors = tuple(getattr(outcome, "terminal_errors", ()) or ())
+    if status == "failed_safe" or terminal_errors:
+        return "turn_failed_safe"
+    if status != "deferred":
+        return None
+    deferred_refs = tuple(str(item) for item in (getattr(outcome, "deferred_refs", ()) or ()))
+    technical_markers = (
+        "technical_retry_pending",
+        "technical_failure",
+        "primary_timeout",
+        "source_review_timeout",
+        "provider_unavailable",
+        "budget_account_unavailable",
+    )
+    if any(any(marker in ref for marker in technical_markers) for ref in deferred_refs):
+        return "turn_technical_failure"
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class QQC2CDrainResult:
     action_statuses: tuple[str, ...]
@@ -270,6 +294,7 @@ class QQC2CHost:
         external_world_perception_hub: WorldPerceptionHub | None = None,
         external_world_perception_disabled_reason: str = "not_configured",
         external_world_perception_registry_health: Mapping[str, object] | None = None,
+        system_notice_dispatcher: SQLiteSystemNoticeDispatcher | None = None,
     ) -> None:
         if not recipient_id or not canonical_user_id:
             raise ValueError("QQ C2C host requires recipient and canonical user ids")
@@ -291,6 +316,7 @@ class QQC2CHost:
             if external_world_perception_registry_health is not None
             else None
         )
+        self._system_notice_dispatcher = system_notice_dispatcher
         self._ingress_store = ingress_store
         self._ingress_now = ingress_now or _utc_now
         self._ingress_sleep = ingress_sleep
@@ -1319,6 +1345,8 @@ class QQC2CHost:
             coalescing_metadata=metadata,
         )
         outcome = await self._host.inbound(inbound)
+        system_notice_failure = _system_notice_failure_code(outcome)
+        dispatch_terminal_failure = False
         action_ids = tuple(
             dict.fromkeys((*outcome.authorized_action_ids, *outcome.scheduled_action_ids))
         )
@@ -1393,6 +1421,13 @@ class QQC2CHost:
                     }
                 )
                 if (
+                    result is not None
+                    and result.action_kind in USER_VISIBLE_PLATFORM_ACTION_KINDS
+                    and result.provider_status
+                    in {"failed", "unknown", "cancelled", "expired"}
+                ):
+                    dispatch_terminal_failure = True
+                if (
                     not dispatch_ack_recorded
                     and settled_user_visible_dispatch
                     and result.provider_status == "provider_accepted"
@@ -1427,6 +1462,24 @@ class QQC2CHost:
                         (first_visible_reply_ns - observed_started_ns) / 1_000_000,
                     ),
                     outcome.status,
+                )
+        notice_failure_code = (
+            "reply_dispatch_terminal_failure"
+            if dispatch_terminal_failure
+            else system_notice_failure
+        )
+        if notice_failure_code is not None and self._system_notice_dispatcher is not None:
+            try:
+                await self._system_notice_dispatcher.notify(
+                    notice_key=f"system-notice:qq-ingress:{batch.batch_id}",
+                    recipient_id=self._recipient_id,
+                    failure_code=notice_failure_code,
+                )
+            except Exception as exc:
+                _LOG.error(
+                    "world v2 system notice failed batch=%s error=%s",
+                    batch.batch_id,
+                    type(exc).__name__,
                 )
         self._ingress_store.complete(
             batch_id=batch.batch_id,
@@ -2349,6 +2402,8 @@ class QQC2CHost:
             self._host.close()
         if self._ingress_store is not None:
             self._ingress_store.close()
+        if self._system_notice_dispatcher is not None:
+            self._system_notice_dispatcher.close()
         if self._semantic_chat is not None:
             world_quiescence = getattr(
                 self._host,
@@ -2619,6 +2674,12 @@ def build_qq_c2c_host(
         external_world_perception_hub = perception_deployment.hub
         external_world_perception_disabled_reason = perception_deployment.reason
         external_world_perception_registry_health = perception_deployment.registry_health
+    system_notice_dispatcher = SQLiteSystemNoticeDispatcher(
+        path=str(settings.database_path),
+        world_id=world_id,
+        delivery=delivery,
+        now=scheduler_now,
+    )
     return QQC2CHost(
         host=WorldV2PlatformHost(application=application),
         recipient_id=recipient_id,
@@ -2645,6 +2706,7 @@ def build_qq_c2c_host(
         idle_heartbeat_seconds=settings.qq_c2c_idle_heartbeat_seconds,
         barge_in_enabled=settings.qq_c2c_barge_in_enabled,
         barge_in_probe_seconds=settings.qq_c2c_barge_in_probe_ms / 1_000,
+        system_notice_dispatcher=system_notice_dispatcher,
     )
 
 

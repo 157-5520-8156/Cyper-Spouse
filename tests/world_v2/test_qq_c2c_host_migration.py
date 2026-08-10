@@ -52,6 +52,10 @@ from companion_daemon.world_v2.social_initiative import (
     SocialInitiativePolicy,
     social_initiative_attempt_id,
 )
+from companion_daemon.world_v2.system_notice import (
+    SYSTEM_NOTICE_TEXT,
+    SQLiteSystemNoticeDispatcher,
+)
 
 
 NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
@@ -1505,6 +1509,58 @@ class _Delivery:
         return {"status": "ok", "data": {"message_id": f"typing-{len(self.sent)}"}}
 
 
+@pytest.mark.asyncio
+async def test_qq_host_sends_distinct_system_notice_for_terminal_turn_failure(
+    tmp_path: Path,
+) -> None:
+    class _TechnicalFailureHost:
+        async def inbound(self, _inbound):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                status="deferred",
+                authorized_action_ids=(),
+                scheduled_action_ids=(),
+                deferred_refs=("expression_episode.technical_retry_pending",),
+                terminal_errors=(),
+            )
+
+        def close(self) -> None:
+            return None
+
+    clock = {"now": NOW}
+
+    async def advance(seconds: float) -> None:
+        clock["now"] += timedelta(seconds=seconds)
+
+    delivery = _Delivery()
+    notice = SQLiteSystemNoticeDispatcher(
+        path=str(tmp_path / "system-notice-host.sqlite"),
+        world_id="world:test",
+        delivery=delivery,
+        now=lambda: clock["now"],
+    )
+    host = QQC2CHost(
+        host=_TechnicalFailureHost(),  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(tmp_path / "system-notice-host.sqlite"),
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=advance,
+        system_notice_dispatcher=notice,
+    )
+    try:
+        result = await host.inbound_text(
+            message_id="message:technical-failure",
+            recipient_id="10001",
+            text="你还在吗？",
+            observed_at=clock["now"],
+        )
+    finally:
+        await host.aclose()
+
+    assert result.status == "deferred"
+    assert delivery.sent == [("10001", SYSTEM_NOTICE_TEXT)]
+
+
 class _CanonicalStreamingFixture:
     async def complete_json_stream_with_usage(
         self,
@@ -2592,7 +2648,7 @@ async def test_qq_restart_scheduler_retries_a_deferred_expression_failure_once(
         await first.aclose()
 
     assert failed.status == "deferred"
-    assert _visible(first_delivery) == []
+    assert _visible(first_delivery) == [("10001", SYSTEM_NOTICE_TEXT)]
     assert any(
         "failed the private-turn-state causal contract" in prompt for prompt in primary.prompts
     )
@@ -2849,7 +2905,7 @@ async def test_newer_qq_inbound_supersedes_older_technical_expression_retry_afte
             observed_at=NOW,
         )
         assert failed.status == "deferred"
-        assert _visible(first_delivery) == []
+        assert _visible(first_delivery) == [("10001", SYSTEM_NOTICE_TEXT)]
 
         retry_state["ready"] = True
         newer = await first.inbound_text(
@@ -2862,7 +2918,10 @@ async def test_newer_qq_inbound_supersedes_older_technical_expression_retry_afte
         await first.aclose()
 
     assert newer.status == "action_authorized"
-    assert _visible(first_delivery) == [("10001", "这次接住了。")]
+    assert _visible(first_delivery) == [
+        ("10001", SYSTEM_NOTICE_TEXT),
+        ("10001", "这次接住了。"),
+    ]
 
     def expression_prompt_count() -> int:
         return sum(
@@ -3318,7 +3377,7 @@ async def test_napcat_typing_only_choice_cannot_become_a_silent_expression_plan(
     assert result.status == "deferred"
     assert projection.actions == ()
     assert projection.expression_plans == ()
-    assert delivery.sent == []
+    assert delivery.sent == [("10001", SYSTEM_NOTICE_TEXT)]
 
 
 @pytest.mark.asyncio
