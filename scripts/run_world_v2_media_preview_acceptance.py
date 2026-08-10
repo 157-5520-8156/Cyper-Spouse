@@ -105,6 +105,22 @@ WORLD_ID = "world:media-preview-acceptance"
 RECIPIENT_REF = "user:acceptance"
 INBOUND_OBSERVATION_ID = "observation:acceptance:acceptance:message:acceptance"
 MEDIA_ACTION_KINDS = frozenset({"media_render", "media_repair", "media_inspection"})
+MAX_REAL_RENDER_ATTEMPTS = 2
+RESTART_REPORT_FIELDS = (
+    "provider_dispatch_rows_unchanged",
+    "provider_receipt_ids_unchanged",
+    "same_idempotency_not_resent",
+    "planning_result_rows_unchanged",
+    "planning_same_idempotency_not_resent",
+    "artifact_bytes_unchanged",
+    "artifact_hash_unchanged",
+    "inspection_result_unchanged",
+    "inspection_hash_unchanged",
+    "projection_semantic_hash_unchanged",
+    "cold_projection_matches_cold_replay",
+    "cold_projection_semantic_hash_matches_replay",
+    "repeat_drain_preview_count",
+)
 
 
 @contextmanager
@@ -142,6 +158,98 @@ class _NoDeliveryTransport:
 
     async def lookup(self, **_kwargs: object) -> None:
         return None
+
+
+def _new_scratch_root() -> Path:
+    """Create one fresh, explicitly bounded acceptance root below ``/tmp``."""
+
+    root = Path(tempfile.mkdtemp(prefix="girl-agent-wt-e.", dir="/tmp"))
+    if root.parent.resolve() != Path("/tmp").resolve():
+        raise RuntimeError("acceptance scratch root escaped /tmp")
+    return root
+
+
+def _require_scratch_path(path: Path, scratch_root: Path) -> Path:
+    """Return a resolved scratch path or reject production/shared locations."""
+
+    resolved = Path(path).resolve()
+    root = Path(scratch_root).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("path is outside the isolated scratch root") from exc
+    return resolved
+
+
+def _qualification_fields(
+    *, status: object, deterministic_selection_double: bool
+) -> dict[str, object]:
+    """Derive qualification flags without allowing a failed phase to qualify."""
+
+    if deterministic_selection_double:
+        scope = "downstream_provider_stages_only"
+    elif status == "qualification_complete":
+        scope = "full_chain"
+    else:
+        scope = "character_selection_only"
+    complete = status == "qualification_complete" and not deterministic_selection_double
+    return {
+        "status": status,
+        "qualification_scope": scope,
+        "character_selection_qualified": complete,
+        "deterministic_selection_double": deterministic_selection_double,
+        "qualification_complete": complete,
+    }
+
+
+def _provider_failure_did_not_become_role_no_op(
+    selection_report: Mapping[str, object], failure_events: Sequence[object]
+) -> bool:
+    """Keep technical provider failure distinct from a CharacterInterior no-op."""
+
+    return bool(failure_events) and selection_report.get("status") == "proposed" and (
+        selection_report.get("decision") != "no_op"
+    )
+
+
+def _restart_report_is_complete(report: Mapping[str, object]) -> bool:
+    return all(field in report for field in RESTART_REPORT_FIELDS)
+
+
+def _artifact_report_is_valid(
+    artifact: Mapping[str, object] | object, *, scratch_root: Path
+) -> bool:
+    if not isinstance(artifact, Mapping):
+        return False
+    path_value = artifact.get("path")
+    if not isinstance(path_value, str):
+        return False
+    try:
+        path = _require_scratch_path(Path(path_value), scratch_root)
+    except ValueError:
+        return False
+    if not path.is_file():
+        return False
+    data = path.read_bytes()
+    actual_hash = "sha256:" + hashlib.sha256(data).hexdigest()
+    dimensions = artifact.get("dimensions")
+    mime_type = artifact.get("mime_type")
+    return (
+        bool(data)
+        and artifact.get("bytes") == len(data)
+        and artifact.get("sha256") == actual_hash
+        and isinstance(mime_type, str)
+        and mime_type.startswith("image/")
+        and isinstance(dimensions, Mapping)
+        and isinstance(dimensions.get("width"), int)
+        and isinstance(dimensions.get("height"), int)
+        and dimensions["width"] > 0
+        and dimensions["height"] > 0
+    )
+
+
+def _render_attempt_within_limit(attempt_count: int) -> bool:
+    return 0 <= attempt_count < MAX_REAL_RENDER_ATTEMPTS
 
 
 class _ObservedRoleModel:
@@ -784,15 +892,19 @@ def _dispatch_rows(database_path: Path) -> list[dict[str, object]]:
     connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
     try:
         rows = connection.execute(
-            "SELECT idempotency_key, request_fingerprint, receipt_json, result_type, result_json "
-            "FROM world_v2_media_provider_dispatch ORDER BY idempotency_key"
+            "SELECT d.idempotency_key, d.request_fingerprint, d.receipt_json, "
+            "d.result_type, d.result_json, p.diagnostic_json "
+            "FROM world_v2_media_provider_dispatch AS d "
+            "LEFT JOIN world_v2_media_provider_diagnostic AS p "
+            "ON p.world_id = d.world_id AND p.idempotency_key = d.idempotency_key "
+            "ORDER BY d.idempotency_key"
         ).fetchall()
     except sqlite3.Error as exc:
         raise RuntimeError(f"cannot read isolated media dispatch evidence: {type(exc).__name__}") from exc
     finally:
         connection.close()
     result: list[dict[str, object]] = []
-    for key, fingerprint, receipt_json, result_type, result_json in rows:
+    for key, fingerprint, receipt_json, result_type, result_json, diagnostic_json in rows:
         receipt: dict[str, object] = {}
         try:
             decoded = json.loads(str(receipt_json))
@@ -800,6 +912,14 @@ def _dispatch_rows(database_path: Path) -> list[dict[str, object]]:
                 receipt = decoded
         except (TypeError, ValueError):
             pass
+        diagnostic: dict[str, object] | None = None
+        if diagnostic_json is not None:
+            try:
+                decoded_diagnostic = json.loads(str(diagnostic_json))
+                if isinstance(decoded_diagnostic, dict):
+                    diagnostic = decoded_diagnostic
+            except (TypeError, ValueError):
+                diagnostic = None
         result.append(
             {
                 "idempotency_key": str(key),
@@ -807,6 +927,7 @@ def _dispatch_rows(database_path: Path) -> list[dict[str, object]]:
                 "receipt_id": receipt.get("provider_receipt_id"),
                 "status": receipt.get("status"),
                 "error_class": receipt.get("error_class"),
+                "diagnostic": diagnostic,
                 "result_type": result_type,
                 "result_json_hash": (
                     "sha256:" + hashlib.sha256(str(result_json).encode("utf-8")).hexdigest()
@@ -1122,6 +1243,7 @@ async def _drain_provider_stages(
 ) -> None:
     render_latency = 0.0
     inspection_latency = 0.0
+    render_attempts = 0
     action_evidence: list[dict[str, object]] = []
     for round_index in range(16):
         await app.drain_media_continuation_once(
@@ -1142,6 +1264,14 @@ async def _drain_provider_stages(
         )
         if pending:
             for action in pending[:1]:
+                if action.kind in {"media_render", "media_repair"}:
+                    if not _render_attempt_within_limit(render_attempts):
+                        phase_report["render_attempt_limit_exceeded"] = True
+                        phase_report["real_render_attempts"] = render_attempts
+                        raise RuntimeError(
+                            "isolated qualification exceeded the maximum real render attempts"
+                        )
+                    render_attempts += 1
                 started = time.perf_counter()
                 result = await app.drain_action(action.action_id)
                 elapsed = _latency(started)
@@ -1172,6 +1302,8 @@ async def _drain_provider_stages(
         "inspection_provider_call": "included in render latency by the current provider transport seam",
     }
     phase_report["provider_actions"] = action_evidence
+    phase_report["real_render_attempts"] = render_attempts
+    phase_report["max_real_render_attempts"] = MAX_REAL_RENDER_ATTEMPTS
 
 
 async def _run_phase(
@@ -1440,7 +1572,9 @@ async def _run_phase(
                         "observed": True,
                         "failure_kind": "planning_terminal_result",
                         "failure_did_not_become_role_no_op": (
-                            report["character_selection"].get("decision") != "no_op"
+                            _provider_failure_did_not_become_role_no_op(
+                                report["character_selection"], [planning.status]
+                            )
                         ),
                         "failure": (
                             planning_rows[-1].get("reason_code")
@@ -1549,8 +1683,9 @@ async def _run_phase(
                     "provider_failure_semantics": {
                         "observed": bool(failure_events),
                         "failure_did_not_become_role_no_op": (
-                            report["character_selection"].get("status") == "proposed"
-                            and report["character_selection"].get("decision") != "no_op"
+                            _provider_failure_did_not_become_role_no_op(
+                                report["character_selection"], failure_events
+                            )
                         ),
                         "failure_events": failure_events,
                     },
@@ -1740,8 +1875,9 @@ async def _run_phase(
         report["provider_failure_semantics"] = {
             "observed": bool(failure_events),
             "failure_did_not_become_role_no_op": (
-                report["character_selection"].get("status") == "proposed"
-                and report["character_selection"].get("decision") != "no_op"
+                _provider_failure_did_not_become_role_no_op(
+                    report["character_selection"], failure_events
+                )
                 if failure_events
                 else "not_observed"
             ),
@@ -1751,14 +1887,7 @@ async def _run_phase(
         fail_closed = report["fail_closed"]
         replay_live = report["replay_live"]
         artifact = report.get("artifact")
-        artifact_valid = (
-            isinstance(artifact, dict)
-            and isinstance(artifact.get("path"), str)
-            and Path(str(artifact["path"])).is_file()
-            and isinstance(artifact.get("bytes"), int)
-            and artifact["bytes"] > 0
-            and isinstance(artifact.get("sha256"), str)
-        )
+        artifact_valid = _artifact_report_is_valid(artifact, scratch_root=phase_root)
         failed_checks: list[str] = []
         if not artifact_valid:
             failed_checks.append("artifact_bytes_hash_and_path")
@@ -1874,8 +2003,7 @@ def _base_report(*, scratch_root: Path, settings: Settings) -> dict[str, object]
 async def main() -> int:
     started = time.perf_counter()
     original_cwd = Path.cwd()
-    scratch_root = Path(tempfile.mkdtemp(prefix="girl-agent-wt-e.", dir="/tmp"))
-    scratch_root.mkdir(parents=True, exist_ok=True)
+    scratch_root = _new_scratch_root()
     exit_code = 0
     report: dict[str, object]
     role_model: _ObservedRoleModel | None = None
@@ -1943,12 +2071,10 @@ async def main() -> int:
                 }
             if real_phase.get("status") == "qualification_complete":
                 report.update(
-                    {
-                        "status": "qualification_complete",
-                        "qualification_scope": "full_chain",
-                        "character_selection_qualified": True,
-                        "deterministic_selection_double": False,
-                    }
+                    _qualification_fields(
+                        status="qualification_complete",
+                        deterministic_selection_double=False,
+                    )
                 )
             elif (
                 real_phase.get("status") == "legal_character_no_op"
@@ -1966,10 +2092,10 @@ async def main() -> int:
                 report["scratch_dbs"].append(downstream.get("scratch_db"))
                 report.update(
                     {
-                        "status": downstream.get("status"),
-                        "qualification_scope": "downstream_provider_stages_only",
-                        "character_selection_qualified": False,
-                        "deterministic_selection_double": True,
+                        **_qualification_fields(
+                            status=downstream.get("status"),
+                            deterministic_selection_double=True,
+                        ),
                         "downstream_provider_stages": {
                             "status": downstream.get("status"),
                             "planning": downstream.get("planning"),
@@ -1996,21 +2122,17 @@ async def main() -> int:
                 "source_candidate_unavailable",
             }:
                 report.update(
-                    {
-                        "status": real_phase.get("status"),
-                        "qualification_scope": "character_selection_only",
-                        "character_selection_qualified": False,
-                        "deterministic_selection_double": False,
-                    }
+                    _qualification_fields(
+                        status=real_phase.get("status"),
+                        deterministic_selection_double=False,
+                    )
                 )
             else:
                 report.update(
-                    {
-                        "status": real_phase.get("status"),
-                        "qualification_scope": "character_selection_only",
-                        "character_selection_qualified": False,
-                        "deterministic_selection_double": False,
-                    }
+                    _qualification_fields(
+                        status=real_phase.get("status"),
+                        deterministic_selection_double=False,
+                    )
                 )
                 exit_code = 5
     except Exception as exc:
