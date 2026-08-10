@@ -3735,9 +3735,14 @@ def test_qq_health_reports_a_running_scheduler_even_when_the_world_is_starved(
             "attempt_timeout_seconds": None,
             "secondary_reserved_seconds": None,
         },
-        "redundancy_state": "unavailable",
-        "source_review_authority": None,
-    }
+            "redundancy_state": "unavailable",
+            "source_review_authority": None,
+            "source_guard_relation": "unavailable",
+            "selective_source_review": {
+                "enabled": False,
+                "runtime": None,
+            },
+        }
     assert scheduler["life_source_authority"]["status"] == "unavailable"
     assert scheduler["life_source_authority"]["last_transport_winner"] is None
     if scheduler["recall_semantic"]["enabled"]:

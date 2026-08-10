@@ -18360,6 +18360,203 @@ async def test_inventory_guard_treats_an_empty_terminal_expression_as_empty_inve
 
 
 @pytest.mark.asyncio
+async def test_compact_source_authority_closes_complete_source_free_surface_in_one_call() -> None:
+    text = "你这么一问，我忽然有点想你。"
+
+    class _CompactAuthority(_SequenceJsonModel):
+        def supports_strict_output_contract(self, contract: str) -> bool:
+            return contract in {
+                "visible-beat-source-verdict.1",
+                "source-closure-review.7",
+                "report-relative-entailment-adjudication.3",
+            }
+
+    reviewer = _CompactAuthority(
+        [
+            json.dumps(
+                {
+                    "contract": "visible-beat-source-verdict.1",
+                    "decisions": [
+                        {
+                            "beat_index": 0,
+                            "verdict": "source_free",
+                            "semantic_role": "private_state",
+                            "subject_role": "companion",
+                            "source_ref_indexes": [],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+    inventory = _StrictInventorySequenceJsonModel([])
+
+    result = await review_expression_with_candidate_external_coverage(
+        reviewer=reviewer,
+        inventory_model=inventory,
+        request=_qq_request(),
+        raw=_candidate_coverage_raw(text),
+        identity_frame=None,
+    )
+
+    assert result.review is None
+    assert result.visible_authority_exhaustive is True
+    assert len(reviewer.calls) == 1
+    assert inventory.calls == []
+    packet = json.loads(reviewer.calls[0][0][-1]["content"])
+    assert packet["output_contract"]["contract"] == "visible-beat-source-verdict.1"
+    assert packet["visible_beats"] == [{"beat_index": 0, "text": text}]
+
+
+@pytest.mark.asyncio
+async def test_compact_source_authority_reviews_text_without_serializing_opaque_beats() -> None:
+    text = "我在听。"
+
+    class _CompactAuthority(_SequenceJsonModel):
+        def supports_strict_output_contract(self, contract: str) -> bool:
+            return contract == "visible-beat-source-verdict.1"
+
+    reviewer = _CompactAuthority(
+        [
+            json.dumps(
+                {
+                    "contract": "visible-beat-source-verdict.1",
+                    "decisions": [
+                        {
+                            "beat_index": 0,
+                            "verdict": "source_free",
+                            "semantic_role": "commitment",
+                            "subject_role": "companion",
+                            "source_ref_indexes": [],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+    raw = json.dumps(
+        {
+            "timing_choice": "now",
+            "beats": [
+                {"modality": "reaction", "reaction_id": "reaction:heart"},
+                {"modality": "text", "text": text},
+                {"modality": "typing"},
+                {"modality": "sticker", "sticker_id": "sticker:cat"},
+            ],
+            "stance": "warm",
+            "brief_rationale": "Keep opaque capability tokens outside factual prose review.",
+            "confidence": 7600,
+            "world_claims": [],
+        },
+        ensure_ascii=False,
+    )
+
+    result = await review_expression_with_candidate_external_coverage(
+        reviewer=reviewer,
+        inventory_model=_StrictInventorySequenceJsonModel([]),
+        request=_qq_request(),
+        raw=raw,
+        identity_frame=None,
+    )
+
+    assert result.review is None
+    assert len(reviewer.calls) == 1
+    packet = json.loads(reviewer.calls[0][0][-1]["content"])
+    assert packet["visible_beats"] == [{"beat_index": 0, "text": text}]
+
+
+@pytest.mark.asyncio
+async def test_compact_source_authority_rejects_unclosed_external_segment() -> None:
+    text = "下午看书的时候突然想到你，但当时没说。"
+
+    class _CompactAuthority(_SequenceJsonModel):
+        def supports_strict_output_contract(self, contract: str) -> bool:
+            return contract in {
+                "visible-beat-source-verdict.1",
+                "source-closure-review.7",
+                "report-relative-entailment-adjudication.3",
+            }
+
+    reviewer = _CompactAuthority(
+        [
+            json.dumps(
+                {
+                    "contract": "visible-beat-source-verdict.1",
+                    "decisions": [
+                        {
+                            "beat_index": 0,
+                            "verdict": "unclosed",
+                            "semantic_role": "external_proposition",
+                            "subject_role": "companion",
+                            "source_ref_indexes": [],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+
+    result = await review_expression_with_candidate_external_coverage(
+        reviewer=reviewer,
+        inventory_model=_StrictInventorySequenceJsonModel([]),
+        request=_qq_request(),
+        raw=_candidate_coverage_raw(text),
+        identity_frame=None,
+    )
+
+    assert result.review is not None
+    assert result.review.decision == "unsupported"
+    assert result.review.visible_findings[0].visible_span == text
+    assert result.visible_authority_exhaustive is True
+    assert len(reviewer.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_compact_source_authority_falls_back_to_full_v7_after_wire_retry() -> None:
+    text = "你这么一问，我忽然有点想你。"
+
+    class _SelectiveAuthority(_SequenceJsonModel):
+        def supports_strict_output_contract(self, contract: str) -> bool:
+            return contract in {
+                "visible-beat-source-verdict.1",
+                "source-closure-review.7",
+                "report-relative-entailment-adjudication.3",
+            }
+
+    reviewer = _SelectiveAuthority(
+        [
+            '{"contract":"visible-beat-source-verdict.1","decisions":[]}',
+            '{"contract":"visible-beat-source-verdict.1","decisions":[]}',
+            _source_closure_review(),
+        ]
+    )
+
+    result = await review_expression_with_candidate_external_coverage(
+        reviewer=reviewer,
+        inventory_model=_StrictInventorySequenceJsonModel([]),
+        request=_qq_request(),
+        raw=_candidate_coverage_raw(text),
+        identity_frame=None,
+    )
+
+    assert result.review is not None
+    assert result.review.decision == "supported"
+    assert len(reviewer.calls) == 3
+    contracts = [
+        json.loads(call[0][-1]["content"])["output_contract"]["contract"]
+        for call in reviewer.calls
+    ]
+    assert contracts == [
+        "visible-beat-source-verdict.1",
+        "visible-beat-source-verdict.1",
+        "source-closure-review.7",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_production_full_review_keeps_report_relative_stage_without_inventory() -> None:
     """Inventory outage must not remove the exact-current-report authority."""
 

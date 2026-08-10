@@ -91,6 +91,12 @@ from ..model_facing_context import (
     compact_recovery_model_facing_context,
 )
 from ..model_completion import ChatCompletionModel
+from ..visible_source_closure_protocol import (
+    VISIBLE_SOURCE_CLOSURE_CONTRACT,
+    compact_source_reference_table,
+    parse_visible_source_closure,
+    visible_source_closure_messages,
+)
 from ..production_reliability_metrics import (
     record_claim_repair,
     record_shape_repair,
@@ -1007,34 +1013,43 @@ async def _metered_review_call(
     if capture is not None:
         author_model_call_id = capture.current_author.model_call_id
         capture.ordinal += 1
+        request_contract = _reviewer_provider_request_contract(reviewer)
         direct_identity = _provider_invocation_identity(
             parent_call_id=author_model_call_id,
             purpose=f"{audit_purpose}_{capture.ordinal}",
             messages=messages,
             temperature=temperature,
+            tools=request_contract[0],
+            tool_choice=request_contract[1],
+            tool_contract_identity=request_contract[2],
         )
 
     metered = getattr(reviewer, "complete_json_with_usage", None)
     if not callable(metered):
         metered = getattr(reviewer, "complete_with_usage", None)
     try:
-        if not callable(metered):
-            complete_json = getattr(reviewer, "complete_json", None)
-            call = (
-                complete_json(messages, temperature=temperature)
-                if callable(complete_json)
-                else reviewer.complete(messages, temperature=temperature)
-            )
-            raw = await call
-            if not isinstance(raw, str):
-                raise ValueError("semantic reviewer result must be text")
-            usage = None
-        else:
-            result = await metered(messages, temperature=temperature)
-            if not isinstance(result, tuple) or len(result) != 2 or not isinstance(result[0], str):
-                raise ValueError("metered semantic reviewer result must be (text, usage)")
-            raw = result[0]
-            usage = ModelUsageProvenance.model_validate(result[1])
+        with model_call_scope(audit_purpose):
+            if not callable(metered):
+                complete_json = getattr(reviewer, "complete_json", None)
+                call = (
+                    complete_json(messages, temperature=temperature)
+                    if callable(complete_json)
+                    else reviewer.complete(messages, temperature=temperature)
+                )
+                raw = await call
+                if not isinstance(raw, str):
+                    raise ValueError("semantic reviewer result must be text")
+                usage = None
+            else:
+                result = await metered(messages, temperature=temperature)
+                if (
+                    not isinstance(result, tuple)
+                    or len(result) != 2
+                    or not isinstance(result[0], str)
+                ):
+                    raise ValueError("metered semantic reviewer result must be (text, usage)")
+                raw = result[0]
+                usage = ModelUsageProvenance.model_validate(result[1])
     except BaseException as exc:
         if capture is not None and direct_identity is not None:
             traced = _source_review_attempts(exc)
@@ -1239,6 +1254,40 @@ def _provider_invocation_identity(
             )
         ),
         request_hash=request_hash,
+    )
+
+
+def _reviewer_provider_request_contract(
+    reviewer: object,
+) -> tuple[
+    list[dict[str, object]] | None,
+    object | None,
+    dict[str, str] | None,
+]:
+    reader = getattr(reviewer, "provider_request_contract", None)
+    if not callable(reader):
+        return None, None, None
+    value = reader()
+    if not isinstance(value, dict):
+        raise ValueError("reviewer provider request contract must be an object")
+    tools = value.get("tools")
+    tool_choice = value.get("tool_choice")
+    contract = value.get("contract")
+    schema_digest = value.get("schema_digest")
+    if (
+        not isinstance(tools, list)
+        or not tools
+        or tool_choice is None
+        or not isinstance(contract, str)
+        or not contract
+        or not isinstance(schema_digest, str)
+        or not schema_digest
+    ):
+        raise ValueError("reviewer provider request contract is incomplete")
+    return (
+        tools,
+        tool_choice,
+        {"contract": contract, "schema_digest": schema_digest},
     )
 
 
@@ -7006,6 +7055,186 @@ async def _inventory_source_declaration_guard(
     )
 
 
+async def _review_expression_with_visible_source_proof(
+    *,
+    reviewer: ChatCompletionModel,
+    request: ModelInput,
+    raw: str,
+    identity_frame: CompanionIdentityFrame | None,
+    model_visible_context_json: str | None,
+    source_ref_aliases: SourceRefAliasTable | None,
+    effect_bearing_only: bool,
+) -> SourceClosureReviewResult:
+    """Run one exhaustive compact authority over the complete visible surface."""
+
+    material = _prepare_source_closure_review_material(
+        request=request,
+        raw=raw,
+        identity_frame=identity_frame,
+        model_visible_context_json=model_visible_context_json,
+        source_ref_aliases=source_ref_aliases,
+        effect_bearing_only=effect_bearing_only,
+    )
+    if material.source_evidence is None:
+        return SourceClosureReviewResult(
+            review=None,
+            usage=None,
+            visible_authority_exhaustive=True,
+        )
+    # Reaction, sticker, and typing transports carry only capability-pinned
+    # opaque tokens; they cannot contain an external proposition.  Review the
+    # complete ordered textual surfaces and leave those non-text transports to
+    # their existing deterministic capability validation.  A mixed text +
+    # reaction expression must never send ``None`` into the semantic protocol.
+    visible_beats = tuple(
+        beat.text for beat in material.draft.beats if beat.text is not None
+    )
+    source_references = compact_source_reference_table(material.source_evidence)
+    source_refs = tuple(str(row["source_ref"]) for row in source_references)
+    world_claims = tuple(
+        {
+            "claim_index": index,
+            **claim.model_dump(mode="json"),
+        }
+        for index, claim in enumerate(material.draft.world_claims)
+    )
+    invalid_reason: str | None = None
+    preceding_usage: ModelUsageProvenance | None = None
+    last_identity: _ProviderInvocationIdentity | None = None
+    last_model_id: str | None = None
+    last_model_version: str | None = None
+    last_usage: ModelUsageProvenance | None = None
+
+    async def proof_once() -> SourceClosureReviewResult:
+        nonlocal invalid_reason, preceding_usage
+        nonlocal last_identity, last_model_id, last_model_version, last_usage
+        messages = visible_source_closure_messages(
+            visible_beats=visible_beats,
+            world_claims=world_claims,
+            source_references=source_references,
+            invalid_reason=invalid_reason,
+        )
+        selected_reviewer = _reviewer_for_wire_reselection(
+            reviewer,
+            invalid_wire=invalid_reason,
+        )
+        request_contract = _reviewer_provider_request_contract(selected_reviewer)
+        last_identity = _provider_invocation_identity(
+            parent_call_id=request.call_id,
+            purpose="visible_source_closure_proof",
+            messages=messages,
+            temperature=0.0,
+            tools=request_contract[0],
+            tool_choice=request_contract[1],
+            tool_contract_identity=request_contract[2],
+        )
+        last_model_id = (
+            str(getattr(selected_reviewer, "model", "")).strip()
+            or type(selected_reviewer).__name__
+        )
+        last_model_version = (
+            str(getattr(selected_reviewer, "VERSION", "")).strip()
+            or VISIBLE_SOURCE_CLOSURE_CONTRACT
+        )
+        try:
+            reviewed_raw, usage = await _metered_review_call(
+                selected_reviewer,
+                messages,
+                temperature=0.0,
+                audit_purpose="visible_source_closure_proof_v1",
+            )
+            last_usage = usage
+            proof = parse_visible_source_closure(
+                reviewed_raw,
+                visible_beats=visible_beats,
+                source_ref_kinds=tuple(
+                    row.get("kind") if isinstance(row.get("kind"), str) else None
+                    for row in source_references
+                ),
+                source_ref_subject_roles=tuple(
+                    row.get("subject_role")
+                    if isinstance(row.get("subject_role"), str)
+                    else None
+                    for row in source_references
+                ),
+            )
+        except ValidationError:
+            if last_usage is not None:
+                preceding_usage = (
+                    last_usage
+                    if preceding_usage is None
+                    else _combine_usage(preceding_usage, last_usage, request.call_id)
+                )
+            invalid_reason = "wire_schema_invalid"
+            raise ValueError(invalid_reason) from None
+        except ValueError as exc:
+            if last_usage is not None:
+                preceding_usage = (
+                    last_usage
+                    if preceding_usage is None
+                    else _combine_usage(preceding_usage, last_usage, request.call_id)
+                )
+            invalid_reason = str(exc)[:240]
+            raise
+        combined_usage = (
+            usage
+            if preceding_usage is None
+            else _combine_usage(preceding_usage, usage, request.call_id)
+        )
+        unclosed = tuple(segment for segment in proof.segments if segment.decision == "unclosed")
+        if not unclosed:
+            return SourceClosureReviewResult(
+                review=None,
+                usage=combined_usage,
+                visible_authority_exhaustive=True,
+            )
+        roles = tuple(segment.semantic_role for segment in unclosed)
+        return SourceClosureReviewResult(
+            review=_ContextualClaimSupportReview(
+                decision="unsupported",
+                visible_text_failures=("undeclared_external_assertion",),
+                visible_findings=tuple(
+                    SourceClosureVisibleFinding(
+                        category="undeclared_external_assertion",
+                        visible_span=segment.locator.text,
+                        claim_index=None,
+                        source_relation="unclosed",
+                        source_refs=tuple(
+                            source_refs[index] for index in segment.source_ref_indexes
+                        ),
+                    )
+                    for segment in unclosed
+                ),
+                unclosed_semantic_role_counts=_count_unclosed_semantic_roles(roles),
+                brief_reason="compact visible source proof retained unclosed segment",
+            ),
+            usage=combined_usage,
+            visible_authority_exhaustive=True,
+            visible_authority_terminal_rejection=(
+                "source_bearing_private_episode" in roles
+            ),
+        )
+
+    try:
+        return await run_validation_review(
+            proof_once,
+            timeout_seconds=_SOURCE_CLOSURE_REVIEW_TIMEOUT_SECONDS,
+        )
+    except ValidationTechnicalFailure as exc:
+        if exc.model_call_id is not None or last_identity is None:
+            raise
+        assert last_model_id is not None
+        assert last_model_version is not None
+        raise ValidationTechnicalFailure(
+            exc.failure_code,
+            model_call_id=last_identity.model_call_id,
+            request_hash=last_identity.request_hash,
+            attempted_model_id=last_model_id,
+            attempted_model_version=last_model_version,
+            usage=preceding_usage or last_usage,
+        ) from exc
+
+
 async def review_expression_with_candidate_external_coverage(
     *,
     reviewer: ChatCompletionModel,
@@ -7027,6 +7256,84 @@ async def review_expression_with_candidate_external_coverage(
     report-relative stage; only historical fixtures may opt back into
     declared-claims-only behavior.
     """
+
+    if _strict_contract_supported(reviewer, VISIBLE_SOURCE_CLOSURE_CONTRACT):
+        try:
+            compact_result = await _review_expression_with_visible_source_proof(
+                reviewer=reviewer,
+                request=request,
+                raw=raw,
+                identity_frame=identity_frame,
+                model_visible_context_json=model_visible_context_json,
+                source_ref_aliases=source_ref_aliases,
+                effect_bearing_only=effect_bearing_only,
+            )
+        except ValidationTechnicalFailure as compact_failure:
+            # The compact route is an optimization, not a new availability
+            # authority. Its bounded wire/transport failure falls through to
+            # the existing full reviewer on the identical pinned candidate.
+            # A semantic ``unsupported`` verdict never reaches this branch.
+            if not _strict_contract_supported(reviewer, "source-closure-review.7"):
+                # Flash-only topology has no second provider to disguise this
+                # failure. Keep the typed compact failure observable and let
+                # the normal same-character correction/retry lifecycle own it.
+                raise
+            full_result = await review_expression_source_closure(
+                reviewer=reviewer,
+                report_relative_reviewer=report_relative_reviewer,
+                request=request,
+                raw=raw,
+                identity_frame=identity_frame,
+                model_visible_context_json=model_visible_context_json,
+                source_ref_aliases=source_ref_aliases,
+                allow_report_relative_adjudication=allow_report_relative_adjudication,
+                declared_claims_only=False,
+                effect_bearing_only=effect_bearing_only,
+            )
+            return _with_combined_source_review_usage(
+                result=full_result,
+                preceding_usage=compact_failure.usage,
+                call_id=request.call_id,
+            )
+        if compact_result.review is not None and compact_result.review.decision == "unsupported":
+            return compact_result
+        material = _prepare_source_closure_review_material(
+            request=request,
+            raw=raw,
+            identity_frame=identity_frame,
+            model_visible_context_json=model_visible_context_json,
+            source_ref_aliases=source_ref_aliases,
+            effect_bearing_only=effect_bearing_only,
+        )
+        if (
+            not material.draft.world_claims
+            or not _strict_contract_supported(reviewer, "source-closure-review.7")
+        ):
+            return compact_result
+        claim_result = await review_expression_source_closure(
+            reviewer=reviewer,
+            request=request,
+            raw=raw,
+            identity_frame=identity_frame,
+            model_visible_context_json=model_visible_context_json,
+            source_ref_aliases=source_ref_aliases,
+            allow_report_relative_adjudication=False,
+            declared_claims_only=True,
+            effect_bearing_only=effect_bearing_only,
+        )
+        return SourceClosureReviewResult(
+            review=claim_result.review,
+            usage=(
+                compact_result.usage
+                if claim_result.usage is None
+                else _combine_usage(
+                    compact_result.usage,
+                    claim_result.usage,
+                    request.call_id,
+                )
+            ),
+            visible_authority_exhaustive=True,
+        )
 
     if inventory_model is None:
         # Inventory V5 is an optional semantic decomposition optimization.  A

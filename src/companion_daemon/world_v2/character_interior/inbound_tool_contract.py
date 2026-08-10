@@ -229,15 +229,44 @@ def _capability_expression_schema(
     if capabilities.private_turn_state_mode == "required":
         required = required | {"private_turn_state"}
     schema["required"] = sorted(required)
-    # Provider JSON-schema support has a dependable ``anyOf`` subset.  Keep
-    # the timing union transport-only while making the deployment's deferred
-    # beat budget visible before a provider can emit an unexecutable plan.
+    # Provider JSON-schema support has a dependable ``anyOf`` subset.  Compile
+    # every timing/posture invariant that the provider dialect can express so
+    # an ordinary ``now + yield`` or ``later + interject`` choice is rejected
+    # before it spends the one bounded host correction.  The canonical model
+    # remains authoritative for relative comparisons such as expiry > delay.
+    no_due_window = {
+        "delay_seconds": {"type": "null"},
+        "expires_after_seconds": {"type": "null"},
+    }
     schema["anyOf"] = [
-        {"properties": {"timing_choice": {"enum": ["now", "silent"]}}},
+        {
+            "properties": {
+                "timing_choice": {"enum": ["now"]},
+                "beats": beats,
+                "turn_posture": {
+                    "enum": [None, "continue", "interject", "supersede"]
+                },
+                **no_due_window,
+            }
+        },
         {
             "properties": {
                 "timing_choice": {"enum": ["later"]},
                 "beats": later_beats,
+                "turn_posture": {
+                    "enum": [None, "yield", "continue", "supersede"]
+                },
+            }
+        },
+        {
+            "properties": {
+                "timing_choice": {"enum": ["silent"]},
+                "beats": {**deepcopy(beats), "maxItems": 0},
+                "turn_posture": {
+                    "enum": [None, "yield", "continue", "supersede"]
+                },
+                "response_expectation": {"type": "null"},
+                **no_due_window,
             }
         },
     ]
@@ -447,6 +476,9 @@ class InboundToolContracts:
             now_head_branch = {
                 "properties": {
                     "timing_choice": {"enum": ["now"]},
+                    "turn_posture": {
+                        "enum": [None, "continue", "interject", "supersede"]
+                    },
                     "beat": deepcopy(beat_array["items"]),
                     "beats": null_transport,
                 },
@@ -455,6 +487,9 @@ class InboundToolContracts:
             later_head_branch = {
                 "properties": {
                     "timing_choice": {"enum": ["later"]},
+                    "turn_posture": {
+                        "enum": [None, "yield", "continue", "supersede"]
+                    },
                     "beat": null_transport,
                     "beats": deferred_beats,
                     "leading_typing_beat": null_transport,
@@ -464,6 +499,9 @@ class InboundToolContracts:
             silent_head_branch = {
                 "properties": {
                     "timing_choice": {"enum": ["silent"]},
+                    "turn_posture": {
+                        "enum": [None, "yield", "continue", "supersede"]
+                    },
                     "beat": null_transport,
                     "beats": null_transport,
                     "leading_typing_beat": null_transport,
@@ -647,6 +685,10 @@ class InboundToolContracts:
                 + capabilities.profile_id
                 + f"; max_beats={capabilities.max_beats}; "
                 + f"max_later_beats={capabilities.max_later_beats}."
+                + " For timing_choice=now return at least one visible beat and never choose "
+                "turn_posture=yield. For timing_choice=later return at least one text beat "
+                "and never choose interject. For timing_choice=silent return no beats and "
+                "never choose interject."
             ),
             "parameters": parameters,
         }

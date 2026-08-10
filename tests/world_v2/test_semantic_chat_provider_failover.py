@@ -32,6 +32,9 @@ from companion_daemon.world_v2.structured_source_review_model import (
     InventoryAvailabilityAuthority,
     StructuredSourceReviewModel,
 )
+from companion_daemon.world_v2.visible_source_review_model import (
+    VisibleSourceReviewModel,
+)
 
 
 class _InjectedModel:
@@ -188,6 +191,7 @@ async def test_remote_production_composes_without_reviewer_when_redundancy_is_di
             DEEPSEEK_API_KEY="deepseek-test-key",
             OPENAI_API_KEY="openai-test-key",
             WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=False,
+            WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED=False,
             WORLD_V2_CHAT_SOURCE_REVIEW_ENABLED=False,
         ),
         model_id_prefix="test",
@@ -206,6 +210,7 @@ async def test_remote_production_keeps_chat_source_review_when_redundancy_is_dis
             OPENAI_API_KEY="openai-test-key",
             OPENROUTER_API_KEY="openrouter-test-key",
             WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=False,
+            WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED=False,
             WORLD_V2_CHAT_SOURCE_REVIEW_ENABLED=True,
         ),
         model_id_prefix="test",
@@ -246,6 +251,7 @@ def test_remote_production_rejects_unqualified_redundant_review_routes(
                 OPENAI_API_KEY="openai-test-key",
                 OPENROUTER_API_KEY="openrouter-test-key",
                 WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+                WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED=False,
                 WORLD_V2_SOURCE_REVIEW_SECONDARY_MODEL="openai/gpt-5.4-mini",
                 WORLD_V2_SOURCE_REVIEW_FALLBACK_MODEL="gpt-5.4-nano",
                 WORLD_V2_SOURCE_REVIEW_RECOVERY_MODEL="openai/gpt-5.4-mini",
@@ -267,6 +273,7 @@ async def test_world_v2_composition_uses_one_character_provider_and_independent_
         OPENROUTER_API_KEY="openrouter-test-key",
         OPENAI_PROXY_URL="http://127.0.0.1:7890",
         WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+        WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED=False,
     )
 
     composition = build_semantic_chat_composition(
@@ -295,6 +302,51 @@ async def test_world_v2_composition_uses_one_character_provider_and_independent_
     await composition.aclose()
 
 
+@pytest.mark.asyncio
+async def test_flash_only_visible_guard_uses_one_correlated_checkpoint() -> None:
+    base = {
+        "_env_file": None,
+        "DEEPSEEK_API_KEY": "deepseek-test-key",
+        "OPENAI_API_KEY": None,
+        "OPENROUTER_API_KEY": None,
+        "QWEN_API_KEY": None,
+        "WORLD_V2_LIFE_SOURCE_REVIEW_ENABLED": False,
+    }
+    observed_usage: list[object] = []
+    usage_observer = observed_usage.append
+    composition = build_semantic_chat_composition(
+        settings=Settings(
+            **base,
+            WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED=True,
+            WORLD_V2_SELECTIVE_SOURCE_REVIEW_MODEL="deepseek-v4-flash",
+        ),
+        model_id_prefix="test",
+        usage_observer=usage_observer,
+    )
+    assert isinstance(composition.source_closure_model, VisibleSourceReviewModel)
+    assert composition.source_closure_model.provider == "deepseek"
+    assert composition.source_closure_model.model == "deepseek-v4-flash"
+    assert composition.source_closure_model.supports_strict_output_contract(
+        "visible-beat-source-verdict.1"
+    )
+    assert isinstance(composition.recovery_source_closure_model, VisibleSourceReviewModel)
+    assert composition.life_source_closure_model is None
+    assert composition.source_closure_model.usage_observer is usage_observer
+    compact_health = composition.proactive_source_authority_health()["selective_source_review"]
+    assert compact_health["enabled"] is True
+    assert compact_health["runtime"]["semantic_authority_relation"] == (
+        "correlated_same_checkpoint"
+    )
+    health = composition.proactive_source_authority_health()
+    assert health["status"] == "correlated_guard"
+    assert health["independent_reviewer"] is False
+    assert health["fact_effects_available"] is True
+    assert health["source_guard_relation"] == "correlated_same_checkpoint"
+    assert health["active_source_review_protocol"] == "visible_beat_source_verdict.1"
+    assert health["redundancy_state"] == "single_active_correlated_lane"
+    await composition.aclose()
+
+
 def test_provider_capture_can_preserve_deepseek_authority_for_isolated_preflight() -> None:
     """A loopback hash capture must not erase the underlying author identity."""
 
@@ -306,6 +358,7 @@ def test_provider_capture_can_preserve_deepseek_authority_for_isolated_preflight
         OPENAI_API_KEY="openai-test-key",
         OPENROUTER_API_KEY="openrouter-test-key",
         WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+        WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED=False,
     )
 
     composition = build_semantic_chat_composition(
@@ -337,6 +390,7 @@ def test_provider_capture_authority_is_fail_closed_outside_exact_loopback_route(
         "OPENAI_API_KEY": "openai-test-key",
         "OPENROUTER_API_KEY": "openrouter-test-key",
         "WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED": True,
+        "WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED": False,
         **settings_update,
     }
     settings = Settings(
@@ -361,6 +415,7 @@ def test_provider_capture_authority_rejects_caller_supplied_character_route() ->
         OPENAI_API_KEY="openai-test-key",
         OPENROUTER_API_KEY="openrouter-test-key",
         WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+        WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED=False,
     )
 
     with pytest.raises(ValueError, match="caller-supplied character models"):
@@ -389,6 +444,7 @@ def test_provider_capture_authority_rejects_unpinned_thinking_checkpoint() -> No
         OPENAI_API_KEY="openai-test-key",
         OPENROUTER_API_KEY="openrouter-test-key",
         WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+        WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED=False,
     )
 
     with pytest.raises(ValueError, match="thinking character route"):
@@ -411,6 +467,7 @@ async def test_production_composition_has_no_backup_character_author() -> None:
         OPENAI_API_KEY="openai-test-key",
         OPENROUTER_API_KEY="openrouter-test-key",
         WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+        WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED=False,
     )
 
     composition = build_semantic_chat_composition(
@@ -436,6 +493,7 @@ async def test_shadow_composition_does_not_install_a_backup_character_observer()
         OPENROUTER_API_KEY="openrouter-test-key",
         WORLD_V2_EXPRESSION_EPISODE_MODE="shadow",
         WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+        WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED=False,
     )
 
     composition = build_semantic_chat_composition(
@@ -501,6 +559,7 @@ async def test_production_composition_keeps_unverified_inventory_out_of_every_ca
         WORLD_V2_SOURCE_REVIEW_RECOVERY_MODEL="qwen/qwen-plus",
         WORLD_V2_SOURCE_REVIEW_RECOVERY_FALLBACK_MODEL="gpt-4.1-mini",
         WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+        WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED=False,
         WORLD_V2_SOURCE_REVIEW_HEDGE_AFTER_SECONDS=3.5,
         WORLD_V2_SOURCE_REVIEW_DEADLINE_SECONDS=19.0,
         WORLD_V2_SOURCE_INVENTORY_TIMEOUT_SECONDS=5.0,
@@ -644,6 +703,7 @@ async def test_production_source_review_prefers_the_stricter_live_winner() -> No
             OPENAI_API_KEY="openai-test-key",
             OPENROUTER_API_KEY="openrouter-test-key",
             WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+            WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED=False,
         ),
         model_id_prefix="test",
     )
@@ -673,6 +733,7 @@ async def test_production_composition_does_not_install_unverified_openrouter_inv
         WORLD_V2_SOURCE_REVIEW_RECOVERY_MODEL="qwen/qwen-plus",
         WORLD_V2_SOURCE_REVIEW_RECOVERY_FALLBACK_MODEL="gpt-4.1-mini",
         WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+        WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED=False,
     )
 
     composition = build_semantic_chat_composition(
@@ -716,6 +777,7 @@ async def test_production_composition_installs_inventory_guard_with_qualified_re
             OPENROUTER_API_KEY="openrouter-test-key",
             OPENROUTER_BASE_URL="https://openrouter.ai/api/v1",
             WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+            WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED=False,
         ),
         model_id_prefix="test",
     )
@@ -799,6 +861,7 @@ async def test_production_inventory_can_be_disabled_without_weakening_full_revie
             OPENAI_API_KEY="openai-test-key",
             OPENROUTER_API_KEY="openrouter-test-key",
             WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+            WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED=False,
             WORLD_V2_SOURCE_INVENTORY_ENABLED=False,
         ),
         model_id_prefix="test",
@@ -1015,6 +1078,7 @@ async def test_explicit_offline_fixture_never_installs_character_self_review() -
         ],
         "independent_reviewer": False,
         "fact_effects_available": False,
+        "source_guard_relation": "unavailable",
         "subjective_expression_available": True,
         "author_model": "FakeCompanionModel",
         "reviewer_model": None,
@@ -1033,6 +1097,7 @@ async def test_explicit_offline_fixture_never_installs_character_self_review() -
         "inventory_qualification_state": "unavailable",
         "active_source_review_protocol": "full_source_review.7",
         "source_review_qualification_transition": ("unavailable -> full_source_review.7"),
+        "selective_source_review": {"enabled": False, "runtime": None},
         "candidate_review_capabilities": {
             "ordinary": {
                 "inventory_v5": False,
@@ -1096,7 +1161,9 @@ async def test_proactive_source_authority_refuses_an_explicit_author_self_review
 
 
 @pytest.mark.asyncio
-async def test_remote_production_composition_runs_pure_deterministic_without_reviewer_keys() -> None:
+async def test_remote_production_composition_runs_pure_deterministic_without_reviewer_keys() -> (
+    None
+):
     """No review keys require an explicit degraded author-only opt-out."""
 
     composition = build_semantic_chat_composition(
@@ -1272,6 +1339,7 @@ async def test_composition_defers_owned_reviewer_close_until_authority_is_quiesc
             OPENAI_API_KEY="openai-test-key",
             OPENROUTER_API_KEY="openrouter-test-key",
             WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+            WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED=False,
         ),
         model_id_prefix="test",
     )
@@ -1489,6 +1557,7 @@ async def test_production_source_authority_finishes_inside_its_22_second_caller(
         OPENAI_API_KEY="openai-test-key",
         OPENROUTER_API_KEY="openrouter-test-key",
         WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+        WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED=False,
         WORLD_V2_SOURCE_REVIEW_HEDGE_AFTER_SECONDS=8.0,
         WORLD_V2_SOURCE_REVIEW_DEADLINE_SECONDS=30.0,
     )
@@ -1528,6 +1597,7 @@ async def test_production_proactive_authorship_has_no_post_authorship_binder() -
         OPENAI_API_KEY="openai-test-key",
         OPENROUTER_API_KEY="openrouter-test-key",
         WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+        WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED=False,
     )
 
     composition = build_semantic_chat_composition(

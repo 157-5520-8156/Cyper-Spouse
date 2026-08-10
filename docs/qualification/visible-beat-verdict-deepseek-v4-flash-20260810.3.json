@@ -1,0 +1,51 @@
+{
+  "contract": "visible-beat-source-verdict.1",
+  "evidence_revision": "visible-beat-verdict-deepseek-v4-flash-20260810.3",
+  "observed_at": "2026-08-10",
+  "provider": "deepseek",
+  "endpoint": "https://api.deepseek.com/beta",
+  "model": "deepseek-v4-flash",
+  "transport": "required strict tool",
+  "schema_sha256": "347069477180408b262fd4ac7da64341c07b8456d18ad6bd6ab7dee7f9ea78e7",
+  "sample_count": 100,
+  "success_count": 100,
+  "first_attempt_schema_valid_count": 100,
+  "adversarial_coordinates": [
+    "immediate_private_state",
+    "genuine_question",
+    "world_unbound_generalization",
+    "present_character_commitment",
+    "exact_current_counterpart_report",
+    "actor_swap",
+    "invented_physical_state",
+    "invented_completed_episode",
+    "plan_claimed_as_completed",
+    "polarity_conflict"
+  ],
+  "latency_ms": {
+    "p50": 1049.1,
+    "p95": 1386.6,
+    "p99": 1529.5,
+    "max": 1956.7
+  },
+  "observed_input_tokens_per_call": {
+    "min": 1089,
+    "max": 1131
+  },
+  "observed_output_tokens_per_call": {
+    "min": 106,
+    "max": 110
+  },
+  "semantic_authority_relation_to_character_author": "correlated_same_checkpoint",
+  "independent_semantic_authority": false,
+  "scope": "isolated exact-contract route selection only",
+  "qualification_state": "manual_only",
+  "release_state": "qualification_incomplete",
+  "excluded_scope": [
+    "end-to-end first Beat latency",
+    "real QQ delivery and receipt",
+    "natural multi-turn experience",
+    "24-hour soak",
+    "independent semantic review"
+  ]
+}

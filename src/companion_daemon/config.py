@@ -473,9 +473,27 @@ class Settings(BaseSettings):
         default=True,
         alias="WORLD_V2_CHAT_SOURCE_REVIEW_ENABLED",
         description=(
-            "Install an independent source-closure authority for visible CharacterInterior "
-            "chat candidates. This is separate from the redundant reviewer/fallback policy; "
-            "disabling it is an explicit unsafe/degraded deployment choice."
+            "Install source-closure authority for visible CharacterInterior chat candidates. "
+            "The selected topology may be the legacy independent lane or an explicitly "
+            "correlated guard; disabling both is an unsafe/degraded deployment choice."
+        ),
+    )
+    world_v2_selective_source_review_enabled: bool = Field(
+        default=False,
+        alias="WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED",
+        description=(
+            "Staging opt-in for a separate DeepSeek Flash runtime implementing the compact "
+            "visible-source guard. It is the same semantic checkpoint as the Character author "
+            "and is reported as correlated, not independent. Production default remains off "
+            "until the end-to-end latency, QQ receipt, restart, and soak gates pass."
+        ),
+    )
+    world_v2_selective_source_review_model: str = Field(
+        default="deepseek-v4-flash",
+        alias="WORLD_V2_SELECTIVE_SOURCE_REVIEW_MODEL",
+        description=(
+            "Exact DeepSeek Flash checkpoint audited for visible-beat-source-verdict.1. "
+            "Production rejects a value different from DEEPSEEK_MODEL."
         ),
     )
     # Life Ecology source closure is a hard dependency of life_development
