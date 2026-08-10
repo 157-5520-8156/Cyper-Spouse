@@ -16,8 +16,10 @@ from companion_daemon.llm import (
     ProviderCircuitBreaker,
     complete_with_timeout,
     model_call_scope,
+    model_provider_request_identity_scope,
     model_request_emission_scope,
     model_turn_scope,
+    provider_invocation_request_hash,
 )
 from companion_daemon.world_v2.deliberation import ModelUsageProvenance
 from companion_daemon.world_v2.character_interior.inbound_tool_contract import (
@@ -738,6 +740,73 @@ async def test_request_emission_marker_runs_after_payload_build_at_transport_bou
         "request_completed",
     ]
     await model.aclose()
+
+
+@pytest.mark.asyncio
+async def test_loopback_capture_receives_only_adapter_verified_request_identity() -> None:
+    captured_headers: dict[str, str] = {}
+    messages = [{"role": "user", "content": "hi"}]
+    request_hash = provider_invocation_request_hash(
+        messages=messages,
+        temperature=0.8,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_headers.update(request.headers)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "ok"}}]},
+        )
+
+    model = DeepSeekChatModel(
+        "key",
+        "http://127.0.0.1:32124",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    object.__setattr__(model, "_test_only_capture_exact_request_identity", True)
+
+    try:
+        with model_request_emission_scope(
+            provider_call_id="model-call:test-exact-identity",
+            entry_marker=None,
+            completion_marker=None,
+        ), model_provider_request_identity_scope(
+            request_hash=request_hash,
+        ):
+            assert await model.complete(messages) == "ok"
+    finally:
+        await model.aclose()
+
+    assert captured_headers["x-girl-agent-request-identity"] == request_hash
+
+
+@pytest.mark.asyncio
+async def test_loopback_capture_rejects_a_stale_local_request_identity() -> None:
+    model = DeepSeekChatModel(
+        "key",
+        "http://127.0.0.1:32124",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(
+            lambda _request: pytest.fail("identity mismatch must precede transport")
+        ),
+    )
+    object.__setattr__(model, "_test_only_capture_exact_request_identity", True)
+
+    try:
+        with model_request_emission_scope(
+            provider_call_id="model-call:test-stale-identity",
+            entry_marker=None,
+            completion_marker=None,
+        ), model_provider_request_identity_scope(
+            request_hash="0" * 64,
+        ):
+            with pytest.raises(ValueError, match="request identity mismatch"):
+                await model.complete([{"role": "user", "content": "hi"}])
+    finally:
+        await model.aclose()
 
 
 @pytest.mark.asyncio

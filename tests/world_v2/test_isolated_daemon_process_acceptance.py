@@ -942,6 +942,31 @@ def test_provider_capture_reconstructs_deepseek_strict_tool_identity() -> None:
         payload={
             "messages": [
                 {"role": "system", "content": "COMBINED OUTPUT ENVELOPE"},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "inner_life_snapshot": {
+                                "contract": "inner-life-snapshot.1",
+                                "authority": "derived_from_verified_context",
+                                "availability": "available",
+                                "source_refs": ["event:exact"],
+                                "materials": {
+                                    "recent_self_experiences": {
+                                        "availability": "available",
+                                        "items": [
+                                            {
+                                                "source_ref": "event:exact",
+                                                "summary": "An exact request-bound state.",
+                                            }
+                                        ],
+                                    }
+                                },
+                            }
+                        },
+                        separators=(",", ":"),
+                    ),
+                },
             ],
             "temperature": 0.7,
             "tools": list(contract.provider_tools),
@@ -954,6 +979,48 @@ def test_provider_capture_reconstructs_deepseek_strict_tool_identity() -> None:
     evidence = state.report()["request_evidence"]
     assert isinstance(evidence, list) and evidence
     assert evidence[0]["forced_tool_request_hashes"]
+
+
+def test_provider_capture_prefers_exact_emitted_request_identity() -> None:
+    exact_hash = "a" * 64
+    state = _ProviderCaptureState(
+        mode="loopback-stub",
+        upstream_base_url=None,
+    )
+    status, _response = state.handle(
+        path="/chat/completions",
+        payload={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "inner_life_snapshot": {
+                                "contract": "inner-life-snapshot.1",
+                                "authority": "derived_from_verified_context",
+                                "availability": "available",
+                                "current_world_state": {
+                                    "source_ref": "world-event:identity-test",
+                                    "summary": "Adapter-verified request identity.",
+                                },
+                            }
+                        },
+                        separators=(",", ":"),
+                    ),
+                },
+            ],
+            "temperature": 0.7,
+        },
+        authorization="Bearer isolated-test",
+        emitted_request_hash=exact_hash,
+    )
+
+    assert status == 200
+    report = state.report()
+    assert report["inner_life_snapshot_exact_request_hashes"] == [exact_hash]
+    evidence = report["request_evidence"]
+    assert isinstance(evidence, list) and evidence
+    assert evidence[0]["exact_emitted_request_hash"] == exact_hash
 
 
 def test_provider_capture_retains_presented_source_ids_for_causal_correlation() -> None:
@@ -1609,7 +1676,11 @@ def test_causal_report_does_not_join_unrelated_run_wide_coverage() -> None:
         "inner_life_snapshot_present_count": 1,
         "recall_material_present_count": 1,
         "source_closure_request_count": 1,
-        "inner_life_snapshot_model_request_hashes": [accepted_request_hash],
+        # The raw provider-presentation hash intentionally differs from the
+        # durable author request identity.  Only the guarded adapter handoff
+        # supplies the exact hash that can close the causal chain.
+        "inner_life_snapshot_model_request_hashes": ["raw-provider-presentation"],
+        "inner_life_snapshot_exact_request_hashes": [accepted_request_hash],
         # A mixed run may contain both a forced-tool and a plain role request;
         # retaining both lanes is required for causal correlation.
         "inner_life_snapshot_forced_tool_request_hashes": [

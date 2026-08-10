@@ -213,6 +213,11 @@ def _apply_test_only_provider_capture_authority(
     ):
         raise ValueError("test-only provider capture authority requires a DeepSeek model")
     object.__setattr__(model, "semantic_authority_id", authority_id)
+    # The exact loopback capture is also allowed to receive a SHA-256 of the
+    # adapter-verified logical request identity.  The capture proxy strips the
+    # header before forwarding upstream; ordinary production models never set
+    # this private flag and therefore never emit local audit metadata.
+    object.__setattr__(model, "_test_only_capture_exact_request_identity", True)
 
 
 def _model_identity(model: object | None) -> str | None:

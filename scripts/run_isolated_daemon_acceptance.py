@@ -744,7 +744,11 @@ def _available_recall_material(value: object) -> list[object]:
     return found
 
 
-def _provider_request_evidence(payload: dict[str, object]) -> dict[str, object]:
+def _provider_request_evidence(
+    payload: dict[str, object],
+    *,
+    emitted_request_hash: str | None = None,
+) -> dict[str, object]:
     raw_messages = payload.get("messages")
     messages = raw_messages if isinstance(raw_messages, list) else []
     trusted_material = _trusted_provider_user_material(messages)
@@ -804,6 +808,10 @@ def _provider_request_evidence(payload: dict[str, object]) -> dict[str, object]:
     )
     source_event_ids = _presented_source_event_ids(trusted_material)
     forced_tool_request_hashes = _forced_tool_request_hashes(payload)
+    if emitted_request_hash is not None and re.fullmatch(
+        r"[0-9a-f]{64}", emitted_request_hash
+    ) is None:
+        raise ValueError("captured request identity must be one lowercase SHA-256")
     recall_hash = _canonical_hash(recall) if recall else None
     emotion_hash = _canonical_hash(emotion) if emotion else None
     temperature = payload.get("temperature")
@@ -821,6 +829,7 @@ def _provider_request_evidence(payload: dict[str, object]) -> dict[str, object]:
         "request_hash": _canonical_hash(payload),
         "presentation_hash": _canonical_hash(messages),
         "model_invocation_request_hash": model_invocation_request_hash,
+        "exact_emitted_request_hash": emitted_request_hash,
         "forced_tool_request_hashes": forced_tool_request_hashes,
         "inner_life_snapshot_hash": inner_life_snapshot_hash,
         "source_event_ids": source_event_ids,
@@ -870,8 +879,16 @@ class _ProviderCaptureState:
         with self._lock:
             return tuple(dict(record) for record in self._records)
 
-    def _record(self, payload: dict[str, object]) -> tuple[bool, bool]:
-        evidence = _provider_request_evidence(payload)
+    def _record(
+        self,
+        payload: dict[str, object],
+        *,
+        emitted_request_hash: str | None,
+    ) -> tuple[bool, bool]:
+        evidence = _provider_request_evidence(
+            payload,
+            emitted_request_hash=emitted_request_hash,
+        )
         should_delay = False
         tracks_first_interruption = False
         with self._lock:
@@ -961,6 +978,7 @@ class _ProviderCaptureState:
         path: str,
         payload: dict[str, object],
         authorization: str,
+        emitted_request_hash: str | None = None,
     ) -> tuple[int, dict[str, object]]:
         if path not in {"/chat/completions", "/beta/chat/completions"}:
             return 404, {"error": {"message": "unsupported capture endpoint"}}
@@ -972,7 +990,10 @@ class _ProviderCaptureState:
             for message in raw_messages
         ):
             return 400, {"error": {"message": "messages must be role/content objects"}}
-        should_delay, tracks_first_interruption = self._record(payload)
+        should_delay, tracks_first_interruption = self._record(
+            payload,
+            emitted_request_hash=emitted_request_hash,
+        )
         try:
             if should_delay:
                 # The marker event is set before this bounded delay. The runner
@@ -1098,11 +1119,10 @@ class _ProviderCaptureState:
             and isinstance(record.get("emotion_context_hash"), str)
         ]
         return {
-            # Version 2 adds source identities and forced-tool candidate
-            # hashes.  The old .1 report only represented raw/model hashes;
-            # callers must not silently interpret the new correlation fields
-            # as the old contract.
-            "contract": "provider-presentation-capture.2",
+            # Version 3 adds the adapter-verified exact request identity from
+            # the guarded loopback handoff.  Reconstructed v2 candidates stay
+            # diagnostic only and cannot masquerade as exact correlation.
+            "contract": "provider-presentation-capture.3",
             "capture_mode": self.mode,
             "raw_prompt_retained": False,
             "raw_response_retained": False,
@@ -1119,6 +1139,13 @@ class _ProviderCaptureState:
                     str(record["model_invocation_request_hash"])
                     for record in inner_life_snapshot_records
                     if isinstance(record.get("model_invocation_request_hash"), str)
+                )
+            ),
+            "inner_life_snapshot_exact_request_hashes": list(
+                dict.fromkeys(
+                    str(record["exact_emitted_request_hash"])
+                    for record in inner_life_snapshot_records
+                    if isinstance(record.get("exact_emitted_request_hash"), str)
                 )
             ),
             "inner_life_snapshot_forced_tool_request_hashes": list(
@@ -1171,6 +1198,7 @@ class _ProviderCaptureState:
             "request_evidence": [
                 {
                     "model_invocation_request_hash": record.get("model_invocation_request_hash"),
+                    "exact_emitted_request_hash": record.get("exact_emitted_request_hash"),
                     "forced_tool_request_hashes": record.get("forced_tool_request_hashes", []),
                     "inner_life_snapshot_hash": record.get("inner_life_snapshot_hash"),
                     "source_event_ids": record.get("source_event_ids", []),
@@ -1216,6 +1244,11 @@ def _provider_capture_handler(
                     path=self.path,
                     payload=decoded,
                     authorization=str(self.headers.get("Authorization") or ""),
+                    emitted_request_hash=(
+                        str(self.headers["X-Girl-Agent-Request-Identity"])
+                        if self.headers.get("X-Girl-Agent-Request-Identity") is not None
+                        else None
+                    ),
                 )
             except (httpx.HTTPError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
                 status = 502
@@ -2865,8 +2898,13 @@ def build_causal_audit(
     forced_inner_life_hashes = _string_set(
         provider_audit.get("inner_life_snapshot_forced_tool_request_hashes")
     )
-    inner_life_snapshot_model_hashes = forced_inner_life_hashes | _string_set(
-        provider_audit.get("inner_life_snapshot_model_request_hashes")
+    exact_inner_life_hashes = _string_set(
+        provider_audit.get("inner_life_snapshot_exact_request_hashes")
+    )
+    inner_life_snapshot_model_hashes = (
+        exact_inner_life_hashes
+        | forced_inner_life_hashes
+        | _string_set(provider_audit.get("inner_life_snapshot_model_request_hashes"))
     )
     recall_material_model_hashes = _string_set(
         provider_audit.get("recall_material_model_request_hashes")
@@ -2889,6 +2927,9 @@ def build_causal_audit(
             request_hash = item.get("model_invocation_request_hash")
             if isinstance(request_hash, str):
                 request_evidence_by_hash[request_hash] = item
+            exact_request_hash = item.get("exact_emitted_request_hash")
+            if isinstance(exact_request_hash, str):
+                request_evidence_by_hash[exact_request_hash] = item
             forced_hashes = item.get("forced_tool_request_hashes")
             if isinstance(forced_hashes, list):
                 for forced_hash in forced_hashes:
@@ -3497,7 +3538,7 @@ def run(
                     provider_capture.report()
                     if isinstance(provider_capture, _ProviderCaptureState)
                     else {
-                        "contract": "provider-presentation-capture.2",
+                        "contract": "provider-presentation-capture.3",
                         "capture_mode": "disabled_fake",
                         "raw_prompt_retained": False,
                         "raw_response_retained": False,
@@ -3508,6 +3549,7 @@ def run(
                         "inner_life_snapshot_present_count": 0,
                         "inner_life_snapshot_hashes": [],
                         "inner_life_snapshot_model_request_hashes": [],
+                        "inner_life_snapshot_exact_request_hashes": [],
                         "inner_life_snapshot_forced_tool_request_hashes": [],
                         "recall_material_present_count": 0,
                         "recall_material_hashes": [],

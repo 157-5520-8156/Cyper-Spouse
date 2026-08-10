@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -13,6 +13,7 @@ from pathlib import Path
 from threading import Lock
 from time import monotonic, time
 from typing import Protocol, TypeVar
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -31,6 +32,11 @@ _MODEL_CALL_STATE: ContextVar["ModelCallScopeState | None"] = ContextVar(
 _MODEL_REQUEST_EMISSION_STATE: ContextVar["ModelRequestEmissionScopeState | None"] = ContextVar(
     "model_request_emission_state", default=None
 )
+_MODEL_PROVIDER_REQUEST_IDENTITY: ContextVar[
+    "ModelProviderRequestIdentityState | None"
+] = ContextVar("model_provider_request_identity", default=None)
+
+_TEST_ONLY_REQUEST_IDENTITY_HEADER = "X-Girl-Agent-Request-Identity"
 
 
 @contextmanager
@@ -187,6 +193,70 @@ class ModelRequestSpanToken:
 
     scope: ModelRequestEmissionScopeState
     provider_call_id: str
+
+
+@dataclass(frozen=True)
+class ModelProviderRequestIdentityState:
+    """Local-only material used to verify one exact adapter request.
+
+    The contract material never enters the provider JSON body.  A guarded
+    loopback capture may receive only the final SHA-256 so an isolated
+    acceptance process can correlate the exact HTTP request with durable
+    ``ModelResult`` lineage without reverse-engineering provider schemas.
+    """
+
+    request_hash: str
+    identity_extras: Mapping[str, object]
+
+
+def provider_invocation_request_hash(
+    *,
+    messages: list[dict[str, object]] | list[dict[str, str]],
+    temperature: float,
+    tools: list[dict[str, object]] | None = None,
+    tool_choice: object | None = None,
+    identity_extras: Mapping[str, object] | None = None,
+) -> str:
+    """Compile the canonical logical provider identity used by audit/replay."""
+
+    payload: dict[str, object] = {
+        "messages": messages,
+        "temperature": temperature,
+    }
+    if tools is not None:
+        payload["tools"] = tools
+        payload["tool_choice"] = tool_choice
+    if identity_extras is not None:
+        overlap = set(payload).intersection(identity_extras)
+        if overlap:
+            raise ValueError(
+                "provider request identity extras overlap canonical fields: "
+                + ",".join(sorted(overlap))
+            )
+        payload.update(identity_extras)
+    return _canonical_digest(payload)
+
+
+@contextmanager
+def model_provider_request_identity_scope(
+    *,
+    request_hash: str,
+    identity_extras: Mapping[str, object] | None = None,
+) -> Iterator[ModelProviderRequestIdentityState]:
+    """Bind the logical request identity to the adapter emission boundary."""
+
+    normalized = request_hash.strip().removeprefix("sha256:")
+    if len(normalized) != 64 or any(char not in "0123456789abcdef" for char in normalized):
+        raise ValueError("provider request identity must be one lowercase SHA-256")
+    state = ModelProviderRequestIdentityState(
+        request_hash=normalized,
+        identity_extras=dict(identity_extras or {}),
+    )
+    token = _MODEL_PROVIDER_REQUEST_IDENTITY.set(state)
+    try:
+        yield state
+    finally:
+        _MODEL_PROVIDER_REQUEST_IDENTITY.reset(token)
 
 
 @contextmanager
@@ -859,6 +929,44 @@ class DeepSeekChatModel:
             payload["response_format"] = {"type": "json_object"}
         return payload
 
+    def _test_only_capture_identity_headers(
+        self,
+        *,
+        messages: list[dict[str, object]],
+        temperature: float,
+        tools: list[dict[str, object]] | None,
+        tool_choice: object | None,
+    ) -> dict[str, str]:
+        """Return a verified hash header only for the isolated loopback proxy."""
+
+        if not bool(getattr(self, "_test_only_capture_exact_request_identity", False)):
+            return {}
+        parsed = urlsplit(self.base_url)
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname != "127.0.0.1"
+            or parsed.port is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/", "/beta"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("test-only request identity requires exact loopback capture")
+        identity = _MODEL_PROVIDER_REQUEST_IDENTITY.get()
+        if identity is None:
+            return {}
+        actual = provider_invocation_request_hash(
+            messages=messages,
+            temperature=temperature,
+            tools=tools,
+            tool_choice=tool_choice,
+            identity_extras=identity.identity_extras,
+        )
+        if actual != identity.request_hash:
+            raise ValueError("provider request identity mismatch at transport boundary")
+        return {_TEST_ONLY_REQUEST_IDENTITY_HEADER: actual}
+
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         result = await self._complete(
             messages,
@@ -963,6 +1071,12 @@ class DeepSeekChatModel:
         )
         request_payload["stream"] = True
         request_payload["stream_options"] = {"include_usage": True}
+        capture_identity_headers = self._test_only_capture_identity_headers(
+            messages=messages,
+            temperature=temperature,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
         response_payload: dict[str, object] = {}
         usage: dict[str, object] = {}
         pieces: list[str] = []
@@ -985,6 +1099,7 @@ class DeepSeekChatModel:
                     headers={
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
+                        **capture_identity_headers,
                     },
                     json=request_payload,
                 ) as response:
@@ -1270,6 +1385,12 @@ class DeepSeekChatModel:
                 tools=tools,
                 tool_choice=tool_choice,
             )
+            capture_identity_headers = self._test_only_capture_identity_headers(
+                messages=messages,
+                temperature=temperature,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
             request_span = mark_model_request_emitted()
             try:
                 response = await self.client.post(
@@ -1277,6 +1398,7 @@ class DeepSeekChatModel:
                     headers={
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
+                        **capture_identity_headers,
                     },
                     json=request_payload,
                 )

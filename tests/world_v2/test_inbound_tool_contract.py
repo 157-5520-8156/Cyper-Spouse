@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 
+import httpx
 import pytest
 from jsonschema import Draft202012Validator
 
+from companion_daemon.llm import DeepSeekChatModel
 from companion_daemon.world_v2.character_interior.inbound_tool_contract import (
     InboundToolContracts,
 )
@@ -485,6 +487,90 @@ async def test_nonmetered_correction_keeps_local_contract_identity_off_provider_
     )
 
     assert json.loads(result.raw)["expression_draft"] == expression
+
+
+@pytest.mark.asyncio
+async def test_metered_correction_emits_the_exact_durable_request_identity() -> None:
+    contract = InboundToolContracts().contract_for(
+        phase="final",
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        recall_allowed=False,
+    )
+    captured_headers: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_headers.update(request.headers)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": contract.identity.tool_name,
+                                        "arguments": json.dumps(
+                                            {
+                                                "result_kind": "decision",
+                                                "appraisal_draft": _appraisal(),
+                                                "expression_draft": {
+                                                    "timing_choice": "now",
+                                                    "beats": [
+                                                        {
+                                                            "modality": "text",
+                                                            "text": "我重新选好了。",
+                                                        }
+                                                    ],
+                                                    "stance": "自然回应",
+                                                    "brief_rationale": "结构修正不改变我的选择权。",
+                                                    "confidence": 7000,
+                                                    "world_claims": [],
+                                                },
+                                            },
+                                            ensure_ascii=False,
+                                        ),
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
+        )
+
+    model = DeepSeekChatModel(
+        "key",
+        "http://127.0.0.1:32124",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    object.__setattr__(model, "_test_only_capture_exact_request_identity", True)
+    try:
+        result = await complete_bounded_validation_reselection(
+            model=model,
+            messages=[{"role": "user", "content": "choose"}],
+            raw="{}",
+            instruction="choose again",
+            temperature=0.8,
+            timeout_seconds=1.0,
+            parent_call_id="call:metered-correction-identity",
+            tools=list(contract.provider_tools),
+            tool_choice=contract.provider_tool_choice,
+            tool_contract_identity=contract.identity.request_identity_material(),
+            unwrap_tool_result=contract.unwrap,
+        )
+    finally:
+        await model.aclose()
+
+    assert captured_headers["x-girl-agent-request-identity"] == result.winning_request_hash
 
 
 def test_later_branch_carries_the_stricter_capability_beat_limit() -> None:

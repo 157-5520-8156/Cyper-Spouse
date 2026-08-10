@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable
 from collections import OrderedDict
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 import hashlib
@@ -25,7 +25,9 @@ from pydantic import Field, ValidationError
 from companion_daemon.llm import (
     complete_with_timeout,
     model_call_scope,
+    model_provider_request_identity_scope,
     model_request_emission_scope,
+    provider_invocation_request_hash,
 )
 
 from ..biographical_claim_authority import (
@@ -1214,16 +1216,17 @@ def _provider_invocation_identity(
 ) -> _ProviderInvocationIdentity:
     """Bind one adapter sub-call to the exact payload supplied to its provider."""
 
-    identity_payload: dict[str, object] = {
-        "messages": messages,
-        "temperature": temperature,
-    }
-    if tools is not None:
-        identity_payload["tools"] = tools
-        identity_payload["tool_choice"] = tool_choice
-    if tool_contract_identity is not None:
-        identity_payload["tool_contract_identity"] = tool_contract_identity
-    request_hash = _digest(identity_payload)
+    request_hash = provider_invocation_request_hash(
+        messages=messages,
+        temperature=temperature,
+        tools=tools,
+        tool_choice=tool_choice,
+        identity_extras=(
+            {"tool_contract_identity": tool_contract_identity}
+            if tool_contract_identity is not None
+            else None
+        ),
+    )
     return _ProviderInvocationIdentity(
         model_call_id=(
             "model-call:"
@@ -1303,33 +1306,80 @@ async def complete_bounded_validation_reselection(
         if parent_call_id is not None
         else None
     )
+    request_identity_scope: AbstractContextManager[None] = (
+        model_provider_request_identity_scope(
+            request_hash=identity.request_hash,
+            identity_extras=(
+                {"tool_contract_identity": tool_contract_identity}
+                if tool_contract_identity is not None
+                else None
+            ),
+        )
+        if identity is not None
+        else nullcontext()
+    )
     try:
         async with asyncio.timeout(timeout_seconds):
-            metered = getattr(model, "complete_json_with_usage", None)
-            if not callable(metered):
-                metered = getattr(model, "complete_with_usage", None)
-            if callable(metered):
-                result = await metered(
-                    corrective,
-                    temperature=temperature,
-                    **(
-                        {"tools": tools, "tool_choice": tool_choice}
-                        if tools is not None
-                        else {}
-                    ),
+            with request_identity_scope:
+                metered = getattr(model, "complete_json_with_usage", None)
+                if not callable(metered):
+                    metered = getattr(model, "complete_with_usage", None)
+                if callable(metered):
+                    result = await metered(
+                        corrective,
+                        temperature=temperature,
+                        **(
+                            {"tools": tools, "tool_choice": tool_choice}
+                            if tools is not None
+                            else {}
+                        ),
+                    )
+                    if (
+                        not isinstance(result, tuple)
+                        or len(result) != 2
+                        or not isinstance(result[0], str)
+                    ):
+                        raise ValueError(
+                            "metered validation reselection result must be (text, usage)"
+                        )
+                    corrected, usage_raw = result
+                    if unwrap_tool_result is not None:
+                        corrected = unwrap_tool_result(corrected)
+                    return ValidationReselectionResult(
+                        raw=corrected,
+                        usage=ModelUsageProvenance.model_validate(usage_raw),
+                        corrective_used=True,
+                        winning_model_call_id=(
+                            identity.model_call_id if identity is not None else None
+                        ),
+                        winning_request_hash=(
+                            identity.request_hash if identity is not None else None
+                        ),
+                        winning_model_id=model_id,
+                        source_closure_lane_used=source_closure_lane_used,
+                    )
+                complete_json = getattr(model, "complete_json", None)
+                corrected = await (
+                    complete_json(
+                        corrective,
+                        temperature=temperature,
+                        **(
+                            {
+                                "tools": tools,
+                                "tool_choice": tool_choice,
+                            }
+                            if tools is not None
+                            else {}
+                        ),
+                    )
+                    if callable(complete_json)
+                    else model.complete(corrective, temperature=temperature)
                 )
-                if (
-                    not isinstance(result, tuple)
-                    or len(result) != 2
-                    or not isinstance(result[0], str)
-                ):
-                    raise ValueError("metered validation reselection result must be (text, usage)")
-                corrected, usage_raw = result
                 if unwrap_tool_result is not None:
                     corrected = unwrap_tool_result(corrected)
                 return ValidationReselectionResult(
                     raw=corrected,
-                    usage=ModelUsageProvenance.model_validate(usage_raw),
+                    usage=None,
                     corrective_used=True,
                     winning_model_call_id=(
                         identity.model_call_id if identity is not None else None
@@ -1338,34 +1388,6 @@ async def complete_bounded_validation_reselection(
                     winning_model_id=model_id,
                     source_closure_lane_used=source_closure_lane_used,
                 )
-            complete_json = getattr(model, "complete_json", None)
-            corrected = await (
-                complete_json(
-                    corrective,
-                    temperature=temperature,
-                    **(
-                        {
-                            "tools": tools,
-                            "tool_choice": tool_choice,
-                        }
-                        if tools is not None
-                        else {}
-                    ),
-                )
-                if callable(complete_json)
-                else model.complete(corrective, temperature=temperature)
-            )
-            if unwrap_tool_result is not None:
-                corrected = unwrap_tool_result(corrected)
-            return ValidationReselectionResult(
-                raw=corrected,
-                usage=None,
-                corrective_used=True,
-                winning_model_call_id=(identity.model_call_id if identity is not None else None),
-                winning_request_hash=(identity.request_hash if identity is not None else None),
-                winning_model_id=model_id,
-                source_closure_lane_used=source_closure_lane_used,
-            )
     except BaseException as exc:
         _capture_failed_authored_subcall(
             identity=identity,

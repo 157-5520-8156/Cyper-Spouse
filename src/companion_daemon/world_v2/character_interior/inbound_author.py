@@ -18,6 +18,7 @@ import logging
 from typing import Any
 
 from companion_daemon.llm import (
+    model_provider_request_identity_scope,
     model_request_emission_scope,
 )
 
@@ -2845,6 +2846,17 @@ class _InboundCharacterAuthor:
                 provider_call_id=winning_provider_identity.model_call_id,
                 entry_marker=mark_first_role_provider_entry,
                 completion_marker=mark_first_role_provider_completion,
+            ), model_provider_request_identity_scope(
+                request_hash=winning_provider_identity.request_hash,
+                identity_extras=(
+                    {
+                        "tool_contract_identity": (
+                            cognition_contract.identity.request_identity_material()
+                        )
+                    }
+                    if use_forced_tool
+                    else None
+                ),
             ):
                 if transport_provider is not None:
                     raw = await provider.complete_json(
