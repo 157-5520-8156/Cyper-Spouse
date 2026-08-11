@@ -234,6 +234,11 @@ def _capability_expression_schema(
         capabilities=capabilities,
         require_turn_posture=require_turn_posture,
     )
+    # Canonical replay may inherit the safe empty default, but a strict-tool
+    # provider cannot omit object properties.  Requiring the live wire to say
+    # ``world_claims=[]`` keeps each timing branch non-null and prevents a
+    # schema-valid JSON null from consuming the role's one correction.
+    required = required | {"world_claims"}
     if capabilities.private_turn_state_mode == "required":
         required = required | {"private_turn_state"}
     schema["required"] = sorted(required)

@@ -6,6 +6,10 @@ import httpx
 import pytest
 
 from companion_daemon.llm import DeepSeekChatModel
+from companion_daemon.world_v2.character_interior.inbound_wire import (
+    _metered_review_call,
+    _ProviderSubcallAuditCapture,
+)
 from companion_daemon.world_v2.structured_source_review_model import (
     StrictOutputCapabilityEvidence,
 )
@@ -393,3 +397,86 @@ async def test_visible_source_review_model_forces_one_tool_without_response_form
     assert len(functions) == 1
     assert functions[0]["strict"] is True
     assert functions[0]["parameters"] == visible_source_closure_schema()
+
+
+@pytest.mark.asyncio
+async def test_compact_guard_emits_the_exact_durable_request_identity() -> None:
+    captured_header: list[str | None] = []
+    result = _wire(_decision(verdict="source_free", role="private_state"))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured_header.append(
+            request.headers.get("X-Girl-Agent-Request-Identity")
+        )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call.identity",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "visible_beat_source_verdict_v1",
+                                        "arguments": result,
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 10},
+            },
+        )
+
+    leaf = DeepSeekChatModel(
+        "key",
+        "http://127.0.0.1:19876",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    leaf._test_only_capture_exact_request_identity = True
+    evidence = StrictOutputCapabilityEvidence.verified(
+        evidence_source="test",
+        provider="deepseek",
+        model="deepseek-v4-flash",
+        contracts=(VISIBLE_SOURCE_CLOSURE_CONTRACT,),
+        observed_at="2026-08-10",
+        contract_schema_digests=(
+            (VISIBLE_SOURCE_CLOSURE_CONTRACT, visible_source_verdict_schema_digest()),
+        ),
+    )
+    model = VisibleSourceReviewModel(
+        transport_model=leaf,
+        strict_output_capability_evidence=evidence,
+    )
+    messages = visible_source_closure_messages(
+        visible_beats=("我有点担心你。",),
+        world_claims=(),
+        source_references=(),
+    )
+    try:
+        with _ProviderSubcallAuditCapture(
+            owner_model_call_id="model-call:author",
+            owner_request_hash="a" * 64,
+            owner_raw="{}",
+            owner_model_id="deepseek-v4-flash",
+            owner_model_version="character-interior.1",
+            purpose="character_author",
+        ) as audit_capture:
+            await _metered_review_call(
+                model,
+                messages,
+                temperature=0.0,
+                audit_purpose="visible_source_closure_proof_v1",
+            )
+            attempts = audit_capture.finalize()
+    finally:
+        await model.aclose()
+
+    assert len(attempts) == 1
+    assert captured_header == [attempts[0].request_hash]

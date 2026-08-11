@@ -182,7 +182,11 @@ def required_authored_expression_fields(
     if require_turn_posture:
         required.add("turn_posture")
     if capabilities.media_request_mode == "candidate_only":
-        required.add("media_request")
+        # The DeepSeek strict-tool dialect requires every property to be
+        # present.  Make the role state the exact media source set as an array
+        # (possibly empty) so an omitted optional cannot become JSON null and
+        # consume the turn's one bounded correction at the canonical decoder.
+        required.update({"media_request", "media_source_refs"})
     return frozenset(required)
 
 

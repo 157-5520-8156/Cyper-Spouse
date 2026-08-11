@@ -35,6 +35,32 @@ def visible_source_verdict_schema_digest() -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def visible_source_verdict_provider_request_contract() -> dict[str, object]:
+    """Compile the one canonical strict-tool request contract for this role."""
+
+    return {
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": _TOOL_NAME,
+                    "description": (
+                        "Return exhaustive factual source verdicts for visible Beats."
+                    ),
+                    "strict": True,
+                    "parameters": visible_source_closure_schema(),
+                },
+            }
+        ],
+        "tool_choice": {
+            "type": "function",
+            "function": {"name": _TOOL_NAME},
+        },
+        "contract": VISIBLE_SOURCE_CLOSURE_CONTRACT,
+        "schema_digest": visible_source_verdict_schema_digest(),
+    }
+
+
 def audited_visible_source_verdict_capability_evidence(
     *,
     enabled: bool,
@@ -109,6 +135,13 @@ class VisibleSourceReviewModel:
         self.base_url = str(getattr(transport_model, "base_url", ""))
         self.model = str(getattr(transport_model, "model", ""))
         self.usage_observer = getattr(transport_model, "usage_observer", None)
+        declared_authority = getattr(transport_model, "semantic_authority_id", None)
+        if isinstance(declared_authority, str) and declared_authority.strip():
+            # This wrapper does not introduce another semantic producer.  Carry
+            # the already-validated underlying checkpoint identity through the
+            # exact loopback-capture seam so composition can still prove that
+            # author and compact guard are intentionally correlated.
+            self.semantic_authority_id = declared_authority.strip()
         self.owns_transport = bool(owns_transport)
         if strict_output_capability_evidence.provider.casefold() != self.provider.casefold():
             raise ValueError("visible verdict evidence provider must match transport")
@@ -131,33 +164,17 @@ class VisibleSourceReviewModel:
 
     @staticmethod
     def _tools() -> tuple[list[dict[str, object]], dict[str, object]]:
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": _TOOL_NAME,
-                    "description": "Return exhaustive factual source verdicts for visible Beats.",
-                    "strict": True,
-                    "parameters": visible_source_closure_schema(),
-                },
-            }
-        ]
-        choice: dict[str, object] = {
-            "type": "function",
-            "function": {"name": _TOOL_NAME},
-        }
-        return tools, choice
+        contract = visible_source_verdict_provider_request_contract()
+        tools = contract["tools"]
+        choice = contract["tool_choice"]
+        if not isinstance(tools, list) or not isinstance(choice, dict):
+            raise AssertionError("visible source provider contract is malformed")
+        return deepcopy(tools), deepcopy(choice)
 
     def provider_request_contract(self) -> dict[str, object]:
         """Expose the exact transport contract for local request identity."""
 
-        tools, tool_choice = self._tools()
-        return {
-            "tools": deepcopy(tools),
-            "tool_choice": deepcopy(tool_choice),
-            "contract": VISIBLE_SOURCE_CLOSURE_CONTRACT,
-            "schema_digest": visible_source_verdict_schema_digest(),
-        }
+        return visible_source_verdict_provider_request_contract()
 
     async def _call(
         self,
@@ -246,5 +263,6 @@ class VisibleSourceReviewModel:
 __all__ = [
     "VisibleSourceReviewModel",
     "audited_visible_source_verdict_capability_evidence",
+    "visible_source_verdict_provider_request_contract",
     "visible_source_verdict_schema_digest",
 ]

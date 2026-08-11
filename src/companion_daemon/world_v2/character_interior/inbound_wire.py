@@ -738,7 +738,8 @@ def expression_draft_shape_contract(*, include_world_claims: bool = True) -> str
         "media_request is none or consider_available_candidate and must obey the supplied "
         "expression_capabilities.media_request_mode; it is required when that mode is "
         "candidate_only. A non-none media_request is executable only with timing_choice now. "
-        "media_source_refs is an optional array of exact pinned life/world source refs. "
+        "When media_request_mode is candidate_only, media_source_refs is required and must be "
+        "an array of exact pinned life/world source refs; use [] when selecting no new source. "
         "When the present moment is relevant to a media request, select it there; this lets "
         "the media lane compile a candidate without "
         "guessing a scene. An existing candidate can still be considered without adding a "
@@ -1016,12 +1017,14 @@ async def _metered_review_call(
 
     capture = _PROVIDER_SUBCALL_CAPTURE.get()
     direct_identity: _ProviderInvocationIdentity | None = None
+    direct_contract_identity: dict[str, str] | None = None
     direct_model_id = str(getattr(reviewer, "model", "")).strip() or type(reviewer).__name__
     direct_model_version = str(getattr(reviewer, "VERSION", "")).strip() or type(reviewer).__name__
     if capture is not None:
         author_model_call_id = capture.current_author.model_call_id
         capture.ordinal += 1
         request_contract = _reviewer_provider_request_contract(reviewer)
+        direct_contract_identity = request_contract[2]
         direct_identity = _provider_invocation_identity(
             parent_call_id=author_model_call_id,
             purpose=f"{audit_purpose}_{capture.ordinal}",
@@ -1032,11 +1035,24 @@ async def _metered_review_call(
             tool_contract_identity=request_contract[2],
         )
 
+    request_identity_scope: AbstractContextManager[object] = (
+        model_provider_request_identity_scope(
+            request_hash=direct_identity.request_hash,
+            identity_extras=(
+                {"tool_contract_identity": direct_contract_identity}
+                if direct_contract_identity is not None
+                else None
+            ),
+        )
+        if direct_identity is not None
+        else nullcontext()
+    )
+
     metered = getattr(reviewer, "complete_json_with_usage", None)
     if not callable(metered):
         metered = getattr(reviewer, "complete_with_usage", None)
     try:
-        with model_call_scope(audit_purpose):
+        with model_call_scope(audit_purpose), request_identity_scope:
             if not callable(metered):
                 complete_json = getattr(reviewer, "complete_json", None)
                 call = (
@@ -7259,88 +7275,24 @@ async def review_expression_with_candidate_external_coverage(
 ) -> SourceClosureReviewResult:
     """Use one visible authority, optionally auditing claim-free visible text.
 
-    Inventory V5 narrows the review packet when available.  The production
-    fallback keeps the same full V7 authority, including the independent
-    report-relative stage; only historical fixtures may opt back into
-    declared-claims-only behavior.
+    The compact visible-beat contract is terminal whenever the installed
+    reviewer supports it: its verdict covers both prose and declared claims,
+    and its typed transport/wire failure propagates to the same-character
+    correction lifecycle.  It can never reactivate the historical full-V7
+    chat route. Production composition rejects Inventory/full-V7 injection;
+    the remaining parsers exist only for historical replay and low-level
+    migration fixtures, not as an availability fallback.
     """
 
     if _strict_contract_supported(reviewer, VISIBLE_SOURCE_CLOSURE_CONTRACT):
-        try:
-            compact_result = await _review_expression_with_visible_source_proof(
-                reviewer=reviewer,
-                request=request,
-                raw=raw,
-                identity_frame=identity_frame,
-                model_visible_context_json=model_visible_context_json,
-                source_ref_aliases=source_ref_aliases,
-                effect_bearing_only=effect_bearing_only,
-            )
-        except ValidationTechnicalFailure as compact_failure:
-            # The compact route is an optimization, not a new availability
-            # authority. Its bounded wire/transport failure falls through to
-            # the existing full reviewer on the identical pinned candidate.
-            # A semantic ``unsupported`` verdict never reaches this branch.
-            if not _strict_contract_supported(reviewer, "source-closure-review.7"):
-                # Flash-only topology has no second provider to disguise this
-                # failure. Keep the typed compact failure observable and let
-                # the normal same-character correction/retry lifecycle own it.
-                raise
-            full_result = await review_expression_source_closure(
-                reviewer=reviewer,
-                report_relative_reviewer=report_relative_reviewer,
-                request=request,
-                raw=raw,
-                identity_frame=identity_frame,
-                model_visible_context_json=model_visible_context_json,
-                source_ref_aliases=source_ref_aliases,
-                allow_report_relative_adjudication=allow_report_relative_adjudication,
-                declared_claims_only=False,
-                effect_bearing_only=effect_bearing_only,
-            )
-            return _with_combined_source_review_usage(
-                result=full_result,
-                preceding_usage=compact_failure.usage,
-                call_id=request.call_id,
-            )
-        if compact_result.review is not None and compact_result.review.decision == "unsupported":
-            return compact_result
-        material = _prepare_source_closure_review_material(
-            request=request,
-            raw=raw,
-            identity_frame=identity_frame,
-            model_visible_context_json=model_visible_context_json,
-            source_ref_aliases=source_ref_aliases,
-            effect_bearing_only=effect_bearing_only,
-        )
-        if (
-            not material.draft.world_claims
-            or not _strict_contract_supported(reviewer, "source-closure-review.7")
-        ):
-            return compact_result
-        claim_result = await review_expression_source_closure(
+        return await _review_expression_with_visible_source_proof(
             reviewer=reviewer,
             request=request,
             raw=raw,
             identity_frame=identity_frame,
             model_visible_context_json=model_visible_context_json,
             source_ref_aliases=source_ref_aliases,
-            allow_report_relative_adjudication=False,
-            declared_claims_only=True,
             effect_bearing_only=effect_bearing_only,
-        )
-        return SourceClosureReviewResult(
-            review=claim_result.review,
-            usage=(
-                compact_result.usage
-                if claim_result.usage is None
-                else _combine_usage(
-                    compact_result.usage,
-                    claim_result.usage,
-                    request.call_id,
-                )
-            ),
-            visible_authority_exhaustive=True,
         )
 
     if inventory_model is None:

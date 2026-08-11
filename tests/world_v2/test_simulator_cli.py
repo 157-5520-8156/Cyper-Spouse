@@ -139,7 +139,8 @@ async def test_simulator_cli_wires_an_independent_life_source_reviewer_when_conf
     source_reviewer = built["life_source_closure_reviewer"]
     assert world_author.authority_origin is author
     assert source_rewriter.authority_origin is author
-    assert len(reviewers) == 2
-    assert reviewers[0] is not reviewers[1]
-    assert source_reviewer.authority_origin is reviewers[1]
+    # The independent provider is Life-only. Visible chat receives its compact
+    # Flash guard from semantic composition rather than a second paid reviewer.
+    assert len(reviewers) == 1
+    assert source_reviewer.authority_origin is reviewers[0]
     assert all(options["reasoning_effort"] == "" for options in reviewer_kwargs)

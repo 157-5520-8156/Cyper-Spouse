@@ -27,6 +27,7 @@ from companion_daemon.world_v2.semantic_chat_composition import (
 from companion_daemon.world_v2.character_interior.inbound_author import (
     _InboundCharacterAuthor as InboundCharacterAuthor,
 )
+from compact_source_review_fixture import compact_source_review_wire
 
 
 NOW = datetime(2026, 7, 19, 12, tzinfo=UTC)
@@ -204,13 +205,12 @@ class _FastInfrastructureModel:
     semantic_authority_id = "semantic-authority:test:fast-infrastructure"
 
     def supports_strict_output_contract(self, contract: str) -> bool:
-        return contract in {
-            "report-relative-entailment-adjudication.3",
-            "source-closure-review.7",
-        }
+        return contract == "visible-beat-source-verdict.1"
 
     async def complete(self, messages, **_kwargs) -> str:  # type: ignore[no-untyped-def]
         system = str(messages[0]["content"])
+        if "factual source-boundary classifier" in system:
+            return compact_source_review_wire(messages)
         if "Audit only factual source closure" in system:
             return json.dumps(
                 {

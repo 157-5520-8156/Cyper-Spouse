@@ -21,6 +21,13 @@ from companion_daemon.world_v2.structured_expression_reselection_model import (
     expression_reselection_output_contract,
     expression_reselection_tool_contract,
 )
+from companion_daemon.world_v2.visible_source_closure_protocol import (
+    visible_source_closure_messages,
+)
+from companion_daemon.world_v2.visible_source_review_model import (
+    visible_source_verdict_provider_request_contract,
+    visible_source_verdict_schema_digest,
+)
 
 
 _RUNNER_PATH = Path(__file__).resolve().parents[2] / "scripts" / "run_isolated_daemon_acceptance.py"
@@ -441,6 +448,52 @@ def _source_authority_health_with_qualified_inventory_guard() -> dict[str, objec
     return health
 
 
+def _compact_visible_source_guard_health() -> dict[str, object]:
+    return {
+        "status": "correlated_guard",
+        "visible_review_strategy": "visible_beat_verdict",
+        "active_source_review_protocol": "visible_beat_source_verdict.1",
+        "source_guard_relation": "correlated_same_checkpoint",
+        "independent_reviewer": False,
+        "reviewer_model": "deepseek-v4-flash",
+        "redundancy_state": "single_active_correlated_lane",
+        "source_review_authority": None,
+        "selective_source_review": {
+            "enabled": True,
+            "runtime": {
+                "contract": "visible-source-review-model.1",
+                "model": "deepseek-v4-flash",
+                "route": "http://127.0.0.1:32124",
+                "semantic_authority_relation": "correlated_same_checkpoint",
+                "independent_semantic_authority": False,
+                "strict_output": {
+                    "status": "verified",
+                    "evidence_source": (
+                        "isolated_correlated_checkpoint_contract_audit"
+                    ),
+                    "reason_code": "strict_output.endpoint_capability_verified",
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-flash",
+                    "contracts": ["visible-beat-source-verdict.1"],
+                    "observed_at": "2026-08-10",
+                    "qualified_at": "2026-08-10",
+                    "evidence_revision": (
+                        "visible-beat-verdict-deepseek-v4-flash-20260810.3"
+                    ),
+                    "audit_sample_count": 100,
+                    "audit_success_count": 100,
+                    "contract_schema_digests": {
+                        "visible-beat-source-verdict.1": (
+                            "347069477180408b262fd4ac7da64341c"
+                            "07b8456d18ad6bd6ab7dee7f9ea78e7"
+                        )
+                    },
+                },
+            },
+        },
+    }
+
+
 def test_source_authority_report_rejects_unqualified_inventory_lineage() -> None:
     source_health = _source_authority_health_with_unverified_inventory()
     report = _RUNNER_MODULE._source_authority_acceptance_report(
@@ -508,7 +561,8 @@ def test_source_authority_report_rejects_unqualified_inventory_lineage() -> None
         },
     )
 
-    assert report["contract"] == "isolated-source-authority-acceptance.2"
+    assert report["contract"] == "isolated-source-authority-acceptance.3"
+    assert report["qualification_scope"] == "unavailable"
     assert report["first_start_health"] == source_health
     assert report["after_restart_health"] == source_health
     assert report["terminal_candidate_inventory"] == {
@@ -527,11 +581,9 @@ def test_source_authority_report_rejects_unqualified_inventory_lineage() -> None
         "source_review_eligible_terminal_candidate_count": 1,
         "source_authority_proven_terminal_candidate_count": 0,
         "all_source_review_eligible_terminal_candidates_proven": False,
+        "proof_contract": "visible-beat-source-verdict.1",
         "qualified_inventory_models": [],
-        "qualified_full_review_models": [
-            "qwen/qwen-plus",
-            "gpt-4.1-mini",
-        ],
+        "qualified_visible_guard_models": [],
         "evidence": [],
     }
     assert report["coverage_assurance"] == {
@@ -541,7 +593,7 @@ def test_source_authority_report_rejects_unqualified_inventory_lineage() -> None
     }
 
 
-def test_source_authority_report_accepts_strict_full_review_v7_lineage() -> None:
+def test_source_authority_report_rejects_retired_full_review_v7_lineage() -> None:
     source_health = _source_authority_health_with_unverified_inventory()
     report = _RUNNER_MODULE._source_authority_acceptance_report(
         requested=True,
@@ -579,19 +631,244 @@ def test_source_authority_report_accepts_strict_full_review_v7_lineage() -> None
     )
 
     terminal = report["terminal_candidate_source_authority"]
-    assert terminal["all_source_review_eligible_terminal_candidates_proven"] is True
-    assert terminal["evidence"] == [
-        {
-            "proposal_id": "proposal:full-review",
-            "winning_protocol": "full_source_closure_review.7",
-            "model_call_ids": ["model-call:full-review:1"],
-            "model_result_event_refs": ["event:model-result:full-review:1"],
-            "models": ["gpt-4.1-mini"],
-        }
-    ]
+    assert terminal["proof_contract"] == "visible-beat-source-verdict.1"
+    assert terminal["all_source_review_eligible_terminal_candidates_proven"] is False
+    assert terminal["qualified_visible_guard_models"] == []
+    assert terminal["evidence"] == []
     assert report["terminal_candidate_inventory"][
         "all_inventory_eligible_terminal_candidates_proven"
     ] is False
+
+
+def test_source_authority_report_binds_compact_guard_to_parent_and_capture_identity() -> None:
+    source_health = _compact_visible_source_guard_health()
+    review_request_hash = "a" * 64
+    report = _RUNNER_MODULE._source_authority_acceptance_report(
+        requested=True,
+        first_health={"scheduler": {"proactive_source_authority": source_health}},
+        restart_health={"scheduler": {"proactive_source_authority": source_health}},
+        provider_audit={
+            "contract": "provider-presentation-capture.3",
+            "capture_mode": "real-provider",
+            "request_evidence": [
+                {
+                    "model_invocation_request_hash": "b" * 64,
+                    "exact_emitted_request_hash": review_request_hash,
+                    "forced_tool_request_hashes": [review_request_hash],
+                    "source_closure_request": True,
+                    "source_closure_contract": "visible-beat-source-verdict.1",
+                    "source_closure_schema_digest": (
+                        "347069477180408b262fd4ac7da64341c"
+                        "07b8456d18ad6bd6ab7dee7f9ea78e7"
+                    ),
+                    "source_closure_semantic_authority_relation": (
+                        "correlated_same_checkpoint"
+                    ),
+                    "source_closure_capture_scope": (
+                        "isolated_test_only_correlated_capture"
+                    ),
+                }
+            ],
+        },
+        final_replay={
+            "accepted_character_choices": [
+                {
+                    "proposal_id": "proposal:compact",
+                    "disposition": "effect_accepted",
+                    "request_hash": "author-request:1",
+                    "trigger_ref": "event:observation:compact",
+                    "attempt_id": "attempt:compact",
+                    "model_call_id": "model-call:author:compact",
+                    "related_author_model_call_ids": [
+                        "model-call:author:compact"
+                    ],
+                    "proposal_event_sequence": 12,
+                    "source_review_eligible": True,
+                }
+            ],
+            "model_result_records": [
+                {
+                    "model_call_id": "model-call:author:compact",
+                    "parent_model_call_id": None,
+                    "request_hash": "author-request:1",
+                    "trigger_ref": "event:observation:compact",
+                    "attempt_id": "attempt:compact",
+                    "model_id": "deepseek-v4-flash",
+                    "router_version": "semantic-compute-router.1",
+                    "route_reason_code": "semantic_character_choice",
+                    "status": "proposal_validated",
+                    "outcome": "winner",
+                    "event_ref": "event:model-result:author:compact",
+                    "event_sequence": 7,
+                },
+                {
+                    "model_call_id": "model-call:guard:compact",
+                    "parent_model_call_id": "model-call:author:compact",
+                    "request_hash": review_request_hash,
+                    "trigger_ref": "event:observation:compact",
+                    "attempt_id": "attempt:compact",
+                    "model_id": "deepseek-v4-flash",
+                    "router_version": "provider-subcall-audit.1",
+                    "route_reason_code": (
+                        "validation.visible_source_closure_proof_v1"
+                    ),
+                    "status": "proposal_validated",
+                    "outcome": "winner",
+                    "event_ref": "event:model-result:guard:compact",
+                    "event_sequence": 9,
+                },
+            ],
+        },
+    )
+
+    assert report["contract"] == "isolated-source-authority-acceptance.3"
+    assert report["qualification_scope"] == (
+        "isolated_test_only_correlated_capture"
+    )
+    assert report["production_qualification_claimed"] is False
+    terminal = report["terminal_candidate_source_authority"]
+    assert terminal["proof_contract"] == "visible-beat-source-verdict.1"
+    assert terminal["qualified_visible_guard_models"] == ["deepseek-v4-flash"]
+    assert terminal["all_source_review_eligible_terminal_candidates_proven"] is True
+    assert terminal["evidence"] == [
+        {
+            "proposal_id": "proposal:compact",
+            "winning_protocol": "visible_beat_source_verdict.1",
+            "model_call_id": "model-call:guard:compact",
+            "model_result_event_ref": "event:model-result:guard:compact",
+            "model": "deepseek-v4-flash",
+            "request_hash": review_request_hash,
+            "parent_model_call_id": "model-call:author:compact",
+            "parent_request_hash": "author-request:1",
+            "schema_digest": (
+                "347069477180408b262fd4ac7da64341c"
+                "07b8456d18ad6bd6ab7dee7f9ea78e7"
+            ),
+            "evidence_revision": (
+                "visible-beat-verdict-deepseek-v4-flash-20260810.3"
+            ),
+            "semantic_authority_relation": "correlated_same_checkpoint",
+            "capture_scope": "isolated_test_only_correlated_capture",
+        }
+    ]
+
+
+def _compact_guard_report_with_mutation(mutation: str) -> dict[str, object]:
+    review_request_hash = "a" * 64
+    provider_item: dict[str, object] = {
+        "model_invocation_request_hash": "b" * 64,
+        "exact_emitted_request_hash": review_request_hash,
+        "forced_tool_request_hashes": [review_request_hash],
+        "source_closure_request": True,
+        "source_closure_contract": "visible-beat-source-verdict.1",
+        "source_closure_schema_digest": (
+            "347069477180408b262fd4ac7da64341c"
+            "07b8456d18ad6bd6ab7dee7f9ea78e7"
+        ),
+        "source_closure_semantic_authority_relation": (
+            "correlated_same_checkpoint"
+        ),
+        "source_closure_capture_scope": "isolated_test_only_correlated_capture",
+    }
+    candidate: dict[str, object] = {
+        "proposal_id": "proposal:compact",
+        "disposition": "effect_accepted",
+        "request_hash": "author-request:1",
+        "trigger_ref": "event:observation:compact",
+        "attempt_id": "attempt:compact",
+        "model_call_id": "model-call:author:compact",
+        "related_author_model_call_ids": ["model-call:author:compact"],
+        "proposal_event_sequence": 12,
+        "source_review_eligible": True,
+    }
+    author_record: dict[str, object] = {
+        "model_call_id": "model-call:author:compact",
+        "parent_model_call_id": None,
+        "request_hash": "author-request:1",
+        "trigger_ref": "event:observation:compact",
+        "attempt_id": "attempt:compact",
+        "model_id": "deepseek-v4-flash",
+        "router_version": "semantic-compute-router.1",
+        "route_reason_code": "semantic_character_choice",
+        "status": "proposal_validated",
+        "outcome": "winner",
+        "event_ref": "event:model-result:author:compact",
+        "event_sequence": 7,
+    }
+    guard_record: dict[str, object] = {
+        "model_call_id": "model-call:guard:compact",
+        "parent_model_call_id": "model-call:author:compact",
+        "request_hash": review_request_hash,
+        "trigger_ref": "event:observation:compact",
+        "attempt_id": "attempt:compact",
+        "model_id": "deepseek-v4-flash",
+        "router_version": "provider-subcall-audit.1",
+        "route_reason_code": "validation.visible_source_closure_proof_v1",
+        "status": "proposal_validated",
+        "outcome": "winner",
+        "event_ref": "event:model-result:guard:compact",
+        "event_sequence": 9,
+    }
+    request_evidence = [provider_item]
+    model_records = [author_record, guard_record]
+    if mutation == "different_related_parent":
+        candidate["related_author_model_call_ids"] = [
+            "model-call:author:compact",
+            "model-call:author:other",
+        ]
+        guard_record["parent_model_call_id"] = "model-call:author:other"
+        other_author = dict(author_record)
+        other_author.update(
+            {
+                "model_call_id": "model-call:author:other",
+                "request_hash": "author-request:other",
+                "event_ref": "event:model-result:author:other",
+                "event_sequence": 6,
+            }
+        )
+        model_records.insert(0, other_author)
+    elif mutation == "request_hash":
+        guard_record["request_hash"] = "c" * 64
+    elif mutation == "schema_digest":
+        provider_item["source_closure_schema_digest"] = "stale-digest"
+    elif mutation == "duplicate_capture":
+        request_evidence.append(dict(provider_item))
+    else:
+        raise AssertionError(f"unknown mutation: {mutation}")
+    source_health = _compact_visible_source_guard_health()
+    return _RUNNER_MODULE._source_authority_acceptance_report(
+        requested=True,
+        first_health={"scheduler": {"proactive_source_authority": source_health}},
+        restart_health={"scheduler": {"proactive_source_authority": source_health}},
+        provider_audit={
+            "contract": "provider-presentation-capture.3",
+            "capture_mode": "real-provider",
+            "request_evidence": request_evidence,
+        },
+        final_replay={
+            "accepted_character_choices": [candidate],
+            "model_result_records": model_records,
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "different_related_parent",
+        "request_hash",
+        "schema_digest",
+        "duplicate_capture",
+    ],
+)
+def test_source_authority_report_rejects_mutated_request_identity_and_lineage(
+    mutation: str,
+) -> None:
+    report = _compact_guard_report_with_mutation(mutation)
+
+    terminal = report["terminal_candidate_source_authority"]
+    assert terminal["all_source_review_eligible_terminal_candidates_proven"] is False
+    assert terminal["evidence"] == []
 
 
 def test_source_authority_requires_qualified_restart_and_terminal_lineage() -> None:
@@ -625,12 +902,165 @@ def test_source_authority_requires_qualified_restart_and_terminal_lineage() -> N
     )
 
     assert assessment["failure_codes"] == [
+        "source_authority.first_start_not_qualified",
         "source_authority.restart_not_qualified",
         "source_authority.terminal_source_review_not_proven",
     ]
 
 
-def test_source_authority_deterministic_invariants_accept_full_review_proof() -> None:
+def test_source_authority_accepts_exact_compact_correlated_capture_evidence() -> None:
+    report = _passing_real_provider_report()
+    source_health = _compact_visible_source_guard_health()
+    report["source_authority_acceptance"] = {
+        "contract": "isolated-source-authority-acceptance.3",
+        "requested": True,
+        "qualification_scope": "isolated_test_only_correlated_capture",
+        "production_qualification_claimed": False,
+        "first_start_health": source_health,
+        "after_restart_health": source_health,
+        "terminal_candidate_source_authority": {
+            "proof_contract": "visible-beat-source-verdict.1",
+            "source_review_eligible_terminal_candidate_count": 1,
+            "source_authority_proven_terminal_candidate_count": 1,
+            "all_source_review_eligible_terminal_candidates_proven": True,
+        },
+        "coverage_assurance": {
+            "proof_source": "private_self_expression_audit",
+            "evaluated_by_this_process": False,
+            "character_wording_forced": False,
+        },
+    }
+
+    assessment = evaluate_deterministic_invariants(
+        report=report,
+        model_mode="real-provider",
+    )
+
+    assert assessment["passed"] is True
+    assert assessment["failure_codes"] == []
+
+
+def test_source_authority_rejects_a_vacuous_zero_candidate_proof() -> None:
+    report = _passing_real_provider_report()
+    source_health = _compact_visible_source_guard_health()
+    report["source_authority_acceptance"] = {
+        "contract": "isolated-source-authority-acceptance.3",
+        "requested": True,
+        "qualification_scope": "isolated_test_only_correlated_capture",
+        "production_qualification_claimed": False,
+        "first_start_health": source_health,
+        "after_restart_health": source_health,
+        "terminal_candidate_source_authority": {
+            "proof_contract": "visible-beat-source-verdict.1",
+            "source_review_eligible_terminal_candidate_count": 0,
+            "source_authority_proven_terminal_candidate_count": 0,
+            "all_source_review_eligible_terminal_candidates_proven": True,
+        },
+        "coverage_assurance": {
+            "proof_source": "private_self_expression_audit",
+            "evaluated_by_this_process": False,
+            "character_wording_forced": False,
+        },
+    }
+
+    assessment = evaluate_deterministic_invariants(
+        report=report,
+        model_mode="real-provider",
+    )
+
+    assert assessment["passed"] is False
+    assert assessment["failure_codes"] == [
+        "source_authority.terminal_source_review_not_proven"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    [
+        (("source_guard_relation",), "independent"),
+        (("source_review_authority",), {"legacy": "v7"}),
+        (
+            ("selective_source_review", "runtime", "semantic_authority_relation"),
+            "independent",
+        ),
+        (
+            ("selective_source_review", "runtime", "route"),
+            "https://api.deepseek.com",
+        ),
+        (
+            ("selective_source_review", "runtime", "strict_output", "model"),
+            "deepseek-v4-pro",
+        ),
+        (
+            (
+                "selective_source_review",
+                "runtime",
+                "strict_output",
+                "evidence_revision",
+            ),
+            "stale-revision",
+        ),
+        (
+            (
+                "selective_source_review",
+                "runtime",
+                "strict_output",
+                "audit_success_count",
+            ),
+            99,
+        ),
+        (
+            (
+                "selective_source_review",
+                "runtime",
+                "strict_output",
+                "contract_schema_digests",
+                "visible-beat-source-verdict.1",
+            ),
+            "stale-digest",
+        ),
+    ],
+)
+def test_source_authority_rejects_mutated_compact_guard_evidence(
+    path: tuple[str, ...],
+    replacement: object,
+) -> None:
+    report = _passing_real_provider_report()
+    first_health = _compact_visible_source_guard_health()
+    restart_health = json.loads(json.dumps(first_health))
+    target = restart_health
+    for key in path[:-1]:
+        child = target[key]
+        assert isinstance(child, dict)
+        target = child
+    target[path[-1]] = replacement
+    report["source_authority_acceptance"] = {
+        "contract": "isolated-source-authority-acceptance.3",
+        "requested": True,
+        "qualification_scope": "isolated_test_only_correlated_capture",
+        "production_qualification_claimed": False,
+        "first_start_health": first_health,
+        "after_restart_health": restart_health,
+        "terminal_candidate_source_authority": {
+            "proof_contract": "visible-beat-source-verdict.1",
+            "all_source_review_eligible_terminal_candidates_proven": True,
+        },
+        "coverage_assurance": {
+            "proof_source": "private_self_expression_audit",
+            "evaluated_by_this_process": False,
+            "character_wording_forced": False,
+        },
+    }
+
+    assessment = evaluate_deterministic_invariants(
+        report=report,
+        model_mode="real-provider",
+    )
+
+    assert "source_authority.restart_not_qualified" in assessment["failure_codes"]
+
+
+def test_source_authority_deterministic_invariants_reject_retired_full_review() -> None:
     report = _passing_real_provider_report()
     source_health = _source_authority_health_with_unverified_inventory()
     report["source_authority_acceptance"] = {
@@ -655,11 +1085,14 @@ def test_source_authority_deterministic_invariants_accept_full_review_proof() ->
         model_mode="real-provider",
     )
 
-    assert assessment["passed"] is True
-    assert assessment["failure_codes"] == []
+    assert assessment["passed"] is False
+    assert assessment["failure_codes"] == [
+        "source_authority.first_start_not_qualified",
+        "source_authority.restart_not_qualified",
+    ]
 
 
-def test_source_authority_accepts_qualified_inventory_guard_then_full_v7() -> None:
+def test_source_authority_rejects_inventory_guard_then_retired_full_v7() -> None:
     report = _passing_real_provider_report()
     source_health = _source_authority_health_with_qualified_inventory_guard()
     assert qualified_inventory_route_models(source_health) == (
@@ -688,8 +1121,11 @@ def test_source_authority_accepts_qualified_inventory_guard_then_full_v7() -> No
         model_mode="real-provider",
     )
 
-    assert assessment["passed"] is True
-    assert assessment["failure_codes"] == []
+    assert assessment["passed"] is False
+    assert assessment["failure_codes"] == [
+        "source_authority.first_start_not_qualified",
+        "source_authority.restart_not_qualified",
+    ]
 
 
 def test_source_authority_rejects_full_review_without_exact_route_evidence() -> None:
@@ -726,7 +1162,7 @@ def test_source_authority_rejects_full_review_without_exact_route_evidence() -> 
     ]
 
 
-def test_unqualified_inventory_does_not_disqualify_strict_full_review() -> None:
+def test_unqualified_inventory_and_retired_full_review_are_not_visible_proof() -> None:
     report = _passing_real_provider_report()
     source_health = _source_authority_health_with_unverified_inventory()
     inventory_transport = source_health["inventory_transport"]
@@ -758,8 +1194,11 @@ def test_unqualified_inventory_does_not_disqualify_strict_full_review() -> None:
         model_mode="real-provider",
     )
 
-    assert assessment["passed"] is True
-    assert assessment["failure_codes"] == []
+    assert assessment["passed"] is False
+    assert assessment["failure_codes"] == [
+        "source_authority.first_start_not_qualified",
+        "source_authority.restart_not_qualified",
+    ]
 
 
 def _sanitized_provider_environment() -> dict[str, str]:
@@ -919,6 +1358,52 @@ def test_loopback_stub_accepts_deepseek_beta_tool_endpoint() -> None:
 
     assert status == 200
     assert response["choices"][0]["message"]["tool_calls"]
+
+
+def test_provider_capture_reconstructs_compact_visible_guard_request_identity() -> None:
+    messages = visible_source_closure_messages(
+        visible_beats=("我有点担心你。",),
+        world_claims=(),
+        source_references=(),
+    )
+    provider_contract = visible_source_verdict_provider_request_contract()
+    tools = provider_contract["tools"]
+    tool_choice = provider_contract["tool_choice"]
+    assert isinstance(tools, list)
+    assert isinstance(tool_choice, dict)
+    payload = {
+        "messages": messages,
+        "temperature": 0.0,
+        "tools": tools,
+        "tool_choice": tool_choice,
+    }
+    expected_hash = _canonical_hash(
+        {
+            **payload,
+            "tool_contract_identity": {
+                "contract": "visible-beat-source-verdict.1",
+                "schema_digest": visible_source_verdict_schema_digest(),
+            },
+        }
+    )
+
+    assert _forced_tool_request_hashes(payload) == [expected_hash]
+    evidence = _provider_request_evidence(
+        payload,
+        emitted_request_hash=expected_hash,
+    )
+    assert evidence["source_closure_request"] is True
+    assert evidence["source_closure_contract"] == "visible-beat-source-verdict.1"
+    assert evidence["source_closure_schema_digest"] == (
+        visible_source_verdict_schema_digest()
+    )
+    assert evidence["source_closure_semantic_authority_relation"] == (
+        "correlated_same_checkpoint"
+    )
+    assert evidence["source_closure_capture_scope"] == (
+        "isolated_test_only_correlated_capture"
+    )
+    assert evidence["forced_tool_request_hashes"] == [expected_hash]
 
 
 def test_provider_capture_reconstructs_deepseek_strict_tool_identity() -> None:
@@ -1774,28 +2259,27 @@ def test_real_provider_topology_distinguishes_daemon_and_external_networks() -> 
     assert local_topology["aggregate_loopback_only"] is True
 
 
-def test_production_source_authority_topology_reports_partial_hash_capture() -> None:
+def test_compact_source_guard_topology_reports_correlated_hash_capture() -> None:
     topology = _network_topology(
         model_mode="real-provider",
         upstream_base_url="https://api.deepseek.com/v1",
         production_source_authority=True,
-        openai_base_url="https://api.openai.com/v1",
-        openrouter_base_url="https://openrouter.ai/api/v1",
     )
 
     assert topology["model_gateway_scope"] == "loopback_hash_proxy"
-    assert topology["model_hash_capture_coverage"] == "partial_deepseek_only"
+    assert topology["model_hash_capture_coverage"] == "all_deepseek_requests"
     assert topology["source_authority_network"] == {
         "enabled": True,
-        "reviewer_transport_scope": "direct_external_https",
-        "captured_by_deepseek_hash_proxy": False,
-        "openai_endpoint_scope": "external_https",
-        "openrouter_endpoint_scope": "external_https",
+        "reviewer_transport_scope": "shared_deepseek_loopback_hash_proxy",
+        "captured_by_deepseek_hash_proxy": True,
+        "semantic_authority_relation": "correlated_same_checkpoint",
+        "independent_reviewer": False,
+        "qualification_scope": "isolated_test_only_correlated_capture",
     }
     assert topology["aggregate_loopback_only"] is False
 
 
-def test_production_source_authority_preserves_only_its_external_credentials(
+def test_compact_source_guard_clears_retired_external_reviewer_credentials(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1816,9 +2300,15 @@ def test_production_source_authority_preserves_only_its_external_credentials(
 
     assert environment["NAPCAT_API_URL"] == "http://127.0.0.1:32123"
     assert environment["DEEPSEEK_BASE_URL"] == "http://127.0.0.1:32124"
-    assert environment["OPENAI_API_KEY"] == "openai-test-key"
-    assert environment["OPENROUTER_API_KEY"] == "openrouter-test-key"
-    assert environment["WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED"] == "true"
+    assert environment["OPENAI_API_KEY"] == ""
+    assert environment["OPENROUTER_API_KEY"] == ""
+    assert environment["WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED"] == "false"
+    assert environment["WORLD_V2_CHAT_SOURCE_REVIEW_ENABLED"] == "true"
+    assert environment["WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED"] == "true"
+    assert environment["WORLD_V2_SELECTIVE_SOURCE_REVIEW_MODEL"] == (
+        "deepseek-v4-flash"
+    )
+    assert environment["WORLD_V2_LIFE_SOURCE_REVIEW_ENABLED"] == "false"
     assert environment["OPENAI_PROXY_URL"] == ""
     assert environment["ARK_API_KEY"] == ""
     assert environment["CIVITAI_API_KEY"] == ""
@@ -1945,20 +2435,44 @@ def test_production_source_authority_requires_both_real_provider_opt_ins(
         )
 
 
-def test_production_source_authority_requires_both_reviewer_credentials(
+def test_compact_source_guard_does_not_require_retired_reviewer_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     environment = _sanitized_provider_environment()
     environment.update(
         {
             "DEEPSEEK_API_KEY": "deepseek-test-key",
-            "OPENAI_API_KEY": "openai-test-key",
+            "DEEPSEEK_MODEL": "deepseek-v4-flash",
         }
     )
     for name, value in environment.items():
         monkeypatch.setenv(name, value)
 
-    with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
+    settings = _validated_provider_settings(
+        model_mode="real-provider",
+        allow_real_provider=True,
+        production_source_authority=True,
+    )
+
+    assert settings.deepseek_model == "deepseek-v4-flash"
+    assert not settings.openai_api_key
+    assert not settings.openrouter_api_key
+
+
+def test_compact_source_guard_rejects_a_different_deepseek_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = _sanitized_provider_environment()
+    environment.update(
+        {
+            "DEEPSEEK_API_KEY": "deepseek-test-key",
+            "DEEPSEEK_MODEL": "deepseek-v4-pro",
+        }
+    )
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValueError, match="deepseek-v4-flash"):
         _validated_provider_settings(
             model_mode="real-provider",
             allow_real_provider=True,

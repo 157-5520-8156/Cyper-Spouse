@@ -86,11 +86,67 @@ def test_media_enabled_inbound_contract_requires_an_explicit_role_owned_choice()
     )
     expression = decision["properties"]["expression_draft"]
 
-    assert "media_request" in expression["required"]
+    assert {"media_request", "media_source_refs"} <= set(expression["required"])
     assert expression["properties"]["media_request"]["enum"] == [
         "none",
         "consider_available_candidate",
     ]
+
+
+def test_deepseek_media_contract_never_transports_source_refs_as_null() -> None:
+    contract = InboundToolContracts().contract_for(
+        phase="initial",
+        capabilities=qq_expression_capabilities(
+            "napcat", media_request_available=True
+        ),
+        recall_allowed=False,
+        schema_dialect="deepseek-strict",
+    )
+    parameters = contract.provider_tools[0]["function"]["parameters"]
+    decision = next(
+        branch
+        for branch in parameters["anyOf"]
+        if branch["properties"]["result_kind"]["enum"] == ["decision"]
+    )
+    expression = decision["properties"]["expression_draft"]
+
+    assert {"media_source_refs", "world_claims"} <= set(expression["required"])
+    for timing_branch in expression["anyOf"]:
+        for field_name in ("media_source_refs", "world_claims"):
+            field = timing_branch["properties"][field_name]
+            assert field["type"] == "array"
+            assert "anyOf" not in field
+
+
+def test_deepseek_stream_head_never_transports_authored_arrays_as_null() -> None:
+    contract = InboundToolContracts().contract_for(
+        phase="initial",
+        transport="stream",
+        capabilities=qq_expression_capabilities(
+            "napcat", media_request_available=True
+        ),
+        recall_allowed=False,
+        schema_dialect="deepseek-strict",
+    )
+    parameters = contract.provider_tools[0]["function"]["parameters"]
+    decision = next(
+        branch
+        for branch in parameters["anyOf"]
+        if branch["properties"]["result_kind"]["enum"] == ["decision"]
+    )
+    event_variants = decision["properties"]["events"]["items"]["anyOf"]
+    head = next(
+        branch
+        for branch in event_variants
+        if branch["properties"]["type"]["enum"] == ["head"]
+    )
+
+    assert {"media_source_refs", "world_claims"} <= set(head["required"])
+    for timing_branch in head["anyOf"]:
+        for field_name in ("media_source_refs", "world_claims"):
+            field = timing_branch["properties"][field_name]
+            assert field["type"] == "array"
+            assert "anyOf" not in field
 
 
 def test_stream_contract_preserves_append_only_expression_event_transport() -> None:

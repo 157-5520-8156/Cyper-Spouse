@@ -22,6 +22,7 @@ from companion_daemon.world_v2.isolated_source_closure_trace import (
     emit_source_closure_trace,
 )
 from companion_daemon.world_v2.qq_c2c_host import build_qq_c2c_host
+from compact_source_review_fixture import compact_source_review_wire
 
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "run_private_self_expression_audit.py"
@@ -1269,7 +1270,7 @@ class _DormLifeSourceClosureReviewer:
         self.calls: list[list[dict[str, str]]] = []
 
     def supports_strict_output_contract(self, contract: str) -> bool:
-        return contract == "candidate-external-proposition-coverage.5"
+        return contract == "visible-beat-source-verdict.1"
 
     async def complete(
         self,
@@ -1279,6 +1280,8 @@ class _DormLifeSourceClosureReviewer:
     ) -> str:
         del temperature
         self.calls.append(messages)
+        if "factual source-boundary classifier" in messages[0]["content"]:
+            return compact_source_review_wire(messages, unclosed_texts=("宿舍",))
         request = json.loads(messages[1]["content"])
         coverage_contract = request.get("output_contract", {}).get("contract")
         if coverage_contract in {
@@ -2381,7 +2384,6 @@ async def test_explicit_trace_captures_qq_single_call_post_appraisal_delegate(
     delivery = _RUNNER.IsolatedAuditDelivery()
     role_model = _RejectedThenCorrectedReplyModel()
     reviewer = _DormLifeSourceClosureReviewer()
-    inventory = _DormCandidateExternalInventory()
     host = build_qq_c2c_host(
         settings=Settings(
             database_path=tmp_path / "delegated-source-trace.sqlite",
@@ -2394,7 +2396,6 @@ async def test_explicit_trace_captures_qq_single_call_post_appraisal_delegate(
         model=role_model,
         world_support_model=_NamedAdvisoryFake(),
         source_closure_model=reviewer,
-        candidate_external_proposition_inventory_model=inventory,
         delivery=delivery,
         ingress_now=clock.now,
         ingress_sleep=clock.sleep,
@@ -2418,24 +2419,22 @@ async def test_explicit_trace_captures_qq_single_call_post_appraisal_delegate(
 
     assert outcome.status == "action_authorized"
     assert len(role_model.calls) == 2
-    # Each authored candidate pays one indexed Coverage call. The initial
-    # unclosed external proposition additionally receives one independent
-    # report-relative adjudication; Inventory only locates each candidate and
-    # no longer re-judges ordinary unclosed semantic roles.
-    assert len(reviewer.calls) == 3
-    assert len(inventory.calls) == 2
+    # Each authored candidate pays exactly one exhaustive compact review. The
+    # rejected candidate enters the same Character author's one correction;
+    # no Inventory, report-relative, or full-V7 chat call remains.
+    assert len(reviewer.calls) == 2
     trace = [event.as_dict() for event in collector.snapshot()]
     rejections = [event for event in trace if "stage" in event]
-    verdicts = [event for event in trace if event.get("record_kind") == "candidate_verdict"]
     assert [event["stage"] for event in rejections] == ["initial_rejection"]
     assert rejections[0]["visible_beat_texts"] == ["刚才在宿舍翻书，现在看到你了。"]
-    assert verdicts[0]["inventory_outcome"] == "external_propositions"
-    assert verdicts[0]["coverage_outcome"] == "completed"
-    assert verdicts[0]["coverage"][0]["decision"] == "unclosed"
-    assert verdicts[1]["inventory_outcome"] == "no_external_propositions"
-    assert verdicts[1]["coverage_outcome"] == "completed"
-    assert verdicts[1]["coverage"][0]["decision"] == "closed"
-    assert "我看到你这句了。" not in json.dumps(verdicts, ensure_ascii=False)
+    review_packets = [json.loads(call[1]["content"]) for call in reviewer.calls]
+    assert [
+        packet["output_contract"]["contract"] for packet in review_packets
+    ] == ["visible-beat-source-verdict.1", "visible-beat-source-verdict.1"]
+    assert [packet["visible_beats"][0]["text"] for packet in review_packets] == [
+        "刚才在宿舍翻书，现在看到你了。",
+        "我看到你这句了。",
+    ]
     assert [item["content"] for item in delivery.sent if item["modality"] == "text"] == [
         "我看到你这句了。"
     ]

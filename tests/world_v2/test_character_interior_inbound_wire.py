@@ -18482,6 +18482,71 @@ async def test_compact_source_authority_closes_complete_source_free_surface_in_o
 
 
 @pytest.mark.asyncio
+async def test_compact_source_authority_never_adds_full_v7_for_declared_claims() -> None:
+    text = "我现在确实有点想你。"
+
+    class _CompactAuthority(_SequenceJsonModel):
+        def supports_strict_output_contract(self, contract: str) -> bool:
+            return contract in {
+                "visible-beat-source-verdict.1",
+                "source-closure-review.7",
+                "report-relative-entailment-adjudication.3",
+            }
+
+    reviewer = _CompactAuthority(
+        [
+            json.dumps(
+                {
+                    "contract": "visible-beat-source-verdict.1",
+                    "decisions": [
+                        {
+                            "beat_index": 0,
+                            "verdict": "source_free",
+                            "semantic_role": "private_state",
+                            "subject_role": "companion",
+                            "source_ref_indexes": [],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+    raw = json.dumps(
+        {
+            "timing_choice": "now",
+            "beats": [{"modality": "text", "text": text}],
+            "stance": "direct",
+            "brief_rationale": "State a present private feeling.",
+            "confidence": 9000,
+            "world_claims": [
+                {
+                    "claim_text": "我现在有点想你",
+                    "scope": "subjective_or_hypothetical",
+                    "source_refs": [],
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    result = await review_expression_with_candidate_external_coverage(
+        reviewer=reviewer,
+        inventory_model=_StrictInventorySequenceJsonModel([]),
+        request=_qq_request(),
+        raw=raw,
+        identity_frame=None,
+    )
+
+    assert result.review is None
+    assert result.visible_authority_exhaustive is True
+    assert len(reviewer.calls) == 1
+    assert json.loads(reviewer.calls[0][0][-1]["content"])["output_contract"][
+        "contract"
+    ] == "visible-beat-source-verdict.1"
+
+
+@pytest.mark.asyncio
 async def test_compact_source_authority_reviews_text_without_serializing_opaque_beats() -> None:
     text = "我在听。"
 
@@ -18587,7 +18652,7 @@ async def test_compact_source_authority_rejects_unclosed_external_segment() -> N
 
 
 @pytest.mark.asyncio
-async def test_compact_source_authority_falls_back_to_full_v7_after_wire_retry() -> None:
+async def test_compact_source_authority_never_falls_back_to_full_v7_after_wire_retry() -> None:
     text = "你这么一问，我忽然有点想你。"
 
     class _SelectiveAuthority(_SequenceJsonModel):
@@ -18602,21 +18667,19 @@ async def test_compact_source_authority_falls_back_to_full_v7_after_wire_retry()
         [
             '{"contract":"visible-beat-source-verdict.1","decisions":[]}',
             '{"contract":"visible-beat-source-verdict.1","decisions":[]}',
-            _source_closure_review(),
         ]
     )
 
-    result = await review_expression_with_candidate_external_coverage(
-        reviewer=reviewer,
-        inventory_model=_StrictInventorySequenceJsonModel([]),
-        request=_qq_request(),
-        raw=_candidate_coverage_raw(text),
-        identity_frame=None,
-    )
+    with pytest.raises(ValidationTechnicalFailure):
+        await review_expression_with_candidate_external_coverage(
+            reviewer=reviewer,
+            inventory_model=_StrictInventorySequenceJsonModel([]),
+            request=_qq_request(),
+            raw=_candidate_coverage_raw(text),
+            identity_frame=None,
+        )
 
-    assert result.review is not None
-    assert result.review.decision == "supported"
-    assert len(reviewer.calls) == 3
+    assert len(reviewer.calls) == 2
     contracts = [
         json.loads(call[0][-1]["content"])["output_contract"]["contract"]
         for call in reviewer.calls
@@ -18624,7 +18687,6 @@ async def test_compact_source_authority_falls_back_to_full_v7_after_wire_retry()
     assert contracts == [
         "visible-beat-source-verdict.1",
         "visible-beat-source-verdict.1",
-        "source-closure-review.7",
     ]
 
 

@@ -468,24 +468,30 @@ class Settings(BaseSettings):
     world_v2_source_review_redundancy_enabled: bool = Field(
         default=False,
         alias="WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED",
+        description=(
+            "Legacy compatibility input. It cannot install GPT/Qwen redundancy "
+            "on visible chat; Life owns its independent review topology separately."
+        ),
     )
     world_v2_chat_source_review_enabled: bool = Field(
         default=True,
         alias="WORLD_V2_CHAT_SOURCE_REVIEW_ENABLED",
         description=(
-            "Install source-closure authority for visible CharacterInterior chat candidates. "
-            "The selected topology may be the legacy independent lane or an explicitly "
-            "correlated guard; disabling both is an unsafe/degraded deployment choice."
+            "Install the compact DeepSeek Flash source guard for visible CharacterInterior "
+            "chat candidates. False is retained only for provider-free fixtures; a "
+            "provider-backed production composition fails startup rather than selecting "
+            "author-only or the retired independent full-review lane."
         ),
     )
     world_v2_selective_source_review_enabled: bool = Field(
-        default=False,
+        default=True,
         alias="WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED",
         description=(
-            "Staging opt-in for a separate DeepSeek Flash runtime implementing the compact "
-            "visible-source guard. It is the same semantic checkpoint as the Character author "
-            "and is reported as correlated, not independent. Production default remains off "
-            "until the end-to-end latency, QQ receipt, restart, and soak gates pass."
+            "Required production topology for visible chat: a separate DeepSeek Flash runtime "
+            "implements the compact visible-source guard. It is the same semantic checkpoint "
+            "as the Character author and is reported as correlated, not independent. False is "
+            "retained only as a fail-closed legacy configuration value and cannot select the "
+            "retired GPT/Qwen chat review route."
         ),
     )
     world_v2_selective_source_review_model: str = Field(
@@ -507,29 +513,29 @@ class Settings(BaseSettings):
         default=None,
         alias="WORLD_V2_SOURCE_REVIEW_BASE_URL",
         description=(
-            "Optional OpenAI-compatible endpoint for source-closure review "
-            "only. When set, ordinary and recovery reviewers are pinned to "
-            "this local endpoint (no proxy); otherwise OpenRouter/OpenAI are "
-            "used. Still independent of the DeepSeek character author."
+            "Optional OpenAI-compatible endpoint for the independent Life-only "
+            "source reviewer. Visible chat never consumes this route."
         ),
     )
     world_v2_source_review_local_model: str | None = Field(
         default=None,
         alias="WORLD_V2_SOURCE_REVIEW_LOCAL_MODEL",
-        description="Model id used when WORLD_V2_SOURCE_REVIEW_BASE_URL is set.",
+        description=(
+            "Life-only reviewer model used when WORLD_V2_SOURCE_REVIEW_BASE_URL is set."
+        ),
     )
     world_v2_source_inventory_base_url: str | None = Field(
         default=None,
         alias="WORLD_V2_SOURCE_INVENTORY_BASE_URL",
         description=(
-            "Optional OpenAI-compatible endpoint for candidate external "
-            "proposition inventory. Falls back to WORLD_V2_SOURCE_REVIEW_BASE_URL."
+            "Retired visible-chat Inventory compatibility setting. Production "
+            "semantic composition rejects Inventory injection."
         ),
     )
     world_v2_source_inventory_local_model: str | None = Field(
         default=None,
         alias="WORLD_V2_SOURCE_INVENTORY_LOCAL_MODEL",
-        description="Model id used when a local inventory endpoint is set.",
+        description="Retired Inventory compatibility model; not a production chat route.",
     )
     world_v2_source_review_secondary_model: str = Field(
         default="qwen/qwen-plus",
@@ -543,15 +549,16 @@ class Settings(BaseSettings):
     world_v2_source_review_recovery_model: str = Field(
         default="qwen/qwen-plus",
         alias="WORLD_V2_SOURCE_REVIEW_RECOVERY_MODEL",
+        description="Retired visible-chat recovery reviewer compatibility value.",
     )
     world_v2_source_review_recovery_fallback_model: str = Field(
         default="gpt-4.1-mini",
         alias="WORLD_V2_SOURCE_REVIEW_RECOVERY_FALLBACK_MODEL",
+        description="Retired visible-chat recovery reviewer compatibility value.",
     )
     world_v2_source_inventory_enabled: bool = Field(
-        # Inventory V5 is an optimization over the established full source
-        # review, not a correctness requirement. Composition still fails closed
-        # unless the exact endpoint/model/contract has release-pinned evidence.
+        # Retained only for configuration/replay compatibility. Production
+        # semantic chat rejects Inventory and uses the compact exhaustive guard.
         default=True,
         alias="WORLD_V2_SOURCE_INVENTORY_ENABLED",
     )

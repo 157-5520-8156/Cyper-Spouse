@@ -114,14 +114,9 @@ class _NamedNoCallModel:
         raise AssertionError(f"unexpected composition-only model call: {self.model}")
 
 
-class _NamedStrictInventoryNoCallModel(_NamedNoCallModel):
+class _NamedCompactReviewNoCallModel(_NamedNoCallModel):
     def supports_strict_output_contract(self, contract: str) -> bool:
-        return contract == "candidate-external-proposition-inventory.5"
-
-
-class _NamedStrictCoverageNoCallModel(_NamedNoCallModel):
-    def supports_strict_output_contract(self, contract: str) -> bool:
-        return contract == "candidate-external-proposition-coverage.5"
+        return contract == "visible-beat-source-verdict.1"
 
 
 class _NoCallMediaPlanner:
@@ -178,20 +173,18 @@ def _inbound_character_result(
 
 
 @pytest.mark.asyncio
-async def test_http_composition_wires_proactive_identity_reviewer_and_inventory(
+async def test_http_composition_wires_compact_source_guard_without_inventory(
     tmp_path: Path,
 ) -> None:
     author = _NamedNoCallModel("http-proactive-author")
-    reviewer = _NamedStrictCoverageNoCallModel("http-independent-source-reviewer")
+    reviewer = _NamedCompactReviewNoCallModel("http-independent-source-reviewer")
     life_reviewer = _NamedNoCallModel("http-isolated-life-source-reviewer")
-    inventory = _NamedStrictInventoryNoCallModel("http-candidate-inventory")
     host = build_http_v2_capture_host(
         settings=Settings(database_path=tmp_path / "http-proactive-source-authority.sqlite"),
         bootstrap_at=NOW,
         model=author,
         source_closure_model=reviewer,
         life_source_closure_model=life_reviewer,
-        candidate_external_proposition_inventory_model=inventory,
     )
     try:
         interior_health = host.character_interior_health()
@@ -219,11 +212,16 @@ async def test_http_composition_wires_proactive_identity_reviewer_and_inventory(
         assert identity.companion_name == "沈知栀"
         assert source_health["author_model"] == author.model
         assert source_health["reviewer_model"] == reviewer.model
-        assert source_health["candidate_inventory_model"] == inventory.model
+        assert source_health["candidate_inventory_model"] is None
+        assert source_health["visible_review_strategy"] == "visible_beat_verdict"
+        assert source_health["active_source_review_protocol"] == (
+            "visible_beat_source_verdict.1"
+        )
+        assert source_health["selective_source_review"]["enabled"] is True
         assert source_health["candidate_review_capabilities"]["ordinary"] == {
-            "inventory_v5": True,
-            "coverage_v5": True,
-            "roles_independent": True,
+            "inventory_v5": False,
+            "coverage_v5": False,
+            "roles_independent": False,
         }
         development = (  # noqa: SLF001
             host._host._application._life_ecology._life_development_followup

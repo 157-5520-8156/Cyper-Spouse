@@ -261,7 +261,7 @@ class ScenarioVerificationError(AssertionError):
 # .53 hash was stale (the per-case verification predicates and replay checks
 # still pass, but the aggregate request/room/replay manifest moved), so this
 # is an explicit audited rebaseline rather than weakening the drift guard.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.62"
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.63"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
@@ -345,8 +345,14 @@ FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.62"
 # reply_reconsideration Thread is an inner intention, not a scheduled message.
 # Frozen visible outputs, event/action predicates and per-case replay checks
 # remain unchanged; request/audit identities intentionally move.
+# 2026-08-11 3rd: the provider-only strict timing branches now require the
+# canonical non-null world_claims array instead of admitting ``null`` and then
+# paying for a same-role correction. Canonical defaults, Character decisions,
+# all 120 visible/event/action predicates, and per-case replay checks remain
+# unchanged; only strict tool/request audit identities move. Two independent
+# complete runs produced the same aggregate manifest before this rebaseline.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "d9c616f3306621596649798856e192a151c765fbcfff3759b2de6b96272633ce"
+    "9c84267f9af6a8a4a51db6ac9a9cf4ef52594a5e4cc93c6aa63e35932aa0f1c4"
 )
 
 

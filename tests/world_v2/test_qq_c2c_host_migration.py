@@ -76,14 +76,9 @@ class _NamedNoCallModel:
         raise AssertionError(f"unexpected composition-only model call: {self.model}")
 
 
-class _NamedStrictInventoryNoCallModel(_NamedNoCallModel):
+class _NamedCompactReviewNoCallModel(_NamedNoCallModel):
     def supports_strict_output_contract(self, contract: str) -> bool:
-        return contract == "candidate-external-proposition-inventory.5"
-
-
-class _NamedStrictCoverageNoCallModel(_NamedNoCallModel):
-    def supports_strict_output_contract(self, contract: str) -> bool:
-        return contract == "candidate-external-proposition-coverage.5"
+        return contract == "visible-beat-source-verdict.1"
 
 
 class _NamedStrictFullReviewNoCallModel(_NamedNoCallModel):
@@ -95,13 +90,12 @@ class _NamedStrictFullReviewNoCallModel(_NamedNoCallModel):
 
 
 @pytest.mark.asyncio
-async def test_qq_composition_wires_independent_proactive_source_authority(
+async def test_qq_composition_wires_compact_proactive_source_guard(
     tmp_path: Path,
 ) -> None:
     author = _NamedNoCallModel("qq-proactive-author")
-    reviewer = _NamedStrictCoverageNoCallModel("qq-independent-source-reviewer")
+    reviewer = _NamedCompactReviewNoCallModel("qq-independent-source-reviewer")
     life_reviewer = _NamedNoCallModel("qq-isolated-life-source-reviewer")
-    inventory = _NamedStrictInventoryNoCallModel("qq-candidate-inventory")
     host = build_qq_c2c_host(
         settings=Settings(database_path=tmp_path / "qq-proactive-source-authority.sqlite"),
         recipient_id="10001",
@@ -109,7 +103,6 @@ async def test_qq_composition_wires_independent_proactive_source_authority(
         model=author,
         source_closure_model=reviewer,
         life_source_closure_model=life_reviewer,
-        candidate_external_proposition_inventory_model=inventory,
         use_configured_recall_embedding=False,
     )
     try:
@@ -119,7 +112,7 @@ async def test_qq_composition_wires_independent_proactive_source_authority(
 
         assert adapter._identity_frame is not None  # noqa: SLF001
         assert adapter._source_closure_reviewer is reviewer  # noqa: SLF001
-        assert adapter._inventory_model is inventory  # noqa: SLF001
+        assert adapter._inventory_model is None  # noqa: SLF001
         development = (  # noqa: SLF001
             host._host._application._life_ecology._life_development_followup
         )
@@ -131,7 +124,12 @@ async def test_qq_composition_wires_independent_proactive_source_authority(
             development._source_closure_reviewer.authority_origin is life_reviewer
         )
         assert development._source_closure_reviewer_is_independent is True  # noqa: SLF001
-        assert host.proactive_source_authority_health()["status"] == "ready"
+        source_health = host.proactive_source_authority_health()
+        assert source_health["status"] == "ready"
+        assert source_health["visible_review_strategy"] == "visible_beat_verdict"
+        assert source_health["active_source_review_protocol"] == (
+            "visible_beat_source_verdict.1"
+        )
         assert host.life_source_authority_health()["status"] == ("operational_unqualified")
     finally:
         await host.aclose()
@@ -2282,7 +2280,9 @@ async def test_qq_production_composition_ticks_life_from_plan_through_experience
 ) -> None:
     """The actual QQ host installs and advances the complete life vertical."""
 
-    conversation_reviewer = _SupportingLifeSourceReviewer()
+    conversation_reviewer = _NamedCompactReviewNoCallModel(
+        "qq-life-vertical-compact-reviewer"
+    )
     life_reviewer = _SupportingLifeSourceReviewer()
     host = build_qq_c2c_host(
         settings=Settings(database_path=tmp_path / "qq-life-vertical.sqlite"),
@@ -3607,7 +3607,7 @@ def test_onebot_entry_accepts_explicit_distinct_test_authorities_without_provide
     tmp_path: Path,
 ) -> None:
     author = _NamedNoCallModel("isolated-explicit-author")
-    reviewer = _NamedStrictFullReviewNoCallModel("isolated-explicit-reviewer")
+    reviewer = _NamedCompactReviewNoCallModel("isolated-explicit-reviewer")
     life_reviewer = _NamedNoCallModel("isolated-explicit-life-reviewer")
 
     app = create_qq_c2c_onebot_app(
@@ -3638,10 +3638,10 @@ def test_onebot_entry_accepts_explicit_distinct_test_authorities_without_provide
         asyncio.run(app.state.qq_c2c_host.aclose())
 
 
-def test_onebot_test_authority_injection_rejects_non_rr3_v7_reviewer(
+def test_onebot_test_authority_injection_rejects_legacy_full_reviewer(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(ValueError, match="exact RR.3/V7 qualification"):
+    with pytest.raises(ValueError, match="compact visible-Beat contract"):
         create_qq_c2c_onebot_app(
             adapter="napcat",
             settings=Settings(
@@ -3653,7 +3653,9 @@ def test_onebot_test_authority_injection_rejects_non_rr3_v7_reviewer(
                 NAPCAT_ALLOWED_PRIVATE_USER_IDS="10001",
             ),
             _test_only_model=_NamedNoCallModel("isolated-explicit-author"),
-            _test_only_source_closure_model=_NamedStrictCoverageNoCallModel("unqualified-reviewer"),
+            _test_only_source_closure_model=_NamedStrictFullReviewNoCallModel(
+                "legacy-full-reviewer"
+            ),
         )
 
 
@@ -3769,10 +3771,10 @@ def test_qq_health_reports_a_running_scheduler_even_when_the_world_is_starved(
             "last_failure_code": None,
         },
         "inventory_call_timeout_seconds": None,
-        "visible_review_strategy": "full_source_review",
+        "visible_review_strategy": "unavailable",
         "inventory_qualification_state": "unavailable",
-        "active_source_review_protocol": "full_source_review.7",
-        "source_review_qualification_transition": ("unavailable -> full_source_review.7"),
+        "active_source_review_protocol": "unavailable",
+        "source_review_qualification_transition": ("unavailable -> unavailable"),
         "candidate_review_capabilities": {
             "ordinary": {
                 "inventory_v5": False,

@@ -394,6 +394,16 @@ effect-once 和回执，不应固定私密话题必须双气泡，也不应由�
 - durable 技术失败已有独立 System Notice 路径，不再冒充角色沉默；仍需真实 QQ 故障注入与 terminal receipt 证据。
 - source review 已路由到 DeepSeek Flash，并有 100 次精确契约样本；该样本只证明孤立 verdict schema，
   不证明端到端首 Beat、真实 QQ 或独立语义权威。
+- 2026-08-11 现场确认一次消息的旧路径为：DeepSeek 首次流取消 → 同角色纠正 → GPT full V7 → GPT
+  report-relative adjudication → Qwen wire retry；首个 QQ provider-accepted 为 18.212 秒，已记录成功调用成本
+  至少 CNY 0.1129。根因是 selective 开关默认 false、composition 会把 GPT/Qwen 重新装回 ordinary/recovery，
+  compact wire 失败及含 `world_claims` 时又可隐式进入 full V7。当前生产默认只允许 compact Flash；显式 false、
+  自动/Provider-backed 注入旧 full reviewer 均 fail-closed；compact 失败只进入同角色纠正，不再第三方回退。
+  独立 GPT/Qwen authority 仅由 Life runtime 持有，自动聊天 Inventory 路由也已移除。
+- 同次 18.212 秒样本的首轮角色输出含 `media_source_refs:null`。DeepSeek strict timing branch 曾把 canonical
+  非 nullable 数组投影为 nullable，导致一次 4.689 秒调用被 canonical decoder 拒绝后重选。Atomic 与 stream
+  生产工具契约现在都要求显式非 null 的 `media_source_refs` / `world_claims` 数组；`[]` 表示角色没有选择新来源，
+  不由宿主猜测拍摄内容。该修复只去掉无意义 wire 重试，尚未证明 2–3 秒端到端目标。
 - 角色选择 `consider_available_candidate` 并在独立 `media_source_refs` 中选择精确、已审查生活来源时，
   MediaRequestRuntime 现在可在 media selection 前请求 LifeVisualEvidenceAuthor 编译一个 source-closed
   候选；它支持 settlement 以及由 typed Experience/LifeContent 绑定证明的 Snapshot 来源别名，不按“最近事件”
