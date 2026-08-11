@@ -179,8 +179,11 @@ async def test_http_composition_wires_compact_source_guard_without_inventory(
     author = _NamedNoCallModel("http-proactive-author")
     reviewer = _NamedCompactReviewNoCallModel("http-independent-source-reviewer")
     life_reviewer = _NamedNoCallModel("http-isolated-life-source-reviewer")
+    settings = Settings(
+        database_path=tmp_path / "http-proactive-source-authority.sqlite"
+    )
     host = build_http_v2_capture_host(
-        settings=Settings(database_path=tmp_path / "http-proactive-source-authority.sqlite"),
+        settings=settings,
         bootstrap_at=NOW,
         model=author,
         source_closure_model=reviewer,
@@ -192,6 +195,11 @@ async def test_http_composition_wires_compact_source_guard_without_inventory(
         interior = host._semantic_chat.character_interior  # noqa: SLF001
         identity = interior._production_identity_frame  # noqa: SLF001
 
+        assert settings.world_v2_expression_episode_mode == "stream"
+        assert (  # noqa: SLF001
+            host._host._application._turns._runtime._pinned_turn.expression_episode_mode
+            == settings.world_v2_expression_episode_mode
+        )
         assert interior_health["status"] == "ready"
         assert interior_health["primary_author_model"] == author.model
         assert interior_health["semantic_author_count"] == 1
@@ -470,7 +478,10 @@ async def test_http_multi_beat_expression_reaches_terminal_receipts_from_one_mai
 ) -> None:
     model = _TwoBeatHostModel()
     host = build_http_v2_capture_host(
-        settings=Settings(database_path=tmp_path / "http-v2-two-beat.sqlite"),
+        settings=Settings(
+            database_path=tmp_path / "http-v2-two-beat.sqlite",
+            WORLD_V2_EXPRESSION_EPISODE_MODE="off",
+        ),
         bootstrap_at=NOW,
         model=model,
         world_support_model=FakeCompanionModel(),
@@ -502,7 +513,10 @@ async def test_http_shared_reply_audit_reaches_deferred_followup_with_one_main_c
 ) -> None:
     model = _LaterHostModel()
     host = build_http_v2_capture_host(
-        settings=Settings(database_path=tmp_path / "http-v2-shared-later.sqlite"),
+        settings=Settings(
+            database_path=tmp_path / "http-v2-shared-later.sqlite",
+            WORLD_V2_EXPRESSION_EPISODE_MODE="off",
+        ),
         bootstrap_at=NOW,
         model=model,
         world_support_model=FakeCompanionModel(),
@@ -579,7 +593,10 @@ async def test_http_capture_host_runs_one_v2_ingress_action_tick_and_duplicate_w
 async def test_http_regular_drain_does_not_hold_the_inbound_lock(tmp_path: Path) -> None:
     background = _BlockingHttpBackgroundModel()
     host = build_http_v2_capture_host(
-        settings=Settings(database_path=tmp_path / "http-v2-background-nonblocking.sqlite"),
+        settings=Settings(
+            database_path=tmp_path / "http-v2-background-nonblocking.sqlite",
+            WORLD_V2_EXPRESSION_EPISODE_MODE="off",
+        ),
         bootstrap_at=NOW,
         model=_TwoBeatHostModel(),
         world_support_model=background,
@@ -1132,6 +1149,7 @@ async def test_http_default_composition_retains_a_fact_and_retrieval_memory_off_
         settings=Settings(
             database_path=tmp_path / "http-v2-cognitive.sqlite",
             WORLD_V2_RECALL_SEMANTIC_ENABLED=False,
+            WORLD_V2_EXPRESSION_EPISODE_MODE="off",
         ),
         bootstrap_at=NOW,
         model=model,
@@ -1210,7 +1228,10 @@ def test_http_messages_route_uses_the_injected_v2_capture_host_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     host = build_http_v2_capture_host(
-        settings=Settings(database_path=tmp_path / "http-route-v2.sqlite"),
+        settings=Settings(
+            database_path=tmp_path / "http-route-v2.sqlite",
+            WORLD_V2_EXPRESSION_EPISODE_MODE="off",
+        ),
         bootstrap_at=NOW,
         model=FakeCompanionModel(),
     )
@@ -1268,7 +1289,10 @@ def test_http_attachment_evidence_changes_reused_message_identity_into_a_conflic
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     host = build_http_v2_capture_host(
-        settings=Settings(database_path=tmp_path / "http-attachment-v2.sqlite"),
+        settings=Settings(
+            database_path=tmp_path / "http-attachment-v2.sqlite",
+            WORLD_V2_EXPRESSION_EPISODE_MODE="off",
+        ),
         bootstrap_at=NOW,
         model=FakeCompanionModel(),
     )
@@ -1310,7 +1334,10 @@ def test_http_accepts_pure_attachment_without_fabricating_text(
 ) -> None:
     database = tmp_path / "http-pure-attachment-v2.sqlite"
     host = build_http_v2_capture_host(
-        settings=Settings(database_path=database),
+        settings=Settings(
+            database_path=database,
+            WORLD_V2_EXPRESSION_EPISODE_MODE="off",
+        ),
         bootstrap_at=NOW,
         model=FakeCompanionModel(),
     )

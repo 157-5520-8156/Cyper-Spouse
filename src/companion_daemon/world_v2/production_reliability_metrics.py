@@ -39,6 +39,12 @@ _KINDS = (
     "claim_free",
     # The configured backup provider produced the reply after a main failure.
     "backup_recovery",
+    # Content-free transport branch selected by the one-request compact
+    # Character author. These counters let qualification prove adoption and
+    # compare latency without retaining prompt or response text.
+    "compact_reply_only",
+    "compact_full_turn",
+    "compact_recall",
 )
 
 _lock = threading.Lock()
@@ -92,6 +98,17 @@ def record_backup_recovery() -> None:
     _record("backup_recovery")
 
 
+def record_compact_inbound_branch(branch: str) -> None:
+    kind = {
+        "reply_only": "compact_reply_only",
+        "full_turn": "compact_full_turn",
+        "recall": "compact_recall",
+    }.get(branch)
+    if kind is None:
+        raise ValueError("compact inbound branch is not installed")
+    _record(kind)
+
+
 def reliability_snapshot() -> dict[str, object]:
     """Read-only rolling counts for the last 24 hours plus the failsafe rate."""
 
@@ -115,6 +132,9 @@ def reliability_snapshot() -> dict[str, object]:
         "source_closure_reselection_24h": counts["source_closure_reselection"],
         "claim_free_24h": counts["claim_free"],
         "backup_recovery_24h": counts["backup_recovery"],
+        "compact_reply_only_24h": counts["compact_reply_only"],
+        "compact_full_turn_24h": counts["compact_full_turn"],
+        "compact_recall_24h": counts["compact_recall"],
     }
 
 
@@ -130,6 +150,7 @@ __all__ = [
     "record_backup_recovery",
     "record_claim_free_reply",
     "record_claim_repair",
+    "record_compact_inbound_branch",
     "record_dispatch_ack",
     "record_failsafe",
     "record_shape_repair",

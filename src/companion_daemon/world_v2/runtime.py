@@ -30,6 +30,7 @@ from .expression_episode_lifecycle import (
     expression_episode_has_authorized_action,
     expression_episode_open_event,
     expression_episode_repin_reservation_event,
+    expression_episode_retry_reclaim_is_authorized,
     expression_episode_technical_failure_count,
     expression_episode_trigger_id,
     expression_episode_work_due,
@@ -1552,20 +1553,27 @@ class WorldRuntime:
             process,
             owner_id=self._expression_episode_owner,
         )
+        early_retry_reclaim = expression_episode_retry_reclaim_is_authorized(
+            projection,
+            process,
+            at=at,
+        )
         if work_due is not None and at < work_due:
             # The short provider lease may already have expired while a
             # recorded technical failure is still inside its independent
-            # 10/30/120-minute backoff. Neither duplicate ingress nor another
-            # continuation path may reclaim early.
+            # 30-second/30-minute/120-minute schedule. Neither duplicate
+            # ingress nor another continuation path may reclaim early.
             return process, None
         if process.state == "claimed":
             if (
                 process.claim_lease is None
                 or at < process.claim_lease.expires_at
-            ):
+            ) and not early_retry_reclaim:
                 # A duplicate ingress joins the durable failure state but may
-                # not bypass its retry schedule.  The background worker
-                # reclaims the process after the lease expires.
+                # not bypass its retry schedule. An exact current-attempt
+                # terminal failure is the sole exception: its installed due
+                # rotates a new attempt even while the old in-flight lease is
+                # still open.
                 return process, None
         event, claimed = expression_episode_claim_event(
             world_id=self._world_id,
@@ -1577,6 +1585,7 @@ class WorldRuntime:
             technical_failure_count=expression_episode_technical_failure_count(
                 projection, process
             ),
+            retry_projection=projection,
         )
         committed = await self._commit(
             [event],
@@ -1895,6 +1904,11 @@ class WorldRuntime:
             process,
             owner_id=self._expression_episode_owner,
         )
+        early_retry_reclaim = expression_episode_retry_reclaim_is_authorized(
+            projection,
+            process,
+            at=at,
+        )
         local_no_result = (
             process.state == "claimed"
             and process.claim_lease is not None
@@ -1905,7 +1919,9 @@ class WorldRuntime:
                 for item in projection.model_result_audits
             )
         )
-        if (
+        if early_retry_reclaim:
+            claimed, cursor = await self._claim_expression_episode(observation)
+        elif (
             local_no_result
             or (
                 process.state == "claimed"

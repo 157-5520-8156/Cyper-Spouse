@@ -436,6 +436,7 @@ from .proposal_audit_schemas import (
     ProposalRecordedV2Payload,
     RecordedModelResultAudit,
     canonical_json,
+    physical_provider_terminal_matches,
     sha256,
     validate_recorded_attempt_lineage,
 )
@@ -609,8 +610,9 @@ V50_REDUCER_BUNDLE_VERSION = "world-v2-reducers.50"
 V51_REDUCER_BUNDLE_VERSION = "world-v2-reducers.51"
 V52_REDUCER_BUNDLE_VERSION = "world-v2-reducers.52"
 V53_REDUCER_BUNDLE_VERSION = "world-v2-reducers.53"
-PREVIOUS_REDUCER_BUNDLE_VERSION = "world-v2-reducers.54"
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.55"
+V54_REDUCER_BUNDLE_VERSION = "world-v2-reducers.54"
+PREVIOUS_REDUCER_BUNDLE_VERSION = "world-v2-reducers.55"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.56"
 _CONTEXTUAL_LIFE_SOURCE_EVENT_TYPES = frozenset(
     {
         "ObservationRecorded",
@@ -671,6 +673,7 @@ def _experience_semantic_dump(
         V51_REDUCER_BUNDLE_VERSION,
         V52_REDUCER_BUNDLE_VERSION,
         V53_REDUCER_BUNDLE_VERSION,
+        V54_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     } and isinstance(experience, LegacyExperienceProjection):
@@ -702,6 +705,7 @@ def _actor_authority_transition_semantic_dump(
         V51_REDUCER_BUNDLE_VERSION,
         V52_REDUCER_BUNDLE_VERSION,
         V53_REDUCER_BUNDLE_VERSION,
+        V54_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -733,6 +737,7 @@ def _life_arc_semantic_dump(
         V51_REDUCER_BUNDLE_VERSION,
         V52_REDUCER_BUNDLE_VERSION,
         V53_REDUCER_BUNDLE_VERSION,
+        V54_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -757,6 +762,7 @@ def _aspiration_semantic_dump(
     if reducer_bundle_version not in {
         V52_REDUCER_BUNDLE_VERSION,
         V53_REDUCER_BUNDLE_VERSION,
+        V54_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -787,6 +793,7 @@ def _npc_semantic_dump(
         V51_REDUCER_BUNDLE_VERSION,
         V52_REDUCER_BUNDLE_VERSION,
         V53_REDUCER_BUNDLE_VERSION,
+        V54_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -806,6 +813,7 @@ def _npc_semantic_dump(
         V51_REDUCER_BUNDLE_VERSION,
         V52_REDUCER_BUNDLE_VERSION,
         V53_REDUCER_BUNDLE_VERSION,
+        V54_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -837,6 +845,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         V51_REDUCER_BUNDLE_VERSION,
         V52_REDUCER_BUNDLE_VERSION,
         V53_REDUCER_BUNDLE_VERSION,
+        V54_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -859,6 +868,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         V51_REDUCER_BUNDLE_VERSION,
         V52_REDUCER_BUNDLE_VERSION,
         V53_REDUCER_BUNDLE_VERSION,
+        V54_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -874,6 +884,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         V51_REDUCER_BUNDLE_VERSION,
         V52_REDUCER_BUNDLE_VERSION,
         V53_REDUCER_BUNDLE_VERSION,
+        V54_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -905,6 +916,7 @@ def _expression_plan_semantic_dump(
         V51_REDUCER_BUNDLE_VERSION,
         V52_REDUCER_BUNDLE_VERSION,
         V53_REDUCER_BUNDLE_VERSION,
+        V54_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -937,6 +949,7 @@ def _expression_beat_semantic_dump(
         V51_REDUCER_BUNDLE_VERSION,
         V52_REDUCER_BUNDLE_VERSION,
         V53_REDUCER_BUNDLE_VERSION,
+        V54_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -1738,6 +1751,7 @@ class ReducerState(FrozenModel):
             V51_REDUCER_BUNDLE_VERSION,
             V52_REDUCER_BUNDLE_VERSION,
             V53_REDUCER_BUNDLE_VERSION,
+            V54_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
         }:
             # .33-.36 only add current-generation conditional fields. Their
@@ -1786,6 +1800,7 @@ class ReducerState(FrozenModel):
                             None
                             if declared_reducer_bundle_version
                             in {
+                                V54_REDUCER_BUNDLE_VERSION,
                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                 REDUCER_BUNDLE_VERSION,
                             }
@@ -1918,6 +1933,7 @@ class ReducerState(FrozenModel):
                                 V51_REDUCER_BUNDLE_VERSION,
                                 V52_REDUCER_BUNDLE_VERSION,
                                 V53_REDUCER_BUNDLE_VERSION,
+                                V54_REDUCER_BUNDLE_VERSION,
                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                 REDUCER_BUNDLE_VERSION,
                             }
@@ -2008,6 +2024,7 @@ class ReducerState(FrozenModel):
                                 V51_REDUCER_BUNDLE_VERSION,
                                 V52_REDUCER_BUNDLE_VERSION,
                                 V53_REDUCER_BUNDLE_VERSION,
+                                V54_REDUCER_BUNDLE_VERSION,
                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                 REDUCER_BUNDLE_VERSION,
                             }
@@ -2026,6 +2043,7 @@ class ReducerState(FrozenModel):
                                         V51_REDUCER_BUNDLE_VERSION,
                                         V52_REDUCER_BUNDLE_VERSION,
                                         V53_REDUCER_BUNDLE_VERSION,
+                                        V54_REDUCER_BUNDLE_VERSION,
                                         PREVIOUS_REDUCER_BUNDLE_VERSION,
                                     }
                                     else {"settled_dynamic_life_direction_adopted": True}
@@ -2047,6 +2065,7 @@ class ReducerState(FrozenModel):
                                                 V51_REDUCER_BUNDLE_VERSION,
                                                 V52_REDUCER_BUNDLE_VERSION,
                                                 V53_REDUCER_BUNDLE_VERSION,
+                                                V54_REDUCER_BUNDLE_VERSION,
                                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                             }
                                             else (
@@ -2180,6 +2199,7 @@ class ReducerState(FrozenModel):
             V51_REDUCER_BUNDLE_VERSION,
             V52_REDUCER_BUNDLE_VERSION,
             V53_REDUCER_BUNDLE_VERSION,
+            V54_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -2214,6 +2234,7 @@ class ReducerState(FrozenModel):
                 V51_REDUCER_BUNDLE_VERSION,
                 V52_REDUCER_BUNDLE_VERSION,
                 V53_REDUCER_BUNDLE_VERSION,
+                V54_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2245,6 +2266,7 @@ class ReducerState(FrozenModel):
             V51_REDUCER_BUNDLE_VERSION,
             V52_REDUCER_BUNDLE_VERSION,
             V53_REDUCER_BUNDLE_VERSION,
+            V54_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -2275,6 +2297,7 @@ class ReducerState(FrozenModel):
                     V51_REDUCER_BUNDLE_VERSION,
                     V52_REDUCER_BUNDLE_VERSION,
                     V53_REDUCER_BUNDLE_VERSION,
+                    V54_REDUCER_BUNDLE_VERSION,
                     PREVIOUS_REDUCER_BUNDLE_VERSION,
                     REDUCER_BUNDLE_VERSION,
                 }
@@ -2307,6 +2330,7 @@ class ReducerState(FrozenModel):
             V51_REDUCER_BUNDLE_VERSION,
             V52_REDUCER_BUNDLE_VERSION,
             V53_REDUCER_BUNDLE_VERSION,
+            V54_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -2340,6 +2364,7 @@ class ReducerState(FrozenModel):
                 V51_REDUCER_BUNDLE_VERSION,
                 V52_REDUCER_BUNDLE_VERSION,
                 V53_REDUCER_BUNDLE_VERSION,
+                V54_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2535,6 +2560,7 @@ class ReducerState(FrozenModel):
                 V51_REDUCER_BUNDLE_VERSION,
                 V52_REDUCER_BUNDLE_VERSION,
                 V53_REDUCER_BUNDLE_VERSION,
+                V54_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2559,6 +2585,7 @@ class ReducerState(FrozenModel):
                 V51_REDUCER_BUNDLE_VERSION,
                 V52_REDUCER_BUNDLE_VERSION,
                 V53_REDUCER_BUNDLE_VERSION,
+                V54_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -3113,31 +3140,88 @@ def _model_result_recorded(state: ReducerState, event: WorldEvent) -> ReducerSta
         for value in state.model_result_audits
     ):
         raise ValueError("model result identity is already registered")
-    existing_stream = tuple(
-        RecordedModelResultAudit.model_validate_json(value.audit_json)
+    existing_audits = tuple(
+        (value, RecordedModelResultAudit.model_validate_json(value.audit_json))
         for value in state.model_result_audits
-        if value.parent_model_call_id == recorded.model_call_id
-        or value.model_call_id == recorded.parent_model_call_id
     )
+    existing_stream = tuple(
+        audit
+        for projection, audit in existing_audits
+        if projection.parent_model_call_id == recorded.model_call_id
+        or projection.model_call_id == recorded.parent_model_call_id
+    )
+    independent_physical_parents = tuple(
+        physical
+        for _physical_projection, physical in existing_audits
+        if physical.route.router_version == "physical-provider-audit.1"
+        and sum(
+            physical_provider_terminal_matches(
+                expected=terminal,
+                recorded=physical,
+                attempt_id=owner.attempt_id,
+            )
+            for _owner_projection, owner in existing_audits
+            for terminal in owner.physical_provider_audits
+        )
+        == 1
+    )
+    if recorded.route.router_version != "physical-provider-audit.1" and any(
+        recorded.parent_model_call_id == physical.model_call_id
+        or recorded.model_call_id in physical.semantic_model_call_ids
+        for physical in independent_physical_parents
+    ):
+        raise ValueError(
+            "independent failed-main physical terminal reserved semantic identity "
+            "cannot gain a child"
+        )
     if recorded.route.router_version == "physical-provider-audit.1":
         semantic_children = tuple(
             child
             for child in existing_stream
             if child.parent_model_call_id == recorded.model_call_id
         )
-        if (
-            not semantic_children
-            # A completed physical stream can be audited with the visible
-            # head while its already-received semantic tail is still pending.
-            # The terminal binds the complete, immutable set up front; each
-            # subsequently persisted semantic unit is checked against it by
-            # the branch below.
-            or not {child.model_call_id for child in semantic_children}.issubset(
+        bound_stream_terminal = bool(semantic_children) and (
+            {child.model_call_id for child in semantic_children}.issubset(
                 set(recorded.semantic_model_call_ids)
             )
-            or any(child.request_hash != recorded.request_hash for child in semantic_children)
-            or len({child.semantic_stream_part for child in semantic_children})
-            != len(semantic_children)
+            and not any(
+                child.request_hash != recorded.request_hash
+                for child in semantic_children
+            )
+            and len({child.semantic_stream_part for child in semantic_children})
+            == len(semantic_children)
+        )
+        embedded_physical = tuple(
+            (projection, audit, terminal)
+            for projection, audit in existing_audits
+            for terminal in audit.physical_provider_audits
+        )
+        matching_embedded_physical = tuple(
+            (projection, audit, terminal)
+            for projection, audit, terminal in embedded_physical
+            if projection.attempt_id == payload.attempt_id
+            and physical_provider_terminal_matches(
+                expected=terminal,
+                recorded=recorded,
+                attempt_id=audit.attempt_id,
+            )
+        )
+        independent_failed_main_terminal = (
+            not semantic_children
+            and len(matching_embedded_physical) == 1
+        )
+        if independent_failed_main_terminal and not set(
+            recorded.semantic_model_call_ids
+        ).isdisjoint(
+            projection.model_call_id for projection, _audit in existing_audits
+        ):
+            raise ValueError(
+                "independent physical provider semantic identities overlap "
+                "another model result"
+            )
+        if (
+            not bound_stream_terminal
+            and not independent_failed_main_terminal
         ):
             raise ValueError("physical provider terminal changed stream lineage")
     elif recorded.semantic_stream_part is not None:
@@ -10775,8 +10859,43 @@ def _trigger_process_reclaimed(state: ReducerState, event: WorldEvent) -> Reduce
         or replacement.source_evidence_ref != existing.source_evidence_ref
     ):
         raise ValueError("reclaim cannot change trigger identity")
-    if replacement.claim_lease.acquired_at < existing.claim_lease.expires_at:
-        raise ValueError("cannot reclaim before the active lease expires")
+    early_reclaim = (
+        replacement.claim_lease.acquired_at < existing.claim_lease.expires_at
+    )
+    if early_reclaim:
+        from .expression_episode_lifecycle import (
+            EXPRESSION_INFLIGHT_LEASE_SECONDS,
+            expression_episode_attempt_id,
+            expression_episode_retry_reclaim_is_authorized,
+        )
+
+        expected_attempt_id = expression_episode_attempt_id(
+            trigger_id=existing.trigger_id,
+            attempt_ordinal=len(existing.attempt_ids) + 1,
+        )
+        if (
+            existing.process_kind != "expression_episode"
+            or state.logical_time is None
+            or event.logical_time != state.logical_time
+            or replacement.claim_lease.acquired_at != state.logical_time
+            or replacement.claim_lease.expires_at
+            != replacement.claim_lease.acquired_at
+            + timedelta(seconds=EXPRESSION_INFLIGHT_LEASE_SECONDS)
+            or replacement.claim_lease.attempt_id != expected_attempt_id
+            or event.actor != replacement.claim_lease.owner_id
+            or event.source != "world-runtime:expression-episode"
+            or event.causation_id != existing.trigger_id
+            or replacement.runtime_outcome_ref != existing.runtime_outcome_ref
+            or not expression_episode_retry_reclaim_is_authorized(
+                state,
+                existing,
+                at=replacement.claim_lease.acquired_at,
+            )
+        ):
+            raise ValueError(
+                "cannot reclaim before the active lease without exact due "
+                "expression failure authority"
+            )
     if replacement.attempt_ids[:-1] != existing.attempt_ids:
         raise ValueError("reclaimed trigger must preserve attempt lineage")
     if len(replacement.attempt_ids) != len(existing.attempt_ids) + 1:

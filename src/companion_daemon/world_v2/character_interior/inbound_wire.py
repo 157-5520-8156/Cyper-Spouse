@@ -91,14 +91,22 @@ from ..model_facing_context import (
     compact_recovery_model_facing_context,
 )
 from ..model_completion import ChatCompletionModel
+from .inbound_appraisal_wire import AppraisalDraftWire
+from .inbound_tool_contract import (
+    _deepseek_strict_union_padding_is_empty,
+    _expand_compact_gate_payload,
+)
 from ..visible_source_closure_protocol import (
     VISIBLE_SOURCE_CLOSURE_CONTRACT,
+    VisibleSourceClosureWireFailure,
     compact_source_reference_table,
     parse_visible_source_closure,
     visible_source_closure_messages,
 )
+from ..validation_failure_codes import sanitize_validation_technical_failure_code
 from ..production_reliability_metrics import (
     record_claim_repair,
+    record_compact_inbound_branch,
     record_shape_repair,
     record_source_closure_reselection,
 )
@@ -1152,6 +1160,36 @@ def _source_review_attempts(value: object) -> tuple[object, ...]:
     return tuple(attempts) if isinstance(attempts, (tuple, list)) else ()
 
 
+def _normalize_source_review_attempt_failure_code(
+    value: object,
+    *,
+    outcome: str,
+) -> str | None:
+    """Collapse an untrusted leaf diagnostic to installed audit vocabulary."""
+
+    if outcome == "winner":
+        return None
+    if outcome == "timeout":
+        return "provider_timeout"
+    installed = sanitize_validation_technical_failure_code(value)
+    if installed is not None and installed.startswith(
+        ("source_review_", "authored_subcall_")
+    ):
+        return installed
+    if isinstance(value, str):
+        normalized = value.strip()
+        status = ""
+        if normalized.startswith("provider_http_"):
+            status = normalized.removeprefix("provider_http_")
+        elif ":http_" in normalized:
+            status = normalized.rsplit(":http_", 1)[-1]
+        elif "_http_" in normalized:
+            status = normalized.rsplit("_http_", 1)[-1]
+        if len(status) == 3 and status.isdigit() and 100 <= int(status) <= 599:
+            return f"provider_http_{status}"
+    return "provider_exception"
+
+
 def _append_source_review_attempts(
     capture: _ProviderSubcallCapture,
     attempts: tuple[object, ...],
@@ -1166,11 +1204,9 @@ def _append_source_review_attempts(
         model_version = str(getattr(attempt, "model_version", "")).strip()
         lane = str(getattr(attempt, "lane", "")).strip()
         outcome = str(getattr(attempt, "outcome", "")).strip()
-        failure_code_raw = getattr(attempt, "failure_code", None)
-        failure_code = (
-            str(failure_code_raw).strip()[:64]
-            if failure_code_raw is not None and str(failure_code_raw).strip()
-            else None
+        failure_code = _normalize_source_review_attempt_failure_code(
+            getattr(attempt, "failure_code", None),
+            outcome=outcome,
         )
         response_hash = getattr(attempt, "response_hash", None)
         usage_raw = getattr(attempt, "usage", None)
@@ -7142,7 +7178,7 @@ async def _review_expression_with_visible_source_proof(
         }
         for index, claim in enumerate(material.draft.world_claims)
     )
-    invalid_reason: str | None = None
+    invalid_reason: VisibleSourceClosureWireFailure | None = None
     preceding_usage: ModelUsageProvenance | None = None
     last_identity: _ProviderInvocationIdentity | None = None
     last_model_id: str | None = None
@@ -7202,23 +7238,20 @@ async def _review_expression_with_visible_source_proof(
                     for row in source_references
                 ),
             )
-        except ValidationError:
+        except VisibleSourceClosureWireFailure as exc:
+            logger.warning(
+                "visible source closure wire retry code=%s beat_index=%s field=%s",
+                exc.code,
+                exc.beat_index,
+                exc.field,
+            )
             if last_usage is not None:
                 preceding_usage = (
                     last_usage
                     if preceding_usage is None
                     else _combine_usage(preceding_usage, last_usage, request.call_id)
                 )
-            invalid_reason = "wire_schema_invalid"
-            raise ValueError(invalid_reason) from None
-        except ValueError as exc:
-            if last_usage is not None:
-                preceding_usage = (
-                    last_usage
-                    if preceding_usage is None
-                    else _combine_usage(preceding_usage, last_usage, request.call_id)
-                )
-            invalid_reason = str(exc)[:240]
+            invalid_reason = exc
             raise
         combined_usage = (
             usage
@@ -8101,9 +8134,26 @@ class _ExpressionStreamGenerationCoordinator:
             cancel.cancel("expression_stream_reselection_started")
 
 
-_FORCED_STREAM_NULL_SIBLING_KEYS = frozenset(
-    {"expression_draft", "recall_request", "private_turn_state"}
+_FORCED_STREAM_UNION_KEYS = frozenset(
+    {
+        "protocol",
+        "appraisal_draft",
+        "events",
+        "full_turn_json",
+        "expression_draft",
+        "recall_request",
+        "private_turn_state",
+        "payload_json",
+    }
 )
+_FORCED_STREAM_BRANCH_KEYS = {
+    "decision": frozenset({"result_kind", "protocol", "appraisal_draft", "events"}),
+    "reply_only": frozenset(
+        {"result_kind", "protocol", "appraisal_draft", "events"}
+    ),
+    "full_turn": frozenset({"result_kind", "full_turn_json"}),
+    "recall": frozenset({"result_kind", "private_turn_state", "recall_request"}),
+}
 
 
 def _normalize_forced_stream_envelope(value: dict[str, object]) -> dict[str, object]:
@@ -8117,21 +8167,86 @@ def _normalize_forced_stream_envelope(value: dict[str, object]) -> dict[str, obj
     are deliberately left for the normal validator to reject.
     """
 
-    if value.get("result_kind") != "decision":
+    branch_keys = _FORCED_STREAM_BRANCH_KEYS.get(str(value.get("result_kind")))
+    if branch_keys is None:
         return value
     return {
         key: item
         for key, item in value.items()
-        if not (key in _FORCED_STREAM_NULL_SIBLING_KEYS and item is None)
+        if not (
+            key in _FORCED_STREAM_UNION_KEYS
+            and key not in branch_keys
+            and _deepseek_strict_union_padding_is_empty(key, item)
+        )
     }
 
 
+def _compact_gate_control_transfer(
+    value: dict[str, object],
+) -> dict[str, object] | None:
+    """Return one exact non-semantic gate control transfer.
+
+    A compact gate may ask the same role for its already-installed full
+    capability surface, or spend the one bounded Recall opportunity.  Neither
+    branch is an Appraisal or Expression candidate, so no event/effect bytes
+    may cross this parser seam.
+    """
+
+    result_kind = value.get("result_kind")
+    if result_kind != "recall":
+        return None
+    expected = _FORCED_STREAM_BRANCH_KEYS[result_kind]
+    if set(value) != expected:
+        raise ValueError("compact gate control transfer has cross-branch fields")
+    if not isinstance(value.get("private_turn_state"), dict):
+        raise ValueError("compact gate control transfer requires private_turn_state")
+    if not isinstance(value.get("recall_request"), dict):
+        raise ValueError("compact gate Recall control transfer requires recall_request")
+    return {key: item for key, item in value.items() if key != "result_kind"}
+
+
+def _compact_gate_full_turn_json(value: dict[str, object]) -> str | None:
+    """Unwrap the same physical call's full CharacterInterior event stream."""
+
+    if value.get("result_kind") != "full_turn":
+        return None
+    if set(value) != _FORCED_STREAM_BRANCH_KEYS["full_turn"]:
+        raise ValueError("compact gate full turn has cross-branch fields")
+    raw = value.get("full_turn_json")
+    if not isinstance(raw, str) or not raw:
+        raise ValueError("compact gate full turn requires one JSON string")
+    envelope = _parse_json_object(raw)
+    if (
+        set(envelope) != {"protocol", "appraisal_draft", "events"}
+        or envelope.get("protocol") != "character-interior-events.1"
+    ):
+        raise ValueError("compact gate full turn must carry the exact event envelope")
+    return raw
+
+
 def _stream_first_expression(raw: str) -> str:
-    parsed = _normalize_forced_stream_envelope(_parse_json_object(raw))
-    if parsed.get("result_kind") == "decision":
+    parsed = _normalize_forced_stream_envelope(
+        _expand_compact_gate_payload(_parse_json_object(raw))
+    )
+    result_kind = parsed.get("result_kind")
+    full_turn_json = _compact_gate_full_turn_json(parsed)
+    if full_turn_json is not None:
+        return _stream_first_expression(full_turn_json)
+    control_transfer = _compact_gate_control_transfer(parsed)
+    if control_transfer is not None:
+        return json.dumps(
+            control_transfer,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    if result_kind in {"decision", "reply_only"}:
         parsed = {key: value for key, value in parsed.items() if key != "result_kind"}
     if parsed.get("protocol") == "character-interior-events.1":
-        value = _character_interior_event_envelope(parsed)
+        value = (
+            _reply_only_character_interior_event_envelope(parsed)
+            if result_kind == "reply_only"
+            else _character_interior_event_envelope(parsed)
+        )
         events = value["events"]
         assert isinstance(events, list)
         return json.dumps(
@@ -8183,11 +8298,28 @@ def _stream_first_expression(raw: str) -> str:
 
 
 def _stream_tail_expression(raw: str) -> str:
-    parsed = _normalize_forced_stream_envelope(_parse_json_object(raw))
-    if parsed.get("result_kind") == "decision":
+    parsed = _normalize_forced_stream_envelope(
+        _expand_compact_gate_payload(_parse_json_object(raw))
+    )
+    result_kind = parsed.get("result_kind")
+    full_turn_json = _compact_gate_full_turn_json(parsed)
+    if full_turn_json is not None:
+        return _stream_tail_expression(full_turn_json)
+    control_transfer = _compact_gate_control_transfer(parsed)
+    if control_transfer is not None:
+        return json.dumps(
+            control_transfer,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    if result_kind in {"decision", "reply_only"}:
         parsed = {key: value for key, value in parsed.items() if key != "result_kind"}
     if parsed.get("protocol") == "character-interior-events.1":
-        value = _character_interior_event_envelope(parsed)
+        value = (
+            _reply_only_character_interior_event_envelope(parsed)
+            if result_kind == "reply_only"
+            else _character_interior_event_envelope(parsed)
+        )
         expression_tail = _parse_json_object(
             _stream_tail_expression(
                 json.dumps(
@@ -8561,6 +8693,105 @@ def _character_interior_event_envelope(
     return value
 
 
+_REPLY_ONLY_FORBIDDEN_APPRAISAL_EFFECT_FIELDS = (
+    "relationship_signal",
+    "relationship_commitment",
+    "interaction_act",
+)
+_REPLY_ONLY_HEAD_FIELDS = frozenset(
+    {
+        "type",
+        "private_turn_state",
+        "timing_choice",
+        "turn_posture",
+        "cadence",
+        "beat",
+        "stance",
+        "brief_rationale",
+        "confidence",
+        "response_expectation",
+        "response_expectation_assessment",
+        "world_claims",
+        "media_request",
+        "media_source_refs",
+    }
+)
+
+
+def _validate_reply_only_appraisal(value: object) -> None:
+    """Validate canonical appraisal/affect while excluding social effects."""
+
+    if not isinstance(value, dict):
+        raise ValueError("reply-only appraisal must be an object")
+    try:
+        draft = AppraisalDraftWire.model_validate_json(
+            json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+            strict=True,
+        )
+    except ValidationError as exc:
+        raise ValueError("reply-only appraisal is invalid") from exc
+    if any(
+        getattr(draft, field) is not None
+        for field in _REPLY_ONLY_FORBIDDEN_APPRAISAL_EFFECT_FIELDS
+    ):
+        raise ValueError("reply-only appraisal cannot authorize a cross-turn social effect")
+
+
+def _validate_reply_only_head(event: object) -> None:
+    """Prove the early-releasable frame stays inside the compact capability."""
+
+    if not isinstance(event, dict) or set(event) != _REPLY_ONLY_HEAD_FIELDS:
+        raise ValueError("reply-only stream head fields are invalid")
+    beat = event.get("beat")
+    if (
+        event.get("type") != "head"
+        or event.get("timing_choice") != "now"
+        or event.get("turn_posture") not in {None, "continue", "interject"}
+        or not isinstance(beat, dict)
+        or set(beat) != {"modality", "text"}
+        or beat.get("modality") != "text"
+        or not isinstance(beat.get("text"), str)
+        or not beat["text"]
+        or event.get("media_request") != "none"
+        or event.get("media_source_refs") != []
+        or not isinstance(event.get("world_claims"), list)
+    ):
+        raise ValueError("reply-only stream head exceeds its text-only capability")
+
+
+def _reply_only_character_interior_event_envelope(
+    value: dict[str, object],
+) -> dict[str, object]:
+    """Validate the complete no-effect reply branch before tail settlement."""
+
+    if set(value) != {"protocol", "appraisal_draft", "events"}:
+        logger.warning(
+            "reply-only stream envelope key mismatch keys=%s value_shapes=%s",
+            ",".join(sorted(value)),
+            ",".join(
+                f"{key}:{type(item).__name__}:{len(item) if isinstance(item, (str, list, dict)) else '-'}"
+                for key, item in sorted(value.items())
+            ),
+        )
+        raise ValueError("reply-only stream envelope fields are invalid")
+    if value.get("protocol") != "character-interior-events.1":
+        raise ValueError("reply-only stream protocol is invalid")
+    _validate_reply_only_appraisal(value.get("appraisal_draft"))
+    events = value.get("events")
+    if not isinstance(events, list) or len(events) != 2:
+        raise ValueError("reply-only stream requires exactly one head and one end")
+    _validate_reply_only_head(events[0])
+    if events[1] != {"type": "end"}:
+        raise ValueError("reply-only stream must terminate after its single text head")
+    _expression_event_envelope(
+        {
+            "protocol": "expression-events.1",
+            "events": events,
+        }
+    )
+    return value
+
+
 def _expression_event_head(event: object, *, continuation: bool | None) -> str:
     """Translate one role-authored singular head frame to ExpressionDraft wire."""
 
@@ -8714,7 +8945,7 @@ def _incremental_combined_envelope_first_expression(
 
 
 def _without_forced_stream_result_kind(buffer: str) -> str | None:
-    """Expose a decision tool's argument body to the existing stream parser.
+    """Expose a character-result tool's argument body to the stream parser.
 
     DeepSeek streams function ``arguments`` as ordinary JSON deltas.  The
     transport-only discriminator is serialized first, so removing only that
@@ -8750,7 +8981,7 @@ def _without_forced_stream_result_kind(buffer: str) -> str | None:
         kind, cursor = decoder.raw_decode(buffer, cursor)
     except json.JSONDecodeError:
         return None
-    if kind != "decision":
+    if kind not in {"decision", "reply_only"}:
         return None
     while cursor < len(buffer) and buffer[cursor].isspace():
         cursor += 1
@@ -8759,8 +8990,76 @@ def _without_forced_stream_result_kind(buffer: str) -> str | None:
     return buffer[:object_start] + "{" + buffer[cursor + 1 :]
 
 
-def _incremental_forced_stream_expression(buffer: str) -> tuple[bool, str | None]:
-    """Close a forced decision head without relying on JSON member order.
+def _incremental_json_string_prefix(buffer: str, *, value_start: int) -> str:
+    """Decode only complete code points from one possibly unfinished JSON string."""
+
+    if value_start >= len(buffer) or buffer[value_start] != '"':
+        raise ValueError("compact gate full_turn_json must be a JSON string")
+    decoded: list[str] = []
+    cursor = value_start + 1
+    simple_escapes = {
+        '"': '"',
+        "\\": "\\",
+        "/": "/",
+        "b": "\b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+    }
+    while cursor < len(buffer):
+        character = buffer[cursor]
+        if character == '"':
+            break
+        if character != "\\":
+            if ord(character) < 0x20:
+                raise ValueError("compact gate full_turn_json contains a control character")
+            decoded.append(character)
+            cursor += 1
+            continue
+        if cursor + 1 >= len(buffer):
+            break
+        escape = buffer[cursor + 1]
+        if escape in simple_escapes:
+            decoded.append(simple_escapes[escape])
+            cursor += 2
+            continue
+        if escape != "u":
+            raise ValueError("compact gate full_turn_json contains an invalid escape")
+        if cursor + 6 > len(buffer):
+            break
+        digits = buffer[cursor + 2 : cursor + 6]
+        try:
+            codepoint = int(digits, 16)
+        except ValueError as exc:
+            raise ValueError("compact gate full_turn_json contains invalid Unicode") from exc
+        cursor += 6
+        if 0xD800 <= codepoint <= 0xDBFF:
+            if cursor + 6 > len(buffer):
+                break
+            if buffer[cursor : cursor + 2] != "\\u":
+                raise ValueError("compact gate full_turn_json has an unpaired surrogate")
+            low_digits = buffer[cursor + 2 : cursor + 6]
+            try:
+                low = int(low_digits, 16)
+            except ValueError as exc:
+                raise ValueError("compact gate full_turn_json contains invalid Unicode") from exc
+            if not 0xDC00 <= low <= 0xDFFF:
+                raise ValueError("compact gate full_turn_json has an unpaired surrogate")
+            codepoint = 0x10000 + ((codepoint - 0xD800) << 10) + (low - 0xDC00)
+            cursor += 6
+        elif 0xDC00 <= codepoint <= 0xDFFF:
+            raise ValueError("compact gate full_turn_json has an unpaired surrogate")
+        decoded.append(chr(codepoint))
+    return "".join(decoded)
+
+
+def _incremental_forced_stream_expression(
+    buffer: str,
+    *,
+    compact_gate: bool = False,
+) -> tuple[bool, str | None]:
+    """Close a forced character head without relying on JSON member order.
 
     Function-call ``arguments`` are JSON objects and object member order is
     semantically irrelevant.  We release only after the discriminator,
@@ -8768,6 +9067,20 @@ def _incremental_forced_stream_expression(buffer: str) -> tuple[bool, str | None
     If ``events`` precedes the appraisal, this deliberately waits for the
     later field rather than guessing from an incomplete object.
     """
+
+    if compact_gate:
+        try:
+            value = _parse_json_object(buffer)
+        except ValueError:
+            # Compact union authority is the complete outer object. A partial
+            # string/object cannot prove that a later sibling will stay null.
+            return True, None
+        value = _normalize_forced_stream_envelope(value)
+        if value.get("result_kind") not in {"reply_only", "full_turn", "recall"}:
+            raise ValueError("compact gate result_kind is invalid")
+        return True, _stream_first_expression(
+            json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        )
 
     object_start = next(
         (index for index, character in enumerate(buffer) if not character.isspace()),
@@ -8825,13 +9138,82 @@ def _incremental_forced_stream_expression(buffer: str) -> tuple[bool, str | None
     forced = "result_kind" in members or pending_key == "result_kind"
     if not forced:
         return False, None
-    if members.get("result_kind") != "decision":
+    result_kind = members.get("result_kind")
+    if result_kind == "full_turn":
+        inner = members.get("full_turn_json")
+        if not isinstance(inner, str):
+            if pending_key != "full_turn_json" or pending_value_start is None:
+                return True, None
+            inner = _incremental_json_string_prefix(
+                buffer,
+                value_start=pending_value_start,
+            )
+        inner_start = next(
+            (index for index, character in enumerate(inner) if not character.isspace()),
+            -1,
+        )
+        if inner_start < 0:
+            return True, None
+        if inner[inner_start] != "{":
+            raise ValueError("compact gate full turn must begin with an event object")
+        key_start = inner_start + 1
+        while key_start < len(inner) and inner[key_start].isspace():
+            key_start += 1
+        try:
+            first_key, first_key_end = decoder.raw_decode(inner, key_start)
+        except json.JSONDecodeError:
+            return True, None
+        if first_key != "protocol":
+            raise ValueError("compact gate full turn must serialize protocol first")
+        colon = inner.find(":", first_key_end)
+        if colon < 0:
+            return True, None
+        value_start = colon + 1
+        while value_start < len(inner) and inner[value_start].isspace():
+            value_start += 1
+        try:
+            protocol, _ = decoder.raw_decode(inner, value_start)
+        except json.JSONDecodeError:
+            return True, None
+        if protocol != "character-interior-events.1":
+            raise ValueError("compact gate full turn protocol is invalid")
+        return True, _incremental_first_expression(inner)
+    if result_kind not in {"decision", "reply_only"}:
         return True, None
     if members.get("protocol") != "character-interior-events.1":
         return True, None
     appraisal = members.get("appraisal_draft")
     if not isinstance(appraisal, dict):
         return True, None
+    if result_kind == "reply_only":
+        # The compact branch authorizes an externally visible Action. DeepSeek's
+        # strict-schema projection drops array cardinality constraints, so a
+        # complete ``[head, end]`` envelope is the smallest authority unit that
+        # proves there is neither a duplicate head nor a hidden continuation.
+        # Waiting for the tiny end frame still releases before transport-null
+        # siblings and the ordinary decision tail while keeping authorization
+        # fail closed.
+        complete_events = members.get("events")
+        if not isinstance(complete_events, list):
+            return True, None
+        validated = _reply_only_character_interior_event_envelope(
+            {
+                "protocol": members["protocol"],
+                "appraisal_draft": appraisal,
+                "events": complete_events,
+            }
+        )
+        event = validated["events"][0]
+        return True, json.dumps(
+            {
+                "appraisal_draft": validated["appraisal_draft"],
+                "expression_draft": _parse_json_object(
+                    _expression_event_head(event, continuation=False)
+                ),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     events = members.get("events")
     event: object | None = events[0] if isinstance(events, list) and events else None
     if event is None and pending_key == "events" and pending_value_start is not None:
@@ -8863,8 +9245,12 @@ def _incremental_first_expression(
     buffer: str,
     *,
     forced_tool: bool = False,
+    compact_gate: bool = False,
 ) -> str | None:
-    forced, forced_first = _incremental_forced_stream_expression(buffer)
+    forced, forced_first = _incremental_forced_stream_expression(
+        buffer,
+        compact_gate=compact_gate,
+    )
     if forced_tool or forced:
         return forced_first
     normalized = _without_forced_stream_result_kind(buffer)
@@ -9351,6 +9737,38 @@ class _ExpressionDraftWire:
         if session is not None and not session.completed.done():
             session.completed.cancel("expression_stream_reselection_started")
 
+    async def _consume_completed_unit_stream_control_transfer(
+        self,
+        *,
+        request: ModelInput,
+        provider_identity: _ProviderInvocationIdentity,
+        stream_generation: _ExpressionStreamGeneration,
+    ) -> tuple[object | None, str]:
+        """Settle and remove one completed non-semantic stream gate.
+
+        ``full_turn`` and ``recall`` have no authorized Expression tail.  Their
+        complete provider response must nevertheless be retained for exact
+        usage/hash audit before the same pinned key can reserve its next
+        stream.  This seam deliberately does not synthesize semantic head/tail
+        identities or mark a valid control transfer as a rejected candidate.
+        """
+
+        key = self._unit_stream_key(request)
+        session = self._unit_stream_sessions.get(key)
+        if session is None or session.provider_identity != provider_identity:
+            raise RuntimeError("compact gate stream identity is unavailable")
+        _head, _tail, usage, complete_raw = await asyncio.shield(session.completed)
+        self._stream_generation_coordinator.require_current(stream_generation)
+        if self._unit_stream_sessions.get(key) is not session:
+            raise RuntimeError("compact gate stream changed before settlement")
+        self._unit_stream_sessions.pop(key, None)
+        token = self._unit_stream_tokens.get(key)
+        if token != stream_generation:
+            raise RuntimeError("compact gate stream generation changed before settlement")
+        self._unit_stream_tokens.pop(key, None)
+        self._stream_generation_coordinator.cancel(stream_generation)
+        return usage, complete_raw
+
     async def _unit_stream_result(
         self,
         *,
@@ -9379,7 +9797,13 @@ class _ExpressionDraftWire:
                 self._observe_expression_unit_stream_future
             )
             chunks: list[str] = []
-
+            compact_gate_tool = bool(
+                tools
+                and isinstance(tools[0], dict)
+                and isinstance(tools[0].get("function"), dict)
+                and tools[0]["function"].get("name")
+                == "character_inbound_compact_gate_v2"
+            )
             async def run() -> tuple[str, str, object, str]:
                 operation = getattr(self._model, "complete_json_stream_with_usage")
                 current = asyncio.current_task()
@@ -9398,6 +9822,7 @@ class _ExpressionDraftWire:
                         first = _incremental_first_expression(
                             "".join(chunks),
                             forced_tool=tools is not None,
+                            compact_gate=compact_gate_tool,
                         )
                     except ValueError as exc:
                         # A malformed partial argument must not cancel the
@@ -9466,6 +9891,20 @@ class _ExpressionDraftWire:
                         try:
                             first_raw = _stream_first_expression(complete_raw)
                             tail_raw = _stream_tail_expression(complete_raw)
+                            if compact_gate_tool:
+                                compact_branch = _parse_json_object(complete_raw).get(
+                                    "result_kind"
+                                )
+                                if not isinstance(compact_branch, str):
+                                    raise ValueError(
+                                        "compact gate result kind is missing"
+                                    )
+                                record_compact_inbound_branch(compact_branch)
+                                logger.info(
+                                    "compact inbound role branch call=%s branch=%s",
+                                    provider_identity.model_call_id,
+                                    compact_branch,
+                                )
                         except ValueError:
                             first_raw = (
                                 head_future.result()
@@ -11553,7 +11992,7 @@ def _parse_json_object(raw: str) -> dict[str, object]:
             raise ValueError("chat model returned an unclosed JSON fence")
         candidate = "\n".join(lines[1:-1]).strip()
     try:
-        value = json.loads(candidate)
+        value = json.loads(candidate, object_pairs_hook=_unique_stream_json_object)
     except json.JSONDecodeError as exc:
         raise ValueError("chat model did not return one JSON object") from exc
     if not isinstance(value, dict):

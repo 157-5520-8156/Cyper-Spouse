@@ -447,14 +447,7 @@ class QQC2CPlatformTransport:
     ) -> PlatformDispatchReceipt:
         raw_payload_hash = "sha256:" + _digest(response)
         platform_ref = QQDelivery.receipt_candidate(response)
-        provider_status = str(response.get("status") or "").strip().lower()
-        retcode = response.get("retcode")
-        try:
-            rejected = provider_status == "failed" or (
-                retcode is not None and int(str(retcode)) != 0
-            )
-        except (TypeError, ValueError):
-            rejected = provider_status == "failed"
+        rejected = QQDelivery.response_is_rejected(response)
         identity = _digest(
             {
                 "idempotency_key": request.idempotency_key,

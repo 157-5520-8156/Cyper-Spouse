@@ -5906,7 +5906,7 @@ from .external_perception_acceptance_manifest import (  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.55"
+    reducer_bundle_version: str = "world-v2-reducers.56"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)

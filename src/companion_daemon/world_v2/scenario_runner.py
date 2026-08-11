@@ -285,7 +285,17 @@ class ScenarioVerificationError(AssertionError):
 # compiler reason and only when the pinned current-state transition is truly
 # unavailable. The frozen suite emits no such advisory; its predicates remain
 # unchanged while reducer, snapshot, and replay identities move together.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.68"
+# ``.69`` composes reducer .56 exact failed-main physical-provider audit
+# preservation with the one-request ``reply_only`` strict role schema.  The
+# complete fixed corpus keeps every existing per-case predicate enabled while
+# request, reducer, snapshot, and replay identities move together.
+# ``.70`` records the completed compact one-request role transport, durable
+# Recall control-transfer checkpoint/audit recovery, and evidence-bound early
+# retry authority.  The compact branch still preserves the existing role,
+# source-review, acceptance, Action, and receipt boundaries; the frozen suite
+# keeps every existing per-case predicate enabled while request, audit,
+# scheduler, snapshot, and replay identities intentionally move together.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.70"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
@@ -396,8 +406,15 @@ FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.68"
 # ``.68`` composes the exact relationship-commitment terminal authority with
 # reducer .55. Two independent complete frozen-suite processes must produce
 # the same aggregate manifest before the new hash is installed.
+# ``.69`` composes the single physical role-request path and reducer .56's
+# durable exact physical-terminal binding. Two independent complete 120-case
+# processes must produce the same aggregate manifest before installation.
+# ``.70`` composes the compact single-request role transport with durable
+# Recall control-transfer recovery and the evidence-bound 30-second retry
+# authority. Two independent complete 120-case processes must produce the
+# same aggregate manifest before installation.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "0034bd20c86336d3abfc6c70ae739a79ea4288546852c7c38d016b90de9fa9dd"
+    "f9bdcaa4c656bfb0c8c8aa277daeeaa6ef44b113a403e3be769f3f272f310d1d"
 )
 
 

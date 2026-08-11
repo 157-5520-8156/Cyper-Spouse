@@ -69,10 +69,18 @@ from .external_world_perception.deployment import (
 from .external_world_perception.production_attention import (
     LiveAttentionChannelPort,
 )
-from .expression_episode_lifecycle import next_expression_retry_due
+from .expression_episode_lifecycle import (
+    ExpressionTechnicalNoticeCandidate,
+    expression_episode_technical_notice_candidates,
+    next_expression_retry_due,
+)
 from .proactive_action import next_proactive_retry_due
 from .interactive_turn_budget import InteractiveTurnBudgetPolicy
-from .system_notice import SQLiteSystemNoticeDispatcher
+from .schemas import ProjectionCursor
+from .system_notice import (
+    SQLiteSystemNoticeDispatcher,
+    SystemNoticeAuthority,
+)
 from .life_development_model_adapter import RoleBoundLifeDevelopmentModelAdapter
 from .recall_embedding import configured_recall_embedding
 from .recall_index import RecallEmbedding
@@ -242,8 +250,14 @@ def _system_notice_failure_code(outcome: object) -> str | None:
     if status != "deferred":
         return None
     deferred_refs = tuple(str(item) for item in (getattr(outcome, "deferred_refs", ()) or ()))
+    if "expression_episode.technical_retry_pending" in deferred_refs:
+        # A durable lifecycle still owns an automatic retry.  A
+        # Notice here would turn that recoverable intermediate state into a
+        # user-visible terminal claim; the same episode may later authorize a
+        # reply or be superseded by a newer inbound.  Only an actual terminal
+        # outcome may cross the System Notice seam.
+        return None
     technical_markers = (
-        "technical_retry_pending",
         "technical_failure",
         "primary_timeout",
         "source_review_timeout",
@@ -259,6 +273,20 @@ def _system_notice_failure_code(outcome: object) -> str | None:
 class QQC2CDrainResult:
     action_statuses: tuple[str, ...]
     background_statuses: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _TechnicalNoticeDueMarker:
+    """Adapt one projection-derived Notice deadline to the shared wake timer."""
+
+    not_before: datetime
+    state: Literal["scheduled"] = "scheduled"
+    claim_lease: None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _QQDueWakeProjection:
+    actions: tuple[object, ...]
 
 
 class QQC2CHost:
@@ -423,9 +451,17 @@ class QQC2CHost:
         # evidence and must seed the rolling hold once the window closes.
         self._coalescing_waits = 0
         action_due_projection = getattr(self._host, "action_due_projection", None)
+        self._action_due_projection_reader = (
+            action_due_projection if callable(action_due_projection) else None
+        )
+        # This cache only prevents a live timer from re-arming after the
+        # durable sidecar accepted/suppressed an effect-once attempt.  On
+        # restart the projection-derived deadline wakes once and
+        # SQLiteSystemNoticeDispatcher rehydrates the durable attempted state.
+        self._technical_notice_attempted_keys: set[str] = set()
         self._action_due_wake = (
             ActionDueWake(
-                project=action_due_projection,
+                project=self._action_due_wake_projection,
                 wake=self._wake_due_actions,
                 now=self._action_due_now,
                 sleep=self._action_due_sleep,
@@ -1282,6 +1318,90 @@ class QQC2CHost:
             if self._action_due_wake is not None and not self._closed:
                 await self._action_due_wake.refresh()
 
+    async def _latest_inbound_projection_for_outcome(
+        self,
+        outcome: object,
+    ) -> object | None:
+        """Return the exact final projection only while an outcome owns the head."""
+
+        observation_ref = getattr(outcome, "observation_ref", None)
+        if not isinstance(observation_ref, str) or not observation_ref:
+            return None
+        if self._action_due_projection_reader is None:
+            return None
+        projection: object | None = None
+        for attempt_ordinal in range(2):
+            try:
+                projection = await self._read_action_due_projection()
+                break
+            except Exception as exc:
+                if attempt_ordinal == 0:
+                    # A local projection read can lose a short SQLite race.
+                    # Yield once and retry before the durable ingress result is
+                    # completed; otherwise a genuine terminal Notice would be
+                    # suppressed forever by message-id effect-once.
+                    await asyncio.sleep(0)
+                    continue
+                _LOG.warning(
+                    "world v2 system notice latest-inbound reads exhausted "
+                    "error_type=%s",
+                    type(exc).__name__,
+                )
+                return None
+        if projection is None:
+            return None
+        observations = tuple(getattr(projection, "message_observations", ()) or ())
+        if not observations:
+            return None
+        latest = max(
+            observations,
+            key=lambda item: (
+                int(getattr(item, "world_revision", 0) or 0),
+                str(getattr(item, "observation_id", "")),
+            ),
+        )
+        return projection if getattr(latest, "observation_id", None) == observation_ref else None
+
+    async def _outcome_owns_latest_inbound(self, outcome: object) -> bool:
+        """Reject a terminal result that projection proves lost the conversation head."""
+
+        return await self._latest_inbound_projection_for_outcome(outcome) is not None
+
+    def _system_notice_authority(
+        self,
+        projection: object,
+        *,
+        excluding_source_event_ids: tuple[str, ...] = (),
+    ) -> bool | SystemNoticeAuthority:
+        """Bind a real SQLite host to the exact final World/ingress authority."""
+
+        if not isinstance(self._ingress_store, SQLiteQQIngressStore):
+            # In-memory adapters cannot participate in the SQLite reservation
+            # transaction; their process-local callback remains authoritative.
+            return True
+        coordinates = tuple(
+            getattr(projection, name, None)
+            for name in (
+                "world_revision",
+                "deliberation_revision",
+                "ledger_sequence",
+            )
+        )
+        if any(type(value) is not int or value < 0 for value in coordinates):
+            # Narrow fake hosts without a durable World head retain the legacy
+            # callback seam.  Production LedgerProjection always carries all
+            # three exact coordinates.
+            return True
+        world_revision, deliberation_revision, ledger_sequence = coordinates
+        return SystemNoticeAuthority(
+            expected_cursor=ProjectionCursor(
+                world_revision=world_revision,
+                deliberation_revision=deliberation_revision,
+                ledger_sequence=ledger_sequence,
+            ),
+            excluding_source_event_ids=excluding_source_event_ids,
+        )
+
     async def _process_ingress_batch(self, batch: QQIngressBatch) -> QQC2CIngressResult:
         """Run one claimed batch without serializing another provider phase."""
 
@@ -1497,12 +1617,34 @@ class QQC2CHost:
             if dispatch_terminal_failure
             else system_notice_failure
         )
+        if notice_failure_code is not None and not await self._outcome_owns_latest_inbound(outcome):
+            notice_failure_code = None
         if notice_failure_code is not None and self._system_notice_dispatcher is not None:
+            async def notice_still_owns_latest_inbound() -> bool | SystemNoticeAuthority:
+                if self._ingress_store is None or self._ingress_store.has_uncommitted_content(
+                    excluding_source_event_ids=batch.source_event_ids,
+                ):
+                    return False
+                projection = await self._latest_inbound_projection_for_outcome(outcome)
+                if (
+                    projection is None
+                    or self._ingress_store is None
+                    or self._ingress_store.has_uncommitted_content(
+                        excluding_source_event_ids=batch.source_event_ids,
+                    )
+                ):
+                    return False
+                return self._system_notice_authority(
+                    projection,
+                    excluding_source_event_ids=batch.source_event_ids,
+                )
+
             try:
                 await self._system_notice_dispatcher.notify(
                     notice_key=f"system-notice:qq-ingress:{batch.batch_id}",
                     recipient_id=self._recipient_id,
                     failure_code=notice_failure_code,
+                    still_current=notice_still_owns_latest_inbound,
                 )
             except Exception as exc:
                 _LOG.error(
@@ -1523,6 +1665,108 @@ class QQC2CHost:
             canonical_user_id=self._canonical_user_id,
         )
 
+    async def _read_action_due_projection(self) -> object:
+        reader = self._action_due_projection_reader
+        if reader is None:
+            raise RuntimeError("QQ due wake requires its configured projection reader")
+        projection = reader()
+        if isinstance(projection, Awaitable):
+            projection = await projection
+        return projection
+
+    async def _action_due_wake_projection(self) -> object:
+        """Add no state; expose durable Notice deadlines to the shared timer."""
+
+        projection = await self._read_action_due_projection()
+        actions = tuple(getattr(projection, "actions", ()) or ())
+        if self._system_notice_dispatcher is None:
+            return _QQDueWakeProjection(actions=actions)
+        notice_markers = tuple(
+            _TechnicalNoticeDueMarker(not_before=candidate.due_at)
+            for candidate in expression_episode_technical_notice_candidates(projection)
+            if candidate.notice_key not in self._technical_notice_attempted_keys
+        )
+        return _QQDueWakeProjection(actions=(*actions, *notice_markers))
+
+    async def _notify_due_expression_technical_failures(
+        self,
+        *,
+        through: datetime,
+        projection: object,
+    ) -> None:
+        """Emit only still-current, lease-expired platform Notices effect-once."""
+
+        dispatcher = self._system_notice_dispatcher
+        if dispatcher is None:
+            return
+        for candidate in expression_episode_technical_notice_candidates(projection):
+            if (
+                candidate.due_at > through
+                or candidate.notice_key in self._technical_notice_attempted_keys
+            ):
+                continue
+            result = await dispatcher.notify(
+                notice_key=candidate.notice_key,
+                recipient_id=self._recipient_id,
+                failure_code=(
+                    "expression_technical_retry_pending_after_grace:"
+                    + candidate.policy_id
+                ),
+                still_current=(
+                    lambda candidate=candidate: self._technical_notice_still_current(
+                        candidate,
+                        through=through,
+                    )
+                ),
+            )
+            # A stale authority read suppresses the send without writing the
+            # effect-once sidecar.  Keep that candidate retryable; cache only
+            # results backed by a durable attempted/already-attempted row.
+            if result.durable_terminal:
+                self._technical_notice_attempted_keys.add(candidate.notice_key)
+            _LOG.info(
+                "world v2 delayed system notice trigger=%s policy=%s status=%s",
+                candidate.trigger_id,
+                candidate.policy_id,
+                result.status,
+            )
+
+    async def _technical_notice_still_current(
+        self,
+        candidate: ExpressionTechnicalNoticeCandidate,
+        *,
+        through: datetime,
+    ) -> bool | SystemNoticeAuthority:
+        """Re-prove the exact candidate after the sidecar send lock is acquired."""
+
+        if self._ingress_store is None or self._ingress_store.has_uncommitted_content():
+            return False
+        try:
+            projection = await self._read_action_due_projection()
+        except Exception as exc:
+            _LOG.warning(
+                "world v2 delayed system notice authority read failed "
+                "error_type=%s",
+                type(exc).__name__,
+            )
+            return False
+        still_current = any(
+            current.notice_key == candidate.notice_key
+            and current.observation_id == candidate.observation_id
+            and current.trigger_id == candidate.trigger_id
+            and current.policy_id == candidate.policy_id
+            and current.due_at == candidate.due_at
+            and current.due_at <= through
+            for current in expression_episode_technical_notice_candidates(projection)
+        )
+        if (
+            not still_current
+            or self._ingress_store is None
+            or self._ingress_store.has_uncommitted_content()
+        ):
+            return False
+        return self._system_notice_authority(projection)
+
     async def _wake_due_actions(self) -> None:
         """Advance only clock + ActionPump; never background cognition."""
 
@@ -1533,9 +1777,7 @@ class QQC2CHost:
         # Visible ingress no longer holds ``_lock`` across provider work, and
         # the ledger projection, clock CAS, Action claim and provider
         # idempotency remain the authority across this lock-free phase boundary.
-        projection = self._host.action_due_projection()
-        if isinstance(projection, Awaitable):
-            projection = await projection
+        projection = await self._read_action_due_projection()
         due_at = ActionDueWake.nearest_due(projection)
         wall_now = self._action_due_now()
         if due_at is None or due_at > wall_now:
@@ -1544,6 +1786,9 @@ class QQC2CHost:
             # Never reinterpret that stale wake as authority to jump the World
             # Clock to a newly discovered future due; ActionDueWake refreshes
             # the projection after this callback and arms the replacement.
+            await self._notify_due_expression_technical_failures_after_recovery(
+                through=wall_now,
+            )
             return
         # A provider-accepted lease boundary exists only to permit terminal
         # verification/reconciliation of an old external effect.  Its
@@ -1609,6 +1854,34 @@ class QQC2CHost:
                 "not_due",
             }:
                 break
+        # A due Action must never queue behind unrelated model-backed
+        # scheduler work.  Technical Notices retain their recovery ordering,
+        # but only after the exact ActionPump lane has made progress.
+        await self._notify_due_expression_technical_failures_after_recovery(
+            through=wall_now,
+        )
+
+    async def _notify_due_expression_technical_failures_after_recovery(
+        self,
+        *,
+        through: datetime,
+    ) -> None:
+        """Serialize Notice authority behind semantic recovery, not due Actions."""
+
+        if self._system_notice_dispatcher is None:
+            return
+        # A System Notice is a platform liveness effect, not a World fact.  It
+        # uses wall time and never advances the World clock or runs cognition.
+        # Wait for any already-running semantic recovery unit, then re-read
+        # the durable projection.  A retry that succeeds, chooses silence, or
+        # authorizes an Action must settle before the sidecar can reserve the
+        # fixed Notice.
+        async with self._scheduled_work_lock:
+            projection = await self._read_action_due_projection()
+            await self._notify_due_expression_technical_failures(
+                through=through,
+                projection=projection,
+            )
 
     @staticmethod
     def _provider_accepted_only_due(projection: object, *, through: datetime) -> bool:

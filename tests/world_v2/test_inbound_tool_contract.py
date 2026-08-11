@@ -11,8 +11,11 @@ from companion_daemon.llm import DeepSeekChatModel
 from companion_daemon.world_v2.character_interior.inbound_tool_contract import (
     InboundToolContracts,
 )
-from companion_daemon.world_v2.character_interior.inbound_wire import _provider_invocation_identity
 from companion_daemon.world_v2.character_interior.inbound_wire import (
+    _incremental_first_expression,
+    _provider_invocation_identity,
+    _stream_first_expression,
+    _stream_tail_expression,
     complete_bounded_validation_reselection,
 )
 from companion_daemon.world_v2.character_interior.inbound_appraisal_wire import (
@@ -25,6 +28,604 @@ from companion_daemon.world_v2.expression_draft import (
     QQ_NAPCAT_EXPRESSION_CAPABILITIES,
     qq_expression_capabilities,
 )
+
+
+def _reply_only_stream_arguments() -> dict[str, object]:
+    return {
+        "result_kind": "reply_only",
+        "protocol": "character-interior-events.1",
+        "appraisal_draft": {
+            "appraise": False,
+            "affect": "no_change",
+            "brief_rationale": "这句不需要形成新的持久评价。",
+            "behavior_tendency": "自由接话",
+            "stance": "自然回应",
+            "display_strategy": "直接说",
+            "confidence": 7000,
+            "meanings": None,
+            "attribution": None,
+            "severity": None,
+            "components": None,
+            "episode_id": None,
+            "resolution_summary": None,
+        },
+        "events": [
+            {
+                "type": "head",
+                "private_turn_state": {
+                    "contract": "private-turn-state.1",
+                    "inner_state_summary": "我想先自然接住这句话。",
+                    "attended_source_refs": ["s0"],
+                },
+                "timing_choice": "now",
+                "turn_posture": "continue",
+                "cadence": "conversational",
+                "beat": {
+                    "modality": "text",
+                    "text": "嗯，我在听。",
+                },
+                "stance": "自然接话",
+                "brief_rationale": "这一句已经完整表达了我此刻想说的。",
+                "confidence": 7600,
+                "response_expectation": None,
+                "response_expectation_assessment": None,
+                "world_claims": [],
+                "media_request": "none",
+                "media_source_refs": [],
+            },
+            {"type": "end"},
+        ],
+    }
+
+
+def _reply_only_appraisal_effect_arguments() -> dict[str, object]:
+    candidate = _reply_only_stream_arguments()
+    candidate["appraisal_draft"] = {
+        "appraise": True,
+        "affect": "open",
+        "brief_rationale": "我把这句话理解成对方希望被认真听见。",
+        "behavior_tendency": "认真倾听",
+        "stance": "在场且关切",
+        "display_strategy": "自然接住",
+        "confidence": 8200,
+        "meanings": [
+            {
+                "meaning": "对方希望我认真听见此刻的感受",
+                "confidence": 8400,
+            }
+        ],
+        "attribution": "user",
+        "severity": 3200,
+        "components": [
+            {
+                "dimension": "warmth",
+                "target_intensity_bp": 3600,
+            }
+        ],
+        "episode_id": None,
+        "resolution_summary": None,
+    }
+    return candidate
+
+
+def _compact_gate_carrier(result: dict[str, object]) -> dict[str, object]:
+    kind = result.get("result_kind")
+    if kind == "full_turn":
+        payload_json = result.get("full_turn_json")
+        assert isinstance(payload_json, str)
+    else:
+        payload_json = json.dumps(
+            {key: value for key, value in result.items() if key != "result_kind"},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    return {"result_kind": kind, "payload_json": payload_json}
+
+
+def test_compact_gate_strict_contract_is_small_and_keeps_role_owned_branches() -> None:
+    contract = InboundToolContracts().compact_gate_for(
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        recall_allowed=True,
+        schema_dialect="deepseek-strict",
+    )
+    function = contract.provider_tools[0]["function"]
+    parameters = function["parameters"]
+
+    Draft202012Validator.check_schema(parameters)
+    assert function["name"] == "character_inbound_compact_gate_v2"
+    assert len(
+        json.dumps(parameters, ensure_ascii=False, separators=(",", ":")).encode()
+    ) <= 12 * 1024
+    assert parameters == {
+        "type": "object",
+        "properties": {
+            "result_kind": {
+                "type": "string",
+                "enum": ["reply_only", "full_turn", "recall"],
+            },
+            "payload_json": {"type": "string"},
+        },
+        "required": ["result_kind", "payload_json"],
+        "additionalProperties": False,
+    }
+    assert parameters["properties"]["result_kind"]["enum"] == [
+        "reply_only",
+        "full_turn",
+        "recall",
+    ]
+
+    description = function["description"]
+    assert isinstance(description, str)
+    assert "complete external effect is one immediate text message" in description
+    assert "minimum sufficient branch" in description
+    assert "losslessly represents the external effect you choose" in description
+    assert "multiple sentences or paragraphs" in description
+    assert "not required to be terse or emotionally flat" in description
+    assert "only when the external effect you choose actually requires" in description
+    assert "does not classify by topic, length, complexity, or keywords" in description
+    assert "does not choose the branch" in description
+    assert "Choose reply_only only when" not in description
+    assert "canonical appraisal and affect lifecycle" in description
+    assert "brief_rationale, behavior_tendency, stance, display_strategy, and confidence" in (
+        description
+    )
+    assert "appraise and affect are your choices" in description
+    assert "no appraisal, affect" not in description
+    assert "complete chosen branch object as a JSON string in payload_json" in description
+    assert "full_turn_json" not in description
+
+    multi_paragraph = _reply_only_stream_arguments()
+    events = multi_paragraph["events"]
+    assert isinstance(events, list)
+    head = events[0]
+    assert isinstance(head, dict)
+    head["beat"] = {
+        "modality": "text",
+        "text": "第一句完整回应。\n\n第二段仍属于同一条消息。",
+    }
+    compact_carrier = {
+        "result_kind": "reply_only",
+        "payload_json": json.dumps(
+            {key: value for key, value in multi_paragraph.items() if key != "result_kind"},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+    }
+    assert list(Draft202012Validator(parameters).iter_errors(compact_carrier)) == []
+    assert contract.decode(json.dumps(compact_carrier, ensure_ascii=False))[
+        "events"
+    ] == events
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_keys"),
+    (
+        (
+            {
+                "result_kind": "reply_only",
+                **_reply_only_stream_arguments(),
+            },
+            {"result_kind", "protocol", "appraisal_draft", "events"},
+        ),
+        (
+            _reply_only_appraisal_effect_arguments(),
+            {"result_kind", "protocol", "appraisal_draft", "events"},
+        ),
+        (
+            {
+                "result_kind": "full_turn",
+                "full_turn_json": json.dumps(
+                    {
+                        key: value
+                        for key, value in _reply_only_stream_arguments().items()
+                        if key != "result_kind"
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            },
+            {"result_kind", "full_turn_json"},
+        ),
+        (
+            {
+                "result_kind": "recall",
+                "private_turn_state": {
+                    "contract": "private-turn-state.1",
+                    "inner_state_summary": "我想先确认此前相关记忆。",
+                    "attended_source_refs": [],
+                },
+                "recall_request": {
+                    "query_text": "此前相关记忆",
+                    "lexical_text": None,
+                    "occurred_from": None,
+                    "occurred_to": None,
+                    "link_refs": [],
+                    "memory_kinds": ["episodic"],
+                    "include_historical": False,
+                    "limit": 4,
+                },
+            },
+            {"result_kind", "private_turn_state", "recall_request"},
+        ),
+    ),
+)
+def test_compact_gate_decoder_removes_only_strict_null_siblings(
+    result: dict[str, object],
+    expected_keys: set[str],
+) -> None:
+    contract = InboundToolContracts().compact_gate_for(
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        recall_allowed=True,
+        schema_dialect="deepseek-strict",
+    )
+    strict_result = _compact_gate_carrier(result)
+
+    Draft202012Validator(
+        contract.provider_tools[0]["function"]["parameters"]
+    ).validate(strict_result)
+    decoded = contract.decode(json.dumps(strict_result, ensure_ascii=False))
+
+    assert set(decoded) == expected_keys
+
+
+def test_compact_gate_decoder_rejects_non_null_cross_branch_semantics() -> None:
+    contract = InboundToolContracts().compact_gate_for(
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        recall_allowed=True,
+        schema_dialect="deepseek-strict",
+    )
+    result = {
+        "result_kind": "full_turn",
+        "payload_json": json.dumps(
+            {
+                "protocol": "character-interior-events.1",
+                "appraisal_draft": {"appraise": False},
+                "events": [],
+                "recall_request": {},
+            },
+            separators=(",", ":"),
+        ),
+    }
+
+    with pytest.raises(ValueError, match="exact event envelope"):
+        contract.decode(json.dumps(result, ensure_ascii=False))
+
+
+def test_compact_gate_carrier_rejects_duplicate_or_inner_transport_authority() -> None:
+    contract = InboundToolContracts().compact_gate_for(
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        recall_allowed=True,
+        schema_dialect="deepseek-strict",
+    )
+    duplicate_inner = {
+        "result_kind": "reply_only",
+        "payload_json": '{"protocol":"character-interior-events.1",'
+        '"protocol":"character-interior-events.1","appraisal_draft":{},"events":[]}',
+    }
+    with pytest.raises(ValueError, match="duplicate field"):
+        contract.decode(json.dumps(duplicate_inner, separators=(",", ":")))
+
+    inner_authority = _reply_only_stream_arguments()
+    inner_authority["result_kind"] = "full_turn"
+    with pytest.raises(ValueError, match="cannot own transport authority"):
+        contract.decode(
+            json.dumps(
+                {
+                    "result_kind": "reply_only",
+                    "payload_json": json.dumps(inner_authority, ensure_ascii=False),
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    payload_json = _compact_gate_carrier(_reply_only_stream_arguments())["payload_json"]
+    assert isinstance(payload_json, str)
+    duplicate_outer = (
+        '{"result_kind":"reply_only","result_kind":"full_turn","payload_json":'
+        + json.dumps(payload_json, ensure_ascii=False)
+        + "}"
+    )
+    with pytest.raises(ValueError, match="duplicate field"):
+        contract.decode(duplicate_outer)
+    with pytest.raises(ValueError, match="conflicting duplicated field"):
+        _stream_first_expression(duplicate_outer)
+
+
+def test_stream_contract_contains_one_constrained_role_owned_reply_branch() -> None:
+    contract = InboundToolContracts().contract_for(
+        phase="initial",
+        transport="stream",
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        recall_allowed=True,
+    )
+    function = contract.provider_tools[0]["function"]
+    parameters = function["parameters"]
+    Draft202012Validator.check_schema(parameters)
+    validator = Draft202012Validator(parameters)
+
+    reply_only = _reply_only_stream_arguments()
+    assert list(validator.iter_errors(reply_only)) == []
+    assert json.loads(contract.unwrap(json.dumps(reply_only, ensure_ascii=False))) == {
+        key: value for key, value in reply_only.items() if key != "result_kind"
+    }
+    reply_branch = next(
+        branch
+        for branch in parameters["anyOf"]
+        if branch["properties"]["result_kind"]["enum"] == ["reply_only"]
+    )
+    appraisal = reply_branch["properties"]["appraisal_draft"]
+    head = next(
+        branch
+        for branch in reply_branch["properties"]["events"]["items"]["anyOf"]
+        if branch["properties"]["type"]["enum"] == ["head"]
+    )
+    assert appraisal["properties"]["appraise"]["type"] == "boolean"
+    assert appraisal["properties"]["affect"]["enum"] == [
+        "no_change",
+        "open",
+        "update",
+        "resolve",
+        "supersede",
+    ]
+    assert {
+        "meanings",
+        "components",
+        "attribution",
+        "severity",
+        "episode_id",
+        "resolution_summary",
+    } <= set(appraisal["properties"])
+    assert not {
+        "relationship_signal",
+        "relationship_commitment",
+        "interaction_act",
+    } & set(appraisal["properties"])
+    assert head["properties"]["timing_choice"]["enum"] == ["now"]
+    assert head["properties"]["beat"]["properties"]["modality"]["enum"] == [
+        "text"
+    ]
+    assert head["properties"]["media_request"]["enum"] == ["none"]
+    assert reply_branch["properties"]["events"]["maxItems"] == 2
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("timing_choice", "later"),
+        ("beat", {"modality": "reaction", "reaction_id": "heart"}),
+        ("media_request", "consider_available_candidate"),
+    ),
+)
+def test_stream_reply_only_rejects_expression_capability_escalation(
+    field: str,
+    value: object,
+) -> None:
+    contract = InboundToolContracts().contract_for(
+        phase="initial",
+        transport="stream",
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        recall_allowed=False,
+    )
+    candidate = _reply_only_stream_arguments()
+    events = list(candidate["events"])
+    events[0] = {**events[0], field: value}
+    candidate["events"] = events
+
+    assert list(
+        Draft202012Validator(
+            contract.provider_tools[0]["function"]["parameters"]
+        ).iter_errors(candidate)
+    )
+
+
+def test_stream_reply_only_accepts_canonical_appraisal_affect_but_rejects_cross_turn_effects() -> None:
+    contract = InboundToolContracts().contract_for(
+        phase="initial",
+        transport="stream",
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        recall_allowed=False,
+    )
+    validator = Draft202012Validator(
+        contract.provider_tools[0]["function"]["parameters"]
+    )
+    appraisal_effect = _reply_only_appraisal_effect_arguments()
+    assert list(validator.iter_errors(appraisal_effect)) == []
+    assert "嗯，我在听。" in _stream_first_expression(
+        json.dumps(appraisal_effect, ensure_ascii=False)
+    )
+
+    for patch in (
+        {
+            "relationship_commitment": {
+                "target_stage": "friend",
+                "commitment_code": "mutual_friendship",
+                "persistence": "durable",
+                "visible_text_span": "嗯，我在听。",
+            }
+        },
+        {
+            "interaction_act": {
+                "operation": "declare",
+                "status_code": "heard",
+            }
+        },
+    ):
+        candidate = _reply_only_stream_arguments()
+        candidate["appraisal_draft"] = {
+            **candidate["appraisal_draft"],
+            **patch,
+        }
+        assert list(validator.iter_errors(candidate))
+
+
+@pytest.mark.parametrize("missing", ("meanings", "components"))
+def test_stream_reply_only_appraisal_lifecycle_missing_required_fields_fails_closed(
+    missing: str,
+) -> None:
+    candidate = _reply_only_appraisal_effect_arguments()
+    del candidate["appraisal_draft"][missing]
+
+    with pytest.raises(ValueError, match="reply-only appraisal is invalid"):
+        _stream_first_expression(json.dumps(candidate, ensure_ascii=False))
+
+
+def test_stream_reply_only_requires_pending_expectation_assessment_when_pinned() -> None:
+    contract = InboundToolContracts().contract_for(
+        phase="initial",
+        transport="stream",
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        recall_allowed=False,
+        response_expectation_assessment_required=True,
+    )
+    validator = Draft202012Validator(
+        contract.provider_tools[0]["function"]["parameters"]
+    )
+    missing_assessment = _reply_only_stream_arguments()
+    assessed = _reply_only_stream_arguments()
+    events = list(assessed["events"])
+    events[0] = {
+        **events[0],
+        "response_expectation_assessment": {
+            "status": "still_pending",
+            "reason": "我仍然希望等到对方回应。",
+        },
+    }
+    assessed["events"] = events
+
+    assert list(validator.iter_errors(missing_assessment))
+    assert list(validator.iter_errors(assessed)) == []
+
+
+def test_stream_reply_only_and_full_decision_share_one_strict_tool_request() -> None:
+    contract = InboundToolContracts().contract_for(
+        phase="initial",
+        transport="stream",
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        recall_allowed=True,
+        schema_dialect="deepseek-strict",
+    )
+    parameters = contract.provider_tools[0]["function"]["parameters"]
+    Draft202012Validator.check_schema(parameters)
+    assert parameters["properties"]["result_kind"]["enum"] == [
+        "decision",
+        "reply_only",
+        "recall",
+    ]
+    assert contract.provider_tools[0]["function"]["name"] == (
+        "character_inbound_initial_stream_v1"
+    )
+    strict_reply = _reply_only_stream_arguments()
+    for field in parameters["properties"]:
+        strict_reply.setdefault(field, None)
+    Draft202012Validator(parameters).validate(strict_reply)
+    assert json.loads(
+        contract.unwrap(json.dumps(strict_reply, ensure_ascii=False))
+    ) == {
+        key: value
+        for key, value in _reply_only_stream_arguments().items()
+        if key != "result_kind"
+    }
+
+
+def test_reply_only_stream_parser_closes_strict_schema_capability_gaps() -> None:
+    good = _reply_only_stream_arguments()
+    assert "嗯，我在听。" in _stream_first_expression(
+        json.dumps(good, ensure_ascii=False)
+    )
+
+    strict_empty_padding = json.loads(json.dumps(good, ensure_ascii=False))
+    strict_empty_padding.update(
+        {
+            "full_turn_json": "",
+            "private_turn_state": {},
+            "recall_request": None,
+        }
+    )
+    assert "嗯，我在听。" in _stream_first_expression(
+        json.dumps(strict_empty_padding, ensure_ascii=False)
+    )
+
+    compact_carrier = _compact_gate_carrier(good)
+    assert "嗯，我在听。" in _stream_first_expression(
+        json.dumps(compact_carrier, ensure_ascii=False)
+    )
+
+    appraisal_effect = _reply_only_appraisal_effect_arguments()
+    assert "嗯，我在听。" in _stream_first_expression(
+        json.dumps(appraisal_effect, ensure_ascii=False)
+    )
+
+    relationship_effect = json.loads(json.dumps(good, ensure_ascii=False))
+    relationship_effect["appraisal_draft"]["relationship_signal"] = {
+        "signal_code": "closer_after_open_talk",
+        "confidence_bp": 6000,
+        "persistence": "session",
+        "rationale_code": "felt_heard",
+        "suggested_deltas": {
+            "trust_bp": 20,
+            "closeness_bp": 40,
+            "respect_bp": 10,
+            "reliability_bp": 0,
+            "mutuality_bp": 30,
+            "repair_confidence_bp": 0,
+        },
+    }
+    with pytest.raises(ValueError, match="reply-only appraisal"):
+        _stream_first_expression(json.dumps(relationship_effect, ensure_ascii=False))
+
+    extra_beat = json.loads(json.dumps(good, ensure_ascii=False))
+    extra_beat["events"].insert(
+        1,
+        {
+            "type": "beat",
+            "beat": {"modality": "text", "text": "第二条不能越权出现。"},
+            "world_claims": [],
+        },
+    )
+    with pytest.raises(ValueError, match="exactly one head"):
+        _stream_tail_expression(json.dumps(extra_beat, ensure_ascii=False))
+
+
+def test_reply_only_incremental_release_requires_exact_head_and_end() -> None:
+    good = _reply_only_stream_arguments()
+    raw = json.dumps(good, ensure_ascii=False)
+    end_frame = json.dumps({"type": "end"}, ensure_ascii=False)
+
+    # A complete first head is not enough authority: the end frame proves that
+    # this constrained branch contains no second visible beat.
+    assert _incremental_first_expression(
+        raw[: raw.index(end_frame)],
+        forced_tool=True,
+    ) is None
+
+    contract = InboundToolContracts().contract_for(
+        phase="initial",
+        transport="stream",
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        recall_allowed=True,
+        schema_dialect="deepseek-strict",
+    )
+    parameters = contract.provider_tools[0]["function"]["parameters"]
+    duplicate_head = json.loads(json.dumps(good, ensure_ascii=False))
+    duplicate_head["events"] = [
+        duplicate_head["events"][0],
+        duplicate_head["events"][0],
+    ]
+    for field in parameters["properties"]:
+        duplicate_head.setdefault(field, None)
+    # DeepSeek's strict projection deliberately drops min/maxItems. The host
+    # parser remains the final capability boundary for this malformed result.
+    Draft202012Validator(parameters).validate(duplicate_head)
+    with pytest.raises(ValueError, match="terminate after its single text head"):
+        _incremental_first_expression(
+            json.dumps(duplicate_head, ensure_ascii=False),
+            forced_tool=True,
+        )
+
+    assert "嗯，我在听。" in _incremental_first_expression(
+        raw,
+        forced_tool=True,
+    )
 
 
 def test_initial_contract_keeps_recall_as_a_role_owned_legal_outcome() -> None:
@@ -191,6 +792,7 @@ def test_stream_function_parameters_have_an_object_root_for_deepseek() -> None:
     assert parameters["required"] == ["result_kind"]
     assert parameters["properties"]["result_kind"]["enum"] == [
         "decision",
+        "reply_only",
         "recall",
     ]
     assert set(parameters["properties"]) >= {
@@ -873,7 +1475,11 @@ def test_stream_later_head_preserves_the_full_deferred_beat_budget() -> None:
         recall_allowed=False,
     )
     parameters = contract.provider_tools[0]["function"]["parameters"]
-    decision = _object_schema(parameters)
+    decision = next(
+        branch
+        for branch in parameters["anyOf"]
+        if branch["properties"]["result_kind"]["enum"] == ["decision"]
+    )
     events = decision["properties"]["events"]
     assert isinstance(events, dict)
     items = events["items"]

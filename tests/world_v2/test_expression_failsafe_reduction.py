@@ -129,6 +129,9 @@ def test_reliability_snapshot_counts_and_rate() -> None:
     metrics.record_source_closure_reselection()
     metrics.record_claim_free_reply()
     metrics.record_backup_recovery()
+    metrics.record_compact_inbound_branch("reply_only")
+    metrics.record_compact_inbound_branch("full_turn")
+    metrics.record_compact_inbound_branch("recall")
 
     snapshot = metrics.reliability_snapshot()
 
@@ -145,6 +148,9 @@ def test_reliability_snapshot_counts_and_rate() -> None:
     assert snapshot["source_closure_reselection_24h"] == 1
     assert snapshot["claim_free_24h"] == 1
     assert snapshot["backup_recovery_24h"] == 1
+    assert snapshot["compact_reply_only_24h"] == 1
+    assert snapshot["compact_full_turn_24h"] == 1
+    assert snapshot["compact_recall_24h"] == 1
     assert isinstance(snapshot["since"], str)
 
 
@@ -156,6 +162,11 @@ def test_reliability_snapshot_prunes_entries_older_than_the_window() -> None:
 
     assert snapshot["failsafe_24h"] == 1
     assert snapshot["failsafe_rate_24h"] is None  # no visible replies recorded
+
+
+def test_compact_inbound_branch_counter_rejects_unknown_transport() -> None:
+    with pytest.raises(ValueError, match="branch is not installed"):
+        metrics.record_compact_inbound_branch("host_guessed_reply")
 
 
 # --- corrective coverage for non-claim structural rejects ----------------------

@@ -1355,6 +1355,18 @@ class StructuredRoleToolContracts:
             "type": "string",
             "enum": ["private_impression_transition"],
         }
+        decision_field = proposal_properties.get("decision")
+        if not isinstance(decision_field, dict):
+            raise ValueError("private impression decision schema is incomplete")
+        installed_decisions = (
+            ("retain", "consolidate", "supersede")
+            if existing_impression_short_tokens
+            else ("retain",)
+        )
+        proposal_properties["decision"] = {
+            **deepcopy(decision_field),
+            "enum": list(installed_decisions),
+        }
         for field_name in ("source_refs", "predecessor_refs"):
             field = proposal_properties.get(field_name)
             if not isinstance(field, dict) or not isinstance(field.get("items"), dict):
@@ -1482,7 +1494,7 @@ class StructuredRoleToolContracts:
             "name": _PRIVATE_IMPRESSION_TOOL_NAME,
             "description": (
                 "Return the complete source-bound private impression reflection. "
-                "The character may form one tentative retain/consolidate/supersede "
+                f"The character may form one tentative {'/'.join(installed_decisions)} "
                 "proposal, make no change, or request one bounded recall. The function "
                 "constrains tokens and transport shape only; the character owns the "
                 "interpretation and whether to form it."

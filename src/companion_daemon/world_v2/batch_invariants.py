@@ -112,6 +112,7 @@ from .proposal_audit_schemas import (
     ModelResultRecordedPayload,
     ProposalRecordedV2Payload,
     RecordedModelResultAudit,
+    physical_provider_terminal_matches,
 )
 from .acceptance_manifest import parse_acceptance_manifest_v2
 from .minimal_reply_events import (
@@ -733,6 +734,17 @@ def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> No
         ModelResultRecordedPayload.model_validate_json(events[index].payload_json)
         for index in expected_model_indexes
     ]
+    recorded_attempts = tuple(
+        RecordedModelResultAudit.model_validate_json(attempt.audit_json)
+        for attempt in attempts
+    )
+    if any(
+        audit.route.router_version == "physical-provider-audit.1"
+        for audit in recorded_attempts
+    ):
+        raise ValueError(
+            "physical provider terminal must be adjacent to its owning model attempt"
+        )
     for index, attempt in enumerate(attempts):
         if (
             attempt.attempt_index != index
@@ -750,8 +762,17 @@ def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> No
         ModelResultRecordedPayload.model_validate_json(events[index].payload_json)
         for index in model_indexes[first.attempt_count :]
     ]
+    batch_model_call_ids = {
+        candidate.model_call_id for candidate in (*attempts, *nested_provider_records)
+    }
     all_call_ids = {attempt.model_call_id for attempt in attempts}
     authored_call_ids = set(all_call_ids)
+    embedded_physical = tuple(
+        (candidate, terminal)
+        for candidate in recorded_attempts
+        for terminal in candidate.physical_provider_audits
+    )
+    consumed_embedded_physical: set[int] = set()
     for nested in nested_provider_records:
         recorded = RecordedModelResultAudit.model_validate_json(nested.audit_json)
         if (
@@ -790,19 +811,48 @@ def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> No
                 for candidate in attempts
                 if candidate.parent_model_call_id == recorded.model_call_id
             )
+            bound_stream_terminal = bool(semantic_children) and all(
+                child.model_call_id in recorded.semantic_model_call_ids
+                and child.request_hash == recorded.request_hash
+                for child in semantic_children
+            )
+            matching_embedded = tuple(
+                index
+                for index, (candidate, terminal) in enumerate(embedded_physical)
+                if nested.attempt_id == candidate.attempt_id
+                and physical_provider_terminal_matches(
+                    expected=terminal,
+                    recorded=recorded,
+                    attempt_id=candidate.attempt_id,
+                )
+            )
+            independent_failed_main_terminal = (
+                not semantic_children
+                and len(matching_embedded) == 1
+                and matching_embedded[0] not in consumed_embedded_physical
+            )
+            if independent_failed_main_terminal and not set(
+                recorded.semantic_model_call_ids
+            ).isdisjoint(batch_model_call_ids):
+                raise ValueError(
+                    "independent physical provider semantic identities overlap "
+                    "another model result"
+                )
             if (
                 recorded.parent_model_call_id is not None
-                or not semantic_children
-                or any(
-                    child.model_call_id not in recorded.semantic_model_call_ids
-                    or child.request_hash != recorded.request_hash
-                    for child in semantic_children
+                or not (
+                    bound_stream_terminal or independent_failed_main_terminal
                 )
             ):
                 raise ValueError("physical provider terminal has invalid stream lineage")
+            if independent_failed_main_terminal:
+                consumed_embedded_physical.add(matching_embedded[0])
         else:
             raise ValueError("nested provider record uses an unknown audit contract")
         all_call_ids.add(nested.model_call_id)
+
+    if len(consumed_embedded_physical) != len(embedded_physical):
+        raise ValueError("embedded physical provider terminal must be adjacent")
 
     if first.proposal_hash is None:
         if len(events) != len(model_indexes) or v2_proposal_indexes:

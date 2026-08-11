@@ -1299,7 +1299,7 @@ async def test_exhausted_repin_budget_records_durable_defer_without_reauthoring(
         )
         assert episode.claim_lease is not None
         assert next_expression_retry_due(projection) == (
-            episode.claim_lease.acquired_at + timedelta(minutes=10)
+            episode.claim_lease.acquired_at + timedelta(seconds=30)
         )
     finally:
         await host.aclose()
@@ -1332,11 +1332,14 @@ async def test_fresh_context_repin_cap_is_durable_across_scheduler_recovery(
         origin = projection.logical_time or NOW
         await runtime._commit(  # noqa: SLF001
             [
-                _world_only_clock_event(
-                    world_id=runtime.world_id,
-                    origin=origin,
-                    ordinal=100 + call_ordinal,
-                )
+                    _world_only_clock_event(
+                        world_id=runtime.world_id,
+                        origin=origin,
+                        # Force a new World head without accidentally crossing
+                        # the installed 30-second first-retry boundary.  This
+                        # test owns the durable repin cap, not retry timing.
+                        ordinal=call_ordinal,
+                    )
             ],
             world_revision=projection.world_revision,
             deliberation_revision=projection.deliberation_revision,
@@ -1373,7 +1376,7 @@ async def test_fresh_context_repin_cap_is_durable_across_scheduler_recovery(
         )
         assert episode.claim_lease is not None
         assert next_expression_retry_due(projection) == (
-            episode.claim_lease.acquired_at + timedelta(minutes=10)
+            episode.claim_lease.acquired_at + timedelta(seconds=30)
         )
 
         # The same-owner scheduler sees the durable terminal failure/backoff;
@@ -1732,7 +1735,7 @@ async def test_context_preparation_failure_is_a_durable_backed_off_attempt(
             "model-call:skipped-pre-provider:"
         )
         assert "persistent resolver failure" not in audits[0].audit_json
-        assert next_expression_retry_due(failed) == NOW + timedelta(minutes=10)
+        assert next_expression_retry_due(failed) == NOW + timedelta(seconds=30)
 
         # Polling the scheduler cannot re-enter context preparation before the
         # exact durable deadline.
@@ -1832,7 +1835,7 @@ async def test_snapshot_failure_is_a_durable_backed_off_pre_provider_attempt(
             "model-call:skipped-pre-provider:"
         )
         assert secret not in audits[0].audit_json
-        assert next_expression_retry_due(failed) == NOW + timedelta(minutes=10)
+        assert next_expression_retry_due(failed) == NOW + timedelta(seconds=30)
 
         assert await runtime._drain_expression_retry_once() is None  # noqa: SLF001
         after_poll = await host._host.action_due_projection()  # noqa: SLF001
@@ -2244,7 +2247,7 @@ async def test_budget_rejected_crash_proposal_uses_capped_retry_schedule_without
         )
         first_due = next_expression_retry_due(first_projection)
         assert first_episode.claim_lease is not None
-        assert first_due == NOW + timedelta(minutes=10)
+        assert first_due == NOW + timedelta(seconds=30)
         assert {
             item.status for item in first_projection.acceptance_decisions
         } == {"rejected"}

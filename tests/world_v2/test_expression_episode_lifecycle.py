@@ -6,13 +6,18 @@ from types import SimpleNamespace
 import pytest
 
 from companion_daemon.world_v2.expression_episode_lifecycle import (
+    EXPRESSION_TECHNICAL_NOTICE_POLICY_ID,
     due_expression_retry_processes,
+    expression_episode_attempt_id,
+    expression_episode_technical_notice_candidates,
     expression_episode_claim_event,
+    expression_episode_retry_reclaim_is_authorized,
     expression_episode_retry_due,
     expression_episode_technical_failure_count,
     next_expression_retry_due,
 )
-from companion_daemon.world_v2.schemas import ClaimLease, TriggerProcess
+from companion_daemon.world_v2.reducers import ReducerState, reduce_event
+from companion_daemon.world_v2.schemas import ClaimLease, TriggerProcess, WorldEvent
 
 
 NOW = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
@@ -133,6 +138,7 @@ def _projection(
         minimal_reply_manifests=(),
         expression_plan_manifests=(),
         acceptance_decisions=acceptance_decisions,
+        actions=(),
     )
 
 
@@ -216,6 +222,118 @@ def test_expression_episode_cannot_reclaim_an_active_lease() -> None:
         )
 
 
+def test_terminal_failure_rotates_attempt_at_installed_retry_due() -> None:
+    claimed = _claimed_process()
+    due_at = NOW + timedelta(seconds=30)
+    projection = _projection(
+        processes=(claimed,),
+        logical_time=due_at,
+    )
+
+    assert expression_episode_retry_reclaim_is_authorized(
+        projection,
+        claimed,
+        at=due_at,
+    )
+    event, retried = expression_episode_claim_event(
+        world_id=WORLD_ID,
+        process=claimed,
+        owner_id="worker:retry",
+        at=due_at,
+        trace_id="trace:retry",
+        correlation_id="correlation:retry",
+        retry_projection=projection,
+    )
+
+    assert event.event_type == "TriggerProcessReclaimed"
+    assert retried.claim_lease is not None
+    assert retried.claim_lease.acquired_at == due_at
+    assert retried.claim_lease.expires_at == due_at + timedelta(minutes=2)
+    assert retried.attempt_ids[:-1] == claimed.attempt_ids
+
+
+def test_spoofed_failure_count_cannot_rotate_an_active_attempt() -> None:
+    claimed = _claimed_process()
+    due_at = NOW + timedelta(seconds=30)
+    projection = _projection(
+        processes=(claimed,),
+        failed=False,
+        logical_time=due_at,
+    )
+
+    assert not expression_episode_retry_reclaim_is_authorized(
+        projection,
+        claimed,
+        at=due_at,
+    )
+    with pytest.raises(ValueError, match="before its active lease expires"):
+        expression_episode_claim_event(
+            world_id=WORLD_ID,
+            process=claimed,
+            owner_id="worker:retry",
+            at=due_at,
+            trace_id="trace:retry",
+            correlation_id="correlation:retry",
+            technical_failure_count=99,
+            retry_projection=projection,
+        )
+
+
+def test_reducer_reproves_exact_failure_before_early_retry_reclaim() -> None:
+    claimed = _claimed_process()
+    due_at = NOW + timedelta(seconds=30)
+    projection = _projection(
+        processes=(claimed,),
+        failed=False,
+        logical_time=due_at,
+    )
+    state = ReducerState.model_construct(
+        logical_time=due_at,
+        trigger_processes=(claimed,),
+        message_observations=projection.message_observations,
+        committed_world_event_refs=projection.committed_world_event_refs,
+        model_result_audits=(),
+        proposal_audits=(),
+        acceptance_decisions=(),
+        minimal_reply_manifests=(),
+        expression_plan_manifests=(),
+        actions=(),
+    )
+    attempt_id = expression_episode_attempt_id(
+        trigger_id=claimed.trigger_id,
+        attempt_ordinal=2,
+    )
+    replacement = claimed.model_copy(
+        update={
+            "claim_lease": ClaimLease(
+                owner_id="worker:forged-retry",
+                attempt_id=attempt_id,
+                acquired_at=due_at,
+                expires_at=due_at + timedelta(minutes=2),
+            ),
+            "attempt_ids": (*claimed.attempt_ids, attempt_id),
+        }
+    )
+    forged = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event:expression-episode:forged-early-reclaim",
+        world_id=WORLD_ID,
+        event_type="TriggerProcessReclaimed",
+        logical_time=due_at,
+        created_at=due_at,
+        actor="worker:forged-retry",
+        source="world-runtime:expression-episode",
+        trace_id="trace:forged-retry",
+        causation_id=claimed.trigger_id,
+        correlation_id="correlation:forged-retry",
+        idempotency_key="expression-episode:forged-early-reclaim",
+        payload={"process": replacement.model_dump(mode="json")},
+    )
+
+    with pytest.raises(ValueError, match="exact due expression failure authority"):
+        reduce_event(state, forged)
+
+
 def test_reclaim_lease_is_short_even_after_a_bound_failure() -> None:
     crashed_second_claim = _claimed_process(
         attempt=2,
@@ -243,7 +361,7 @@ def test_retry_projection_separates_inflight_lease_from_technical_backoff() -> N
     assert expression_episode_retry_due(process) == NOW + timedelta(minutes=2)
     assert next_expression_retry_due(
         _projection(processes=(process,))
-    ) == NOW + timedelta(minutes=10)
+    ) == NOW + timedelta(seconds=30)
     assert next_expression_retry_due(
         _projection(processes=(process,), failed=False)
     ) == NOW + timedelta(minutes=2)
@@ -267,7 +385,7 @@ def test_nested_model_audits_count_as_one_failed_expression_attempt() -> None:
     )
 
     assert expression_episode_technical_failure_count(projection, process) == 1
-    assert next_expression_retry_due(projection) == NOW + timedelta(minutes=10)
+    assert next_expression_retry_due(projection) == NOW + timedelta(seconds=30)
 
 
 def test_nested_model_audits_preserve_the_retry_ordinal_between_attempts() -> None:
@@ -316,7 +434,7 @@ def test_rejected_reply_counts_once_despite_nested_attempt_audits() -> None:
     )
 
     assert expression_episode_technical_failure_count(projection, process) == 1
-    assert next_expression_retry_due(projection) == NOW + timedelta(minutes=10)
+    assert next_expression_retry_due(projection) == NOW + timedelta(seconds=30)
 
 
 def test_retry_projection_rejects_a_mismatched_observation_event_authority() -> None:
@@ -390,7 +508,7 @@ def test_stale_reply_proposal_reconsiders_now_but_rejected_acceptance_backs_off(
                 proposal_ids=(proposal_id,),
             acceptance_decisions=(rejected,),
         )
-    ) == NOW + timedelta(minutes=10)
+    ) == NOW + timedelta(seconds=30)
 
 
 def test_unattempted_reclaim_waits_only_for_its_short_inflight_lease() -> None:
@@ -435,8 +553,90 @@ def test_due_expression_retry_processes_are_eligible_due_and_stably_ordered() ->
     projection = _projection(processes=(later, first))
 
     assert due_expression_retry_processes(
-        projection, at=NOW + timedelta(minutes=9)
+        projection, at=NOW + timedelta(seconds=29)
     ) == ()
     assert due_expression_retry_processes(
-        projection, at=NOW + timedelta(minutes=12)
+        projection, at=NOW + timedelta(minutes=2)
+    ) == (first,)
+    assert due_expression_retry_processes(
+        projection, at=NOW + timedelta(minutes=2, seconds=30)
     ) == (first, later)
+
+
+def test_technical_notice_candidate_requires_second_attempt_technical_terminal() -> None:
+    first = _claimed_process()
+    first_failed = _projection(
+        processes=(first,),
+        logical_time=NOW + timedelta(seconds=30),
+    )
+    assert expression_episode_technical_notice_candidates(first_failed) == ()
+
+    process = _claimed_process(
+        attempt=2,
+        acquired_at=NOW + timedelta(seconds=30),
+    )
+    retry_inflight = _projection(
+        processes=(process,),
+        failed=False,
+        logical_time=NOW + timedelta(seconds=45),
+    )
+    assert expression_episode_technical_notice_candidates(retry_inflight) == ()
+
+    retry_failed = _projection(
+        processes=(process,),
+        logical_time=NOW + timedelta(seconds=45),
+    )
+    candidates = expression_episode_technical_notice_candidates(retry_failed)
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate.trigger_id == process.trigger_id
+    assert candidate.observation_id == OBSERVATION_ID
+    assert candidate.policy_id == EXPRESSION_TECHNICAL_NOTICE_POLICY_ID
+    assert candidate.due_at == NOW + timedelta(minutes=2, seconds=30)
+    assert candidate.due_at >= retry_failed.logical_time + timedelta(seconds=30)
+    assert candidate.notice_key == (
+        "system-notice:expression-technical-pending:"
+        f"{EXPRESSION_TECHNICAL_NOTICE_POLICY_ID}:{process.trigger_id}"
+    )
+
+
+def test_technical_notice_candidate_requires_the_latest_still_pending_inbound() -> None:
+    failed = _claimed_process(
+        attempt=2,
+        acquired_at=NOW + timedelta(seconds=30),
+    )
+    projection = _projection(processes=(failed,), failed=True)
+    projection.message_observations = (
+        *projection.message_observations,
+        SimpleNamespace(
+            observation_id=f"{OBSERVATION_ID}:new",
+            source_event_id="qq-message:new",
+            event_payload_hash="2" * 64,
+            world_revision=2,
+        ),
+    )
+    projection.committed_world_event_refs = (
+        *projection.committed_world_event_refs,
+        SimpleNamespace(
+            event_id="event:observation:new",
+            event_type="ObservationRecorded",
+            world_revision=2,
+            payload_hash="2" * 64,
+        ),
+    )
+
+    assert expression_episode_technical_notice_candidates(projection) == ()
+
+    projection.trigger_processes = (
+        failed.model_copy(
+            update={
+                "state": "terminal",
+                "runtime_outcome_ref": "expression-episode:silent",
+            }
+        ),
+    )
+    projection.message_observations = projection.message_observations[:1]
+    projection.committed_world_event_refs = projection.committed_world_event_refs[:1]
+
+    assert expression_episode_technical_notice_candidates(projection) == ()

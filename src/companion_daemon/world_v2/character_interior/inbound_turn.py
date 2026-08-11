@@ -21,7 +21,15 @@ import json
 from typing import Mapping
 
 from .inbound_wire import _combine_usage
-from ..deliberation import ModelInput, ModelOutput
+from ..deliberation import (
+    AuthoredCandidateInvocationAudit,
+    ModelInput,
+    ModelOutput,
+    ModelUsageProvenance,
+    PhysicalProviderInvocationAudit,
+    ProviderSubcallAudit,
+    ValidationTechnicalFailure,
+)
 from ..proposal_envelope import (
     validate_proposal_envelope,
 )
@@ -36,6 +44,11 @@ from ..recall_runtime import (
 )
 from ..schema_core import canonicalize_json_value
 from ..schemas import ProjectionCursor
+from ..validation_failure_codes import (
+    sanitize_physical_provider_failure_code,
+    sanitize_provider_subcall_failure_code,
+    sanitize_validation_technical_failure_code,
+)
 from .audit import recorded_character_interior_lineage
 from .inbound_author import _InboundRecallRequested
 from .contracts import (
@@ -43,7 +56,7 @@ from .contracts import (
     _InteriorAuthorLineage,
     _InteriorCapabilityManifest,
 )
-from .core import CharacterInterior
+from .core import CharacterInterior, _RoleFacultyTechnicalFailure
 from .ports import _InteriorRoleRequest, _RoleResultContractError
 from .run_result import CausalOpportunityIdentity
 
@@ -70,6 +83,178 @@ def _digest(value: object) -> str:
 
 def _sha256(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _recall_control_transfer_audit(
+    request: _InteriorRoleRequest,
+) -> tuple[AuthoredCandidateInvocationAudit | None, ModelUsageProvenance | None]:
+    """Restore one prompt/body-free initial role call from the durable turn."""
+
+    lineage = request.recall_parent_author_lineage
+    if lineage is None:
+        if request.recall_parent_usage_json is not None:
+            raise RuntimeError("inbound Recall parent usage lost its author")
+        return None, None
+    usage = (
+        ModelUsageProvenance.model_validate_json(
+            request.recall_parent_usage_json,
+            strict=True,
+        )
+        if request.recall_parent_usage_json is not None
+        else None
+    )
+    return (
+        AuthoredCandidateInvocationAudit(
+            purpose="recall_control_transfer",
+            model_call_id=lineage.model_call_id,
+            request_hash=lineage.request_hash.removeprefix("sha256:"),
+            response_hash=lineage.response_hash.removeprefix("sha256:"),
+            model_id=lineage.model_id,
+            model_version=lineage.model_version,
+            outcome="control_transfer",
+            usage=usage,
+        ),
+        usage,
+    )
+
+
+def _merge_recall_control_transfer_audit(
+    existing: tuple[AuthoredCandidateInvocationAudit, ...],
+    recall_audit: AuthoredCandidateInvocationAudit | None,
+) -> tuple[AuthoredCandidateInvocationAudit, ...]:
+    """Include one durable Recall parent without duplicating its invocation."""
+
+    if recall_audit is None:
+        return existing
+    matches = tuple(
+        item for item in existing if item.model_call_id == recall_audit.model_call_id
+    )
+    if not matches:
+        return (recall_audit, *existing)
+    if len(matches) != 1 or matches[0] != recall_audit:
+        raise RuntimeError("inbound Recall parent audit changed identity")
+    return existing
+
+
+def _sanitized_role_technical_failure(
+    exc: ValidationTechnicalFailure,
+    *,
+    failure_code: str,
+    recall_audit: AuthoredCandidateInvocationAudit | None = None,
+) -> _RoleFacultyTechnicalFailure:
+    """Copy only typed, prompt/body-free provider evidence across the Faculty port."""
+
+    try:
+        model_call_id = exc.model_call_id
+        request_hash = exc.request_hash
+        if (model_call_id is None) != (request_hash is None):
+            raise ValueError("partial provider identity")
+        if model_call_id is not None and (
+            not isinstance(model_call_id, str)
+            or not model_call_id
+            or len(model_call_id) > 256
+            or not isinstance(request_hash, str)
+            or len(request_hash) != 64
+            or any(value not in "0123456789abcdef" for value in request_hash)
+        ):
+            raise ValueError("invalid provider identity")
+
+        attempted_model_id = exc.attempted_model_id
+        attempted_model_version = exc.attempted_model_version
+        if (attempted_model_id is None) != (attempted_model_version is None):
+            raise ValueError("partial attempted-model identity")
+        if attempted_model_id is not None and (
+            not isinstance(attempted_model_id, str)
+            or not attempted_model_id
+            or len(attempted_model_id) > 256
+            or not isinstance(attempted_model_version, str)
+            or not attempted_model_version
+            or len(attempted_model_version) > 256
+        ):
+            raise ValueError("invalid attempted-model identity")
+
+        if exc.usage is not None and not isinstance(exc.usage, ModelUsageProvenance):
+            raise ValueError("invalid usage evidence type")
+        usage = (
+            ModelUsageProvenance.model_validate(
+                exc.usage.model_dump(mode="python"),
+                strict=True,
+            )
+            if exc.usage is not None
+            else None
+        )
+        if usage is not None and attempted_model_id is None:
+            raise ValueError("usage has no attempted-model identity")
+        if (
+            len(exc.provider_subcall_audits) > 16
+            or len(exc.authored_candidate_audits) > 8
+            or len(exc.physical_provider_audits) > 1
+        ):
+            raise ValueError("technical audit evidence count is out of bounds")
+        provider_subcall_audits = tuple(
+            ProviderSubcallAudit.model_validate(
+                {
+                    **item.model_dump(mode="python"),
+                    "failure_code": sanitize_provider_subcall_failure_code(
+                        item.failure_code,
+                        outcome=item.outcome,
+                    ),
+                },
+                strict=True,
+            )
+            for item in exc.provider_subcall_audits
+            if isinstance(item, ProviderSubcallAudit)
+        )
+        if len(provider_subcall_audits) != len(exc.provider_subcall_audits):
+            raise ValueError("invalid provider-subcall evidence type")
+        authored_candidate_audits = tuple(
+            AuthoredCandidateInvocationAudit.model_validate(
+                item.model_dump(mode="python"),
+                strict=True,
+            )
+            for item in exc.authored_candidate_audits
+            if isinstance(item, AuthoredCandidateInvocationAudit)
+        )
+        if len(authored_candidate_audits) != len(exc.authored_candidate_audits):
+            raise ValueError("invalid authored-candidate evidence type")
+        authored_candidate_audits = _merge_recall_control_transfer_audit(
+            authored_candidate_audits,
+            recall_audit,
+        )
+        if len(authored_candidate_audits) > 8:
+            raise ValueError("technical authored-candidate evidence count is out of bounds")
+        physical_provider_audits = tuple(
+            PhysicalProviderInvocationAudit.model_validate(
+                {
+                    **item.model_dump(mode="python"),
+                    "failure_code": sanitize_physical_provider_failure_code(
+                        item.failure_code,
+                        outcome=item.outcome,
+                    ),
+                },
+                strict=True,
+            )
+            for item in exc.physical_provider_audits
+            if isinstance(item, PhysicalProviderInvocationAudit)
+        )
+        if len(physical_provider_audits) != len(exc.physical_provider_audits):
+            raise ValueError("invalid physical-provider evidence type")
+    except Exception:
+        # Do not echo a malformed provider object or validation body into the
+        # next exception. Core will classify this as a real Faculty outage.
+        raise RuntimeError("inbound role technical evidence is invalid") from None
+
+    return _RoleFacultyTechnicalFailure(
+        failure_code,
+        model_call_id=model_call_id,
+        request_hash=request_hash,
+        attempted_model_id=attempted_model_id,
+        attempted_model_version=attempted_model_version,
+        usage=usage,
+        provider_subcall_audits=provider_subcall_audits,
+        authored_candidate_audits=authored_candidate_audits,
+        physical_provider_audits=physical_provider_audits,
+    )
 
 
 def _logical_time(request: ModelInput) -> datetime:
@@ -498,15 +683,41 @@ class InboundTurnFaculty:
                     response_hash="sha256:" + recall_choice.response_hash,
                     attempt_ordinal=0,
                 ).model_dump(mode="python"),
+                "author_usage_json": (
+                    _canonical(recall_choice.usage.model_dump(mode="json"))
+                    if recall_choice.usage is not None
+                    else None
+                ),
             }
+        except ValidationTechnicalFailure as exc:
+            failure_code = sanitize_validation_technical_failure_code(exc.failure_code)
+            if failure_code is None:
+                raise RuntimeError("inbound role technical failure is not installed") from None
+            recall_audit, _recall_usage = _recall_control_transfer_audit(request)
+            raise _sanitized_role_technical_failure(
+                exc,
+                failure_code=failure_code,
+                recall_audit=recall_audit,
+            ) from None
         if not isinstance(output, ModelOutput):
             raise TypeError("inbound character author output is invalid")
         if output.prefetch_trace is not None or output.presented_prefetch_traces:
             raise RuntimeError("inbound author attempted to own the retired prefetch lifecycle")
         recall_parent = self._recall_parents.get(request.inner_turn_id)
-        if recall_parent is not None:
+        recall_audit, recall_usage = _recall_control_transfer_audit(request)
+        if recall_parent is not None and (
+            recall_audit is None
+            or recall_parent.model_id != recall_audit.model_id
+            or recall_parent.model_version != recall_audit.model_version
+            or recall_parent.model_call_id != recall_audit.model_call_id
+            or recall_parent.request_hash != recall_audit.request_hash
+            or recall_parent.response_hash != recall_audit.response_hash
+            or recall_parent.usage != recall_usage
+        ):
+            raise RuntimeError("inbound durable Recall parent changed identity")
+        if recall_audit is not None:
             usage = _combine_usage(
-                recall_parent.usage,
+                recall_usage,
                 output.usage,
                 owned_input.call_id,
             )
@@ -515,6 +726,10 @@ class InboundTurnFaculty:
                     "usage": usage,
                     "input_tokens": usage.input_tokens if usage is not None else None,
                     "output_tokens": usage.output_tokens if usage is not None else None,
+                    "authored_candidate_audits": _merge_recall_control_transfer_audit(
+                        output.authored_candidate_audits,
+                        recall_audit,
+                    ),
                 }
             )
         winning_call = output.winning_model_call_id or owned_input.call_id
@@ -752,9 +967,26 @@ class CharacterInteriorInboundDeliberationAdapter:
             )
         )
         if decision.status == "technical_failure":
-            raise RuntimeError(
-                "character_interior_inbound_" + (decision.failure_code or "technical_failure")
-            )
+            failure_code = sanitize_validation_technical_failure_code(decision.failure_code)
+            if failure_code is not None:
+                evidence = self._interior._consume_role_failure_evidence(  # noqa: SLF001
+                    inner_turn_id=decision.inner_turn_id,
+                    failure_code=failure_code,
+                )
+                if evidence is None:
+                    raise ValidationTechnicalFailure(failure_code)
+                raise ValidationTechnicalFailure(
+                    failure_code,
+                    model_call_id=evidence.model_call_id,
+                    request_hash=evidence.request_hash,
+                    attempted_model_id=evidence.attempted_model_id,
+                    attempted_model_version=evidence.attempted_model_version,
+                    usage=evidence.usage,  # type: ignore[arg-type]
+                    provider_subcall_audits=evidence.provider_subcall_audits,  # type: ignore[arg-type]
+                    authored_candidate_audits=evidence.authored_candidate_audits,  # type: ignore[arg-type]
+                    physical_provider_audits=evidence.physical_provider_audits,  # type: ignore[arg-type]
+                )
+            raise RuntimeError("character_interior_inbound_technical_failure")
         if decision.status != "decided" or not isinstance(decision.decision, dict):
             raise RuntimeError("character_interior_inbound_result_unavailable")
         payload = decision.decision

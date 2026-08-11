@@ -15,6 +15,7 @@ from companion_daemon.world_v2.structured_source_review_model import (
 )
 from companion_daemon.world_v2.visible_source_closure_protocol import (
     VISIBLE_SOURCE_CLOSURE_CONTRACT,
+    VisibleSourceClosureWireFailure,
     parse_visible_source_closure,
     visible_source_closure_messages,
     visible_source_closure_schema,
@@ -94,7 +95,7 @@ def test_visible_source_verdict_request_carries_one_compact_evidence_table() -> 
     assert "我有点担心你，你现在发烧了" in messages[0]["content"]
 
 
-def test_visible_source_verdict_requires_one_ordered_decision_per_beat() -> None:
+def test_visible_source_verdict_requires_one_complete_unique_decision_per_beat() -> None:
     raw = _wire(
         _decision(
             beat_index=1,
@@ -103,12 +104,75 @@ def test_visible_source_verdict_requires_one_ordered_decision_per_beat() -> None
         )
     )
 
-    with pytest.raises(ValueError, match="each visible Beat exactly once"):
+    with pytest.raises(
+        VisibleSourceClosureWireFailure,
+        match="each visible Beat exactly once",
+    ) as raised:
         parse_visible_source_closure(
             raw,
             visible_beats=("第一条", "第二条"),
             source_ref_kinds=(),
         )
+
+    assert raised.value.code == "beat_coverage_invalid"
+    assert raised.value.beat_index is None
+    assert raised.value.field == "decisions"
+
+
+def test_visible_source_verdict_canonicalizes_complete_unique_beat_order() -> None:
+    proof = parse_visible_source_closure(
+        _wire(
+            _decision(
+                beat_index=1,
+                verdict="source_free",
+                role="commitment",
+            ),
+            _decision(
+                beat_index=0,
+                verdict="source_free",
+                role="private_state",
+            ),
+        ),
+        visible_beats=("我现在有点担心。", "这件事我会记着。"),
+        source_ref_kinds=(),
+    )
+
+    assert [segment.locator.beat_index for segment in proof.segments] == [0, 1]
+    assert [segment.locator.text for segment in proof.segments] == [
+        "我现在有点担心。",
+        "这件事我会记着。",
+    ]
+
+
+def test_visible_source_verdict_schema_failure_has_content_free_coordinate() -> None:
+    raw = json.dumps(
+        {
+            "contract": "visible-beat-source-verdict.1",
+            "decisions": [
+                {
+                    "beat_index": 0,
+                    "verdict": "source_free",
+                    "semantic_role": "private_state",
+                    "source_ref_indexes": [],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(VisibleSourceClosureWireFailure) as raised:
+        parse_visible_source_closure(
+            raw,
+            visible_beats=("模型正文不应出现在修复坐标里。",),
+            source_ref_kinds=(),
+        )
+
+    assert raised.value.code == "schema_invalid"
+    assert raised.value.beat_index == 0
+    assert raised.value.field == "decisions.0.subject_role"
+    assert "模型正文" not in json.dumps(
+        raised.value.correction_coordinate(),
+        ensure_ascii=False,
+    )
 
 
 def test_visible_source_verdict_derives_whole_beat_locator_host_side() -> None:
@@ -230,13 +294,20 @@ def test_visible_source_verdict_rejects_cross_actor_source_binding() -> None:
         )
     )
 
-    with pytest.raises(ValueError, match="source actor does not match"):
+    with pytest.raises(
+        VisibleSourceClosureWireFailure,
+        match="source actor does not match",
+    ) as raised:
         parse_visible_source_closure(
             raw,
             visible_beats=("我今天淋雨了。",),
             source_ref_kinds=("current_counterpart_report",),
             source_ref_subject_roles=("counterpart",),
         )
+
+    assert raised.value.code == "subject_binding_invalid"
+    assert raised.value.beat_index == 0
+    assert raised.value.field == "decisions.0.subject_role"
 
 
 @pytest.mark.parametrize("subject_role", ["general", "none"])

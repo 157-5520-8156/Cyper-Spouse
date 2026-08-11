@@ -27,6 +27,10 @@ from .proposal_audit_schemas import (
 from .proposal_envelope import validate_proposal_envelope
 from .schema_core import FrozenModel
 from .schemas import CommitResult, ProjectionCursor, WorldEvent
+from .validation_failure_codes import (
+    sanitize_physical_provider_failure_code,
+    sanitize_provider_subcall_failure_code,
+)
 
 
 class ProposalAuditContext(FrozenModel):
@@ -157,7 +161,13 @@ class ProposalAuditRecorder:
             audit_json = model_audit_json(audit)  # type: ignore[arg-type]
             model_payload = ModelResultRecordedPayload(
                 audit_contract=(
-                    "model-result-audit.7"
+                    "model-result-audit.8"
+                    if audit.physical_provider_audits
+                    and audit.semantic_stream_part is None
+                    and audit.parent_model_call_id is None
+                    and audit.status in {"main_timeout", "main_exception"}
+                    and audit.outcome in {"timeout", "exception"}
+                    else "model-result-audit.7"
                     if audit.character_interior_lineage is not None
                     else "model-result-audit.6"
                     if audit.semantic_stream_part is not None
@@ -379,14 +389,6 @@ def _strict_result(value: DeliberationResult) -> DeliberationResult:
             attempt_audits=audits,
         )
     except Exception as exc:
-        import logging
-
-        logging.getLogger("revalidprobe").warning(
-            "strict revalidation inner %s: %s",
-            type(exc).__name__,
-            str(exc)[:400],
-            exc_info=True,
-        )
         raise ValueError("deliberation result failed strict revalidation") from exc
 
 
@@ -426,13 +428,27 @@ def _strict_audit(value: ModelResultAudit) -> ModelResultAudit:
             model_version=item.model_version,
             lane=item.lane,
             outcome=item.outcome,
-            failure_code=item.failure_code,
+            failure_code=sanitize_provider_subcall_failure_code(
+                item.failure_code,
+                outcome=item.outcome,
+            ),
             response_hash=item.response_hash,
             usage=item.usage,
         )
         for item in raw_subcalls
     )
-    physical = tuple(PhysicalProviderInvocationAudit.model_validate(item) for item in raw_physical)
+    physical = tuple(
+        PhysicalProviderInvocationAudit.model_validate(
+            {
+                **item.model_dump(mode="python"),
+                "failure_code": sanitize_physical_provider_failure_code(
+                    item.failure_code,
+                    outcome=item.outcome,
+                ),
+            }
+        )
+        for item in raw_physical
+    )
     route = ModelRoute(
         tier=value.route.tier,
         reason_code=value.route.reason_code,
@@ -491,27 +507,42 @@ def _strict_audit(value: ModelResultAudit) -> ModelResultAudit:
         raise ValueError("provider subcall parent has no batch-persisted author attempt")
     if physical:
         terminal = physical[0]
-        if (
-            audit.semantic_stream_part != "tail"
-            or audit.parent_model_call_id != terminal.model_call_id
-            or audit.model_call_id not in terminal.semantic_model_call_ids
-            or audit.request_hash != terminal.request_hash
-        ):
+        bound_stream_tail = (
+            audit.semantic_stream_part == "tail"
+            and audit.parent_model_call_id == terminal.model_call_id
+            and audit.model_call_id in terminal.semantic_model_call_ids
+            and audit.request_hash == terminal.request_hash
+        )
+        independent_failed_main = (
+            audit.semantic_stream_part is None
+            and audit.parent_model_call_id is None
+            and audit.status in {"main_timeout", "main_exception"}
+            and audit.outcome in {"timeout", "exception"}
+            and audit.model_call_id != terminal.model_call_id
+            and audit.model_call_id not in terminal.semantic_model_call_ids
+        )
+        if not bound_stream_tail and not independent_failed_main:
             import logging
 
             logging.getLogger("tailprobe").warning(
-                "tail binding mismatch part=%s parent=%s call=%s in_semantic=%s hash_ok=%s "
-                "terminal_call=%s terminal_semantic=%s terminal_hash=%s",
+                "physical binding mismatch part=%s parent=%s call=%s in_semantic=%s "
+                "hash_ok=%s status=%s outcome=%s terminal_call=%s "
+                "terminal_semantic=%s terminal_hash=%s",
                 audit.semantic_stream_part,
                 audit.parent_model_call_id,
                 audit.model_call_id,
                 audit.model_call_id in terminal.semantic_model_call_ids,
                 audit.request_hash == terminal.request_hash,
+                audit.status,
+                audit.outcome,
                 terminal.model_call_id,
                 tuple(terminal.semantic_model_call_ids),
                 terminal.request_hash,
             )
-            raise ValueError("physical provider terminal is not bound to its stream tail")
+            raise ValueError(
+                "physical provider terminal is neither an independent failed-main "
+                "call nor bound to its stream tail"
+            )
     return audit
 
 
@@ -522,12 +553,13 @@ def authored_candidate_model_audit(
 ) -> ModelResultAudit:
     """Expand one non-final author invocation into an immutable audit record."""
 
-    corrective = value.purpose not in {
+    control_transfer = value.outcome == "control_transfer"
+    corrective = not control_transfer and value.purpose not in {
         "primary_initial",
         "quick_recovery_initial",
         "provisional_initial",
     }
-    unresolved = value.outcome == "validation_unresolved"
+    returned = value.outcome in {"validation_unresolved", "control_transfer"}
     model_result_ref = "model-result:" + sha256(
         canonical_json(
             {
@@ -549,12 +581,12 @@ def authored_candidate_model_audit(
         model_version=value.model_version,
         request_hash=value.request_hash,
         response_hash=value.response_hash,
-        status="candidate_returned" if unresolved else "main_invalid",
+        status="candidate_returned" if returned else "main_invalid",
         failure_code=(
-            None if unresolved else "corrective_invalid" if corrective else "primary_invalid"
+            None if returned else "corrective_invalid" if corrective else "primary_invalid"
         ),
         slot="corrective" if corrective else "primary",
-        outcome="returned" if unresolved else "invalid",
+        outcome="returned" if returned else "invalid",
         input_tokens=value.usage.input_tokens if value.usage is not None else None,
         output_tokens=value.usage.output_tokens if value.usage is not None else None,
         usage=value.usage,
@@ -604,7 +636,10 @@ def provider_subcall_model_audit(
         failure_code=(
             None
             if succeeded
-            else value.failure_code
+            else sanitize_provider_subcall_failure_code(
+                value.failure_code,
+                outcome=value.outcome,
+            )
             or (
                 "source_review_timeout" if value.outcome == "timeout" else "source_review_exception"
             )
@@ -649,7 +684,10 @@ def physical_provider_model_audit(
         request_hash=value.request_hash,
         response_hash=value.response_hash,
         status=f"provider_{value.outcome}",  # type: ignore[arg-type]
-        failure_code=value.failure_code,
+        failure_code=sanitize_physical_provider_failure_code(
+            value.failure_code,
+            outcome=value.outcome,
+        ),
         slot="primary",
         outcome=value.outcome,
         input_tokens=value.usage.input_tokens if value.usage is not None else None,

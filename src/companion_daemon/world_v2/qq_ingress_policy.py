@@ -246,6 +246,11 @@ class QQIngressStore(Protocol):
     ) -> QQIngressBatch | None: ...
     def complete(self, *, batch_id: str, outcome_status: str, action_id: str | None) -> None: ...
     def submission(self, source_event_id: str) -> QQIngressSubmission | None: ...
+    def has_uncommitted_content(
+        self,
+        *,
+        excluding_source_event_ids: tuple[str, ...] = (),
+    ) -> bool: ...
     def close(self) -> None: ...
 
 
@@ -500,6 +505,19 @@ class MemoryQQIngressStore:
     def submission(self, source_event_id: str) -> QQIngressSubmission | None:
         record = self._fragments.get(source_event_id)
         return self._submission(record) if record is not None else None
+
+    def has_uncommitted_content(
+        self,
+        *,
+        excluding_source_event_ids: tuple[str, ...] = (),
+    ) -> bool:
+        excluded = set(excluding_source_event_ids)
+        return any(
+            source_event_id not in excluded
+            and item.state != "committed"
+            and item.fragment.content_shape != "control"
+            for source_event_id, item in self._fragments.items()
+        )
 
     def _submission(self, record: _StoredFragment) -> QQIngressSubmission:
         batch = self._batches.get(record.batch_id or "")
@@ -763,6 +781,30 @@ class SQLiteQQIngressStore:
             state=row["state"], batch_id=row["batch_id"],
             outcome_status=row["outcome_status"], action_id=row["action_id"],
         )
+
+    def has_uncommitted_content(
+        self,
+        *,
+        excluding_source_event_ids: tuple[str, ...] = (),
+    ) -> bool:
+        if len(excluding_source_event_ids) > 16:
+            raise ValueError("QQ ingress exclusion set is out of bounds")
+        placeholders = ",".join("?" for _ in excluding_source_event_ids)
+        exclusion = (
+            f" AND source_event_id NOT IN ({placeholders})"
+            if placeholders
+            else ""
+        )
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT 1 FROM world_v2_qq_ingress_fragments "
+                "WHERE state!='committed' "
+                "AND json_extract(payload_json, '$.content_shape')!='control'"
+                + exclusion
+                + " LIMIT 1",
+                excluding_source_event_ids,
+            ).fetchone()
+        return row is not None
 
     @staticmethod
     def _decode_fragment(payload: Mapping[str, object]) -> QQIngressFragment:

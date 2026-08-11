@@ -1385,7 +1385,10 @@ class StructuredCharacterRoleFaculty:
                 "result_status": "recall_request",
             },
             "capability_manifest": capability,
-            "purpose_contract": self._contract_view(contract),
+            "purpose_contract": self._contract_view(
+                contract,
+                capability_manifest=request.capability_manifest,
+            ),
             "wire_contract": {
                 "allowed_statuses": allowed_statuses,
                 "fields": [
@@ -1571,14 +1574,62 @@ class StructuredCharacterRoleFaculty:
         DeepSeek's JSON mode occasionally emits a complete purpose payload in
         the generic ``decision`` slot while omitting the envelope.  This
         adapter only moves an object when its own explicit source binding is
-        already present; it must never promote attention refs or invent
-        summary, refs, timing, silence, or any semantic field.  Proposal contracts have the inverse legacy
+        already present; it must never promote attention refs into decision
+        evidence or invent summary, refs, timing, silence, or any semantic
+        field.  Proposal contracts have the inverse legacy
         shape: a duplicate semantic decision string appears beside an already
         complete typed proposal.  It is safe to discard that duplicate only
         when it exactly agrees with the typed proposal.
         """
 
         normalized = dict(decoded)
+        if contract.purpose == "private_impression_reflection":
+            # Reflection evidence is exposed to the provider through short
+            # tokens.  Translate an attended token only when both its semantic
+            # source binding and its pinned authority binding close over the
+            # exact manifest. Unknown or ambiguous tokens remain unchanged and
+            # fail the ordinary attended-source validation below.
+            manifest = request.capability_manifest
+            raw_attention = normalized.get("attended_source_refs")
+            if manifest is not None and isinstance(raw_attention, list):
+                raw_sources = manifest.payload.get("reflection_sources")
+                raw_token_map = manifest.payload.get("token_map")
+                raw_short_tokens = manifest.payload.get("short_tokens")
+                installed_tokens = (
+                    {item for item in raw_short_tokens if isinstance(item, str)}
+                    if isinstance(raw_short_tokens, list)
+                    else set()
+                )
+                attention_token_map: dict[str, str] = {}
+                ambiguous_tokens: set[str] = set()
+                if isinstance(raw_sources, list) and isinstance(raw_token_map, dict):
+                    for raw_source in raw_sources:
+                        if not isinstance(raw_source, Mapping):
+                            continue
+                        short_token = raw_source.get("short_token")
+                        semantic_source_ref = raw_source.get("source_ref")
+                        authority_source_ref = raw_source.get("authority_event_ref")
+                        if (
+                            not isinstance(short_token, str)
+                            or short_token not in installed_tokens
+                            or not isinstance(semantic_source_ref, str)
+                            or raw_token_map.get(short_token) != semantic_source_ref
+                            or not isinstance(authority_source_ref, str)
+                            or authority_source_ref not in manifest.source_refs
+                            or authority_source_ref not in request.snapshot.source_refs
+                        ):
+                            continue
+                        previous = attention_token_map.get(short_token)
+                        if previous is not None and previous != authority_source_ref:
+                            ambiguous_tokens.add(short_token)
+                            continue
+                        attention_token_map[short_token] = authority_source_ref
+                normalized["attended_source_refs"] = [
+                    attention_token_map.get(item, item)
+                    if isinstance(item, str) and item not in ambiguous_tokens
+                    else item
+                    for item in raw_attention
+                ]
         raw_decision = normalized.get("decision")
         proposals = normalized.get("proposals")
 
@@ -2436,7 +2487,11 @@ class StructuredCharacterRoleFaculty:
         }
 
     @staticmethod
-    def _contract_view(contract: PurposeDecisionContract) -> dict[str, object]:
+    def _contract_view(
+        contract: PurposeDecisionContract,
+        *,
+        capability_manifest: _InteriorCapabilityManifest | None,
+    ) -> dict[str, object]:
         view: dict[str, object] = {
             "purpose": contract.purpose,
             "payload_contract": contract.payload_contract,
@@ -2504,16 +2559,28 @@ class StructuredCharacterRoleFaculty:
                 "disposition": "continue|cancel|defer|merge|supersede|new_beat"
             }
         if contract.purpose == "private_impression_reflection":
+            existing_impression_tokens = (
+                capability_manifest.payload.get("existing_impression_short_tokens")
+                if capability_manifest is not None
+                else None
+            )
+            replacement_available = bool(existing_impression_tokens)
             view["status_schema"] = {
                 "no_change": "proposals must be []",
                 "transition": "exactly one private_impression_transition proposal",
             }
             view["proposal_schema"] = {
                 "proposal_type": "private_impression_transition",
-                "decision": "retain|consolidate|supersede",
+                "decision": (
+                    "retain|consolidate|supersede"
+                    if replacement_available
+                    else "retain"
+                ),
                 "predecessor_refs": (
                     "selected existing-impression short tokens from "
                     "capability_manifest.payload.existing_impression_short_tokens"
+                    if replacement_available
+                    else "must be []"
                 ),
                 "source_refs": (
                     "selected offered short tokens from "
@@ -2524,6 +2591,8 @@ class StructuredCharacterRoleFaculty:
                     "predecessor_refs are existing-impression short tokens, every "
                     "predecessor must also be listed in source_refs, retain has no "
                     "predecessors, and consolidate/supersede has at least one"
+                    if replacement_available
+                    else "retain is the only installed transition and has no predecessors"
                 ),
                 "reflection_summary": "free tentative private reading",
                 "confidence_bp": "integer 0..10000",

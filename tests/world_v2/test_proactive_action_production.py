@@ -2165,7 +2165,7 @@ async def test_sqlite_production_composition_installs_proactive_budget_without_a
 async def test_production_proactive_lane_does_not_reauthor_after_timeout(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
-    proactive = _SlowPrimaryThenSilentDraftModel(primary_delay_seconds=0.05)
+    proactive = _SlowPrimaryThenSilentDraftModel(primary_delay_seconds=0.4)
     chat = _production_expression_wire(_NoExpectationChat())
     app = build_sqlite_world_v2_test_application(
         path=tmp_path / "proactive-timeout-policy.sqlite3",
@@ -2175,10 +2175,13 @@ async def test_production_proactive_lane_does_not_reauthor_after_timeout(
             reply_target="user:primary",
             action_pump_owner="worker:actions",
             interactive_turn_budget_policy=InteractiveTurnBudgetPolicy(
-                total_seconds=0.03,
-                hedge_after_seconds=0.005,
-                acceptance_dispatch_reserve_seconds=0.005,
-                first_provider_entry_seconds=0.001,
+                # This policy is shared by inbound and proactive authorship.
+                # Leave enough room for the production inbound composition so
+                # this regression exercises only the proactive timeout below.
+                total_seconds=0.25,
+                hedge_after_seconds=0.02,
+                acceptance_dispatch_reserve_seconds=0.02,
+                first_provider_entry_seconds=0.01,
                 technical_recovery_seconds=0.2,
                 validation_recovery_seconds=0.2,
                 validation_reselection_seconds=0.2,
@@ -2199,7 +2202,7 @@ async def test_production_proactive_lane_does_not_reauthor_after_timeout(
         now=NOW,
     )
     try:
-        await app.inbound(
+        inbound = await app.inbound(
             platform="http",
             platform_user_id="user.1",
             platform_message_id="message:proactive-timeout-policy",
@@ -2207,6 +2210,7 @@ async def test_production_proactive_lane_does_not_reauthor_after_timeout(
             observed_at=NOW,
             trace_id="trace:proactive-timeout-policy",
         )
+        assert inbound.status == "action_authorized"
         await app.tick(
             tick_id="tick:proactive-timeout-policy",
             logical_time_from=NOW,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import UTC, datetime
 from hashlib import sha256
 import threading
@@ -18,6 +19,7 @@ from companion_daemon.world_v2.character_interior.inbound_wire import (
     _incremental_first_expression,
     _stream_first_expression,
     _stream_tail_expression,
+    _normalize_source_review_attempt_failure_code,
     expression_draft_shape_contract,
     review_candidate_external_proposition_coverage,
     review_expression_source_closure,
@@ -984,6 +986,263 @@ def test_strict_forced_stream_removes_only_null_union_siblings() -> None:
     assert first["appraisal_draft"]["affect"] == "no_change"
     assert first["expression_draft"]["beats"][0]["text"] == "先说一句。"
     assert tail["expression_draft"]["timing_choice"] == "silent"
+
+
+def _compact_full_turn_event_envelope() -> dict[str, object]:
+    return {
+        "protocol": "character-interior-events.1",
+        "appraisal_draft": {"appraise": False, "affect": "no_change"},
+        "events": [
+            {
+                "type": "head",
+                "timing_choice": "now",
+                "beat": {"modality": "text", "text": "完整能力仍在同一次调用里。"},
+                "stance": "自然",
+                "brief_rationale": "我选择了完整表达能力。",
+                "confidence": 7000,
+                "world_claims": [],
+            },
+            {"type": "end"},
+        ],
+    }
+
+
+def test_compact_gate_recall_control_transfer_waits_for_complete_exact_object() -> None:
+    value: dict[str, object] = {
+        "result_kind": "recall",
+        "protocol": None,
+        "appraisal_draft": None,
+        "events": None,
+        "full_turn_json": None,
+        "private_turn_state": {
+            "contract": "private-turn-state.1",
+            "inner_state_summary": "我想先使用另一项角色能力。",
+            "attended_source_refs": [],
+        },
+        "recall_request": {
+            "query_text": "此前相关记忆",
+            "memory_kinds": ["episodic"],
+            "limit": 4,
+        },
+    }
+    raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    assert _incremental_first_expression(raw[:-1], forced_tool=True) is None
+    first = json.loads(_stream_first_expression(raw))
+    tail = json.loads(_stream_tail_expression(raw))
+
+    assert set(first) == {"private_turn_state", "recall_request"}
+    assert tail == first
+
+
+def test_compact_full_turn_recursively_uses_existing_event_parser() -> None:
+    envelope = _compact_full_turn_event_envelope()
+    raw = json.dumps(
+        {
+            "result_kind": "full_turn",
+            "protocol": None,
+            "appraisal_draft": None,
+            "events": None,
+            "full_turn_json": json.dumps(
+                envelope,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "private_turn_state": None,
+            "recall_request": None,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+    first = json.loads(_stream_first_expression(raw))
+    tail = json.loads(_stream_tail_expression(raw))
+
+    assert first["appraisal_draft"] == envelope["appraisal_draft"]
+    assert first["expression_draft"]["beats"][0]["text"] == (
+        "完整能力仍在同一次调用里。"
+    )
+    assert tail["expression_draft"]["timing_choice"] == "silent"
+
+
+def test_compact_full_turn_unescapes_inner_head_before_outer_string_finishes() -> None:
+    envelope = _compact_full_turn_event_envelope()
+    raw = json.dumps(
+        {
+            "result_kind": "full_turn",
+            "full_turn_json": json.dumps(
+                envelope,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    end_marker = ',{\\"type\\":\\"end\\"}'
+    prefix = raw[: raw.index(end_marker)]
+
+    assert (
+        _incremental_first_expression(
+            prefix,
+            forced_tool=True,
+            compact_gate=True,
+        )
+        is None
+    )
+    first_raw = _incremental_first_expression(prefix, forced_tool=True)
+
+    assert first_raw is not None
+    first = json.loads(first_raw)
+    assert first["expression_draft"]["beats"][0]["text"] == (
+        "完整能力仍在同一次调用里。"
+    )
+
+
+def _compact_reply_only_outer() -> dict[str, object]:
+    return {
+        "result_kind": "reply_only",
+        "protocol": "character-interior-events.1",
+        "appraisal_draft": {
+            "appraise": False,
+            "affect": "no_change",
+            "brief_rationale": "这句不形成持久评价。",
+            "behavior_tendency": "自由接话",
+            "stance": "自然",
+            "display_strategy": "直接说",
+            "confidence": 7000,
+        },
+        "events": [
+            {
+                "type": "head",
+                "private_turn_state": {
+                    "contract": "private-turn-state.1",
+                    "inner_state_summary": "我想直接接住这句话。",
+                    "attended_source_refs": [],
+                },
+                "timing_choice": "now",
+                "turn_posture": "continue",
+                "cadence": "conversational",
+                "beat": {"modality": "text", "text": "我在听。"},
+                "stance": "自然",
+                "brief_rationale": "这句已经完整。",
+                "confidence": 7000,
+                "response_expectation": None,
+                "response_expectation_assessment": None,
+                "world_claims": [],
+                "media_request": "none",
+                "media_source_refs": [],
+            },
+            {"type": "end"},
+        ],
+        "full_turn_json": None,
+        "private_turn_state": None,
+        "recall_request": None,
+    }
+
+
+def test_compact_reply_waits_for_complete_outer_union_before_head_authority() -> None:
+    raw = json.dumps(
+        _compact_reply_only_outer(),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+    assert (
+        _incremental_first_expression(
+            raw[:-1],
+            forced_tool=True,
+            compact_gate=True,
+        )
+        is None
+    )
+    assert (
+        _incremental_first_expression(
+            raw,
+            forced_tool=True,
+            compact_gate=True,
+        )
+        is not None
+    )
+
+
+@pytest.mark.parametrize("result_kind", ("reply_only", "full_turn"))
+def test_compact_visible_branch_rejects_late_cross_branch_sibling(
+    result_kind: str,
+) -> None:
+    if result_kind == "reply_only":
+        value = _compact_reply_only_outer()
+        value["full_turn_json"] = json.dumps(
+            _compact_full_turn_event_envelope(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    else:
+        value = {
+            "result_kind": "full_turn",
+            "protocol": None,
+            "appraisal_draft": {"appraise": False},
+            "events": None,
+            "full_turn_json": json.dumps(
+                _compact_full_turn_event_envelope(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "private_turn_state": None,
+            "recall_request": None,
+        }
+    raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    with pytest.raises(ValueError, match="compact gate|reply-only"):
+        _incremental_first_expression(
+            raw,
+            forced_tool=True,
+            compact_gate=True,
+        )
+
+
+def test_compact_gate_control_transfer_rejects_cross_branch_payload() -> None:
+    raw = json.dumps(
+        {
+            "result_kind": "full_turn",
+            "protocol": None,
+            "appraisal_draft": {"appraise": False},
+            "events": None,
+            "full_turn_json": json.dumps(_compact_full_turn_event_envelope()),
+            "private_turn_state": None,
+            "recall_request": None,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+    with pytest.raises(ValueError, match="compact gate"):
+        _stream_first_expression(raw)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "raw_code", "expected"),
+    (
+        ("timeout", "sk_live_SECRET", "provider_timeout"),
+        ("exception", "RemoteTransport:http_401", "provider_http_401"),
+        ("exception", "source_review_exception", "source_review_exception"),
+        ("exception", "authored_subcall_exception", "authored_subcall_exception"),
+        ("exception", "sk_live_SECRET", "provider_exception"),
+        ("winner", "sk_live_SECRET", None),
+    ),
+)
+def test_source_review_attempt_failure_code_never_persists_provider_content(
+    outcome: str,
+    raw_code: str,
+    expected: str | None,
+) -> None:
+    normalized = _normalize_source_review_attempt_failure_code(
+        raw_code,
+        outcome=outcome,
+    )
+
+    assert normalized == expected
+    assert "SECRET" not in (normalized or "")
 
 
 def test_strict_forced_stream_accepts_empty_sibling_beat_transport_padding() -> None:
@@ -18803,7 +19062,7 @@ async def test_compact_source_authority_never_falls_back_to_full_v7_after_wire_r
         ]
     )
 
-    with pytest.raises(ValidationTechnicalFailure):
+    with pytest.raises(ValidationTechnicalFailure) as raised:
         await review_expression_with_candidate_external_coverage(
             reviewer=reviewer,
             inventory_model=_StrictInventorySequenceJsonModel([]),
@@ -18821,6 +19080,90 @@ async def test_compact_source_authority_never_falls_back_to_full_v7_after_wire_r
         "visible-beat-source-verdict.1",
         "visible-beat-source-verdict.1",
     ]
+    correction = json.loads(reviewer.calls[1][0][-1]["content"])
+    assert correction["failure"] == {
+        "code": "beat_coverage_invalid",
+        "field": "decisions",
+    }
+    assert correction["structural_constraints"]["expected_beat_indexes"] == [0]
+    assert correction["structural_constraints"]["source_ref_count"] >= 0
+    assert correction["structural_constraints"]["verdict_role_ref_matrix"] == {
+        "source_free": {
+            "semantic_roles": [
+                "private_state",
+                "commitment",
+                "generalization",
+                "question",
+            ],
+            "source_ref_indexes": "empty",
+        },
+        "closed": {
+            "semantic_roles": ["external_proposition", "mixed"],
+            "source_ref_indexes": "one_to_eight_unique_in_range",
+        },
+        "unclosed": {
+            "semantic_roles": ["external_proposition", "mixed"],
+            "source_ref_indexes": "empty",
+        },
+    }
+    assert '"decisions":[]' not in reviewer.calls[1][0][-1]["content"]
+    assert raised.value.failure_code == "source_review_exception"
+
+
+@pytest.mark.asyncio
+async def test_compact_source_authority_exact_wire_repair_can_converge(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    text = "你这么一问，我忽然有点想你。"
+
+    class _SelectiveAuthority(_SequenceJsonModel):
+        def supports_strict_output_contract(self, contract: str) -> bool:
+            return contract == "visible-beat-source-verdict.1"
+
+    reviewer = _SelectiveAuthority(
+        [
+            '{"contract":"visible-beat-source-verdict.1","decisions":[]}',
+            json.dumps(
+                {
+                    "contract": "visible-beat-source-verdict.1",
+                    "decisions": [
+                        {
+                            "beat_index": 0,
+                            "verdict": "source_free",
+                            "semantic_role": "private_state",
+                            "subject_role": "companion",
+                            "source_ref_indexes": [],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="companion_daemon.world_v2.character_interior.inbound_wire",
+    ):
+        result = await review_expression_with_candidate_external_coverage(
+            reviewer=reviewer,
+            inventory_model=_StrictInventorySequenceJsonModel([]),
+            request=_qq_request(),
+            raw=_candidate_coverage_raw(text),
+            identity_frame=None,
+        )
+
+    assert result.review is None
+    assert result.visible_authority_exhaustive is True
+    assert len(reviewer.calls) == 2
+    correction = json.loads(reviewer.calls[1][0][-1]["content"])
+    assert correction["failure"] == {
+        "code": "beat_coverage_invalid",
+        "field": "decisions",
+    }
+    assert "code=beat_coverage_invalid" in caplog.text
+    assert "field=decisions" in caplog.text
+    assert text not in caplog.text
 
 
 @pytest.mark.asyncio

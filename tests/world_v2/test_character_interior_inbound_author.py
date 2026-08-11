@@ -64,8 +64,13 @@ from companion_daemon.world_v2.recall_embedding import OpenAICompatibleRecallEmb
 from companion_daemon.world_v2.recall_index import FeatureHashRecallEmbedding
 from companion_daemon.world_v2.character_interior.inbound_author import (
     _InboundCharacterAuthor as InboundCharacterAuthor,
+    _InboundRecallRequested,
     _retired_stream_candidate_audits,
 )
+from companion_daemon.world_v2.character_interior.inbound_tool_contract import (
+    InboundToolContracts,
+)
+from companion_daemon.world_v2.recall_runtime import mark_recall_budget_consumed
 from companion_daemon.world_v2.deliberation import PhysicalProviderInvocationAudit
 from companion_daemon.world_v2.world_turn_runtime import InboundTurn
 
@@ -1681,6 +1686,12 @@ class _ForcedStreamingCombinedProvider:
                 "stance": "自然回应",
                 "display_strategy": "直接说",
                 "confidence": 7000,
+                "meanings": None,
+                "attribution": None,
+                "severity": None,
+                "components": None,
+                "episode_id": None,
+                "resolution_summary": None,
             },
             "events": [
                 {
@@ -1730,6 +1741,788 @@ class _ForcedStreamingCombinedProvider:
             input_tokens=20,
             output_tokens=10,
         )
+
+
+class _ReplyOnlyStreamingProvider(_ForcedStreamingCombinedProvider):
+    supports_strict_tool_choice = True
+
+    def __init__(self, *, block_tail: bool = True) -> None:
+        super().__init__()
+        self.messages: list[list[dict[str, str]]] = []
+        self.prompt_specimens: list[dict[str, object]] = []
+        if not block_tail:
+            self.release_tail.set()
+
+    @staticmethod
+    def _prompt_specimen(messages: list[dict[str, str]]) -> dict[str, object]:
+        system = messages[0]["content"]
+        marker = "REPLY_ONLY PAYLOAD_JSON CANONICAL SPECIMEN JSON:\n"
+        start = system.index(marker) + len(marker)
+        specimen, end = json.JSONDecoder().raw_decode(system, start)
+        assert isinstance(specimen, dict)
+        assert system[end:].startswith(
+            "\nEND REPLY_ONLY PAYLOAD_JSON CANONICAL SPECIMEN JSON."
+        )
+        return specimen
+
+    @staticmethod
+    def _prompt_instruction_metadata(
+        messages: list[dict[str, str]],
+    ) -> dict[str, object]:
+        system = messages[0]["content"]
+        marker = "REPLY_ONLY PAYLOAD_JSON INSTRUCTION METADATA JSON:\n"
+        start = system.index(marker) + len(marker)
+        metadata, end = json.JSONDecoder().raw_decode(system, start)
+        assert isinstance(metadata, dict)
+        assert system[end:].startswith(
+            "\nEND REPLY_ONLY PAYLOAD_JSON INSTRUCTION METADATA JSON."
+        )
+        return metadata
+
+    @classmethod
+    def _follow_prompt_specimen(
+        cls,
+        value: object,
+        *,
+        domains: dict[str, object],
+    ) -> object:
+        if isinstance(value, list):
+            return [
+                cls._follow_prompt_specimen(item, domains=domains) for item in value
+            ]
+        if isinstance(value, dict):
+            return {
+                key: cls._follow_prompt_specimen(item, domains=domains)
+                for key, item in value.items()
+            }
+        replacements: dict[str, object] = {
+            "<role:boolean>": False,
+            "<role:confidence_bp>": 7000,
+            "<role:private_state_text>": "我想先自然接住这句话。",
+            "<role:visible_text>": "嗯，我在听。",
+            "<role:text>": "这是我此刻自己选择的表述。",
+            "<role:response_expectation_or_null>": None,
+            "<role:response_expectation_assessment_or_null>": None,
+        }
+        if isinstance(value, str) and value in replacements:
+            return replacements[value]
+        if isinstance(value, str) and value.startswith("<role:choose:"):
+            domain = value.removeprefix("<role:choose:").removesuffix(">")
+            choices = domains[domain]
+            assert isinstance(choices, list) and choices
+            return choices[0]
+        return value
+
+    def decoded_payload(self, messages: list[dict[str, str]]) -> dict[str, object]:
+        specimen = self._prompt_specimen(messages)
+        self.prompt_specimens.append(specimen)
+        metadata = self._prompt_instruction_metadata(messages)
+        domains = metadata["domains"]
+        assert isinstance(domains, dict)
+        payload = self._follow_prompt_specimen(specimen, domains=domains)
+        assert isinstance(payload, dict)
+        return payload
+
+    def payload(self, messages: list[dict[str, str]]) -> dict[str, object]:
+        return {
+            "result_kind": "reply_only",
+            "payload_json": json.dumps(
+                self.decoded_payload(messages),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        }
+
+    async def complete_json_stream_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        on_text_delta=None,  # type: ignore[no-untyped-def]
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> tuple[str, ModelUsageProvenance]:
+        del temperature
+        self.calls.append((tools, tool_choice))
+        self.messages.append(messages)
+        assert tools is not None
+        assert tools[0]["function"]["strict"] is True
+        payload = self.payload(messages)
+        for field in tools[0]["function"]["parameters"]["properties"]:
+            payload.setdefault(field, None)
+        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if on_text_delta is not None:
+            on_text_delta(raw[:-1])
+        self.tail_started.set()
+        await self.release_tail.wait()
+        if on_text_delta is not None:
+            on_text_delta(raw[-1:])
+        return raw, _metered_usage(
+            ref="usage:reply-only-stream",
+            input_tokens=20,
+            output_tokens=6,
+        )
+
+
+class _ReplyOnlyAppraisalStreamingProvider(_ReplyOnlyStreamingProvider):
+    def decoded_payload(self, messages: list[dict[str, str]]) -> dict[str, object]:
+        payload = super().decoded_payload(messages)
+        payload["appraisal_draft"] = {
+            "appraise": True,
+            "affect": "open",
+            "brief_rationale": "我把这句话理解成对方希望被认真听见。",
+            "behavior_tendency": "认真倾听",
+            "stance": "在场且关切",
+            "display_strategy": "自然接住",
+            "confidence": 8200,
+            "meanings": [
+                {
+                    "meaning": "对方希望我认真听见此刻的感受",
+                    "confidence": 8400,
+                }
+            ],
+            "attribution": "user",
+            "severity": 3200,
+            "components": [
+                {
+                    "dimension": "warmth",
+                    "target_intensity_bp": 3600,
+                }
+            ],
+            "episode_id": None,
+            "resolution_summary": None,
+        }
+        return payload
+
+
+class _FullTurnGateStreamingProvider(_ForcedStreamingCombinedProvider):
+    supports_strict_tool_choice = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.messages: list[list[dict[str, str]]] = []
+        self.tool_names: list[str] = []
+        self.prompt_grammars: list[dict[str, object]] = []
+
+    @staticmethod
+    def _prompt_grammar(messages: list[dict[str, str]]) -> dict[str, object]:
+        system = messages[0]["content"]
+        marker = "FULL_TURN PAYLOAD_JSON CANONICAL SPECIMEN JSON:\n"
+        start = system.index(marker) + len(marker)
+        grammar, end = json.JSONDecoder().raw_decode(system, start)
+        assert isinstance(grammar, dict)
+        assert system[end:].startswith(
+            "\nEND FULL_TURN PAYLOAD_JSON CANONICAL SPECIMEN JSON."
+        )
+        return grammar
+
+    @staticmethod
+    def _prompt_instruction_metadata(
+        messages: list[dict[str, str]],
+    ) -> dict[str, object]:
+        system = messages[0]["content"]
+        marker = "FULL_TURN PAYLOAD_JSON INSTRUCTION METADATA JSON:\n"
+        start = system.index(marker) + len(marker)
+        metadata, end = json.JSONDecoder().raw_decode(system, start)
+        assert isinstance(metadata, dict)
+        assert system[end:].startswith(
+            "\nEND FULL_TURN PAYLOAD_JSON INSTRUCTION METADATA JSON."
+        )
+        return metadata
+
+    @classmethod
+    def _follow_prompt_grammar(
+        cls,
+        value: object,
+        *,
+        domains: dict[str, object],
+    ) -> object:
+        if isinstance(value, list):
+            return [cls._follow_prompt_grammar(item, domains=domains) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: cls._follow_prompt_grammar(item, domains=domains)
+                for key, item in value.items()
+            }
+        if value == "<role:boolean>":
+            return False
+        if value == "<role:confidence_bp>":
+            return 7000
+        if value == "<role:private_state_text>":
+            return "我想用完整能力把这句话说清楚。"
+        if value == "<role:visible_text>":
+            return "这次我选择完整地回应。"
+        if value == "<role:text>":
+            return "这是我此刻自己选择的表述。"
+        if value in {
+            "<role:response_expectation_or_null>",
+            "<role:response_expectation_assessment_or_null>",
+        }:
+            return None
+        if isinstance(value, str) and value.startswith("<role:choose:"):
+            domain = value.removeprefix("<role:choose:").removesuffix(">")
+            choices = domains[domain]
+            assert isinstance(choices, list) and choices
+            return choices[0]
+        return value
+
+    async def complete_json_stream_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        on_text_delta=None,  # type: ignore[no-untyped-def]
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> tuple[str, ModelUsageProvenance]:
+        del temperature
+        assert tools is not None
+        self.calls.append((tools, tool_choice))
+        self.messages.append(messages)
+        function = tools[0]["function"]
+        name = str(function["name"])
+        self.tool_names.append(name)
+        assert name == "character_inbound_compact_gate_v2"
+        grammar = self._prompt_grammar(messages)
+        self.prompt_grammars.append(grammar)
+        metadata = self._prompt_instruction_metadata(messages)
+        domains = metadata["domains"]
+        assert isinstance(domains, dict)
+        full_turn = self._follow_prompt_grammar(grammar, domains=domains)
+        payload: dict[str, object] = {
+            "result_kind": "full_turn",
+            "payload_json": json.dumps(
+                full_turn,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        }
+        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if on_text_delta is not None:
+            on_text_delta(raw)
+        return raw, _metered_usage(
+            ref=f"usage:full-turn-gate:{len(self.calls)}",
+            input_tokens=20,
+            output_tokens=8,
+        )
+
+
+class _RecallGateStreamingProvider(_FullTurnGateStreamingProvider):
+    async def complete_json_stream_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        on_text_delta=None,  # type: ignore[no-untyped-def]
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> tuple[str, ModelUsageProvenance]:
+        assert tools is not None
+        name = str(tools[0]["function"]["name"])
+        result_kinds = tools[0]["function"]["parameters"]["properties"][
+            "result_kind"
+        ]["enum"]
+        if name == "character_inbound_compact_gate_v2" and "recall" not in result_kinds:
+            return await super().complete_json_stream_with_usage(
+                messages,
+                temperature=temperature,
+                on_text_delta=on_text_delta,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+        if name != "character_inbound_compact_gate_v2":
+            del temperature
+            self.calls.append((tools, tool_choice))
+            self.messages.append(messages)
+            self.tool_names.append(name)
+            payload = self.payload()
+            for field in tools[0]["function"]["parameters"]["properties"]:
+                payload.setdefault(field, None)
+            raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+            if on_text_delta is not None:
+                on_text_delta(raw)
+            return raw, _metered_usage(
+                ref="usage:recall-followup",
+                input_tokens=20,
+                output_tokens=8,
+            )
+        del temperature
+        self.calls.append((tools, tool_choice))
+        self.messages.append(messages)
+        self.tool_names.append(name)
+        recall_payload: dict[str, object] = {
+            "private_turn_state": {
+                "contract": "private-turn-state.1",
+                "inner_state_summary": "我想先确认此前的相关记忆再自己决定。",
+                "attended_source_refs": [],
+            },
+            "recall_request": {
+                "query_text": "此前的相关记忆",
+                "memory_kinds": ["episodic"],
+                "limit": 4,
+            },
+        }
+        payload: dict[str, object] = {
+            "result_kind": "recall",
+            "payload_json": json.dumps(
+                recall_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        }
+        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if on_text_delta is not None:
+            on_text_delta(raw)
+        return raw, _metered_usage(
+            ref="usage:recall-gate",
+            input_tokens=12,
+            output_tokens=5,
+        )
+
+
+class _EmptyReplyOnlyInventory:
+    model = "empty-reply-only-inventory"
+
+    def __init__(self) -> None:
+        self.calls: list[list[dict[str, str]]] = []
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+    ) -> str:
+        del temperature
+        self.calls.append(messages)
+        return json.dumps(
+            {
+                "contract": "candidate-external-proposition-inventory.5",
+                "propositions": [],
+            }
+        )
+
+
+class _ReplyOnlySourceClosureReviewer(_SourceClosureReviewer):
+    @staticmethod
+    def supports_strict_output_contract(contract: str) -> bool:
+        return contract == "candidate-external-proposition-coverage.5"
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+    ) -> str:
+        contract = _requested_output_contract(messages)
+        if contract == "candidate-external-proposition-coverage.5":
+            del temperature
+            self.calls.append(messages)
+            return json.dumps(
+                {
+                    "contract": contract,
+                    "findings": [],
+                }
+            )
+        return await super().complete(messages, temperature=temperature)
+
+
+@pytest.mark.asyncio
+async def test_reply_only_releases_reviewable_head_from_one_physical_character_call() -> None:
+    provider = _ReplyOnlyStreamingProvider()
+    reviewer = _ReplyOnlySourceClosureReviewer()
+    inventory = _EmptyReplyOnlyInventory()
+    author = InboundCharacterAuthor(
+        flash_model=provider,
+        source_closure_model=reviewer,
+        candidate_external_proposition_inventory_model=inventory,
+        review_claim_free_candidates=True,
+        expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        require_explicit_authored_decision_fields=True,
+    )
+    request = _request(revision=3, call="call:reply-only-stream")
+
+    head_task = asyncio.create_task(author.propose_stream_head(request))
+    await asyncio.wait_for(provider.tail_started.wait(), timeout=0.5)
+    await asyncio.sleep(0)
+    assert not head_task.done()
+    provider.release_tail.set()
+    head = await asyncio.wait_for(head_task, timeout=0.5)
+
+    assert len(provider.calls) == 1
+    assert len(reviewer.calls) == 1
+    assert len(inventory.calls) == 1
+    assert len(provider.prompt_specimens) == 1
+    reply_only_specimen = provider.prompt_specimens[0]
+    assert set(reply_only_specimen) == {"protocol", "appraisal_draft", "events"}
+    assert reply_only_specimen["protocol"] == "character-interior-events.1"
+    assert "contract" not in reply_only_specimen
+    appraisal_specimen = reply_only_specimen["appraisal_draft"]
+    assert isinstance(appraisal_specimen, dict)
+    assert set(appraisal_specimen) == {
+        "appraise",
+        "affect",
+        "brief_rationale",
+        "behavior_tendency",
+        "stance",
+        "display_strategy",
+        "confidence",
+    }
+    reply_only_events = reply_only_specimen["events"]
+    assert isinstance(reply_only_events, list)
+    assert len(reply_only_events) == 2
+    assert isinstance(reply_only_events[0], dict)
+    assert reply_only_events[0].get("type") == "head"
+    assert reply_only_events[1] == {"type": "end"}
+    reply_only_metadata = provider._prompt_instruction_metadata(  # noqa: SLF001
+        provider.messages[0]
+    )
+    reply_only_domains = reply_only_metadata["domains"]
+    assert isinstance(reply_only_domains, dict)
+    assert reply_only_domains["reply_only_turn_posture"] == [
+        None,
+        "continue",
+        "interject",
+    ]
+    assert reply_only_domains["response_expectation_assessment_status"] == [
+        "fulfilled",
+        "superseded",
+        "still_pending",
+        "uncertain",
+    ]
+    tools, tool_choice = provider.calls[0]
+    assert tools is not None
+    assert tools[0]["function"]["name"] == "character_inbound_compact_gate_v2"
+    assert tools[0]["function"]["strict"] is True
+    assert len(
+        json.dumps(
+            tools[0]["function"]["parameters"],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+    ) <= 12_000
+    assert tool_choice == {
+        "type": "function",
+        "function": {"name": "character_inbound_compact_gate_v2"},
+    }
+    assert "result_kind=reply_only" in provider.messages[0][0]["content"]
+    assert "result_kind=full_turn" in provider.messages[0][0]["content"]
+    compact_system = provider.messages[0][0]["content"]
+    assert "complete external effect is one immediate text message" in compact_system
+    assert "minimum sufficient branch" in compact_system
+    assert "losslessly represents the external effect you have chosen" in compact_system
+    assert "multiple sentences or paragraphs" in compact_system
+    assert "not required to be terse or emotionally flat" in compact_system
+    assert "only when the external effect you choose actually requires" in compact_system
+    assert "does not classify by topic, length, complexity, or keywords" in compact_system
+    assert "does not choose the branch" in compact_system
+    assert "result_kind=reply_only only when" not in compact_system
+    assert "canonical appraisal and affect lifecycle" in compact_system
+    assert (
+        "brief_rationale, behavior_tendency, stance, display_strategy, and confidence"
+        in compact_system
+    )
+    assert "appraise and affect remain your choices" in compact_system
+    assert "with no appraisal, affect" not in compact_system
+    assert "complete chosen inner object in payload_json" in compact_system
+    assert "REPLY_ONLY PAYLOAD_JSON CANONICAL SPECIMEN JSON" in compact_system
+    assert (
+        "reply-only instruction metadata block is not part of payload_json"
+        in compact_system
+    )
+    assert "host never substitutes null as a semantic default" in compact_system
+    assert "full_turn_json" not in compact_system
+    assert (
+        "Recall is unavailable on this call; use result_kind=decision."
+        not in provider.messages[0][0]["content"]
+    )
+    assert head.semantic_stream_part == "head"
+    assert head.provider_parent_model_call_id is not None
+    assert "嗯，我在听。" in json.dumps(head.raw_proposal, ensure_ascii=False)
+    assert "appraisal" not in head.raw_proposal
+    assert "relationship" not in json.dumps(head.raw_proposal, ensure_ascii=False)
+    assert "interaction_act" not in json.dumps(head.raw_proposal, ensure_ascii=False)
+
+    tail = await asyncio.wait_for(
+        author.propose_stream_tail(
+            request.model_copy(update={"call_id": "call:reply-only-stream-tail"})
+        ),
+        timeout=0.5,
+    )
+    assert len(provider.calls) == 1
+    assert tail.semantic_stream_part == "tail"
+    assert tail.episode_disposition == "complete_without_more"
+    assert len(tail.physical_provider_audits) == 1
+    assert tail.physical_provider_audits[0].outcome == "completed"
+    assert tail.physical_provider_audits[0].model_call_id == head.provider_parent_model_call_id
+
+
+@pytest.mark.asyncio
+async def test_compact_full_turn_keeps_full_stream_in_one_physical_character_call() -> None:
+    provider = _FullTurnGateStreamingProvider()
+    author = InboundCharacterAuthor(
+        flash_model=provider,
+        expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        require_explicit_authored_decision_fields=True,
+    )
+    request = _request(revision=3, call="call:compact-full-turn")
+
+    head = await author.propose_stream_head(request)
+    tail = await author.propose_stream_tail(
+        request.model_copy(update={"call_id": "call:compact-full-turn-tail"})
+    )
+
+    assert provider.tool_names == ["character_inbound_compact_gate_v2"]
+    assert len(provider.calls) == 1
+    specimen = provider.prompt_grammars[0]
+    assert set(specimen) == {"protocol", "appraisal_draft", "events"}
+    assert specimen["protocol"] == "character-interior-events.1"
+    assert "contract" not in specimen
+    system = provider.messages[0][0]["content"]
+    assert "APPRAISAL SEMANTIC CONTRACT" in system
+    assert "EXPRESSION SEMANTIC CONTRACT" in system
+    assert head.semantic_stream_part == "head"
+    assert tail.semantic_stream_part == "tail"
+    assert "这次我选择完整地回应。" in json.dumps(head.raw_proposal, ensure_ascii=False)
+    assert not head.raw_proposal.get("appraisal")
+    assert len(tail.physical_provider_audits) == 1
+    assert tail.physical_provider_audits[0].model_call_id == head.provider_parent_model_call_id
+    assert author._compact_gate_audits == {}  # noqa: SLF001 - no separate gate call exists
+
+    tools, tool_choice = provider.calls[0]
+    compact_request_bytes = len(
+        json.dumps(
+            {
+                "messages": provider.messages[0],
+                "tools": tools,
+                "tool_choice": tool_choice,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+    )
+    legacy = InboundToolContracts().contract_for(
+        phase="initial",
+        transport="stream",
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        recall_allowed=False,
+        schema_dialect="deepseek-strict",
+    )
+    legacy_request_bytes = len(
+        json.dumps(
+            {
+                "messages": provider.messages[0],
+                "tools": list(legacy.provider_tools),
+                "tool_choice": legacy.provider_tool_choice,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+    )
+    assert compact_request_bytes <= 40_000
+    assert compact_request_bytes < legacy_request_bytes * 0.45
+
+
+@pytest.mark.asyncio
+async def test_compact_gate_stays_enabled_when_recall_is_unavailable() -> None:
+    provider = _FullTurnGateStreamingProvider()
+    author = InboundCharacterAuthor(
+        flash_model=provider,
+        expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        require_explicit_authored_decision_fields=True,
+    )
+    request = _request(revision=3, call="call:compact-without-recall")
+    request = request.model_copy(
+        update={
+            "model_content_json": mark_recall_budget_consumed(
+                request.model_content_json
+            )
+        }
+    )
+
+    await author.propose_stream_head(request)
+
+    assert provider.tool_names == ["character_inbound_compact_gate_v2"]
+    tools, tool_choice = provider.calls[0]
+    assert tools is not None
+    parameters = tools[0]["function"]["parameters"]
+    assert parameters["properties"]["result_kind"]["enum"] == [
+        "reply_only",
+        "full_turn",
+    ]
+    assert "recall_request" not in parameters["properties"]
+    assert "private_turn_state" not in parameters["properties"]
+    assert tool_choice == {
+        "type": "function",
+        "function": {"name": "character_inbound_compact_gate_v2"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_compact_recall_reuses_gate_without_reopening_recall_after_transfer() -> None:
+    provider = _RecallGateStreamingProvider()
+    author = InboundCharacterAuthor(flash_model=provider)
+    author.delegate_recall_to_character_interior()
+    request = _request(revision=3, call="call:compact-recall")
+
+    with pytest.raises(_InboundRecallRequested) as caught:
+        await author.propose_stream_head(request)
+
+    assert caught.value.query == "此前的相关记忆"
+    assert caught.value.usage is not None
+    assert provider.tool_names == ["character_inbound_compact_gate_v2"]
+    assert len(author._compact_gate_audits) == 1  # noqa: SLF001
+    gate_audit = next(iter(author._compact_gate_audits.values()))  # noqa: SLF001
+    assert gate_audit.result_kind == "recall"
+
+    after_recall = request.model_copy(
+        update={
+            "call_id": "call:compact-recall-followup",
+            "model_content_json": mark_recall_budget_consumed(request.model_content_json),
+        }
+    )
+    head = await author.propose_stream_head(after_recall)
+    tail = await author.propose_stream_tail(
+        after_recall.model_copy(update={"call_id": "call:compact-recall-tail"})
+    )
+
+    assert provider.tool_names == [
+        "character_inbound_compact_gate_v2",
+        "character_inbound_compact_gate_v2",
+    ]
+    assert len(provider.calls) == 2
+    second_tools, _ = provider.calls[1]
+    assert second_tools is not None
+    assert second_tools[0]["function"]["parameters"]["properties"]["result_kind"][
+        "enum"
+    ] == ["reply_only", "full_turn"]
+    assert "这次我选择完整地回应。" in json.dumps(
+        head.raw_proposal,
+        ensure_ascii=False,
+    )
+    assert len(tail.physical_provider_audits) == 1
+
+
+@pytest.mark.asyncio
+async def test_reply_only_atomically_installs_appraisal_affect_and_one_public_action(
+    tmp_path,
+) -> None:
+    path = tmp_path / "reply-only-public.sqlite"
+    config = replace(_config(), expression_episode_mode="stream")
+    inbound = InboundTurn(
+        platform="test",
+        platform_user_id="user.1",
+        platform_message_id="message:reply-only-public",
+        text="我只是想让你听我说。",
+        observed_at=NOW,
+        trace_id="trace:reply-only-public",
+    )
+    provider = _ReplyOnlyAppraisalStreamingProvider(block_tail=False)
+    author = InboundCharacterAuthor(
+        flash_model=provider,
+        expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        require_explicit_authored_decision_fields=True,
+    )
+    transport = _DeliveredTransport()
+    app = build_sqlite_world_v2_test_application(
+        path=path,
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        character_interior=compose_fixture_character_interior(
+            inbound_author=author,
+        ),
+        transport=transport,
+        now=NOW,
+    )
+    try:
+        outcome = await app.respond(inbound)
+        delivery = await app.drain_actions_once()
+        duplicate_drain = await app.drain_actions_once()
+        projection = app._ledger.project()  # noqa: SLF001 - cold-replay evidence
+        rebuilt = app._ledger.rebuild()  # noqa: SLF001 - cold-replay evidence
+        evidence = app.export_replay_evidence()
+    finally:
+        app.close()
+
+    assert outcome.status == "action_authorized"
+    assert delivery is not None and delivery.status == "settled"
+    assert duplicate_drain is not None and duplicate_drain.status == "idle"
+    assert duplicate_drain.action_id is None
+    assert len(provider.calls) == 1
+    assert transport.bodies == ["嗯，我在听。"]
+    assert projection == rebuilt
+    assert len(projection.actions) == 1
+    assert projection.actions[0].state == "delivered"
+    assert len(projection.execution_receipts) == 1
+    receipt = projection.execution_receipts[0]
+    assert receipt.receipt_kind == "terminal"
+    assert receipt.observed_state == "delivered"
+    assert receipt.is_terminal is True
+    assert len(projection.appraisals) == 1
+    assert len(projection.affect_episodes) == 1
+    assert projection.affect_proposals == ()
+    assert projection.relationship_signals == ()
+    assert projection.relationship_commitments == ()
+    assert projection.interaction_acts == ()
+    assert projection.interaction_act_proposals == ()
+    assert projection.media_opportunities == ()
+    assert projection.media_plans == ()
+    event_types = [item.event.event_type for item in evidence.events]
+    assert event_types.count("ActionAuthorized") == 1
+    assert event_types.count("ExecutionReceiptRecorded") == 1
+    assert event_types.count("AppraisalAccepted") == 1
+    assert event_types.count("AffectEpisodeOpened") == 1
+    assert event_types.index("ExpressionPlanAccepted") < event_types.index(
+        "AppraisalAccepted"
+    )
+    assert event_types.index("ActionAuthorized") < event_types.index(
+        "AffectEpisodeOpened"
+    )
+
+    reopened_author = InboundCharacterAuthor(
+        flash_model=provider,
+        expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        require_explicit_authored_decision_fields=True,
+    )
+    reopened = build_sqlite_world_v2_test_application(
+        path=path,
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        character_interior=compose_fixture_character_interior(
+            inbound_author=reopened_author,
+        ),
+        transport=transport,
+        now=NOW,
+    )
+    try:
+        cold_projection = reopened._ledger.project()  # noqa: SLF001
+        assert reopened._ledger.rebuild() == cold_projection  # noqa: SLF001
+        replayed = await reopened.respond(inbound)
+        assert replayed.outcome_id == outcome.outcome_id
+        assert replayed.status == outcome.status
+        assert replayed.authorized_action_ids == outcome.authorized_action_ids
+        assert replayed.scheduled_action_ids == outcome.scheduled_action_ids
+        assert replayed.terminal_errors == outcome.terminal_errors
+        replay_drain = await reopened.drain_actions_once()
+        assert replay_drain is not None and replay_drain.status == "idle"
+        assert replay_drain.action_id is None
+        replay_evidence = reopened.export_replay_evidence()
+    finally:
+        reopened.close()
+
+    assert len(provider.calls) == 1
+    assert transport.bodies == ["嗯，我在听。"]
+    assert len(cold_projection.actions) == 1
+    assert cold_projection.actions[0].state == "delivered"
+    assert len(cold_projection.appraisals) == 1
+    assert len(cold_projection.affect_episodes) == 1
+    assert cold_projection.relationship_signals == ()
+    assert cold_projection.relationship_commitments == ()
+    assert cold_projection.interaction_acts == ()
+    replay_event_types = [item.event.event_type for item in replay_evidence.events]
+    assert replay_event_types.count("ActionAuthorized") == 1
+    assert replay_event_types.count("ExecutionReceiptRecorded") == 1
 
 
 @pytest.mark.asyncio
@@ -4347,7 +5140,7 @@ async def test_public_turn_never_enters_detached_backup_correction(
         not in {"provider-subcall-audit.1", "authored-candidate-audit.1"}
     ]
     assert top_level_audits[-1]["status"] == "main_exception"
-    assert top_level_audits[-1]["failure_code"] == "primary_exception"
+    assert top_level_audits[-1]["failure_code"] == "paired_expression_reselection_invalid"
     assert len(primary.calls) == 2
     assert backup.calls == []
 
@@ -4758,6 +5551,20 @@ async def test_paired_cognition_honors_character_recall_and_replays_trace(
         if item.event.event_type == "ModelResultRecorded"
     )
     assert "main_invalid" not in all_model_statuses
+    recall_control_results = tuple(
+        json.loads(item.event.payload()["audit_json"])
+        for item in evidence.events
+        if item.event.event_type == "ModelResultRecorded"
+        and json.loads(item.event.payload()["audit_json"])["route"]["reason_code"]
+        == "author_candidate.recall_control_transfer.control_transfer"
+    )
+    assert len(recall_control_results) == 1
+    assert recall_control_results[0]["status"] == "candidate_returned"
+    assert recall_control_results[0]["outcome"] == "returned"
+    assert recall_control_results[0].get("parent_model_call_id") is None
+    assert recall_control_results[0]["usage"]["provider_usage_ref"] == (
+        "usage:tool-recall:1"
+    )
 
 
 @pytest.mark.asyncio

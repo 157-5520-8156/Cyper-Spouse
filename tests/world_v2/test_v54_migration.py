@@ -19,6 +19,7 @@ from companion_daemon.world_v2.interaction_act_schemas import (
     InteractionActProjection,
     InteractionActSourceRef,
 )
+from companion_daemon.world_v2.proposal_audit_schemas import RecordedModelResultAudit
 from companion_daemon.world_v2.reducers import ReducerState
 from companion_daemon.world_v2.schemas import (
     InteractionActProposalProjection,
@@ -33,8 +34,10 @@ WORLD = "world:v54-migration"
 V53 = "world-v2-reducers.53"
 V54 = "world-v2-reducers.54"
 V55 = "world-v2-reducers.55"
+V56 = "world-v2-reducers.56"
 EC50_SOURCE_COMMIT = "ec50d9f28e33459272f644fd4900673509bd045f"
 V54_SOURCE_COMMIT = "3fe665570554bd8e95acd1040822a2eb070e6dc0"
+V55_SOURCE_COMMIT = "2fd930a66ba6b49e322997e30a65b8551ac9e0a2"
 
 
 EC50_V53_SEED_SCRIPT = textwrap.dedent(
@@ -122,6 +125,144 @@ EC50_V53_SEED_SCRIPT = textwrap.dedent(
 )
 
 
+V55_STREAM_AUDIT_APPEND_SCRIPT = textwrap.dedent(
+    """
+    from datetime import UTC, datetime
+    import hashlib
+    import json
+    from pathlib import Path
+    import sys
+
+    from companion_daemon.world_v2.deliberation import (
+        DeliberationResult,
+        ModelResultAudit,
+        ModelRoute,
+        PhysicalProviderInvocationAudit,
+    )
+    from companion_daemon.world_v2.proposal_audit import (
+        ProposalAuditContext,
+        ProposalAuditRecorder,
+    )
+    from companion_daemon.world_v2 import reducers
+    from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
+
+
+    def digest(value):
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+    path = Path(sys.argv[1])
+    world_id = sys.argv[2]
+    now = datetime(2026, 8, 11, 16, 1, tzinfo=UTC)
+    ledger = SQLiteWorldLedger(path=path, world_id=world_id)
+    before = ledger.project()
+    physical_call_id = "model-call:authentic-v55:physical"
+    head_call_id = "model-call:authentic-v55:head"
+    tail_call_id = "model-call:authentic-v55:tail"
+    request_hash = hashlib.sha256(b"authentic-v55-physical-request").hexdigest()
+    tail_response_hash = hashlib.sha256(b"authentic-v55-tail-response").hexdigest()
+    physical = PhysicalProviderInvocationAudit(
+        model_call_id=physical_call_id,
+        request_hash=request_hash,
+        model_id="model:authentic-v55",
+        model_version="2026-08",
+        outcome="completed",
+        response_hash=hashlib.sha256(b"authentic-v55-full-response").hexdigest(),
+        usage_status="unresolved",
+        semantic_model_call_ids=(head_call_id, tail_call_id),
+    )
+    tail = ModelResultAudit(
+        model_call_id=tail_call_id,
+        parent_model_call_id=physical_call_id,
+        semantic_stream_part="tail",
+        model_result_ref=(
+            "model-result:"
+            + digest(
+                {
+                    "model_call_id": tail_call_id,
+                    "response_hash": tail_response_hash,
+                }
+            )
+        ),
+        attempt_id="attempt:authentic-v55:stream-tail",
+        route=ModelRoute(
+            tier="flash",
+            reason_code="authentic_v55_stream_tail",
+            router_version="router.1",
+        ),
+        model_id="model:authentic-v55",
+        model_version="2026-08",
+        request_hash=request_hash,
+        response_hash=tail_response_hash,
+        status="candidate_returned",
+        slot="primary",
+        outcome="returned",
+        physical_provider_audits=(physical,),
+    )
+    capsule_id = hashlib.sha256(b"authentic-v55-capsule").hexdigest()
+    result = DeliberationResult(
+        result_id=(
+            "deliberation:"
+            + digest(
+                {
+                    "capsule_id": capsule_id,
+                    "proposal_hash": None,
+                    "attempt_audits": [tail.model_dump(mode="json")],
+                }
+            )
+        ),
+        capsule_id=capsule_id,
+        proposal=None,
+        audit=tail,
+        attempt_audits=(tail,),
+    )
+    committed = ProposalAuditRecorder(ledger=ledger).record(
+        result,
+        ProposalAuditContext(
+            world_id=world_id,
+            trigger_ref="trigger:authentic-v55:stream-tail",
+            logical_time=now,
+            created_at=now,
+            actor="character:celia",
+            source="world-v2-deliberation",
+            trace_id="trace:authentic-v55:stream-tail",
+            causation_id="attempt:authentic-v55:stream-tail",
+            correlation_id="trigger:authentic-v55:stream-tail",
+            evaluated_world_revision=before.world_revision,
+            expected_commit_world_revision=before.world_revision,
+            expected_deliberation_revision=before.deliberation_revision,
+            expected_ledger_sequence=before.ledger_sequence,
+        ),
+    )
+    projection = ledger.project()
+    ledger.close()
+    print(
+        json.dumps(
+            {
+                "cursor": [
+                    committed.world_revision,
+                    committed.deliberation_revision,
+                    committed.cursor.ledger_sequence,
+                ],
+                "projection_bundle": projection.reducer_bundle_version,
+                "reducer_bundle": reducers.REDUCER_BUNDLE_VERSION,
+                "audit_contracts": [
+                    audit.audit_contract for audit in projection.model_result_audits
+                ],
+            },
+            sort_keys=True,
+        )
+    )
+    """
+)
+
+
 def _message_event() -> WorldEvent:
     observation = Observation(
         schema_version="world-v2.1",
@@ -172,6 +313,7 @@ def _build_archived_database(
     source_commit: str,
     expected_bundle: str,
     source_name: str,
+    append_v55_stream_audit: bool = False,
 ) -> tuple[int, int, int]:
     repository_root = Path(__file__).resolve().parents[2]
     resolved = subprocess.run(
@@ -218,6 +360,29 @@ def _build_archived_database(
     assert metadata["projection_bundle"] == expected_bundle
     assert Path(str(metadata["module_file"])).is_relative_to(source_root)
     cursor = metadata["cursor"]
+    if append_v55_stream_audit:
+        appended = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                V55_STREAM_AUDIT_APPEND_SCRIPT,
+                str(database_path),
+                WORLD,
+            ],
+            cwd=source_root,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        metadata = json.loads(appended.stdout.splitlines()[-1])
+        assert metadata["reducer_bundle"] == expected_bundle
+        assert metadata["projection_bundle"] == expected_bundle
+        assert metadata["audit_contracts"] == [
+            "model-result-audit.6",
+            "model-result-audit.6",
+        ]
+        cursor = metadata["cursor"]
     assert isinstance(cursor, list)
     assert len(cursor) == 3
     assert all(isinstance(value, int) for value in cursor)
@@ -247,7 +412,7 @@ def _head_coordinates(path: Path) -> tuple[int, int, int, str]:
     return int(row[0]), int(row[1]), int(row[2]), str(row[3])
 
 
-def test_authentic_v53_message_head_migrates_to_v55_without_rewriting_history(
+def test_authentic_v53_message_head_migrates_to_v56_without_rewriting_history(
     tmp_path,
 ) -> None:
     path = tmp_path / "v53-message-head.sqlite3"
@@ -265,7 +430,7 @@ def test_authentic_v53_message_head_migrates_to_v55_without_rewriting_history(
 
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
     projection = migrated.project()
-    assert projection.reducer_bundle_version == V55
+    assert projection.reducer_bundle_version == V56
     assert projection.message_observations[0].actor == "user:primary"
     assert projection.message_observations[0].channel == "qq"
     assert (
@@ -287,7 +452,7 @@ def test_authentic_v53_message_head_migrates_to_v55_without_rewriting_history(
     migrated.close()
 
     assert _event_rows_as_bytes(path) == old_events
-    assert _head_coordinates(path) == (*old_head[:3], V55)
+    assert _head_coordinates(path) == (*old_head[:3], V56)
 
     reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
     cold_projection = reopened.project()
@@ -297,8 +462,8 @@ def test_authentic_v53_message_head_migrates_to_v55_without_rewriting_history(
     assert _event_rows_as_bytes(path) == old_events
 
 
-def test_v55_head_survives_cold_reopen_and_full_rebuild(tmp_path) -> None:
-    path = tmp_path / "v55-cold-reopen.sqlite3"
+def test_v56_head_survives_cold_reopen_and_full_rebuild(tmp_path) -> None:
+    path = tmp_path / "v56-cold-reopen.sqlite3"
     first = SQLiteWorldLedger(path=path, world_id=WORLD)
     first.commit(
         (_message_event(),),
@@ -306,7 +471,7 @@ def test_v55_head_survives_cold_reopen_and_full_rebuild(tmp_path) -> None:
         expected_deliberation_revision=0,
     )
     expected = first.project()
-    assert expected.reducer_bundle_version == V55
+    assert expected.reducer_bundle_version == V56
     first.close()
 
     reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
@@ -315,10 +480,10 @@ def test_v55_head_survives_cold_reopen_and_full_rebuild(tmp_path) -> None:
     reopened.close()
 
 
-def test_authentic_v54_head_migrates_to_v55_without_rewriting_history(
+def test_authentic_v54_head_migrates_to_v56_without_rewriting_history(
     tmp_path,
 ) -> None:
-    path = tmp_path / "v54-to-v55.sqlite3"
+    path = tmp_path / "v54-to-v56.sqlite3"
     source_cursor = _build_archived_database(
         tmp_path=tmp_path,
         database_path=path,
@@ -331,12 +496,78 @@ def test_authentic_v54_head_migrates_to_v55_without_rewriting_history(
 
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
     projection = migrated.project()
-    assert projection.reducer_bundle_version == V55
+    assert projection.reducer_bundle_version == V56
     assert migrated.rebuild() == projection
     migrated.close()
 
     assert _event_rows_as_bytes(path) == old_events
+    assert _head_coordinates(path) == (*source_cursor, V56)
+
+
+def test_authentic_v55_stream_audit_migrates_to_v56_without_rewriting_history(
+    tmp_path,
+) -> None:
+    path = tmp_path / "v55-stream-audit-to-v56.sqlite3"
+    source_cursor = _build_archived_database(
+        tmp_path=tmp_path,
+        database_path=path,
+        source_commit=V55_SOURCE_COMMIT,
+        expected_bundle=V55,
+        source_name="v55-stream-audit-source",
+        append_v55_stream_audit=True,
+    )
+    old_events = _event_rows_as_bytes(path)
+    assert len(old_events) == 3
     assert _head_coordinates(path) == (*source_cursor, V55)
+
+    migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
+    projection = migrated.project()
+    assert projection.reducer_bundle_version == V56
+    assert [
+        audit.model_call_id for audit in projection.model_result_audits
+    ] == [
+        "model-call:authentic-v55:tail",
+        "model-call:authentic-v55:physical",
+    ]
+    assert [
+        audit.audit_contract for audit in projection.model_result_audits
+    ] == [
+        "model-result-audit.6",
+        "model-result-audit.6",
+    ]
+    semantic_tail = RecordedModelResultAudit.model_validate_json(
+        projection.model_result_audits[0].audit_json
+    )
+    physical_terminal = RecordedModelResultAudit.model_validate_json(
+        projection.model_result_audits[1].audit_json
+    )
+    assert semantic_tail.parent_model_call_id == physical_terminal.model_call_id
+    assert semantic_tail.semantic_stream_part == "tail"
+    assert semantic_tail.request_hash == physical_terminal.request_hash
+    assert physical_terminal.status == "provider_completed"
+    assert physical_terminal.response_hash == hashlib.sha256(
+        b"authentic-v55-full-response"
+    ).hexdigest()
+    assert physical_terminal.semantic_model_call_ids == (
+        "model-call:authentic-v55:head",
+        "model-call:authentic-v55:tail",
+    )
+    assert (
+        projection.world_revision,
+        projection.deliberation_revision,
+        projection.ledger_sequence,
+    ) == source_cursor
+    assert migrated.rebuild() == projection
+    migrated.close()
+
+    assert _event_rows_as_bytes(path) == old_events
+    assert _head_coordinates(path) == (*source_cursor, V56)
+
+    reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
+    assert reopened.project() == projection
+    assert reopened.rebuild() == projection
+    reopened.close()
+    assert _event_rows_as_bytes(path) == old_events
 
 
 def test_pending_interaction_act_proposal_does_not_change_world_semantic_payload() -> None:

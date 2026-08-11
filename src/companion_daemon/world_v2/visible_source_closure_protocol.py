@@ -15,7 +15,7 @@ from copy import deepcopy
 import json
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 
 VISIBLE_SOURCE_CLOSURE_CONTRACT = "visible-beat-source-verdict.1"
@@ -38,6 +38,14 @@ VisibleSourceRelation = Literal[
     "first_person_immediate_private_continuity",
     "declared_world_claim_source_coverage",
     "pinned_context_authority_coverage",
+]
+VisibleSourceClosureWireFailureCode = Literal[
+    "schema_invalid",
+    "beat_coverage_invalid",
+    "ref_set_invalid",
+    "verdict_role_invalid",
+    "verdict_ref_invalid",
+    "subject_binding_invalid",
 ]
 
 _ProviderSemanticRole = Literal[
@@ -99,6 +107,31 @@ class VisibleSourceClosureWire(BaseModel):
 
     contract: Literal["visible-beat-source-verdict.1"]
     segments: tuple[VisibleSourceClosureSegment, ...]
+
+
+class VisibleSourceClosureWireFailure(ValueError):
+    """Content-free structural coordinate for one invalid reviewer wire."""
+
+    def __init__(
+        self,
+        code: VisibleSourceClosureWireFailureCode,
+        message: str,
+        *,
+        beat_index: int | None = None,
+        field: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.beat_index = beat_index
+        self.field = field
+
+    def correction_coordinate(self) -> dict[str, object]:
+        coordinate: dict[str, object] = {"code": self.code}
+        if self.beat_index is not None:
+            coordinate["beat_index"] = self.beat_index
+        if self.field is not None:
+            coordinate["field"] = self.field
+        return coordinate
 
 
 # DeepSeek strict tools support a deliberate JSON-Schema subset.  Keep this
@@ -259,7 +292,7 @@ def visible_source_closure_messages(
     visible_beats: tuple[str, ...],
     world_claims: tuple[dict[str, object], ...],
     source_references: tuple[dict[str, object], ...],
-    invalid_reason: str | None = None,
+    invalid_reason: VisibleSourceClosureWireFailure | None = None,
 ) -> list[dict[str, str]]:
     """Compile one compact request; correction never echoes invalid bytes."""
 
@@ -291,13 +324,52 @@ def visible_source_closure_messages(
         },
     ]
     if invalid_reason is not None:
+        source_subject_roles = tuple(
+            {
+                "source_ref_index": index,
+                "subject_role": row.get("subject_role"),
+            }
+            for index, row in enumerate(source_references)
+        )
         messages.append(
             {
                 "role": "user",
                 "content": json.dumps(
                     {
                         "correction_contract": "visible-beat-source-verdict-repair.1",
-                        "failure": invalid_reason[:320],
+                        "failure": invalid_reason.correction_coordinate(),
+                        "structural_constraints": {
+                            "expected_beat_indexes": list(range(len(visible_beats))),
+                            "source_ref_count": len(source_references),
+                            "source_subject_roles": source_subject_roles,
+                            "verdict_role_ref_matrix": {
+                                "source_free": {
+                                    "semantic_roles": [
+                                        "private_state",
+                                        "commitment",
+                                        "generalization",
+                                        "question",
+                                    ],
+                                    "source_ref_indexes": "empty",
+                                },
+                                "closed": {
+                                    "semantic_roles": [
+                                        "external_proposition",
+                                        "mixed",
+                                    ],
+                                    "source_ref_indexes": (
+                                        "one_to_eight_unique_in_range"
+                                    ),
+                                },
+                                "unclosed": {
+                                    "semantic_roles": [
+                                        "external_proposition",
+                                        "mixed",
+                                    ],
+                                    "source_ref_indexes": "empty",
+                                },
+                            },
+                        },
                         "instruction": (
                             "Return one complete replacement verdict list for the identical "
                             "pinned candidate. Do not change or author the candidate."
@@ -323,23 +395,92 @@ def parse_visible_source_closure(
 ) -> VisibleSourceClosureWire:
     """Validate exhaustive whole-Beat decisions and pinned source bindings."""
 
-    provider_wire = _ProviderVisibleBeatVerdictWire.model_validate_json(raw)
+    try:
+        provider_wire = _ProviderVisibleBeatVerdictWire.model_validate_json(raw)
+    except ValidationError as exc:
+        errors = exc.errors(
+            include_url=False,
+            include_context=False,
+            include_input=False,
+        )
+        location = errors[0].get("loc", ()) if errors else ()
+        safe_location = tuple(
+            item
+            for item in location
+            if isinstance(item, int)
+            or (
+                isinstance(item, str)
+                and item
+                in {
+                    "contract",
+                    "decisions",
+                    "beat_index",
+                    "verdict",
+                    "semantic_role",
+                    "subject_role",
+                    "source_ref_indexes",
+                }
+            )
+        )
+        beat_index = (
+            safe_location[1]
+            if len(safe_location) > 1
+            and safe_location[0] == "decisions"
+            and isinstance(safe_location[1], int)
+            else None
+        )
+        field = (
+            ".".join(str(item) for item in safe_location)
+            if safe_location
+            else None
+        )
+        raise VisibleSourceClosureWireFailure(
+            "schema_invalid",
+            "visible source verdict wire schema is invalid",
+            beat_index=beat_index,
+            field=field,
+        ) from None
     if len(visible_beats) > 16:
         raise ValueError("visible source verdict supports at most sixteen Beats")
     if source_ref_subject_roles and len(source_ref_subject_roles) != len(source_ref_kinds):
         raise ValueError("source kind and subject tables must align")
-    if tuple(decision.beat_index for decision in provider_wire.decisions) != tuple(
-        range(len(visible_beats))
+    decisions = provider_wire.decisions
+    expected_indexes = tuple(range(len(visible_beats)))
+    actual_indexes = tuple(decision.beat_index for decision in decisions)
+    if (
+        len(actual_indexes) != len(expected_indexes)
+        or len(set(actual_indexes)) != len(actual_indexes)
+        or set(actual_indexes) != set(expected_indexes)
     ):
-        raise ValueError("source verdicts must cover each visible Beat exactly once in order")
+        raise VisibleSourceClosureWireFailure(
+            "beat_coverage_invalid",
+            "source verdicts must cover each visible Beat exactly once",
+            field="decisions",
+        )
+    # Array order carries no semantic authority when the indexes form one
+    # complete unique cover. Canonicalize that transport-only variation before
+    # validating each indexed verdict; missing or duplicate coverage still
+    # fails closed above.
+    decisions = tuple(sorted(decisions, key=lambda decision: decision.beat_index))
 
     normalized: list[VisibleSourceClosureSegment] = []
-    for decision, text in zip(provider_wire.decisions, visible_beats, strict=True):
+    for decision, text in zip(decisions, visible_beats, strict=True):
+        beat_index = decision.beat_index
         refs = decision.source_ref_indexes
         if len(refs) > 8 or len(set(refs)) != len(refs):
-            raise ValueError("source verdict indexes must be bounded and unique")
+            raise VisibleSourceClosureWireFailure(
+                "ref_set_invalid",
+                "source verdict indexes must be bounded and unique",
+                beat_index=beat_index,
+                field=f"decisions.{beat_index}.source_ref_indexes",
+            )
         if any(index < 0 or index >= len(source_ref_kinds) for index in refs):
-            raise ValueError("source verdict index is outside pinned evidence")
+            raise VisibleSourceClosureWireFailure(
+                "ref_set_invalid",
+                "source verdict index is outside pinned evidence",
+                beat_index=beat_index,
+                field=f"decisions.{beat_index}.source_ref_indexes",
+            )
         if decision.verdict == "source_free":
             if decision.semantic_role not in {
                 "private_state",
@@ -347,31 +488,69 @@ def parse_visible_source_closure(
                 "generalization",
                 "question",
             }:
-                raise ValueError("external or mixed Beat cannot be source-free")
+                raise VisibleSourceClosureWireFailure(
+                    "verdict_role_invalid",
+                    "external or mixed Beat cannot be source-free",
+                    beat_index=beat_index,
+                    field=f"decisions.{beat_index}.semantic_role",
+                )
             if refs:
-                raise ValueError("source-free Beat cannot claim source refs")
+                raise VisibleSourceClosureWireFailure(
+                    "verdict_ref_invalid",
+                    "source-free Beat cannot claim source refs",
+                    beat_index=beat_index,
+                    field=f"decisions.{beat_index}.source_ref_indexes",
+                )
             if (
                 decision.semantic_role in {"private_state", "commitment"}
                 and decision.subject_role != "companion"
             ):
-                raise ValueError(
-                    "companion private state or commitment cannot change actor"
+                raise VisibleSourceClosureWireFailure(
+                    "subject_binding_invalid",
+                    "companion private state or commitment cannot change actor",
+                    beat_index=beat_index,
+                    field=f"decisions.{beat_index}.subject_role",
                 )
             if (
                 decision.semantic_role == "generalization"
                 and decision.subject_role not in {"general", "none"}
             ):
-                raise ValueError("source-free generalization must retain general scope")
+                raise VisibleSourceClosureWireFailure(
+                    "subject_binding_invalid",
+                    "source-free generalization must retain general scope",
+                    beat_index=beat_index,
+                    field=f"decisions.{beat_index}.subject_role",
+                )
         elif decision.verdict == "closed":
             if decision.semantic_role not in {"external_proposition", "mixed"}:
-                raise ValueError("only an external or mixed Beat can bind sources")
+                raise VisibleSourceClosureWireFailure(
+                    "verdict_role_invalid",
+                    "only an external or mixed Beat can bind sources",
+                    beat_index=beat_index,
+                    field=f"decisions.{beat_index}.semantic_role",
+                )
             if not refs:
-                raise ValueError("closed Beat requires at least one pinned source")
+                raise VisibleSourceClosureWireFailure(
+                    "verdict_ref_invalid",
+                    "closed Beat requires at least one pinned source",
+                    beat_index=beat_index,
+                    field=f"decisions.{beat_index}.source_ref_indexes",
+                )
         else:
             if decision.semantic_role not in {"external_proposition", "mixed"}:
-                raise ValueError("unclosed Beat must identify external semantic material")
+                raise VisibleSourceClosureWireFailure(
+                    "verdict_role_invalid",
+                    "unclosed Beat must identify external semantic material",
+                    beat_index=beat_index,
+                    field=f"decisions.{beat_index}.semantic_role",
+                )
             if refs:
-                raise ValueError("unclosed Beat cannot claim partial source authority")
+                raise VisibleSourceClosureWireFailure(
+                    "verdict_ref_invalid",
+                    "unclosed Beat cannot claim partial source authority",
+                    beat_index=beat_index,
+                    field=f"decisions.{beat_index}.source_ref_indexes",
+                )
 
         subject_role: VisibleSubjectRole = (
             "other" if decision.subject_role == "mixed" else decision.subject_role
@@ -383,9 +562,19 @@ def parse_visible_source_closure(
                 if source_ref_subject_roles[index] is not None
             }
             if decision.subject_role in {"none", "mixed"}:
-                raise ValueError("closed Beat must identify its source actor")
+                raise VisibleSourceClosureWireFailure(
+                    "subject_binding_invalid",
+                    "closed Beat must identify its source actor",
+                    beat_index=beat_index,
+                    field=f"decisions.{beat_index}.subject_role",
+                )
             if known_roles and subject_role not in known_roles:
-                raise ValueError("closed Beat source actor does not match subject role")
+                raise VisibleSourceClosureWireFailure(
+                    "subject_binding_invalid",
+                    "closed Beat source actor does not match subject role",
+                    beat_index=beat_index,
+                    field=f"decisions.{beat_index}.subject_role",
+                )
 
         role: VisibleSemanticRole = {
             "private_state": "immediate_private_state",
@@ -441,6 +630,7 @@ def _relation_for_source_kinds(kinds: tuple[str | None, ...]) -> VisibleSourceRe
 __all__ = [
     "VISIBLE_SOURCE_CLOSURE_CONTRACT",
     "VisibleSourceClosureWire",
+    "VisibleSourceClosureWireFailure",
     "compact_source_reference_table",
     "parse_visible_source_closure",
     "visible_source_closure_messages",
