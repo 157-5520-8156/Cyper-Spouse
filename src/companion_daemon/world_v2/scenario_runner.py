@@ -271,7 +271,12 @@ class ScenarioVerificationError(AssertionError):
 # projection/context contracts. Scenario behavior and predicates remain
 # unchanged; durable request, reducer, snapshot and replay identities
 # intentionally move together on the migrated staging baseline.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.65"
+# ``.66`` adds the cursor-pinned relationship-stage and InteractionAct identity
+# preflight to the same role wire. The frozen suite emits neither typed choice,
+# so its behavioral predicates remain unchanged; the provider request and
+# durable audit identities intentionally move with the corrected hard-boundary
+# instructions.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.66"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
@@ -376,11 +381,11 @@ FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.65"
 # marks. The frozen suite still emits no InteractionAct, so its per-case
 # visible/event/action/replay predicates remain unchanged; the role wire and
 # snapshot contract identities intentionally move the aggregate manifest.
-# ``.65`` is the first baseline containing all six changes above together.
-# Two independent complete frozen-suite processes produced this same aggregate
-# manifest before the migrated baseline was installed.
+# ``.66`` composes that migrated baseline with pinned semantic-coordinate
+# preflight. Two independent complete frozen-suite processes produced this
+# same aggregate manifest before the new baseline was installed.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "4294fbe11d190437f33042a2512caa1201d4459a532c8b834a408145650285a6"
+    "aafb30d0daee4dcf8f9207a9e006bfdf115e58cf4c4a625c2c8339e7c8090552"
 )
 
 
