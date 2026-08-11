@@ -20,6 +20,7 @@ from .ledger import LedgerPort
 from .proposal_envelope import DecisionProposal, validate_proposal_envelope
 from .schema_core import FrozenModel
 from .schemas import CommitResult, ProjectionCursor
+from .stale_proposal_settlement import settle_stale_typed_proposal
 
 
 class InteractionActWorkerError(ValueError):
@@ -31,7 +32,7 @@ class InteractionActWorkerError(ValueError):
 
 
 class InteractionActWorkResult(FrozenModel):
-    status: Literal["accepted"] = "accepted"
+    status: Literal["accepted", "stale"] = "accepted"
     source_proposal_id: str
     typed_proposal_id: str
     compile_commit: CommitResult
@@ -91,6 +92,31 @@ class InteractionActWorker:
                 continue
             if len(changes) != 1:
                 raise InteractionActWorkerError("change_count_invalid")
+            stale = self._stale_candidate(
+                projection=projection,
+                audit=audit,
+                proposal=proposal,
+                change=changes[0],
+                current_cursor=current_cursor,
+            )
+            if stale is not None:
+                candidate, proposal_event, proposal_commit = stale
+                settled = settle_stale_typed_proposal(
+                    ledger=self._ledger,
+                    proposal_event=proposal_event,
+                    proposal_id=candidate.proposal_id,
+                    evaluated_world_revision=candidate.evaluated_world_revision,
+                    current_cursor=current_cursor,
+                    actor=self._actor,
+                    source=self._source,
+                )
+                return InteractionActWorkResult(
+                    status="stale",
+                    source_proposal_id=proposal.proposal_id,
+                    typed_proposal_id=candidate.proposal_id,
+                    compile_commit=proposal_commit,
+                    acceptance_commit=settled,
+                )
             if self._has_accepted_descendant(
                 projection=projection,
                 audit=audit,
@@ -160,6 +186,38 @@ class InteractionActWorker:
                 compile_commit=compiled.commit,
                 acceptance_commit=accepted,
             )
+        return None
+
+    def _stale_candidate(
+        self,
+        *,
+        projection,
+        audit,
+        proposal: DecisionProposal,
+        change,
+        current_cursor: ProjectionCursor,
+    ):
+        decided = {item.proposal_id for item in projection.acceptance_decisions}
+        expected_change_hash = canonical_interaction_act_change_hash(change)
+        for candidate in projection.interaction_act_proposals:
+            if (
+                candidate.proposal_id in decided
+                or candidate.evaluated_world_revision
+                >= current_cursor.world_revision
+                or candidate.proposal_hash != proposal.proposal_hash
+                or candidate.change_id != change.change_id
+                or candidate.accepted_change_hash != expected_change_hash
+            ):
+                continue
+            located = self._ledger.lookup_event_commit(candidate.recorded_event_ref)
+            if (
+                located is None
+                or located[0].event_type != "InteractionActProposalRecorded"
+                or located[0].causation_id != audit.event_ref
+                or located[0].payload_hash != candidate.recorded_event_payload_hash
+            ):
+                raise InteractionActWorkerError("stale_candidate_event_missing")
+            return candidate, located[0], located[1]
         return None
 
     def _has_accepted_descendant(

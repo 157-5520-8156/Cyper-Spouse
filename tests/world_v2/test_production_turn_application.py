@@ -35,12 +35,16 @@ from companion_daemon.world_v2.deliberation import (
     ModelRoute,
     RouteRequest,
 )
+from companion_daemon.world_v2.errors import ConcurrencyConflict
 from companion_daemon.world_v2.event_ecology_media import EcologyPolicy
 from companion_daemon.world_v2.image_evidence_contract import (
     CharacterMediaEvidenceV1,
     ImageEvidenceV1,
 )
 from companion_daemon.world_v2.image_evidence_runtime import ImageEvidenceDeclarationCommand
+from companion_daemon.world_v2.interaction_act_acceptance_runtime import (
+    InteractionActAcceptanceRuntime,
+)
 from companion_daemon.world_v2.life_ecology_runtime import LifeEcologyRunResult
 from companion_daemon.world_v2.media_v2 import MediaNotRenderable, MediaPlanningResult
 from companion_daemon.world_v2.memory_retrieval import MemoryRetrievalCompiler
@@ -48,6 +52,9 @@ from companion_daemon.world_v2.platform_action_executor import PlatformDispatchR
 from companion_daemon.world_v2.private_image_evidence_contract import RecipientScopedImageEvidenceV1
 from companion_daemon.world_v2.private_image_evidence_runtime import (
     RecipientScopedImageEvidenceDeclarationCommand,
+)
+from companion_daemon.world_v2.relationship_commitment_acceptance_runtime import (
+    RelationshipCommitmentAcceptanceRuntime,
 )
 from companion_daemon.world_v2.production_turn_application import (
     LifeEcologyComposition,
@@ -903,6 +910,226 @@ async def test_delivered_expression_interaction_act_waits_for_receipt_then_settl
         )
     finally:
         app.close()
+
+
+@pytest.mark.asyncio
+async def test_relationship_commitment_stale_candidate_is_closed_after_cold_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "relationship-commitment-stale-recovery.sqlite"
+    config = replace(
+        _config(),
+        reply_target="conversation:test:c2c:user.1",
+        counterpart_actor_ref="user:user.1",
+    )
+    app = _build_application(
+        path=path,
+        config=config,
+        identities=_ConversationTargetIdentities(),
+        router=_Router(),
+        inbound_author=_InboundCharacterAuthor(
+            flash_model=_RelationshipCommitmentInboundModel()
+        ),
+        transport=_DeliveredTransport(received_at=NOW),
+        now=NOW,
+    )
+    try:
+        response = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="relationship-commitment-stale",
+                text="我们可以成为好朋友吗？",
+                observed_at=NOW,
+                trace_id="trace:relationship-commitment-stale",
+            )
+        )
+        assert response.status == "action_authorized"
+        await app.drain_background_once()
+        delivery = await app.drain_actions_once()
+        assert delivery is not None and delivery.status == "settled"
+
+        def lose_acceptance(
+            _self,
+            *,
+            handle,
+            actor: str,
+            source: str,
+        ) -> None:
+            del handle, actor, source
+            raise ConcurrencyConflict("injected relationship acceptance race")
+
+        with monkeypatch.context() as race:
+            race.setattr(
+                RelationshipCommitmentAcceptanceRuntime,
+                "accept_runtime_owned",
+                lose_acceptance,
+            )
+            assert await app.drain_background_once() is None
+
+        pending = app._ledger.project()  # noqa: SLF001 - restart/replay evidence
+        assert len(pending.relationship_proposals) == 1
+        stale_proposal_id = pending.relationship_proposals[0].proposal_id
+        await app.tick(
+            tick_id="relationship-commitment-stale:advance",
+            logical_time_from=pending.logical_time or NOW,
+            logical_time_to=NOW + timedelta(seconds=1),
+            observed_at=NOW + timedelta(seconds=1),
+            trace_id="trace:relationship-commitment-stale:advance",
+            causation_id="scheduler:test",
+            correlation_id="conversation:test:c2c:user.1",
+            reason="test_relationship_commitment_stale_recovery",
+            run_life_ecology=False,
+        )
+    finally:
+        app.close()
+
+    rebuilt = _build_application(
+        path=path,
+        config=config,
+        identities=_ConversationTargetIdentities(),
+        router=_Router(),
+        inbound_author=_InboundCharacterAuthor(
+            flash_model=_RelationshipCommitmentInboundModel()
+        ),
+        transport=_DeliveredTransport(received_at=NOW + timedelta(seconds=1)),
+        now=NOW + timedelta(seconds=1),
+    )
+    try:
+        worker = rebuilt._turns._runtime._relationship_commitment_worker  # noqa: SLF001
+        assert worker is not None
+
+        stale = await worker.drain_one()
+
+        assert stale is not None and stale.status == "stale"
+        after_stale = rebuilt._ledger.project()  # noqa: SLF001
+        assert any(
+            item.proposal_id == stale_proposal_id and item.status == "stale"
+            for item in after_stale.acceptance_decisions
+        )
+        assert after_stale.relationship_commitments == ()
+
+        accepted = await worker.drain_one()
+
+        assert accepted is not None and accepted.status == "accepted"
+        settled = rebuilt._ledger.project()  # noqa: SLF001
+        assert len(settled.relationship_commitments) == 1
+        assert settled.relationship_states[0].stage == "friend"
+        assert all(
+            item.proposal_id
+            in {decision.proposal_id for decision in settled.acceptance_decisions}
+            for item in settled.relationship_proposals
+        )
+        assert rebuilt._ledger.rebuild() == settled  # noqa: SLF001
+    finally:
+        rebuilt.close()
+
+
+@pytest.mark.asyncio
+async def test_interaction_act_stale_candidate_is_closed_before_recompile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "interaction-act-stale-recovery.sqlite"
+    config = replace(
+        _config(),
+        reply_target="conversation:test:c2c:user.1",
+        counterpart_actor_ref="user:user.1",
+    )
+    app = _build_application(
+        path=path,
+        config=config,
+        identities=_ConversationTargetIdentities(),
+        router=_Router(),
+        inbound_author=_InboundCharacterAuthor(
+            flash_model=_DeliveredInteractionActInboundModel()
+        ),
+        transport=_DeliveredTransport(received_at=NOW),
+        now=NOW,
+    )
+    try:
+        response = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="interaction-act-stale",
+                text="你下次愿意把那本书带来吗？",
+                observed_at=NOW,
+                trace_id="trace:interaction-act-stale",
+            )
+        )
+        assert response.status == "action_authorized"
+        await app.drain_background_once()
+        delivery = await app.drain_actions_once()
+        assert delivery is not None and delivery.status == "settled"
+
+        def lose_acceptance(_self, **_kwargs) -> None:
+            raise ConcurrencyConflict("injected interaction-act acceptance race")
+
+        with monkeypatch.context() as race:
+            race.setattr(
+                InteractionActAcceptanceRuntime,
+                "accept",
+                lose_acceptance,
+            )
+            assert await app.drain_background_once() is None
+
+        pending = app._ledger.project()  # noqa: SLF001 - restart/replay evidence
+        assert len(pending.interaction_act_proposals) == 1
+        stale_proposal_id = pending.interaction_act_proposals[0].proposal_id
+        await app.tick(
+            tick_id="interaction-act-stale:advance",
+            logical_time_from=pending.logical_time or NOW,
+            logical_time_to=NOW + timedelta(seconds=1),
+            observed_at=NOW + timedelta(seconds=1),
+            trace_id="trace:interaction-act-stale:advance",
+            causation_id="scheduler:test",
+            correlation_id="conversation:test:c2c:user.1",
+            reason="test_interaction_act_stale_recovery",
+            run_life_ecology=False,
+        )
+    finally:
+        app.close()
+
+    rebuilt = _build_application(
+        path=path,
+        config=config,
+        identities=_ConversationTargetIdentities(),
+        router=_Router(),
+        inbound_author=_InboundCharacterAuthor(
+            flash_model=_DeliveredInteractionActInboundModel()
+        ),
+        transport=_DeliveredTransport(received_at=NOW + timedelta(seconds=1)),
+        now=NOW + timedelta(seconds=1),
+    )
+    try:
+        worker = rebuilt._turns._runtime._interaction_act_worker  # noqa: SLF001
+        assert worker is not None
+
+        stale = await worker.drain_one()
+
+        assert stale is not None and stale.status == "stale"
+        after_stale = rebuilt._ledger.project()  # noqa: SLF001
+        assert any(
+            item.proposal_id == stale_proposal_id and item.status == "stale"
+            for item in after_stale.acceptance_decisions
+        )
+        assert after_stale.interaction_acts == ()
+
+        accepted = await worker.drain_one()
+
+        assert accepted is not None and accepted.status == "accepted"
+        settled = rebuilt._ledger.project()  # noqa: SLF001
+        assert len(settled.interaction_acts) == 1
+        assert all(
+            item.proposal_id
+            in {decision.proposal_id for decision in settled.acceptance_decisions}
+            for item in settled.interaction_act_proposals
+        )
+        assert rebuilt._ledger.rebuild() == settled  # noqa: SLF001
+    finally:
+        rebuilt.close()
 
 
 def test_retired_independent_character_lanes_are_not_production_builder_surfaces() -> None:

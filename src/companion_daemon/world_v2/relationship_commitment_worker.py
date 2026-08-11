@@ -19,6 +19,7 @@ from .relationship_commitment_acceptance_runtime import (
 from .relationship_proposal_compiler import RelationshipProposalCompiler
 from .schema_core import FrozenModel
 from .schemas import CommitResult, ProjectionCursor
+from .stale_proposal_settlement import settle_stale_typed_proposal
 
 
 class RelationshipCommitmentWorkerError(ValueError):
@@ -30,7 +31,7 @@ class RelationshipCommitmentWorkerError(ValueError):
 
 
 class RelationshipCommitmentWorkResult(FrozenModel):
-    status: Literal["accepted"] = "accepted"
+    status: Literal["accepted", "stale"] = "accepted"
     source_proposal_id: str
     typed_proposal_id: str
     compile_commit: CommitResult
@@ -111,6 +112,30 @@ class RelationshipCommitmentWorker:
                 deliberation_revision=audit_commit.deliberation_revision,
                 ledger_sequence=audit_commit.ledger_sequence,
             )
+            stale = self._stale_candidate(
+                projection=projection,
+                audit=audit,
+                change=changes[0],
+                current_cursor=current_cursor,
+            )
+            if stale is not None:
+                candidate, proposal_event, proposal_commit = stale
+                settled = settle_stale_typed_proposal(
+                    ledger=self._ledger,
+                    proposal_event=proposal_event,
+                    proposal_id=candidate.proposal_id,
+                    evaluated_world_revision=candidate.evaluated_world_revision,
+                    current_cursor=current_cursor,
+                    actor=self._actor,
+                    source=self._source,
+                )
+                return RelationshipCommitmentWorkResult(
+                    status="stale",
+                    source_proposal_id=proposal.proposal_id,
+                    typed_proposal_id=candidate.proposal_id,
+                    compile_commit=proposal_commit,
+                    acceptance_commit=settled,
+                )
             if (
                 self._compiler.accepted_commitment_descendant(
                     world_id=self._ledger.world_id,
@@ -155,6 +180,37 @@ class RelationshipCommitmentWorker:
                 compile_commit=compiled.commit,
                 acceptance_commit=accepted,
             )
+        return None
+
+    def _stale_candidate(self, *, projection, audit, change, current_cursor):
+        decided = {item.proposal_id for item in projection.acceptance_decisions}
+        for candidate in projection.relationship_proposals:
+            binding = candidate.source_audit
+            if (
+                candidate.proposal_id in decided
+                or candidate.transition_kind != "commitment"
+                or candidate.evaluated_world_revision
+                >= current_cursor.world_revision
+                or binding is None
+                or binding.proposal_event_ref != audit.event_ref
+                or binding.proposal_event_payload_hash != audit.event_payload_hash
+                or binding.model_result_ref != audit.model_result_ref
+                or binding.capsule_id != audit.capsule_id
+                or binding.change_id != change.change_id
+                or binding.change_payload_hash != change.payload.payload_hash
+                or candidate.recorded_event_ref is None
+            ):
+                continue
+            located = self._ledger.lookup_event_commit(candidate.recorded_event_ref)
+            if (
+                located is None
+                or located[0].event_type != "ProposalRecorded"
+                or located[0].payload_hash != candidate.recorded_event_payload_hash
+            ):
+                raise RelationshipCommitmentWorkerError(
+                    "stale_candidate_event_missing"
+                )
+            return candidate, located[0], located[1]
         return None
 
     @staticmethod

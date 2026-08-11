@@ -594,10 +594,16 @@ class RelationshipProposalCompiler:
         located_existing: list[
             tuple[RelationshipProposalProjection, CommitResult]
         ] = []
+        terminal_proposal_ids = {
+            item.proposal_id
+            for item in projection.acceptance_decisions
+            if item.status in {"rejected", "stale"}
+        }
         for candidate in projection.relationship_proposals:
             binding = candidate.source_audit
             if (
-                binding is None
+                candidate.proposal_id in terminal_proposal_ids
+                or binding is None
                 or binding.proposal_event_ref != authority.audit.event_ref
                 or binding.proposal_event_payload_hash
                 != authority.audit.event_payload_hash
