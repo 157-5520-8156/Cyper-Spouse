@@ -36,7 +36,7 @@ import argparse
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 import hashlib
 import importlib
@@ -389,12 +389,11 @@ def _build_delivery_app(
     deployment = bundle.deployment
     if deployment.auto_delivery is None:
         raise RuntimeError("real QQ acceptance deployment has no media auto-delivery seam")
-    config = preview._config(media_bundle=bundle).model_copy(
-        update={
-            "reply_target": target,
-            "action_pump_owner": "pump:media-qq-acceptance",
-            "media_auto_delivery": deployment.auto_delivery,
-        }
+    config = replace(
+        preview._config(media_bundle=bundle),
+        reply_target=target,
+        action_pump_owner="pump:media-qq-acceptance",
+        media_auto_delivery=deployment.auto_delivery,
     )
     return preview.build_sqlite_world_v2_turn_application(
         path=database_path,

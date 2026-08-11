@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 import importlib.util
 import json
 from pathlib import Path
@@ -167,6 +168,67 @@ def test_scratch_root_and_paths_are_private_and_bounded(tmp_path: Path) -> None:
     assert database_path == root / "world" / "media.sqlite"
     with pytest.raises(ValueError, match="outside"):
         media_qq_acceptance._require_scratch_path(tmp_path / "outside.sqlite", root)
+
+
+def test_delivery_app_replaces_current_dataclass_config_coordinates(
+    tmp_path: Path,
+) -> None:
+    from companion_daemon.world_v2.production_turn_application import (
+        WorldV2TurnApplicationConfig,
+    )
+
+    captured: dict[str, object] = {}
+    auto_delivery = object()
+    original = WorldV2TurnApplicationConfig(
+        world_id="world:media-preview-acceptance",
+        companion_actor_ref="agent:companion",
+        reply_target="conversation:old",
+        action_pump_owner="pump:old",
+    )
+
+    class _Preview:
+        class _Router:
+            pass
+
+        @staticmethod
+        def _config(*, media_bundle: object) -> WorldV2TurnApplicationConfig:
+            assert media_bundle is bundle
+            return original
+
+        @staticmethod
+        def _new_character_interior(role_model: object) -> object:
+            return role_model
+
+        @staticmethod
+        def build_sqlite_world_v2_turn_application(**kwargs: object) -> object:
+            captured.update(kwargs)
+            return SimpleNamespace(config=kwargs["config"])
+
+    bundle = SimpleNamespace(
+        deployment=SimpleNamespace(
+            auto_delivery=auto_delivery,
+            planner=object(),
+        ),
+        transport=object(),
+    )
+
+    app = media_qq_acceptance._build_delivery_app(
+        preview=_Preview(),
+        bundle=bundle,
+        settings=object(),
+        database_path=tmp_path / "media.sqlite",
+        recipient_id="10001",
+        role_model=object(),
+        delivery=SimpleNamespace(),
+        now=datetime(2026, 8, 12, tzinfo=UTC),
+    )
+
+    assert original.reply_target == "conversation:old"
+    assert original.action_pump_owner == "pump:old"
+    assert app.config.reply_target == "conversation:qq:c2c:10001"
+    assert app.config.action_pump_owner == "pump:media-qq-acceptance"
+    assert app.config.media_auto_delivery is auto_delivery
+    assert captured["config"] is app.config
 
 
 @pytest.mark.asyncio
