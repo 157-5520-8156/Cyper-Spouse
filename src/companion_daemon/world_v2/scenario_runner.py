@@ -276,7 +276,11 @@ class ScenarioVerificationError(AssertionError):
 # so its behavioral predicates remain unchanged; the provider request and
 # durable audit identities intentionally move with the corrected hard-boundary
 # instructions.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.66"
+# ``.67`` binds the canonical relationship commitment transition graph into
+# the installed relationship policy digest. Scenario choices and predicates
+# remain unchanged; policy-bearing Context and replay identities intentionally
+# move with the corrected hard-boundary authority.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.67"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
@@ -381,11 +385,11 @@ FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.66"
 # marks. The frozen suite still emits no InteractionAct, so its per-case
 # visible/event/action/replay predicates remain unchanged; the role wire and
 # snapshot contract identities intentionally move the aggregate manifest.
-# ``.66`` composes that migrated baseline with pinned semantic-coordinate
-# preflight. Two independent complete frozen-suite processes produced this
-# same aggregate manifest before the new baseline was installed.
+# ``.67`` composes that migrated baseline with the complete relationship
+# transition-policy identity. Two independent complete frozen-suite processes
+# produced the same aggregate manifest before the new hash was installed.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "aafb30d0daee4dcf8f9207a9e006bfdf115e58cf4c4a625c2c8339e7c8090552"
+    "2ac64b374b7367632703a0e28ff2237f57eecf8b2d7b4df84b3d8c41ebbd185f"
 )
 
 
