@@ -7,6 +7,7 @@ import json
 import pytest
 
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
+from companion_daemon.world_v2.deliberation import DeliberationResult
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.minimal_reply_acceptance import (
     ExpressionBeatMaterial,
@@ -16,6 +17,16 @@ from companion_daemon.world_v2.minimal_reply_events import (
     ExpressionBeatAuthorizedPayload,
     ExpressionPlanAcceptedPayload,
     MessagePayloadStoredPayload,
+)
+from companion_daemon.world_v2.proposal_audit import (
+    ProposalAuditContext,
+    ProposalAuditRecorder,
+)
+from companion_daemon.world_v2.proposal_envelope import (
+    CanonicalTypedPayload,
+    DecisionProposal,
+    ProposalEvidenceRef,
+    TypedChange,
 )
 from companion_daemon.world_v2.relationship_commitment_acceptance_runtime import (
     relationship_commitment_mutation_event_id,
@@ -56,6 +67,7 @@ from test_appraisal_authority import NOW, WORLD_ID, prepare_claimed_interaction
 from test_character_interior_inbound_relationship import (
     _record_relationship_decision,
 )
+from test_proposal_audit import _digest, _result
 
 
 TEXT = "好呀，那说好了，你是我朋友了。"
@@ -377,10 +389,94 @@ class _CompilerLedger:
         )
 
 
+def _record_relationship_commitment_decision(
+    ledger: WorldLedger,
+    *,
+    visible_text_span: str,
+):
+    source_event = ledger.lookup_event_commit("message-event:1")[0]
+    evidence = ProposalEvidenceRef(
+        ref_id=source_event.event_id,
+        evidence_kind="committed_world_event",
+        source_world_revision=ledger.lookup_event_commit(source_event.event_id)[
+            1
+        ].world_revision,
+        immutable_hash="sha256:" + source_event.payload_hash,
+    )
+    proposal = DecisionProposal(
+        proposal_id="proposal:inbound-relationship:1",
+        trigger_ref=source_event.event_id,
+        evaluated_world_revision=ledger.project().world_revision,
+        evidence_refs=(evidence,),
+        proposed_changes=(
+            TypedChange(
+                change_id="change:inbound-relationship-commitment:1",
+                kind="relationship_commitment",
+                target_id="relationship-commitment:user:test:friend",
+                transition="commit",
+                evidence_refs=(source_event.event_id,),
+                payload=CanonicalTypedPayload.from_value(
+                    payload_schema="relationship_commitment.v1",
+                    value={
+                        "subject_ref": "user:test",
+                        "target_stage": "friend",
+                        "commitment_code": "mutual_friendship",
+                        "persistence": "durable",
+                        "visible_text_span": visible_text_span,
+                    },
+                ),
+            ),
+        ),
+        action_intents=(),
+        confidence=7600,
+        brief_rationale="角色在本次互动里形成了自己的关系承诺。",
+        behavior_tendency="自然接住",
+        stance="愿意靠近",
+        display_strategy="不刻意宣告",
+        timing_choice="silent",
+    )
+    base = _result()
+    result = DeliberationResult(
+        result_id="deliberation:"
+        + _digest(
+            {
+                "capsule_id": base.capsule_id,
+                "proposal_hash": proposal.proposal_hash,
+                "attempt_audits": [base.audit.model_dump(mode="json")],
+            }
+        ),
+        capsule_id=base.capsule_id,
+        proposal=proposal,
+        audit=base.audit,
+        attempt_audits=(base.audit,),
+    )
+    head = ledger.project()
+    recorded = ProposalAuditRecorder(ledger=ledger).record(
+        result,
+        ProposalAuditContext(
+            world_id=WORLD_ID,
+            trigger_ref=source_event.event_id,
+            logical_time=NOW,
+            created_at=NOW,
+            actor="agent:companion",
+            source="test:relationship-commitment",
+            trace_id="trace:relationship-commitment",
+            causation_id=source_event.event_id,
+            correlation_id="correlation:relationship-commitment",
+            evaluated_world_revision=head.world_revision,
+            expected_commit_world_revision=head.world_revision,
+            expected_deliberation_revision=head.deliberation_revision,
+            expected_ledger_sequence=head.ledger_sequence,
+        ),
+    )
+    return proposal, recorded.cursor, source_event
+
+
 def _compiler_fixture(
     *,
     include_commitment: bool = True,
     text: str = TEXT,
+    visible_text_span: str = SPAN,
     target_stage: str = "friend",
     subject_ref: str = "user:test",
     stored_event_text: str | None = None,
@@ -389,13 +485,23 @@ def _compiler_fixture(
     issuer = AcceptedLedgerBatchIssuer()
     ledger = WorldLedger.in_memory(world_id=WORLD_ID, accepted_batch_issuer=issuer)
     prepare_claimed_interaction(ledger, reply_target=delivery_target)
-    proposal, audit_cursor, source_event = _record_relationship_decision(
-        ledger,
-        include_signal=False,
-        include_commitment=include_commitment,
-        commitment_target_stage=target_stage,
-        commitment_subject_ref=subject_ref,
-    )
+    if visible_text_span == SPAN:
+        proposal, audit_cursor, source_event = _record_relationship_decision(
+            ledger,
+            include_signal=False,
+            include_commitment=include_commitment,
+            commitment_target_stage=target_stage,
+            commitment_subject_ref=subject_ref,
+        )
+    else:
+        if not include_commitment or target_stage != "friend" or subject_ref != "user:test":
+            raise AssertionError("custom visible span fixture only supports one commitment")
+        proposal, audit_cursor, source_event = (
+            _record_relationship_commitment_decision(
+                ledger,
+                visible_text_span=visible_text_span,
+            )
+        )
     base = ledger.project_at(audit_cursor)
     current, commits = _proof_projection(
         base,
@@ -544,6 +650,104 @@ def test_public_reducer_rejects_commitment_semantics_changed_from_typed_source(
 
     with pytest.raises(ValueError):
         reduce_event(_reducer_state_with_delivery(ledger), crafted_event)
+
+
+def test_public_reducer_rejects_overlapping_delivered_visible_span() -> None:
+    ledger, source_proposal, audit_cursor, _current_cursor = _compiler_fixture(
+        text="aaa",
+        visible_text_span="aa",
+    )
+    source_audit = next(
+        item
+        for item in ledger._delegate.project_at(audit_cursor).proposal_audits
+        if item.proposal_id == source_proposal.proposal_id
+    )
+    source_change = source_proposal.proposed_changes[0]
+    _baseline_ledger, _source, _baseline_cursor, proposal_event = (
+        _compiled_commitment_proposal_event()
+    )
+    proof_event_hashes = {
+        item.event_id: item.payload_hash
+        for item in ledger._current.committed_world_event_refs
+    }
+    proposal = RelationshipProposalProjection.model_validate_json(
+        proposal_event.payload_json
+    )
+    payload = RelationshipCommitmentAcceptedPayload.model_validate_json(
+        proposal.proposed_mutation.payload_json
+    )
+    crafted_proof = payload.commitment.delivery_proof.model_copy(
+        update={
+            "message_payload_hash": "sha256:"
+            + hashlib.sha256(b"aaa").hexdigest(),
+            "stored_payload_event_hash": proof_event_hashes[
+                "event:relationship-commitment-message-stored"
+            ],
+            "beat_event_payload_hash": proof_event_hashes[
+                "event:relationship-commitment-beat-authorized"
+            ],
+            "action_event_payload_hash": proof_event_hashes[
+                "event:relationship-commitment-action-authorized"
+            ],
+        }
+    )
+    crafted = payload.model_copy(
+        update={
+            "commitment": payload.commitment.model_copy(
+                update={
+                    "visible_text_span": "aa",
+                    "delivery_proof": crafted_proof,
+                }
+            )
+        }
+    )
+    crafted_event = _rewrite_compiled_commitment_event(
+        proposal_event,
+        crafted,
+        suffix="overlapping-visible-span",
+    )
+    crafted_proposal = RelationshipProposalProjection.model_validate_json(
+        crafted_event.payload_json
+    )
+    assert crafted_proposal.source_audit is not None
+    crafted_proposal = crafted_proposal.model_copy(
+        update={
+            "source_audit": crafted_proposal.source_audit.model_copy(
+                update={
+                    "proposal_event_ref": source_audit.event_ref,
+                    "proposal_event_payload_hash": source_audit.event_payload_hash,
+                    "model_result_ref": source_audit.model_result_ref,
+                    "capsule_id": source_audit.capsule_id,
+                    "change_id": source_change.change_id,
+                    "change_payload_hash": source_change.payload.payload_hash,
+                }
+            )
+        }
+    )
+    crafted_event = WorldEvent.from_payload(
+        schema_version=crafted_event.schema_version,
+        event_id=f"{crafted_event.event_id}:source-bound",
+        world_id=crafted_event.world_id,
+        event_type=crafted_event.event_type,
+        logical_time=crafted_event.logical_time,
+        created_at=crafted_event.created_at,
+        actor=crafted_event.actor,
+        source=crafted_event.source,
+        trace_id=crafted_event.trace_id,
+        causation_id=crafted_event.causation_id,
+        correlation_id=crafted_event.correlation_id,
+        idempotency_key=f"{crafted_event.idempotency_key}:source-bound",
+        payload=crafted_proposal.model_dump(mode="json"),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="relationship commitment delivered expression is not terminal",
+    ):
+        reduce_event(
+            _reducer_state_with_delivery(ledger),
+            crafted_event,
+        )
 
 
 def test_public_reducer_rejects_commitment_subject_not_bound_to_observation_actor() -> None:
@@ -802,6 +1006,24 @@ def test_record_commitment_rebased_fails_closed_without_delivered_receipt() -> N
 def test_record_commitment_rebased_requires_visible_span_exactly_once() -> None:
     ledger, proposal, audit_cursor, current_cursor = _compiler_fixture(
         text=f"{SPAN}，是真的，{SPAN}。"
+    )
+
+    with pytest.raises(
+        RelationshipProposalCompilerError,
+        match="commitment_visible_span_not_exact",
+    ):
+        RelationshipProposalCompiler(ledger=ledger).record_commitment_rebased(
+            world_id=WORLD_ID,
+            audit_cursor=audit_cursor,
+            current_cursor=current_cursor,
+            proposal_id=proposal.proposal_id,
+        )
+
+
+def test_record_commitment_rebased_counts_overlapping_visible_span_occurrences() -> None:
+    ledger, proposal, audit_cursor, current_cursor = _compiler_fixture(
+        text="aaa",
+        visible_text_span="aa",
     )
 
     with pytest.raises(

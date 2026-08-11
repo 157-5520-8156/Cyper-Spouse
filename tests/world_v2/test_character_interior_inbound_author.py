@@ -340,6 +340,76 @@ class _PrivateTurnStateCombinedProvider(_CombinedProvider):
         )
 
 
+class _OverlappingDeliveredSpanThenExactProvider(_CombinedProvider):
+    """Repair one cross-draft overlap through the same character provider."""
+
+    model = "overlapping-delivered-span-then-exact"
+
+    def __init__(self, *, drop_interaction_on_correction: bool = False) -> None:
+        super().__init__()
+        self._drop_interaction_on_correction = drop_interaction_on_correction
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+    ) -> str:
+        del temperature
+        self.calls.append(messages)
+        first_attempt = len(self.calls) == 1
+        return json.dumps(
+            {
+                "appraisal_draft": {
+                    "appraise": False,
+                    "affect": "no_change",
+                    "interaction_act": (
+                        None
+                        if not first_attempt and self._drop_interaction_on_correction
+                        else {
+                            "operation": "declare",
+                            "status_code": "等待后续继续",
+                            "source_scope": "delivered_expression",
+                            "source_text_span": "aa",
+                            "interaction_act_ref": None,
+                            "act_kind": "约定后续继续交流",
+                            "subject_role": "self",
+                            "counterparty_roles": ["current_counterpart"],
+                            "object_ref": None,
+                            "object_label": None,
+                        }
+                    ),
+                    "behavior_tendency": "按自己的判断回应",
+                    "stance": "认真",
+                    "display_strategy": "自然说明",
+                    "brief_rationale": "她选择提出一个跨轮保留的后续动作。",
+                    "confidence": 8200,
+                },
+                "expression_draft": {
+                    "private_turn_state": {
+                        "contract": "private-turn-state.1",
+                        "inner_state_summary": "我愿意保留这个以后继续交流的安排。",
+                        "attended_source_refs": ["observation:1"],
+                    },
+                    "timing_choice": "now",
+                    "beats": [
+                        {
+                            "modality": "text",
+                            "text": (
+                                "aaa" if first_attempt else "aa，之后继续聊。"
+                            ),
+                        }
+                    ],
+                    "stance": "认真",
+                    "brief_rationale": "她选择明确说出自己的后续安排。",
+                    "confidence": 8200,
+                    "world_claims": [],
+                },
+            },
+            ensure_ascii=False,
+        )
+
+
 class _ContextShiftPrivateTurnStateProvider(_PrivateTurnStateCombinedProvider):
     """Return a fresh standalone expression for a later expression request."""
 
@@ -4320,6 +4390,110 @@ async def test_invalid_appraisal_requires_one_complete_same_role_reselection() -
     assert all(change.kind != "appraisal_transition" for change in proposal.proposed_changes)
     assert "appraisal" in provider.calls[1][-1]["content"].lower()
     assert len(proposal.action_intents) == 1
+
+
+@pytest.mark.asyncio
+async def test_overlapping_delivered_span_is_reselected_before_a_worker_can_observe_it() -> None:
+    provider = _OverlappingDeliveredSpanThenExactProvider()
+    cognition = InboundCharacterAuthor(flash_model=provider)
+    request = _request(revision=3, call="call:overlapping-delivered-span")
+    request = request.model_copy(
+        update={
+            "model_content_json": json.dumps(
+                {
+                    **json.loads(request.model_content_json),
+                    "actor_ref": "actor:companion",
+                },
+                ensure_ascii=False,
+            )
+        }
+    )
+
+    output = await cognition.propose(request)
+
+    proposal = DecisionProposal.model_validate_json(json.dumps(output.raw_proposal))
+    interaction = next(
+        change for change in proposal.proposed_changes if change.kind == "interaction_act"
+    )
+    expression = next(
+        change
+        for change in proposal.proposed_changes
+        if change.kind == "expression_plan_transition"
+    )
+    assert len(provider.calls) == 2
+    assert "visible span must occur exactly once" in provider.calls[1][-1]["content"]
+    assert interaction.payload.value()["source_text_span"] == "aa"
+    assert expression.payload.value()["beat_drafts"][0]["inline_text"] == (
+        "aa，之后继续聊。"
+    )
+    assert "aaa" not in json.dumps(output.raw_proposal, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_delivered_span_correction_replaces_the_paired_interaction_choice() -> None:
+    provider = _OverlappingDeliveredSpanThenExactProvider(
+        drop_interaction_on_correction=True
+    )
+    cognition = InboundCharacterAuthor(flash_model=provider)
+    request = _request(revision=3, call="call:delivered-span-drops-interaction")
+    request = request.model_copy(
+        update={
+            "model_content_json": json.dumps(
+                {
+                    **json.loads(request.model_content_json),
+                    "actor_ref": "actor:companion",
+                },
+                ensure_ascii=False,
+            )
+        }
+    )
+
+    output = await cognition.propose(request)
+
+    proposal = DecisionProposal.model_validate_json(json.dumps(output.raw_proposal))
+    assert len(provider.calls) == 2
+    assert all(change.kind != "interaction_act" for change in proposal.proposed_changes)
+    expression = next(
+        change
+        for change in proposal.proposed_changes
+        if change.kind == "expression_plan_transition"
+    )
+    assert expression.payload.value()["beat_drafts"][0]["inline_text"] == (
+        "aa，之后继续聊。"
+    )
+
+
+@pytest.mark.asyncio
+async def test_deferred_paired_correction_fails_closed_if_the_appraisal_changes(
+    monkeypatch,
+) -> None:
+    provider = _OverlappingDeliveredSpanThenExactProvider(
+        drop_interaction_on_correction=True
+    )
+    cognition = InboundCharacterAuthor(flash_model=provider)
+    request = _request(revision=3, call="call:deferred-span-drops-interaction")
+    request = request.model_copy(
+        update={
+            "model_content_json": json.dumps(
+                {
+                    **json.loads(request.model_content_json),
+                    "actor_ref": "actor:companion",
+                },
+                ensure_ascii=False,
+            )
+        }
+    )
+    monkeypatch.setattr(
+        "companion_daemon.world_v2.character_interior.inbound_author."
+        "expression_episode_provider_slots_active",
+        lambda: True,
+    )
+
+    with pytest.raises(ValidationTechnicalFailure) as caught:
+        await cognition.propose(request)
+
+    assert len(provider.calls) == 2
+    assert caught.value.failure_code == "paired_expression_reselection_invalid"
 
 
 @pytest.mark.asyncio

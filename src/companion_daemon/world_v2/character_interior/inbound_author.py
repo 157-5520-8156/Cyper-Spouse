@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from hashlib import sha256
 import json
 import logging
-from typing import Any
+from typing import Any, NamedTuple
 
 from companion_daemon.llm import (
     model_provider_request_identity_scope,
@@ -99,6 +99,7 @@ from ..isolated_source_closure_trace import (
     SourceClosureTraceStage,
     emit_source_closure_trace,
 )
+from ..interaction_act_identity import interaction_act_overlapping_occurrence_count
 from ..model_facing_context import compact_chat_model_facing_context
 from ..production_reliability_metrics import (
     record_claim_repair,
@@ -164,6 +165,20 @@ _APPRAISAL_AFFECT_FIELDS = {
     "supersede": frozenset({"episode_id", "components"}),
 }
 logger = logging.getLogger(__name__)
+
+
+class _CognitionReselectionResult(NamedTuple):
+    """Validated correction bytes from one indivisible character decision."""
+
+    raw: str
+    usage: ModelUsageProvenance | None
+    corrective_used: bool
+    winning_model_call_id: str | None = None
+    winning_request_hash: str | None = None
+    winning_model_id: str | None = None
+    source_closure_lane_used: bool = False
+    episode_disposition: str | None = None
+    paired_appraisal_proposal: dict[str, object] | None = None
 
 
 
@@ -804,38 +819,13 @@ def _merge_cognition_outputs(
     appraisal_proposal = validate_proposal_envelope(appraisal.raw_proposal)
     if not isinstance(appraisal_proposal, DecisionProposal):
         raise ValueError("inbound appraisal did not return a DecisionProposal")
-    state_changes = tuple(
-        change
-        for change in appraisal_proposal.proposed_changes
-        if change.kind
-        in {
-            "appraisal_transition",
-            "affect_transition",
-            "relationship_signal",
-            "relationship_commitment",
-            "interaction_act",
-        }
-    )
+    state_changes = _cognition_state_changes(appraisal_proposal)
     if not state_changes:
         return expression
-    visible_texts = _expression_inline_texts(expression_proposal)
-    for change in state_changes:
-        payload = change.payload.value()
-        spans: tuple[object, ...] = ()
-        if change.kind == "relationship_commitment":
-            spans = (payload.get("visible_text_span"),)
-        elif (
-            change.kind == "interaction_act"
-            and payload.get("source_scope") == "delivered_expression"
-        ):
-            spans = (payload.get("source_text_span"), payload.get("object_label"))
-        for span in spans:
-            if span is None:
-                continue
-            if not isinstance(span, str) or sum(text.count(span) for text in visible_texts) != 1:
-                raise ValueError(
-                    f"{change.kind} visible span must occur exactly once in the expression"
-                )
+    _validate_cognition_visible_spans(
+        state_changes=state_changes,
+        expression_proposal=expression_proposal,
+    )
     evidence = _merge_evidence(
         appraisal_proposal.evidence_refs,
         expression_proposal.evidence_refs,
@@ -885,6 +875,69 @@ def _merge_cognition_outputs(
     else:
         raise ValueError("inbound expression returned an unsupported proposal kind")
     return expression.model_copy(update={"raw_proposal": merged.model_dump(mode="json")})
+
+
+def _cognition_state_changes(appraisal_proposal: DecisionProposal) -> tuple[Any, ...]:
+    return tuple(
+        change
+        for change in appraisal_proposal.proposed_changes
+        if change.kind
+        in {
+            "appraisal_transition",
+            "affect_transition",
+            "relationship_signal",
+            "relationship_commitment",
+            "interaction_act",
+        }
+    )
+
+
+def _validate_cognition_visible_spans(
+    *,
+    state_changes: tuple[Any, ...],
+    expression_proposal: object,
+) -> None:
+    """Verify cross-draft text coordinates before they can reach a worker."""
+
+    visible_texts = _expression_inline_texts(expression_proposal)
+    for change in state_changes:
+        payload = change.payload.value()
+        spans: tuple[object, ...] = ()
+        if change.kind == "relationship_commitment":
+            spans = (payload.get("visible_text_span"),)
+        elif (
+            change.kind == "interaction_act"
+            and payload.get("source_scope") == "delivered_expression"
+        ):
+            spans = (payload.get("source_text_span"), payload.get("object_label"))
+        for span in spans:
+            if span is None:
+                continue
+            if not isinstance(span, str) or sum(
+                interaction_act_overlapping_occurrence_count(
+                    source_text=text,
+                    selected_text=span,
+                )
+                for text in visible_texts
+            ) != 1:
+                raise ValueError(
+                    f"{change.kind} visible span must occur exactly once in the expression"
+                )
+
+
+def _validate_materialized_cognition_visible_spans(
+    *,
+    appraisal_proposal: object,
+    expression_proposal: object,
+) -> None:
+    appraisal = validate_proposal_envelope(appraisal_proposal)
+    if not isinstance(appraisal, DecisionProposal):
+        raise ValueError("inbound appraisal did not return a DecisionProposal")
+    expression = validate_proposal_envelope(expression_proposal)
+    _validate_cognition_visible_spans(
+        state_changes=_cognition_state_changes(appraisal),
+        expression_proposal=expression,
+    )
 
 
 def _expression_inline_texts(proposal: object) -> tuple[str, ...]:
@@ -2085,7 +2138,11 @@ class _InboundCharacterAuthor:
         timeout_seconds: float = _CLAIM_REPAIR_TIMEOUT_SECONDS,
         private_state_context_json: str | None = None,
         source_ref_aliases: SourceRefAliasTable | None = None,
-    ) -> ValidationReselectionResult | None:
+        paired_appraisal_proposal: object | None = None,
+        paired_appraisal_materializer: (
+            Callable[[dict[str, object]], dict[str, object]] | None
+        ) = None,
+    ) -> _CognitionReselectionResult | None:
         """Spend one corrective call naming the exact bounded violation.
 
         Handles semantic source closure, claim-bookkeeping near-misses, and
@@ -2285,11 +2342,24 @@ class _InboundCharacterAuthor:
 
         corrected_raw = reselection.raw
         episode_disposition: str | None = None
+        corrected_appraisal_proposal: dict[str, object] | None = None
         try:
             if source_closure_review is not None or expression_tool_kwargs:
                 corrected_raw = normalize_realtime_expression_reselection_output(corrected_raw)
             if combined:
                 corrected = _parse_combined(corrected_raw)
+                corrected_appraisal_proposal = (
+                    paired_appraisal_materializer(corrected["appraisal_draft"])
+                    if paired_appraisal_materializer is not None
+                    else materialize_appraisal_draft(
+                        raw=json.dumps(
+                            corrected["appraisal_draft"],
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        request=request,
+                    )
+                )
                 expression_raw = json.dumps(
                     corrected["expression_draft"], ensure_ascii=False, separators=(",", ":")
                 )
@@ -2302,7 +2372,7 @@ class _InboundCharacterAuthor:
                     source_closure_review is not None and not combined
                 ),
             )
-            materialize_expression_draft(
+            materialized_expression = materialize_expression_draft(
                 raw=expression_raw,
                 request=request,
                 capabilities=self._capabilities,
@@ -2314,6 +2384,16 @@ class _InboundCharacterAuthor:
                     self._require_explicit_authored_decision_fields
                 ),
             )
+            effective_appraisal_proposal = (
+                corrected_appraisal_proposal
+                if corrected_appraisal_proposal is not None
+                else paired_appraisal_proposal
+            )
+            if effective_appraisal_proposal is not None:
+                _validate_materialized_cognition_visible_spans(
+                    appraisal_proposal=effective_appraisal_proposal,
+                    expression_proposal=materialized_expression,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -2357,7 +2437,7 @@ class _InboundCharacterAuthor:
         else:
             logger.warning("draft-shape corrective retry repaired the expression draft")
             record_shape_repair()
-        return ValidationReselectionResult(
+        return _CognitionReselectionResult(
             raw=expression_raw,
             usage=reselection.usage,
             corrective_used=True,
@@ -2366,6 +2446,7 @@ class _InboundCharacterAuthor:
             winning_model_id=reselection_model_id,
             source_closure_lane_used=reselection_lane is not None,
             episode_disposition=episode_disposition,
+            paired_appraisal_proposal=corrected_appraisal_proposal,
         )
 
     async def _reselect_invalid_private_recall_choice(
@@ -2536,6 +2617,37 @@ class _InboundCharacterAuthor:
         if repaired_result is None:
             return None
         usage = _combine_usage(detail.usage, repaired_result.usage, request.call_id)
+        try:
+            original = _parse_combined(detail.raw)
+            original_appraisal = materialize_appraisal_draft(
+                raw=json.dumps(
+                    original["appraisal_draft"],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                request=request,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValidationTechnicalFailure(
+                "paired_expression_reselection_invalid",
+                model_call_id=repaired_result.winning_model_call_id,
+                request_hash=repaired_result.winning_request_hash,
+                attempted_model_id=self._model_id_for_provider(request, provider),
+                attempted_model_version=self.VERSION,
+                usage=usage,
+            ) from exc
+        if repaired_result.paired_appraisal_proposal != original_appraisal:
+            # The appraisal candidate has already left this materializer. A
+            # later expression-only recovery cannot silently combine its old
+            # semantic choice with a newly authored paired correction.
+            raise ValidationTechnicalFailure(
+                "paired_expression_reselection_invalid",
+                model_call_id=repaired_result.winning_model_call_id,
+                request_hash=repaired_result.winning_request_hash,
+                attempted_model_id=self._model_id_for_provider(request, provider),
+                attempted_model_version=self.VERSION,
+                usage=usage,
+            )
         reviewer = self._source_closure_reviewer
         if reviewer is not None:
             review_result = await review_expression_with_candidate_external_coverage(
@@ -3509,7 +3621,7 @@ class _InboundCharacterAuthor:
         violation_object: object | None = None
         authored_field_violation = False
         try:
-            materialize_expression_draft(
+            materialized_expression = materialize_expression_draft(
                 raw=expression_raw,
                 request=expression_request,
                 capabilities=self._capabilities,
@@ -3520,6 +3632,12 @@ class _InboundCharacterAuthor:
                 require_explicit_authored_decision_fields=(
                     self._require_explicit_authored_decision_fields
                 ),
+            )
+            if appraisal_proposal is None:
+                raise ValueError("paired appraisal result is missing")
+            _validate_materialized_cognition_visible_spans(
+                appraisal_proposal=appraisal_proposal,
+                expression_proposal=materialized_expression,
             )
         except (TypeError, ValueError) as exc:
             violation = str(exc)
@@ -3571,6 +3689,7 @@ class _InboundCharacterAuthor:
                     timeout_seconds=repair_timeout,
                     private_state_context_json=(provider_expression_request.model_content_json),
                     source_ref_aliases=source_ref_aliases,
+                    paired_appraisal_materializer=materialize_live_appraisal,
                 )
                 if repaired_result is not None:
                     usage = _combine_usage(
@@ -3580,6 +3699,9 @@ class _InboundCharacterAuthor:
                     )
                     expression_raw = repaired_result.raw
                     episode_disposition = repaired_result.episode_disposition
+                    if repaired_result.paired_appraisal_proposal is None:
+                        raise ValueError("paired shape correction omitted appraisal result")
+                    appraisal_proposal = repaired_result.paired_appraisal_proposal
                     if (
                         repaired_result.winning_model_call_id is None
                         or repaired_result.winning_request_hash is None

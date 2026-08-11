@@ -59,6 +59,7 @@ from .ledger_prefix_proof import (
 )
 from .replay_evidence import ReplayCommitEvidence, ReplayEvidence, ReplayEventEvidence
 from .reducers import (
+    V53_REDUCER_BUNDLE_VERSION,
     PREVIOUS_REDUCER_BUNDLE_VERSION,
     REDUCER_BUNDLE_VERSION,
     V48_REDUCER_BUNDLE_VERSION,
@@ -3043,6 +3044,7 @@ class SQLiteWorldLedger:
                 V50_REDUCER_BUNDLE_VERSION,
                 V51_REDUCER_BUNDLE_VERSION,
                 V52_REDUCER_BUNDLE_VERSION,
+                V53_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -3069,6 +3071,7 @@ class SQLiteWorldLedger:
                     V50_REDUCER_BUNDLE_VERSION,
                     V51_REDUCER_BUNDLE_VERSION,
                     V52_REDUCER_BUNDLE_VERSION,
+                    V53_REDUCER_BUNDLE_VERSION,
                     PREVIOUS_REDUCER_BUNDLE_VERSION,
                 }:
                     canonical_legacy_state = json.dumps(
@@ -3400,6 +3403,7 @@ class SQLiteWorldLedger:
                 V50_REDUCER_BUNDLE_VERSION,
                 V51_REDUCER_BUNDLE_VERSION,
                 V52_REDUCER_BUNDLE_VERSION,
+                V53_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
             }:
                 state = ReducerState.model_validate_json(

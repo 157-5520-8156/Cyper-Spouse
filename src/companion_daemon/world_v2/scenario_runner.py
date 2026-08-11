@@ -280,7 +280,12 @@ class ScenarioVerificationError(AssertionError):
 # the installed relationship policy digest. Scenario choices and predicates
 # remain unchanged; policy-bearing Context and replay identities intentionally
 # move with the corrected hard-boundary authority.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.67"
+# ``.68`` records reducer .55, which makes an effect-free relationship
+# commitment terminal advisory authoritative only for the exact installed
+# compiler reason and only when the pinned current-state transition is truly
+# unavailable. The frozen suite emits no such advisory; its predicates remain
+# unchanged while reducer, snapshot, and replay identities move together.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.68"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
@@ -388,8 +393,11 @@ FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.67"
 # ``.67`` composes that migrated baseline with the complete relationship
 # transition-policy identity. Two independent complete frozen-suite processes
 # produced the same aggregate manifest before the new hash was installed.
+# ``.68`` composes the exact relationship-commitment terminal authority with
+# reducer .55. Two independent complete frozen-suite processes must produce
+# the same aggregate manifest before the new hash is installed.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "2ac64b374b7367632703a0e28ff2237f57eecf8b2d7b4df84b3d8c41ebbd185f"
+    "0034bd20c86336d3abfc6c70ae739a79ea4288546852c7c38d016b90de9fa9dd"
 )
 
 

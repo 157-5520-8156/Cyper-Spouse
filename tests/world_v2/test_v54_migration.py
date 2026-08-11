@@ -32,7 +32,9 @@ NOW = datetime(2026, 8, 11, 16, 0, tzinfo=UTC)
 WORLD = "world:v54-migration"
 V53 = "world-v2-reducers.53"
 V54 = "world-v2-reducers.54"
+V55 = "world-v2-reducers.55"
 EC50_SOURCE_COMMIT = "ec50d9f28e33459272f644fd4900673509bd045f"
+V54_SOURCE_COMMIT = "3fe665570554bd8e95acd1040822a2eb070e6dc0"
 
 
 EC50_V53_SEED_SCRIPT = textwrap.dedent(
@@ -163,20 +165,25 @@ def _message_event() -> WorldEvent:
     )
 
 
-def _build_authentic_ec50_v53_database(
-    *, tmp_path: Path, database_path: Path
+def _build_archived_database(
+    *,
+    tmp_path: Path,
+    database_path: Path,
+    source_commit: str,
+    expected_bundle: str,
+    source_name: str,
 ) -> tuple[int, int, int]:
     repository_root = Path(__file__).resolve().parents[2]
     resolved = subprocess.run(
-        ["git", "rev-parse", f"{EC50_SOURCE_COMMIT}^{{commit}}"],
+        ["git", "rev-parse", f"{source_commit}^{{commit}}"],
         cwd=repository_root,
         check=True,
         capture_output=True,
         text=True,
     ).stdout.strip()
-    assert resolved == EC50_SOURCE_COMMIT
+    assert resolved == source_commit
 
-    source_root = tmp_path / "ec50-source"
+    source_root = tmp_path / source_name
     source_root.mkdir()
     archive_path = tmp_path / "ec50-source.tar"
     with archive_path.open("wb") as archive_stream:
@@ -185,7 +192,7 @@ def _build_authentic_ec50_v53_database(
                 "git",
                 "archive",
                 "--format=tar",
-                EC50_SOURCE_COMMIT,
+                source_commit,
                 "src/companion_daemon",
             ],
             cwd=repository_root,
@@ -207,8 +214,8 @@ def _build_authentic_ec50_v53_database(
         text=True,
     )
     metadata = json.loads(seeded.stdout.splitlines()[-1])
-    assert metadata["reducer_bundle"] == V53
-    assert metadata["projection_bundle"] == V53
+    assert metadata["reducer_bundle"] == expected_bundle
+    assert metadata["projection_bundle"] == expected_bundle
     assert Path(str(metadata["module_file"])).is_relative_to(source_root)
     cursor = metadata["cursor"]
     assert isinstance(cursor, list)
@@ -240,13 +247,16 @@ def _head_coordinates(path: Path) -> tuple[int, int, int, str]:
     return int(row[0]), int(row[1]), int(row[2]), str(row[3])
 
 
-def test_authentic_v53_message_head_migrates_to_v54_without_rewriting_history(
+def test_authentic_v53_message_head_migrates_to_v55_without_rewriting_history(
     tmp_path,
 ) -> None:
     path = tmp_path / "v53-message-head.sqlite3"
-    source_cursor = _build_authentic_ec50_v53_database(
+    source_cursor = _build_archived_database(
         tmp_path=tmp_path,
         database_path=path,
+        source_commit=EC50_SOURCE_COMMIT,
+        expected_bundle=V53,
+        source_name="ec50-v53-source",
     )
     old_events = _event_rows_as_bytes(path)
     old_head = _head_coordinates(path)
@@ -255,7 +265,7 @@ def test_authentic_v53_message_head_migrates_to_v54_without_rewriting_history(
 
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
     projection = migrated.project()
-    assert projection.reducer_bundle_version == V54
+    assert projection.reducer_bundle_version == V55
     assert projection.message_observations[0].actor == "user:primary"
     assert projection.message_observations[0].channel == "qq"
     assert (
@@ -277,7 +287,7 @@ def test_authentic_v53_message_head_migrates_to_v54_without_rewriting_history(
     migrated.close()
 
     assert _event_rows_as_bytes(path) == old_events
-    assert _head_coordinates(path) == (*old_head[:3], V54)
+    assert _head_coordinates(path) == (*old_head[:3], V55)
 
     reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
     cold_projection = reopened.project()
@@ -287,8 +297,8 @@ def test_authentic_v53_message_head_migrates_to_v54_without_rewriting_history(
     assert _event_rows_as_bytes(path) == old_events
 
 
-def test_v54_head_survives_cold_reopen_and_full_rebuild(tmp_path) -> None:
-    path = tmp_path / "v54-cold-reopen.sqlite3"
+def test_v55_head_survives_cold_reopen_and_full_rebuild(tmp_path) -> None:
+    path = tmp_path / "v55-cold-reopen.sqlite3"
     first = SQLiteWorldLedger(path=path, world_id=WORLD)
     first.commit(
         (_message_event(),),
@@ -296,13 +306,37 @@ def test_v54_head_survives_cold_reopen_and_full_rebuild(tmp_path) -> None:
         expected_deliberation_revision=0,
     )
     expected = first.project()
-    assert expected.reducer_bundle_version == V54
+    assert expected.reducer_bundle_version == V55
     first.close()
 
     reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
     assert reopened.project() == expected
     assert reopened.rebuild() == expected
     reopened.close()
+
+
+def test_authentic_v54_head_migrates_to_v55_without_rewriting_history(
+    tmp_path,
+) -> None:
+    path = tmp_path / "v54-to-v55.sqlite3"
+    source_cursor = _build_archived_database(
+        tmp_path=tmp_path,
+        database_path=path,
+        source_commit=V54_SOURCE_COMMIT,
+        expected_bundle=V54,
+        source_name="v54-source",
+    )
+    old_events = _event_rows_as_bytes(path)
+    assert _head_coordinates(path) == (*source_cursor, V54)
+
+    migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
+    projection = migrated.project()
+    assert projection.reducer_bundle_version == V55
+    assert migrated.rebuild() == projection
+    migrated.close()
+
+    assert _event_rows_as_bytes(path) == old_events
+    assert _head_coordinates(path) == (*source_cursor, V55)
 
 
 def test_pending_interaction_act_proposal_does_not_change_world_semantic_payload() -> None:

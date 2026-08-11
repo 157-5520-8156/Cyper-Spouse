@@ -985,11 +985,20 @@ async def test_superseded_commitment_is_terminal_before_later_interaction_act(
         projection = app._ledger.project()  # noqa: SLF001
         assert len(projection.relationship_commitments) == 1
         assert len(projection.interaction_acts) == 1
-        assert any(
-            item.proposal_id == superseded.source_proposal_id
-            and item.status == "stale"
+        assert all(
+            item.proposal_id != superseded.source_proposal_id
             for item in projection.acceptance_decisions
         )
+        assert len(superseded.acceptance_commit.event_ids) == 1
+        terminal = app._ledger.lookup_event_commit(  # noqa: SLF001
+            superseded.acceptance_commit.event_ids[0]
+        )
+        assert terminal is not None
+        terminal_payload = terminal[0].payload()
+        assert terminal[0].event_type == "AdvisoryAcceptanceRejected"
+        assert terminal_payload["advisory_kind"] == "typed_change_terminal"
+        assert terminal_payload["stage"] == "stale"
+        assert terminal_payload["proposal_id"] != superseded.source_proposal_id
         assert app._ledger.rebuild() == projection  # noqa: SLF001
     finally:
         app.close()

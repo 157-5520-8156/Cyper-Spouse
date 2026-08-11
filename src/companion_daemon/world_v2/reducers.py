@@ -13,6 +13,12 @@ import unicodedata
 from pydantic import ValidationInfo, model_validator
 
 from .action_lifecycle import TERMINAL_ACTION_STATES, transition_action
+from .audited_change_terminal import (
+    AUDITED_CHANGE_TERMINAL_ADVISORY_KIND,
+    audited_change_terminal_event_id,
+    validate_audited_change_terminal_payload,
+    validate_relationship_commitment_terminal_state,
+)
 from .delayed_trigger_policies import TECHNICAL_RETRY_BACKOFF_SECONDS
 from .affect_events import (
     AFFECT_PAYLOAD_MODELS,
@@ -602,8 +608,9 @@ _V49_REDUCER_BUNDLE_VERSION = "world-v2-reducers.49"
 V50_REDUCER_BUNDLE_VERSION = "world-v2-reducers.50"
 V51_REDUCER_BUNDLE_VERSION = "world-v2-reducers.51"
 V52_REDUCER_BUNDLE_VERSION = "world-v2-reducers.52"
-PREVIOUS_REDUCER_BUNDLE_VERSION = "world-v2-reducers.53"
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.54"
+V53_REDUCER_BUNDLE_VERSION = "world-v2-reducers.53"
+PREVIOUS_REDUCER_BUNDLE_VERSION = "world-v2-reducers.54"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.55"
 _CONTEXTUAL_LIFE_SOURCE_EVENT_TYPES = frozenset(
     {
         "ObservationRecorded",
@@ -663,6 +670,7 @@ def _experience_semantic_dump(
         V50_REDUCER_BUNDLE_VERSION,
         V51_REDUCER_BUNDLE_VERSION,
         V52_REDUCER_BUNDLE_VERSION,
+        V53_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     } and isinstance(experience, LegacyExperienceProjection):
@@ -693,6 +701,7 @@ def _actor_authority_transition_semantic_dump(
         V50_REDUCER_BUNDLE_VERSION,
         V51_REDUCER_BUNDLE_VERSION,
         V52_REDUCER_BUNDLE_VERSION,
+        V53_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -723,6 +732,7 @@ def _life_arc_semantic_dump(
         V50_REDUCER_BUNDLE_VERSION,
         V51_REDUCER_BUNDLE_VERSION,
         V52_REDUCER_BUNDLE_VERSION,
+        V53_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -746,6 +756,7 @@ def _aspiration_semantic_dump(
     dumped = aspiration.model_dump(mode="json")
     if reducer_bundle_version not in {
         V52_REDUCER_BUNDLE_VERSION,
+        V53_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -775,6 +786,7 @@ def _npc_semantic_dump(
         # its pre-promotion projection bytes.
         V51_REDUCER_BUNDLE_VERSION,
         V52_REDUCER_BUNDLE_VERSION,
+        V53_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -793,6 +805,7 @@ def _npc_semantic_dump(
         V50_REDUCER_BUNDLE_VERSION,
         V51_REDUCER_BUNDLE_VERSION,
         V52_REDUCER_BUNDLE_VERSION,
+        V53_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -823,6 +836,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         V50_REDUCER_BUNDLE_VERSION,
         V51_REDUCER_BUNDLE_VERSION,
         V52_REDUCER_BUNDLE_VERSION,
+        V53_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -844,6 +858,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         V50_REDUCER_BUNDLE_VERSION,
         V51_REDUCER_BUNDLE_VERSION,
         V52_REDUCER_BUNDLE_VERSION,
+        V53_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -858,6 +873,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         V50_REDUCER_BUNDLE_VERSION,
         V51_REDUCER_BUNDLE_VERSION,
         V52_REDUCER_BUNDLE_VERSION,
+        V53_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -888,6 +904,7 @@ def _expression_plan_semantic_dump(
         V50_REDUCER_BUNDLE_VERSION,
         V51_REDUCER_BUNDLE_VERSION,
         V52_REDUCER_BUNDLE_VERSION,
+        V53_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -919,6 +936,7 @@ def _expression_beat_semantic_dump(
         V50_REDUCER_BUNDLE_VERSION,
         V51_REDUCER_BUNDLE_VERSION,
         V52_REDUCER_BUNDLE_VERSION,
+        V53_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -1719,6 +1737,7 @@ class ReducerState(FrozenModel):
             V50_REDUCER_BUNDLE_VERSION,
             V51_REDUCER_BUNDLE_VERSION,
             V52_REDUCER_BUNDLE_VERSION,
+            V53_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
         }:
             # .33-.36 only add current-generation conditional fields. Their
@@ -1765,7 +1784,11 @@ class ReducerState(FrozenModel):
                         mode="json",
                         exclude=(
                             None
-                            if declared_reducer_bundle_version == REDUCER_BUNDLE_VERSION
+                            if declared_reducer_bundle_version
+                            in {
+                                PREVIOUS_REDUCER_BUNDLE_VERSION,
+                                REDUCER_BUNDLE_VERSION,
+                            }
                             else {
                                 "normalized_text_hash",
                                 "reply_context_present",
@@ -1894,6 +1917,7 @@ class ReducerState(FrozenModel):
                                 V50_REDUCER_BUNDLE_VERSION,
                                 V51_REDUCER_BUNDLE_VERSION,
                                 V52_REDUCER_BUNDLE_VERSION,
+                                V53_REDUCER_BUNDLE_VERSION,
                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                 REDUCER_BUNDLE_VERSION,
                             }
@@ -1983,6 +2007,7 @@ class ReducerState(FrozenModel):
                                 V50_REDUCER_BUNDLE_VERSION,
                                 V51_REDUCER_BUNDLE_VERSION,
                                 V52_REDUCER_BUNDLE_VERSION,
+                                V53_REDUCER_BUNDLE_VERSION,
                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                 REDUCER_BUNDLE_VERSION,
                             }
@@ -2000,6 +2025,7 @@ class ReducerState(FrozenModel):
                                         V50_REDUCER_BUNDLE_VERSION,
                                         V51_REDUCER_BUNDLE_VERSION,
                                         V52_REDUCER_BUNDLE_VERSION,
+                                        V53_REDUCER_BUNDLE_VERSION,
                                         PREVIOUS_REDUCER_BUNDLE_VERSION,
                                     }
                                     else {"settled_dynamic_life_direction_adopted": True}
@@ -2020,6 +2046,7 @@ class ReducerState(FrozenModel):
                                                 V50_REDUCER_BUNDLE_VERSION,
                                                 V51_REDUCER_BUNDLE_VERSION,
                                                 V52_REDUCER_BUNDLE_VERSION,
+                                                V53_REDUCER_BUNDLE_VERSION,
                                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                             }
                                             else (
@@ -2152,6 +2179,7 @@ class ReducerState(FrozenModel):
             V50_REDUCER_BUNDLE_VERSION,
             V51_REDUCER_BUNDLE_VERSION,
             V52_REDUCER_BUNDLE_VERSION,
+            V53_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -2185,6 +2213,7 @@ class ReducerState(FrozenModel):
                 V50_REDUCER_BUNDLE_VERSION,
                 V51_REDUCER_BUNDLE_VERSION,
                 V52_REDUCER_BUNDLE_VERSION,
+                V53_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2215,6 +2244,7 @@ class ReducerState(FrozenModel):
             V50_REDUCER_BUNDLE_VERSION,
             V51_REDUCER_BUNDLE_VERSION,
             V52_REDUCER_BUNDLE_VERSION,
+            V53_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -2244,6 +2274,7 @@ class ReducerState(FrozenModel):
                     V50_REDUCER_BUNDLE_VERSION,
                     V51_REDUCER_BUNDLE_VERSION,
                     V52_REDUCER_BUNDLE_VERSION,
+                    V53_REDUCER_BUNDLE_VERSION,
                     PREVIOUS_REDUCER_BUNDLE_VERSION,
                     REDUCER_BUNDLE_VERSION,
                 }
@@ -2275,6 +2306,7 @@ class ReducerState(FrozenModel):
             V50_REDUCER_BUNDLE_VERSION,
             V51_REDUCER_BUNDLE_VERSION,
             V52_REDUCER_BUNDLE_VERSION,
+            V53_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -2307,6 +2339,7 @@ class ReducerState(FrozenModel):
                 V50_REDUCER_BUNDLE_VERSION,
                 V51_REDUCER_BUNDLE_VERSION,
                 V52_REDUCER_BUNDLE_VERSION,
+                V53_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2501,6 +2534,7 @@ class ReducerState(FrozenModel):
                 V50_REDUCER_BUNDLE_VERSION,
                 V51_REDUCER_BUNDLE_VERSION,
                 V52_REDUCER_BUNDLE_VERSION,
+                V53_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2524,6 +2558,7 @@ class ReducerState(FrozenModel):
                 V50_REDUCER_BUNDLE_VERSION,
                 V51_REDUCER_BUNDLE_VERSION,
                 V52_REDUCER_BUNDLE_VERSION,
+                V53_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -3287,6 +3322,32 @@ def _advisory_acceptance_rejected(state: ReducerState, event: WorldEvent) -> Red
         not isinstance(payload[name], str) or not payload[name] for name in required
     ):
         raise ValueError("advisory acceptance rejection audit is invalid")
+    if payload["advisory_kind"] == AUDITED_CHANGE_TERMINAL_ADVISORY_KIND:
+        audit = next(
+            (
+                item
+                for item in state.proposal_audits
+                if item.event_ref == payload["source_event_ref"]
+            ),
+            None,
+        )
+        if audit is None:
+            raise ValueError("audited change terminal source audit is missing")
+        change = validate_audited_change_terminal_payload(
+            payload=payload,
+            audit=audit,
+            current_world_revision=len(state.committed_world_event_refs),
+        )
+        validate_relationship_commitment_terminal_state(
+            change=change,
+            relationship_states=state.relationship_states,
+        )
+        if (
+            event.causation_id != audit.event_ref
+            or event.event_id
+            != audited_change_terminal_event_id(audit=audit, change=change)
+        ):
+            raise ValueError("audited change terminal event identity is invalid")
     return state
 
 
@@ -5069,7 +5130,11 @@ def _validate_relationship_commitment_delivery_rebase(
     ).hexdigest()
     if (
         message.payload_hash != expected_message_hash
-        or message.text.count(commitment.visible_text_span) != 1
+        or interaction_act_overlapping_occurrence_count(
+            source_text=message.text,
+            selected_text=commitment.visible_text_span,
+        )
+        != 1
         or not any(
             item.state == "completed"
             and item.receipt_id == proof.receipt_id

@@ -11,7 +11,10 @@ from __future__ import annotations
 import json
 from typing import Literal
 
-from .audited_proposal_settlement import settle_terminal_audited_proposal
+from .audited_proposal_settlement import (
+    find_terminal_audited_change,
+    settle_terminal_audited_change,
+)
 from .ledger import LedgerPort
 from .proposal_envelope import DecisionProposal, validate_proposal_envelope
 from .relationship_commitment_acceptance_runtime import (
@@ -107,6 +110,16 @@ class RelationshipCommitmentWorker:
                 raise RelationshipCommitmentWorkerError(
                     "commitment_change_invalid"
                 )
+            change = changes[0]
+            if (
+                find_terminal_audited_change(
+                    ledger=self._ledger,
+                    audit=audit,
+                    change=change,
+                )
+                is not None
+            ):
+                continue
             located = self._ledger.lookup_event_commit(audit.event_ref)
             if (
                 located is None
@@ -125,7 +138,7 @@ class RelationshipCommitmentWorker:
             stale = self._stale_candidate(
                 projection=projection,
                 audit=audit,
-                change=changes[0],
+                change=change,
                 current_cursor=current_cursor,
             )
             if stale is not None:
@@ -174,11 +187,11 @@ class RelationshipCommitmentWorker:
                     "commitment_stage_transition_not_installed",
                 }:
                     raise
-                terminal = settle_terminal_audited_proposal(
+                terminal = settle_terminal_audited_change(
                     ledger=self._ledger,
                     audit=audit,
+                    change=change,
                     current_cursor=current_cursor,
-                    reason_code=exc.code,
                     actor=self._actor,
                     source=self._source,
                 )

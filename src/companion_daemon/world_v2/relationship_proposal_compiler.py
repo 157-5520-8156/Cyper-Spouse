@@ -17,6 +17,7 @@ from .character_interior.relationship_context import (
     relationship_transition_subject_refs,
 )
 from .event_identity import domain_idempotency_key
+from .interaction_act_identity import interaction_act_overlapping_occurrence_count
 from .ledger import LedgerPort
 from .minimal_reply_events import MessagePayloadStoredPayload
 from .relationship_events import (
@@ -936,7 +937,11 @@ class RelationshipProposalCompiler:
                 ).hexdigest()
                 if (
                     payload.payload_hash != expected_payload_hash
-                    or payload.text.count(visible_text_span) != 1
+                    or interaction_act_overlapping_occurrence_count(
+                        source_text=payload.text,
+                        selected_text=visible_text_span,
+                    )
+                    != 1
                 ):
                     continue
                 text_candidates.append((plan, beat, payload))
