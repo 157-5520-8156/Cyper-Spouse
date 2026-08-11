@@ -26,7 +26,11 @@ from pydantic import (
     model_validator,
 )
 
-from companion_daemon.llm import model_call_scope
+from companion_daemon.llm import (
+    model_call_scope,
+    model_provider_request_identity_scope,
+    provider_invocation_request_hash,
+)
 
 from ..model_completion import ChatCompletionModel
 from ..character_outcome_contract import CharacterLifeDirectionDraft
@@ -1109,12 +1113,18 @@ class StructuredCharacterRoleFaculty:
         contract = self._resolve_contract(request)
         messages = self._messages(request, contract=contract)
         tool_contract = self._tool_contract(request)
-        request_json = _canonical(
-            self._request_identity_value(messages=messages, tool_contract=tool_contract)
+        request_hash = self._provider_request_hash(
+            messages=messages,
+            tool_contract=tool_contract,
         )
-        request_hash = _hash_text(request_json)
-        with model_call_scope("world_v2_character_interior"):
-            raw = await complete_json_object(
+        identity_extras = self._provider_identity_extras(tool_contract=tool_contract)
+        with model_call_scope(
+            "world_v2_character_interior"
+        ), model_provider_request_identity_scope(
+            request_hash=request_hash,
+            identity_extras=identity_extras,
+        ):
+            provider_raw = await complete_json_object(
                 self._model,
                 messages,
                 temperature=self._temperature,
@@ -1123,11 +1133,26 @@ class StructuredCharacterRoleFaculty:
                     tool_contract.provider_tool_choice if tool_contract is not None else None
                 ),
             )
+        raw = provider_raw
+        if tool_contract is not None:
+            try:
+                raw = tool_contract.unwrap(provider_raw)
+            except ValueError as exc:
+                raise StructuredRoleResultError(
+                    "role_result_schema_invalid",
+                    detail=str(exc),
+                    response_hash=(
+                        _hash_text(provider_raw)
+                        if isinstance(provider_raw, str)
+                        else None
+                    ),
+                ) from exc
         try:
             result, response_hash = self._parse_and_validate(
                 raw,
                 request=request,
                 contract=contract,
+                response_hash_source=provider_raw,
             )
         except StructuredRoleResultError as exc:
             import logging
@@ -1156,13 +1181,9 @@ class StructuredCharacterRoleFaculty:
             initial_contract = self._resolve_contract(initial)
             initial_messages = self._messages(initial, contract=initial_contract)
             initial_tool_contract = self._tool_contract(initial)
-            initial_hash = _hash_text(
-                _canonical(
-                    self._request_identity_value(
-                        messages=initial_messages,
-                        tool_contract=initial_tool_contract,
-                    )
-                )
+            initial_hash = self._provider_request_hash(
+                messages=initial_messages,
+                tool_contract=initial_tool_contract,
             )
             parent_model_call_id = self._model_call_id(
                 request=initial,
@@ -1245,6 +1266,11 @@ class StructuredCharacterRoleFaculty:
                 return compiler.proactive_contact(
                     capability_payload=manifest.payload,
                     recall_allowed=not request.recall_completed,
+                    schema_dialect=(
+                        "deepseek-strict"
+                        if bool(getattr(self._model, "supports_strict_tool_choice", False))
+                        else "standard"
+                    ),
                 )
             if request.purpose == "world_stimulus_appraisal":
                 return compiler.world_stimulus_appraisal(
@@ -1302,19 +1328,32 @@ class StructuredCharacterRoleFaculty:
             ) from exc
 
     @staticmethod
-    def _request_identity_value(
+    def _provider_identity_extras(
+        *,
+        tool_contract: StructuredRoleToolContract | None,
+    ) -> dict[str, object] | None:
+        if tool_contract is None:
+            return None
+        return {
+            "tool_contract_identity": (tool_contract.identity.request_identity_material()),
+        }
+
+    def _provider_request_hash(
+        self,
         *,
         messages: list[dict[str, str]],
         tool_contract: StructuredRoleToolContract | None,
-    ) -> object:
-        if tool_contract is None:
-            return messages
-        return {
-            "messages": messages,
-            "tools": list(tool_contract.provider_tools),
-            "tool_choice": tool_contract.provider_tool_choice,
-            "tool_contract_identity": (tool_contract.identity.request_identity_material()),
-        }
+    ) -> str:
+        digest = provider_invocation_request_hash(
+            messages=messages,
+            temperature=self._temperature,
+            tools=(list(tool_contract.provider_tools) if tool_contract is not None else None),
+            tool_choice=(
+                tool_contract.provider_tool_choice if tool_contract is not None else None
+            ),
+            identity_extras=self._provider_identity_extras(tool_contract=tool_contract),
+        )
+        return "sha256:" + digest
 
     def _messages(
         self,
@@ -1453,13 +1492,16 @@ class StructuredCharacterRoleFaculty:
         *,
         request: _InteriorRoleRequest,
         contract: PurposeDecisionContract,
+        response_hash_source: object | None = None,
     ) -> tuple[_WireRoleResult, str]:
         if not isinstance(raw, str):
             raise StructuredRoleResultError(
                 "role_result_not_text",
                 detail=_FAILURE_DETAILS["role_result_not_text"],
             )
-        response_hash = _hash_text(raw)
+        response_hash = _hash_text(
+            response_hash_source if isinstance(response_hash_source, str) else raw
+        )
         try:
             decoded = json.loads(raw)
         except json.JSONDecodeError as exc:

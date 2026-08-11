@@ -261,7 +261,12 @@ class ScenarioVerificationError(AssertionError):
 # .53 hash was stale (the per-case verification predicates and replay checks
 # still pass, but the aggregate request/room/replay manifest moved), so this
 # is an explicit audited rebaseline rather than weakening the drift guard.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.63"
+# ``.64`` binds StructuredCharacterRole provider calls to the exact emitted
+# request identity, including temperature, tools/tool choice, and the canonical
+# tool-contract identity.  Scenario behavior and predicates are unchanged;
+# durable ModelResult/replay hashes intentionally move with the corrected audit
+# identity.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.64"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
@@ -351,8 +356,13 @@ FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.63"
 # all 120 visible/event/action predicates, and per-case replay checks remain
 # unchanged; only strict tool/request audit identities move. Two independent
 # complete runs produced the same aggregate manifest before this rebaseline.
+# 2026-08-11 4th: StructuredCharacterRole request identity now uses the exact
+# provider-emission contract (temperature + rendered tools/tool choice +
+# versioned tool identity), and the guarded loopback header is verified against
+# that same durable hash.  All scenario predicates remain unchanged; only
+# request/audit-derived replay identities move.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "9c84267f9af6a8a4a51db6ac9a9cf4ef52594a5e4cc93c6aa63e35932aa0f1c4"
+    "25c6ef2b3436e0c4b7f184e91ac9bbfbb9105f0b4dba332b5538933374876a7b"
 )
 
 

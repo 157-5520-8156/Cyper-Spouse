@@ -47,6 +47,7 @@ _WORLD_STIMULUS_SOURCE_EVIDENCE = {
     "ExecutionReceiptRecorded": "committed_world_event",
     "ActivityAbandoned": "committed_world_event",
     "PerceptionResultAccepted": "committed_world_event",
+    "AppraisalAccepted": "committed_world_event",
 }
 
 

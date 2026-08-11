@@ -9,7 +9,7 @@ import httpx
 from jsonschema import Draft202012Validator, ValidationError
 import pytest
 
-from companion_daemon.llm import DeepSeekChatModel
+from companion_daemon.llm import DeepSeekChatModel, provider_invocation_request_hash
 from companion_daemon.world_v2.character_interior import CharacterInterior, InteriorOpportunity
 from companion_daemon.world_v2.character_interior.contracts import (
     FACET_NAMES,
@@ -1877,25 +1877,44 @@ def test_world_stimulus_tool_schema_keeps_no_change_and_transition_open() -> Non
 @pytest.mark.asyncio
 async def test_proactive_contact_uses_one_versioned_forced_tool_at_http_boundary() -> None:
     captured: dict[str, object] = {}
+    captured_headers: dict[str, str] = {}
+    captured_paths: list[str] = []
     raw_result = _result(
         status="decision",
         decision={
             "source_refs": ["source:private_self"],
-            "payload": {
-                "timing_choice": "silent",
-                "cadence": "conversational",
-                "beats": [],
-                "stance": "keeping the thought private",
-                "brief_rationale": "she does not want to send it now",
-                "impulse_summary": "the conversation crossed her mind",
-                "confidence": 6400,
-                "world_claims": [],
-            },
+                "payload": {
+                    "timing_choice": "silent",
+                    "turn_posture": None,
+                    "cadence": "conversational",
+                    "beats": [],
+                    "delay_seconds": None,
+                    "expires_after_seconds": None,
+                    "stance": "keeping the thought private",
+                    "brief_rationale": "she does not want to send it now",
+                    "impulse_summary": "the conversation crossed her mind",
+                    "confidence": 6400,
+                    "variation_profile": None,
+                    "response_expectation": None,
+                    "response_expectation_assessment": None,
+                    "world_claims": [],
+                    "media_request": "none",
+                    "media_source_refs": [],
+                },
         },
+    )
+    arguments_json = json.dumps(
+        {"result": json.loads(raw_result)},
+        ensure_ascii=False,
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.update(json.loads(request.content))
+        captured_headers.update(request.headers)
+        captured_paths.append(request.url.path)
+        function = captured["tools"][0]["function"]
+        arguments = json.loads(arguments_json)
+        Draft202012Validator(function["parameters"]).validate(arguments)
         return httpx.Response(
             200,
             json={
@@ -1907,7 +1926,7 @@ async def test_proactive_contact_uses_one_versioned_forced_tool_at_http_boundary
                                     "type": "function",
                                     "function": {
                                         "name": "character_role_proactive_contact_v1",
-                                        "arguments": raw_result,
+                                        "arguments": arguments_json,
                                     },
                                 }
                             ]
@@ -1919,11 +1938,12 @@ async def test_proactive_contact_uses_one_versioned_forced_tool_at_http_boundary
 
     model = DeepSeekChatModel(
         "key",
-        "https://api.deepseek.com",
+        "http://127.0.0.1:32124",
         "deepseek-v4-flash",
         thinking_enabled=False,
         transport=httpx.MockTransport(handler),
     )
+    object.__setattr__(model, "_test_only_capture_exact_request_identity", True)
     try:
         result = await StructuredCharacterRoleFaculty(
             model=model,
@@ -1938,6 +1958,13 @@ async def test_proactive_contact_uses_one_versioned_forced_tool_at_http_boundary
         await model.aclose()
 
     assert result["decision"]["payload"]["timing_choice"] == "silent"
+    assert captured_paths == ["/beta/chat/completions"]
+    assert captured_headers["x-girl-agent-request-identity"] == result["author_lineage"][
+        "request_hash"
+    ].removeprefix("sha256:")
+    assert result["author_lineage"]["response_hash"] == (
+        "sha256:" + hashlib.sha256(arguments_json.encode()).hexdigest()
+    )
     assert "response_format" not in captured
     assert captured["tool_choice"] == {
         "type": "function",
@@ -1947,7 +1974,12 @@ async def test_proactive_contact_uses_one_versioned_forced_tool_at_http_boundary
     assert isinstance(tools, list) and len(tools) == 1
     function = tools[0]["function"]
     assert function["name"] == "character_role_proactive_contact_v1"
-    branches = function["parameters"]["anyOf"]
+    assert function["strict"] is True
+    parameters = function["parameters"]
+    assert parameters["type"] == "object"
+    assert set(parameters["required"]) == set(parameters["properties"])
+    assert set(parameters["properties"]) == {"result"}
+    branches = parameters["properties"]["result"]["anyOf"]
     decision = branches[0]
     assert decision["properties"]["status"]["enum"] == ["decision"]
     assert {
@@ -1971,7 +2003,9 @@ async def test_proactive_contact_uses_one_versioned_forced_tool_at_http_boundary
     } <= set(payload["required"])
     assert len(branches) == 2
     assert branches[1]["properties"]["status"]["enum"] == ["recall_request"]
-    assert decision["properties"]["proposals"]["maxItems"] == 0
+    assert "maxItems" not in json.dumps(parameters)
+    assert "allOf" not in json.dumps(parameters)
+    assert "prefixItems" not in json.dumps(parameters)
 
 
 @pytest.mark.parametrize(
@@ -2433,22 +2467,17 @@ async def test_proactive_request_audit_binds_exact_tool_schema_and_identity() ->
         capability_payload=manifest.payload,
         recall_allowed=True,
     )
-    request_identity = {
-        "messages": model.calls[0][0],
-        "tools": list(contract.provider_tools),
-        "tool_choice": contract.provider_tool_choice,
-        "tool_contract_identity": contract.identity.request_identity_material(),
-    }
     expected_hash = (
         "sha256:"
-        + hashlib.sha256(
-            json.dumps(
-                request_identity,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-        ).hexdigest()
+        + provider_invocation_request_hash(
+            messages=model.calls[0][0],
+            temperature=model.calls[0][1],
+            tools=list(contract.provider_tools),
+            tool_choice=contract.provider_tool_choice,
+            identity_extras={
+                "tool_contract_identity": contract.identity.request_identity_material()
+            },
+        )
     )
 
     assert result["author_lineage"]["request_hash"] == expected_hash

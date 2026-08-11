@@ -65,6 +65,20 @@ def _nullable_strict_schema(schema: object) -> object:
     return {"anyOf": [schema, {"type": "null"}]}
 
 
+def _enum_json_type(value: object) -> str | None:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    return None
+
+
 def _deepseek_strict_schema(value: object) -> object:
     """Project one canonical schema into DeepSeek's strict tool dialect.
 
@@ -132,6 +146,49 @@ def _deepseek_strict_schema(value: object) -> object:
     projected["required"] = list(properties)
     projected["additionalProperties"] = False
     return projected
+
+
+def _deepseek_documented_schema_subset(value: object) -> object:
+    """Keep only the strict JSON-Schema subset documented by DeepSeek."""
+
+    if isinstance(value, list):
+        return [_deepseek_documented_schema_subset(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    projected = {
+        key: _deepseek_documented_schema_subset(item)
+        for key, item in value.items()
+        if key not in {"allOf", "not", "oneOf", "prefixItems"}
+    }
+    enum = projected.get("enum")
+    if "type" not in projected and isinstance(enum, list) and enum:
+        typed_values: dict[str, list[object]] = {}
+        for item in enum:
+            item_type = _enum_json_type(item)
+            if item_type is None:
+                break
+            typed_values.setdefault(item_type, []).append(item)
+        else:
+            if len(typed_values) == 1:
+                projected["type"] = next(iter(typed_values))
+            else:
+                projected.pop("enum", None)
+                projected["anyOf"] = [
+                    {"type": item_type, "enum": items}
+                    for item_type, items in typed_values.items()
+                ]
+    return projected
+
+
+def deepseek_strict_tool_schema(value: object) -> object:
+    """Project a background role tool into DeepSeek's documented strict subset.
+
+    The interactive inbound contract retains its already qualified request
+    identity. New background strict tools additionally remove unsupported
+    composition keywords and type every ``anyOf`` branch before provider use.
+    """
+
+    return _deepseek_documented_schema_subset(_deepseek_strict_schema(value))
 
 
 def _canonical_json(value: object) -> str:
