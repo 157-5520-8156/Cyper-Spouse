@@ -400,6 +400,10 @@ effect-once 和回执，不应固定私密话题必须双气泡，也不应由�
   猜场景。PrivateTurnState 注意力本身不授权候选编译；无来源时仍可消费已有候选。
 - 后台 world-stimulus 可用已有 Thread authority 持久化 `reply_reconsideration`，proactive 到期后仍需角色再次
   决定；技术失败码与角色 `silent` 保持分离。
+- QQ 启动历史补偿不再逐条等待并为每条旧气泡单独生成回复。一个 restart window 现在并发提交给既有
+  ingress coalescer，最多 16 条原始 provider message id 保持独立去重、但只形成一个 bounded user volley。
+  2026-08-11 staging 复现曾从陈旧临时库导入 11 条历史 Observation 并发送 11 条回复；修复后的同库受控
+  重启只执行历史 dedupe 与既有 provider-accepted receipt reconciliation，没有再次调用 `send_private_msg`。
 
 ## 5. 尚未完成的发布资格门
 

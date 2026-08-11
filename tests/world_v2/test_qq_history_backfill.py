@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -103,6 +104,61 @@ async def test_backfill_replays_missed_messages_and_dedupes_known_ones() -> None
     assert report.skipped == 2
     assert report.failed == 0
     assert report.statuses == ("delivered", "delivered")
+
+
+@pytest.mark.asyncio
+async def test_backfill_submits_one_restart_window_as_one_concurrent_volley() -> None:
+    """Historical bubbles must reach the host together, not author N replies."""
+
+    class _VolleyHost(_FakeHost):
+        def __init__(self, *, expected: int) -> None:
+            super().__init__()
+            self.expected = expected
+            self.active = 0
+            self.max_active = 0
+            self.all_entered = asyncio.Event()
+
+        async def inbound_fragment(self, fragment):
+            self.replayed.append(fragment.source_event_id)
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            if self.active == self.expected:
+                self.all_entered.set()
+            try:
+                await asyncio.wait_for(self.all_entered.wait(), timeout=0.1)
+            finally:
+                self.active -= 1
+
+            class _Result:
+                status = "delivered"
+                action_id = "action:one-coalesced-restart-turn"
+                canonical_user_id = "geoff"
+
+            return _Result()
+
+    host = _VolleyHost(expected=3)
+
+    async def fetch() -> list[dict[str, object]]:
+        return [
+            _history_message(
+                message_id=f"missed-{index}",
+                text=f"第 {index} 条补充",
+                at=NOW - timedelta(minutes=4 - index),
+            )
+            for index in range(1, 4)
+        ]
+
+    report = await backfill_missed_private_messages(
+        host=host,
+        fetch_history=fetch,
+        recipient_id=RECIPIENT,
+        now=NOW,
+    )
+
+    assert host.max_active == 3
+    assert host.replayed == ["missed-1", "missed-2", "missed-3"]
+    assert report.replayed == 3
+    assert report.failed == 0
 
 
 @pytest.mark.asyncio
