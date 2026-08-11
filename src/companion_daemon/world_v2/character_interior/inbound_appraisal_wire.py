@@ -31,6 +31,7 @@ from ..proposal_envelope import (
     ProposalEvidenceRef,
     TypedChange,
 )
+from ..relationship_reducers import RELATIONSHIP_COMMITMENT_STAGE_TRANSITIONS
 from ..schema_core import FrozenModel
 
 
@@ -579,7 +580,9 @@ def _appraisal_draft_messages(
         "act_kind, subject_role and counterparty_roles drawn only from current_counterpart/self, "
         "and optional object_ref/object_label. For declare, return object_ref=null and copy any "
         "object_label exactly from the selected source text. For revise, select the exact existing "
-        "interaction_act_ref, act coordinates and object_ref, and return object_label=null. The "
+        "interaction_act_ref identified by the pinned interaction-act source_ref "
+        "interior:interaction-act:<interaction_act_ref>, plus its act coordinates and object_ref, "
+        "and return object_label=null. The "
         "trusted host binds the source actor, and a revision records only that actor's status mark. "
         "Ledger acceptance records the typed statement; it never proves an external action or "
         "outcome completed. Omit interaction_act entirely when she does not choose one."
@@ -1075,6 +1078,27 @@ def _relationship_commitment(
         wire = RelationshipCommitmentWire.model_validate(value, strict=True)
     except ValidationError as exc:
         raise ValueError("AppraisalDraft relationship commitment is invalid") from exc
+    relationship_heads = tuple(
+        item
+        for item in _pinned_slice_values(request, "relationship_slice")
+        if item.get("subject_ref") == trigger.actor
+    )
+    if len(relationship_heads) > 1:
+        raise ValueError("relationship commitment pinned head is not exact")
+    current_stage: object = (
+        relationship_heads[0].get("stage") if relationship_heads else "stranger"
+    )
+    if (
+        not isinstance(current_stage, str)
+        or wire.target_stage
+        not in RELATIONSHIP_COMMITMENT_STAGE_TRANSITIONS.get(
+            current_stage,
+            frozenset(),
+        )
+    ):
+        raise ValueError(
+            "relationship commitment target stage is not installed from pinned head"
+        )
     return {
         "subject_ref": trigger.actor,
         **wire.model_dump(mode="json"),
@@ -1132,6 +1156,34 @@ def _interaction_act(
     )
     if source_actor_ref not in participant_refs:
         raise ValueError("interaction act source actor is not a participant")
+    if wire.operation == "revise":
+        matching_heads = tuple(
+            item
+            for item in _pinned_slice_values(request, "interaction_acts")
+            if item.get("source_ref")
+            == f"interior:interaction-act:{wire.interaction_act_ref}"
+            and isinstance(item.get("frame"), dict)
+        )
+        if len(matching_heads) != 1:
+            raise ValueError(
+                "interaction act revision did not select exactly one pinned act"
+            )
+        frame = matching_heads[0]["frame"]
+        assert isinstance(frame, dict)
+        object_descriptor = frame.get("object")
+        pinned_object_ref = (
+            object_descriptor.get("object_ref")
+            if isinstance(object_descriptor, dict)
+            else None
+        )
+        if (
+            frame.get("subject_ref") != bindings[wire.subject_role]
+            or frame.get("counterparty_refs")
+            != [bindings[item] for item in wire.counterparty_roles]
+            or frame.get("act_kind") != wire.act_kind
+            or pinned_object_ref != wire.object_ref
+        ):
+            raise ValueError("interaction act revision changed pinned act coordinates")
     return {
         "operation": wire.operation,
         "interaction_act_ref": wire.interaction_act_ref,
@@ -1144,6 +1196,64 @@ def _interaction_act(
         "source_text_span": wire.source_text_span,
         "status_code": wire.status_code,
     }
+
+
+def _pinned_slice_values(
+    request: ModelInput,
+    slice_name: str,
+) -> tuple[dict[str, object], ...]:
+    """Read one cursor-pinned typed view without interpreting role-authored text."""
+
+    try:
+        context = json.loads(request.model_content_json)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("typed semantic choice requires pinned Context") from exc
+    if not isinstance(context, dict):
+        raise ValueError("typed semantic choice requires pinned Context")
+    snapshot = context.get("inner_life_snapshot")
+    if snapshot is not None:
+        if not isinstance(snapshot, dict):
+            raise ValueError("typed semantic choice pinned snapshot is invalid")
+        materials = snapshot.get("materials")
+        if not isinstance(materials, dict):
+            raise ValueError("typed semantic choice pinned snapshot is invalid")
+        material_name = {
+            "relationship_slice": "relationship",
+            "interaction_acts": "interaction_acts",
+        }.get(slice_name)
+        if material_name is None:
+            raise ValueError("typed semantic choice requested an unknown pinned view")
+        material = materials.get(material_name, [])
+        if not isinstance(material, list) or any(
+            not isinstance(item, dict) for item in material
+        ):
+            raise ValueError("typed semantic choice pinned snapshot is invalid")
+        return tuple(material)
+    slices = context.get("slices")
+    if slices is None:
+        return ()
+    if not isinstance(slices, dict):
+        raise ValueError("typed semantic choice pinned Context is invalid")
+    lane = slices.get(slice_name)
+    if lane is None:
+        return ()
+    if not isinstance(lane, dict):
+        raise ValueError("typed semantic choice pinned Context is invalid")
+    if lane.get("availability") != "available":
+        return ()
+    items = lane.get("items")
+    if not isinstance(items, list):
+        raise ValueError("typed semantic choice pinned Context is invalid")
+    values: list[dict[str, object]] = []
+    for item in items:
+        value = item.get("value") if isinstance(item, dict) else None
+        item_ref = item.get("item_ref") if isinstance(item, dict) else None
+        if not isinstance(value, dict) or not isinstance(item_ref, str):
+            raise ValueError("typed semantic choice pinned Context is invalid")
+        if "source_ref" in value:
+            raise ValueError("typed semantic choice pinned Context reused source_ref")
+        values.append({**value, "source_ref": item_ref})
+    return tuple(values)
 
 
 def _companion_actor_ref(request: ModelInput) -> str:

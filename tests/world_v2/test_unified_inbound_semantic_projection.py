@@ -6,6 +6,7 @@ import json
 import pytest
 
 from companion_daemon.world_v2.character_interior.inbound_appraisal_wire import (
+    _pinned_slice_values,
     _proposal_from_draft,
 )
 from companion_daemon.world_v2.character_interior.inbound_author import (
@@ -33,6 +34,8 @@ USER = "user:primary"
 COMPANION = "actor:companion"
 OBSERVATION_EVENT = "event:observation:semantic-projection"
 OBSERVATION_HASH = "sha256:" + "b" * 64
+INTERACTION_ACT_REF = "interaction-act:sha256:" + "1" * 64
+INTERACTION_OBJECT_REF = "interaction-object:sha256:" + "2" * 64
 
 
 def _request(*, text: str) -> ModelInput:
@@ -64,6 +67,108 @@ def _request(*, text: str) -> ModelInput:
             reply_target="qq:user:primary",
             text=text,
         ),
+    )
+
+
+def _request_with_context(
+    *,
+    text: str,
+    relationship_stage: str | None = None,
+    interaction_act: dict[str, object] | None = None,
+) -> ModelInput:
+    request = _request(text=text)
+    context = json.loads(request.model_content_json)
+    materials: dict[str, object] = {}
+    if relationship_stage is not None:
+        materials["relationship"] = [
+            {
+                "source_ref": "relationship:user:primary",
+                "subject_ref": USER,
+                "stage": relationship_stage,
+            }
+        ]
+    if interaction_act is not None:
+        materials["interaction_acts"] = [
+            {
+                **interaction_act,
+                "source_ref": f"interior:interaction-act:{INTERACTION_ACT_REF}",
+            }
+        ]
+    context["inner_life_snapshot"] = {"materials": materials}
+    return request.model_copy(
+        update={
+            "model_content_json": json.dumps(
+                context,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        }
+    )
+
+
+def _interaction_act_context(*, act_kind: str) -> dict[str, object]:
+    return {
+        "frame": {
+            "subject_ref": USER,
+            "counterparty_refs": [COMPANION],
+            "act_kind": act_kind,
+            "object": {
+                "object_ref": INTERACTION_OBJECT_REF,
+                "object_label": "那本书",
+                "epistemic_scope": "report_only",
+            },
+        },
+        "participant_statuses": [],
+        "external_outcome": "not_established",
+    }
+
+
+def test_pinned_snapshot_wins_over_conflicting_legacy_slice() -> None:
+    request = _request_with_context(
+        text="我们继续成为更亲近的朋友吧。",
+        relationship_stage="friend",
+    )
+    context = json.loads(request.model_content_json)
+    context["slices"] = {
+        "relationship_slice": {
+            "availability": "available",
+            "items": [
+                {
+                    "item_ref": "relationship:stale",
+                    "value": {"subject_ref": USER, "stage": "stranger"},
+                }
+            ],
+        }
+    }
+    request = request.model_copy(
+        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
+    )
+
+    assert _pinned_slice_values(request, "relationship_slice")[0]["stage"] == "friend"
+
+
+def test_legacy_slice_fallback_preserves_exact_item_source_ref() -> None:
+    request = _request(text="那本书我愿意收下。")
+    context = json.loads(request.model_content_json)
+    context["slices"] = {
+        "interaction_acts": {
+            "availability": "available",
+            "items": [
+                {
+                    "item_ref": f"interior:interaction-act:{INTERACTION_ACT_REF}",
+                    "value": _interaction_act_context(
+                        act_kind="角色自由定义的跨轮动作"
+                    ),
+                }
+            ],
+        }
+    }
+    request = request.model_copy(
+        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
+    )
+
+    assert _pinned_slice_values(request, "interaction_acts")[0]["source_ref"] == (
+        f"interior:interaction-act:{INTERACTION_ACT_REF}"
     )
 
 
@@ -196,6 +301,62 @@ def test_role_authored_relationship_commitment_is_bound_to_verified_counterpart(
     }
 
 
+def test_relationship_commitment_rejects_uninstalled_transition_before_proposal() -> None:
+    request = _request(text="我们直接成为最亲近的朋友吧。")
+
+    with pytest.raises(
+        ValueError,
+        match="relationship commitment target stage is not installed from pinned head",
+    ):
+        _proposal_from_draft(
+            raw=json.dumps(
+                _base_appraisal(
+                    relationship_commitment={
+                        "target_stage": "close_friend",
+                        "commitment_code": "role_authored_close_friendship",
+                        "persistence": "durable",
+                        "visible_text_span": "我们是最亲近的朋友了",
+                    }
+                ),
+                ensure_ascii=False,
+            ),
+            request=request,
+        )
+
+
+def test_relationship_commitment_accepts_installed_transition_from_pinned_head() -> None:
+    request = _request_with_context(
+        text="我们继续成为更亲近的朋友吧。",
+        relationship_stage="friend",
+    )
+    proposal = DecisionProposal.model_validate_json(
+        json.dumps(
+            _proposal_from_draft(
+                raw=json.dumps(
+                    _base_appraisal(
+                        relationship_commitment={
+                            "target_stage": "close_friend",
+                            "commitment_code": "role_authored_close_friendship",
+                            "persistence": "durable",
+                            "visible_text_span": "我们是更亲近的朋友了",
+                        }
+                    ),
+                    ensure_ascii=False,
+                ),
+                request=request,
+            )
+        )
+    )
+
+    commitment = next(
+        change
+        for change in proposal.proposed_changes
+        if change.kind == "relationship_commitment"
+    )
+    assert commitment is not None
+    assert commitment.payload.value()["target_stage"] == "close_friend"
+
+
 def test_relationship_commitment_fails_when_visible_span_is_not_in_expression() -> None:
     request = _request(text="我们可以成为好朋友吗？")
     appraisal = ModelOutput(
@@ -305,7 +466,12 @@ def test_interaction_act_does_not_exist_when_the_role_omits_it() -> None:
 
 
 def test_existing_interaction_act_revision_selects_object_ref_without_reauthoring_label() -> None:
-    request = _request(text="那本书我愿意收下。")
+    request = _request_with_context(
+        text="那本书我愿意收下。",
+        interaction_act=_interaction_act_context(
+            act_kind="offer_to_transfer_possession"
+        ),
+    )
     appraisal = ModelOutput(
         model_id="same-character",
         model_version="test.1",
@@ -317,11 +483,11 @@ def test_existing_interaction_act_revision_selects_object_ref_without_reauthorin
                         "status_code": "愿意继续这个安排",
                         "source_scope": "delivered_expression",
                         "source_text_span": "好呀，你寄给我吧",
-                        "interaction_act_ref": "interaction-act:sha256:" + "1" * 64,
+                        "interaction_act_ref": INTERACTION_ACT_REF,
                         "act_kind": "offer_to_transfer_possession",
                         "subject_role": "current_counterpart",
                         "counterparty_roles": ["self"],
-                        "object_ref": "interaction-object:sha256:" + "2" * 64,
+                        "object_ref": INTERACTION_OBJECT_REF,
                         "object_label": None,
                     }
                 ),
@@ -342,14 +508,87 @@ def test_existing_interaction_act_revision_selects_object_ref_without_reauthorin
     interaction = inspect_unified_inbound_decision(merged).interaction_act
 
     assert interaction is not None
-    assert interaction.payload.value()["object_ref"] == (
-        "interaction-object:sha256:" + "2" * 64
-    )
+    assert interaction.payload.value()["object_ref"] == INTERACTION_OBJECT_REF
     assert interaction.payload.value()["object_label"] is None
 
 
-def test_delivered_expression_interaction_act_span_must_occur_exactly_once() -> None:
+def test_interaction_act_revision_rejects_unpinned_ref_before_proposal() -> None:
     request = _request(text="那本书我愿意收下。")
+
+    with pytest.raises(
+        ValueError,
+        match="interaction act revision did not select exactly one pinned act",
+    ):
+        _proposal_from_draft(
+            raw=json.dumps(
+                _base_appraisal(
+                    interaction_act={
+                        "operation": "revise",
+                        "status_code": "愿意继续这个安排",
+                        "source_scope": "delivered_expression",
+                        "source_text_span": "好呀，你寄给我吧",
+                        "interaction_act_ref": "interaction-act:sha256:" + "9" * 64,
+                        "act_kind": "任意角色自定义动作",
+                        "subject_role": "current_counterpart",
+                        "counterparty_roles": ["self"],
+                        "object_ref": "interaction-object:sha256:" + "8" * 64,
+                        "object_label": None,
+                    }
+                ),
+                ensure_ascii=False,
+            ),
+            request=request,
+        )
+
+
+@pytest.mark.parametrize("coordinate", ["participants", "act_kind", "object_ref"])
+def test_interaction_act_revision_rejects_changed_pinned_coordinates(
+    coordinate: str,
+) -> None:
+    request = _request_with_context(
+        text="那本书我愿意收下。",
+        interaction_act=_interaction_act_context(act_kind="角色自由定义的跨轮动作"),
+    )
+    authored = {
+        "operation": "revise",
+        "status_code": "角色自由书写的新状态",
+        "source_scope": "delivered_expression",
+        "source_text_span": "我会继续记着这件事",
+        "interaction_act_ref": INTERACTION_ACT_REF,
+        "act_kind": "角色自由定义的跨轮动作",
+        "subject_role": "current_counterpart",
+        "counterparty_roles": ["self"],
+        "object_ref": INTERACTION_OBJECT_REF,
+        "object_label": None,
+    }
+    if coordinate == "participants":
+        authored["subject_role"] = "self"
+        authored["counterparty_roles"] = ["current_counterpart"]
+    elif coordinate == "act_kind":
+        authored["act_kind"] = "另一个同样自由命名的动作"
+    else:
+        authored["object_ref"] = "interaction-object:sha256:" + "3" * 64
+
+    with pytest.raises(
+        ValueError,
+        match="interaction act revision changed pinned act coordinates",
+    ):
+        _proposal_from_draft(
+            raw=json.dumps(
+                _base_appraisal(interaction_act=authored),
+                ensure_ascii=False,
+            ),
+            request=request,
+        )
+
+
+def test_delivered_expression_interaction_act_span_must_occur_exactly_once() -> None:
+    request = _request_with_context(
+        text="那本书我愿意收下。",
+        interaction_act=_interaction_act_context(
+            act_kind="offer_to_transfer_possession"
+        ),
+    )
     appraisal = ModelOutput(
         model_id="same-character",
         model_version="test.1",
@@ -361,11 +600,11 @@ def test_delivered_expression_interaction_act_span_must_occur_exactly_once() -> 
                         "status_code": "愿意继续这个安排",
                         "source_scope": "delivered_expression",
                         "source_text_span": "好呀",
-                        "interaction_act_ref": "interaction-act:sha256:" + "1" * 64,
+                        "interaction_act_ref": INTERACTION_ACT_REF,
                         "act_kind": "offer_to_transfer_possession",
                         "subject_role": "current_counterpart",
                         "counterparty_roles": ["self"],
-                        "object_ref": "interaction-object:sha256:" + "2" * 64,
+                        "object_ref": INTERACTION_OBJECT_REF,
                         "object_label": None,
                     }
                 ),
