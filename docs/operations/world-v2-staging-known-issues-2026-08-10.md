@@ -347,6 +347,18 @@ health 中名为 `autonomous_impulses` 的 facet 也不能当成这类持久 imp
 
 同一 impulse 类型还应能请求媒体候选编译，但不能把动机枚举化或让本地规则按情绪/关系自动决定联系与拍照。
 
+**2026-08-11 当前薄片**
+
+- 后台 world-stimulus 角色现在获得明确的 `reply_reconsideration` 能力语义：它可自主打开带
+  due/expiry/importance 的私有 Thread；该操作只记录“以后再决定是否联系”，不会直接调度或发送。
+- 到期后仍由现有 proactive CharacterInterior 再次选择 `now/later/silent`，没有新增本地 `act/hold`
+  规则，也没有常驻轮询模型。
+- proactive 适配器不再把 `role_faculty_unavailable` 和
+  `required_tool_choice_unsupported` 压扁为通用 `authored_subcall_exception`。
+
+这只闭合“已有事件触发的后台意图”薄片，不等于角色拥有无事件的常驻思维流，也不证明主动联系的真实 QQ
+频率、延迟和送达已经资格化。
+
 ## 3. 已排除的误报／当前不是 Bug
 
 ### “窗边看雨”不是对话模型临场幻觉
@@ -382,6 +394,12 @@ effect-once 和回执，不应固定私密话题必须双气泡，也不应由�
 - durable 技术失败已有独立 System Notice 路径，不再冒充角色沉默；仍需真实 QQ 故障注入与 terminal receipt 证据。
 - source review 已路由到 DeepSeek Flash，并有 100 次精确契约样本；该样本只证明孤立 verdict schema，
   不证明端到端首 Beat、真实 QQ 或独立语义权威。
+- 角色选择 `consider_available_candidate` 并在独立 `media_source_refs` 中选择精确、已审查生活来源时，
+  MediaRequestRuntime 现在可在 media selection 前请求 LifeVisualEvidenceAuthor 编译一个 source-closed
+  候选；它支持 settlement 以及由 typed Experience/LifeContent 绑定证明的 Snapshot 来源别名，不按“最近事件”
+  猜场景。PrivateTurnState 注意力本身不授权候选编译；无来源时仍可消费已有候选。
+- 后台 world-stimulus 可用已有 Thread authority 持久化 `reply_reconsideration`，proactive 到期后仍需角色再次
+  决定；技术失败码与角色 `silent` 保持分离。
 
 ## 5. 尚未完成的发布资格门
 

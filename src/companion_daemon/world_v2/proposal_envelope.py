@@ -1194,6 +1194,19 @@ class ExpressionPlanPayload(FrozenModel):
     media_request: Literal["none", "consider_available_candidate"] = Field(
         default="none", exclude_if=lambda value: value == "none"
     )
+    media_source_refs: list[BoundedRef] = Field(
+        default_factory=list,
+        max_length=8,
+        exclude_if=lambda value: not value,
+    )
+
+    @model_validator(mode="after")
+    def media_sources_belong_to_the_explicit_request(self) -> "ExpressionPlanPayload":
+        if len(self.media_source_refs) != len(set(self.media_source_refs)):
+            raise ValueError("media source refs must be unique")
+        if self.media_request == "none" and self.media_source_refs:
+            raise ValueError("media source refs require a media request")
+        return self
 
 
 class PhotoCandidatePayload(FrozenModel):

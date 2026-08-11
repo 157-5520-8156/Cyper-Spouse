@@ -738,6 +738,11 @@ def expression_draft_shape_contract(*, include_world_claims: bool = True) -> str
         "media_request is none or consider_available_candidate and must obey the supplied "
         "expression_capabilities.media_request_mode; it is required when that mode is "
         "candidate_only. A non-none media_request is executable only with timing_choice now. "
+        "media_source_refs is an optional array of exact pinned life/world source refs. "
+        "When the present moment is relevant to a media request, select it there; this lets "
+        "the media lane compile a candidate without "
+        "guessing a scene. An existing candidate can still be considered without adding a "
+        "new source solely for media. "
         "response_expectation, when chosen, uses hoped_response, pressure_bp, "
         "importance_bp, wait_seconds, and expires_after_seconds. "
         "response_expectation_assessment, when required by Context, uses status "
@@ -11138,7 +11143,11 @@ class _ExpressionDraftWire:
             "render or delivery can be started by this turn, so do not present one as underway or "
             "guaranteed. When it is candidate_only, you may choose consider_available_candidate "
             "only if you genuinely want the existing media lane to consider one already-open, "
-            "source-closed candidate. That choice is not a claim that a candidate exists or that "
+            "source-closed candidate, or to compile one from an exact attended, reviewed visual "
+            "life source. If the present moment is the reason, include that exact source ref in "
+            "media_source_refs. Never invent a "
+            "scene or cite the counterpart's request "
+            "as visual evidence. That choice is not a claim that a candidate exists or that "
             "rendering or delivery succeeded; the later CharacterInterior media_selection choice, "
             "privacy/grant/budget checks, provider result, and receipt remain authoritative. "
             "Keep your visible wording consistent with that choice: choose "
@@ -11930,6 +11939,7 @@ _MINIMAL_REPLY_ACCOUNTED_EXPRESSION_FIELDS = frozenset(
         "response_expectation_assessment",
         "world_claims",
         "media_request",
+        "media_source_refs",
     }
 )
 
@@ -11958,6 +11968,7 @@ def _is_lossless_minimal_reply_draft(draft: ExpressionDraft) -> bool:
         and draft.response_expectation is None
         and not draft.world_claims
         and draft.media_request == "none"
+        and not draft.media_source_refs
         and draft.stance in {"defer", "acknowledge_briefly", "answer_without_world_claims"}
     )
 

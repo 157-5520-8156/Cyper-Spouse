@@ -36,6 +36,7 @@ from companion_daemon.world_v2.expression_draft import (
     TEXT_ONLY_EXPRESSION_CAPABILITIES,
     build_source_ref_alias_table,
     current_counterpart_report_source_refs,
+    materialize_expression_draft,
     qq_expression_capabilities,
     _world_claim_evidence,
     world_source_scope_boundary,
@@ -155,6 +156,67 @@ def test_qq_media_request_capability_is_enabled_only_by_a_real_deployment() -> N
     assert available.media_request_mode == "candidate_only"
     assert available.prompt_value()["media_request_mode"] == "candidate_only"
     assert available.prompt_value()["media_request_timing"] == "now_only"
+
+
+def test_media_source_selection_becomes_durable_event_evidence_not_private_audit() -> None:
+    source_ref = "event:life-aftermath:experience:walk"
+    request = _qq_request().model_copy(
+        update={
+            "model_content_json": json.dumps(
+                {
+                    "logical_time": "2026-08-11T12:00:00+00:00",
+                    "slices": {
+                        "recent_experiences": {
+                            "availability": "available",
+                            "items": [
+                                {
+                                    "source_ref": source_ref,
+                                    "source_bindings": [
+                                        {
+                                            "ref": source_ref,
+                                            "source_kind": "committed_event",
+                                            "authority_type": "ExperienceCommitted",
+                                            "source_world_revision": 2,
+                                            "immutable_hash": "c" * 64,
+                                        }
+                                    ],
+                                    "value": {"experience_id": "experience:walk"},
+                                }
+                            ],
+                        }
+                    },
+                }
+            )
+        }
+    )
+    proposal = materialize_expression_draft(
+        value={
+            "private_turn_state": {
+                "contract": "private-turn-state.1",
+                "inner_state_summary": "I want to consider sharing this lived moment.",
+                "attended_source_refs": [source_ref],
+            },
+            "timing_choice": "now",
+            "beats": [{"modality": "text", "text": "刚才那一刻，我有点想拍下来。"}],
+            "stance": "considering",
+            "brief_rationale": "The exact lived moment may be worth sharing.",
+            "confidence": 7_500,
+            "world_claims": [],
+            "media_request": "consider_available_candidate",
+            "media_source_refs": [source_ref],
+        },
+        request=request,
+        capabilities=qq_expression_capabilities(
+            "napcat", media_request_available=True
+        ),
+        private_state_context_json=request.model_content_json,
+    )
+
+    evidence = next(item for item in proposal.evidence_refs if item.ref_id == source_ref)
+    assert evidence.evidence_kind == "committed_experience"
+    assert proposal.private_turn_state is not None
+    change = proposal.proposed_changes[0]
+    assert change.payload.value()["media_source_refs"] == [source_ref]
 
 
 def test_private_turn_state_contract_does_not_license_invented_life_context() -> None:

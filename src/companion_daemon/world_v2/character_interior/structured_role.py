@@ -2614,7 +2614,15 @@ class StructuredCharacterRoleFaculty:
                         "pause|resume|abandon an offered head; creating a Goal is unavailable "
                         "because no Goal content authority is installed"
                     ),
-                    "thread": "open from the current source, or update|resolve|cancel an offered head",
+                    "thread": (
+                        "open a source-bound private unfinished thought from the current "
+                        "experience, or update|resolve|cancel an offered head. Choose "
+                        "thread_kind=reply_reconsideration only when you genuinely want to "
+                        "revisit possible future contact; choose its due_at, expires_at and "
+                        "importance yourself. Opening it records an inner intention only: it "
+                        "does not send or schedule a message. At due time the proactive lane "
+                        "must ask you again to choose now, later, or silent"
+                    ),
                     "commitment": (
                         "open only against an offered open Thread fulfillment contract, or "
                         "release an offered commitment head"

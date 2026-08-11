@@ -1,16 +1,19 @@
 """Durably consume role-owned requests to consider an available media candidate.
 
 The accepted expression is the only source of the request.  This runtime does
-not infer intent from text and does not create visual facts or candidates.  It
-opens a restart-safe ``TriggerProcess`` after a reply Action is provider
-accepted, claims one attempt, and delegates the bounded candidate choice to
-the existing CharacterInterior media conductor.
+not infer intent from text.  It opens a restart-safe ``TriggerProcess`` after a
+reply Action is provider accepted and delegates the bounded candidate choice
+to the existing CharacterInterior media conductor.  When the accepted role
+proposal also carries exact attended life evidence, an optional supplier may
+compile one source-closed candidate before selection; it never guesses a scene
+or treats the counterpart's request as visual proof.
 """
 
 from __future__ import annotations
 
-import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+import asyncio
 import hashlib
 import json
 from typing import Literal, Protocol
@@ -19,6 +22,7 @@ from .errors import ConcurrencyConflict
 from .event_identity import domain_idempotency_key
 from .media_preview_conductor import MediaPreviewConductor, MediaPreviewConductorResult
 from .minimal_reply_events import ExpressionPlanAcceptedPayload
+from .proposal_envelope import DecisionProposal, validate_proposal_envelope
 from .schema_core import FrozenModel
 from .schemas import ClaimLease, ProjectionCursor, TriggerProcess, WorldEvent
 
@@ -78,6 +82,22 @@ class _Ledger(Protocol):
     ) -> tuple[WorldEvent, ...]: ...
 
 
+class _CandidateSupplier(Protocol):
+    def request_once(
+        self,
+        *,
+        source_refs: tuple[str, ...],
+        trace_id: str,
+        correlation_id: str,
+    ) -> object: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _AcceptedMediaRequest:
+    event: WorldEvent
+    source_refs: tuple[str, ...]
+
+
 class MediaRequestAdvanceResult(FrozenModel):
     handled: bool
     status: Literal["idle", "owned", "completed", "blocked"]
@@ -93,12 +113,14 @@ class MediaRequestRuntime:
         *,
         ledger: _Ledger,
         conductor: MediaPreviewConductor,
+        candidate_supplier: _CandidateSupplier | None = None,
         owner_id: str = _OWNER_ID,
     ) -> None:
         if not owner_id:
             raise ValueError("media request runtime requires an owner")
         self._ledger = ledger
         self._conductor = conductor
+        self._candidate_supplier = candidate_supplier
         self._owner_id = owner_id
         self._lock = asyncio.Lock()
         self._owned_attempt_ids: set[str] = set()
@@ -124,7 +146,7 @@ class MediaRequestRuntime:
         if {item.plan_id for item in plans} != plan_ids:
             return False
         for plan in plans:
-            if await self._accepted_request(plan) is not None:
+            if await self._accepted_request(plan, projection=projection) is not None:
                 return True
         return False
 
@@ -177,6 +199,32 @@ class MediaRequestRuntime:
                     status="completed" if completed else "blocked",
                     reason_code=(recovered if completed else "media_request.complete_cursor_stale"),
                 )
+
+            accepted_request = await self._accepted_request_for_process(
+                process=claimed,
+                projection=await self._project(),
+            )
+            if accepted_request is None:
+                return MediaRequestAdvanceResult(
+                    handled=True,
+                    status="blocked",
+                    reason_code="media_request.accepted_request_unavailable",
+                )
+            if self._candidate_supplier is not None and accepted_request.source_refs:
+                supply = self._candidate_supplier.request_once
+                if self._ledger.blocks_event_loop:
+                    await asyncio.to_thread(
+                        supply,
+                        source_refs=accepted_request.source_refs,
+                        trace_id=trace_id,
+                        correlation_id=request_correlation,
+                    )
+                else:
+                    supply(
+                        source_refs=accepted_request.source_refs,
+                        trace_id=trace_id,
+                        correlation_id=request_correlation,
+                    )
 
             preview = await self._conductor.advance_once(
                 logical_time=logical_time,
@@ -243,19 +291,20 @@ class MediaRequestRuntime:
         for plan in sorted(projection.expression_plans, key=lambda item: item.plan_id):
             if plan.plan_id not in visible_plan_ids:
                 continue
-            source = await self._accepted_request(plan)
-            if source is None:
+            request = await self._accepted_request(plan, projection=projection)
+            if request is None:
                 continue
             trigger_id = media_request_trigger_id(
-                world_id=self._ledger.world_id,
-                source_event_ref=source.event_id,
-                source_event_payload_hash=source.payload_hash,
+                world_id=self._ledger.world_id, source_event_ref=request.event.event_id,
+                source_event_payload_hash=request.event.payload_hash,
             )
             if trigger_id not in existing and trigger_id not in completed:
-                return source
+                return request.event
         return None
 
-    async def _accepted_request(self, plan) -> WorldEvent | None:  # type: ignore[no-untyped-def]
+    async def _accepted_request(
+        self, plan, *, projection
+    ) -> _AcceptedMediaRequest | None:  # type: ignore[no-untyped-def]
         located = (
             await asyncio.to_thread(self._ledger.lookup_event_commit, plan.event_ref)
             if self._ledger.blocks_event_loop
@@ -275,7 +324,64 @@ class MediaRequestRuntime:
             or payload.media_request != "consider_available_candidate"
         ):
             return None
-        return event
+        audits = tuple(
+            item
+            for item in getattr(projection, "proposal_audits", ())
+            if item.proposal_id == plan.proposal_id
+        )
+        if not audits:
+            # Historical accepted plans predate the source-carrying request
+            # bridge. They may still consume an already-open candidate, but
+            # cannot authorize compilation of a new one.
+            return _AcceptedMediaRequest(event=event, source_refs=())
+        if len(audits) != 1:
+            return None
+        try:
+            proposal = validate_proposal_envelope(json.loads(audits[0].proposal_json))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(proposal, DecisionProposal):
+            return None
+        changes = tuple(
+            item
+            for item in proposal.proposed_changes
+            if item.kind == "expression_plan_transition" and item.target_id == plan.plan_id
+        )
+        if len(changes) != 1:
+            return None
+        payload_value = changes[0].payload.value()
+        media_refs = payload_value.get("media_source_refs", [])
+        if (
+            payload_value.get("media_request") != "consider_available_candidate"
+            or not isinstance(media_refs, list)
+            or any(not isinstance(item, str) or not item for item in media_refs)
+            or len(media_refs) != len(set(media_refs))
+        ):
+            return None
+        evidence_refs = {item.ref_id for item in proposal.evidence_refs}
+        if not set(media_refs).issubset(evidence_refs):
+            return None
+        return _AcceptedMediaRequest(
+            event=event,
+            source_refs=tuple(media_refs),
+        )
+
+    async def _accepted_request_for_process(
+        self, *, process: TriggerProcess, projection
+    ) -> _AcceptedMediaRequest | None:  # type: ignore[no-untyped-def]
+        if process.source_evidence_ref is None:
+            return None
+        plan = next(
+            (
+                item
+                for item in projection.expression_plans
+                if item.event_ref == process.source_evidence_ref
+            ),
+            None,
+        )
+        if plan is None:
+            return None
+        return await self._accepted_request(plan, projection=projection)
 
     async def _open(self, *, source: WorldEvent, projection) -> TriggerProcess | None:  # type: ignore[no-untyped-def]
         trigger_id = media_request_trigger_id(

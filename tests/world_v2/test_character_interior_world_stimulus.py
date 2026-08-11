@@ -2339,14 +2339,14 @@ async def test_character_can_open_one_source_bound_thread_in_the_same_experience
             "operation": "open",
             "target_id": None,
             "expected_entity_revision": 0,
-            "thread_kind": "topic_open",
+            "thread_kind": "reply_reconsideration",
             "importance_bp": 6100,
             "due_at": "2026-08-05T18:00:00Z",
             "expires_at": "2026-08-06T18:00:00Z",
             "resolution_kind": None,
             "cancellation_reason_code": None,
             "source_refs": [SOURCE_REF],
-            "reason_summary": "她觉得这件事值得以后再回来看。",
+            "reason_summary": "她真的想过一会儿再决定要不要主动联系。",
         },
     )
     runtime, ledger, _projection = _runtime(model=model)
@@ -2355,6 +2355,9 @@ async def test_character_can_open_one_source_bound_thread_in_the_same_experience
 
     assert result.work_status == "accepted"
     assert model.calls == 1
+    role_contract = json.dumps(model.messages[0], ensure_ascii=False)
+    assert "thread_kind=reply_reconsideration" in role_contract
+    assert "does not send or schedule a message" in role_contract
     audits = ledger.project().proposal_audits
     assert len(audits) == 1
     proposal = validate_proposal_envelope(json.loads(audits[0].proposal_json))
@@ -2373,7 +2376,11 @@ async def test_character_can_open_one_source_bound_thread_in_the_same_experience
     )
     assert len(settled.threads) == 1
     assert settled.threads[0].thread_id == change.target_id
-    assert settled.threads[0].values.kind == "topic_open"
+    assert settled.threads[0].values.kind == "reply_reconsideration"
+    assert settled.threads[0].values.due_window is not None
+    assert settled.threads[0].values.due_window.opens_at < (
+        settled.threads[0].values.due_window.closes_at
+    )
     assert settled.thread_transitions[-1].change_id == change.change_id
 
     # Restart/replay sees the terminal source and never re-authors the choice.

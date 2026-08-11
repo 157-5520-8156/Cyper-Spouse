@@ -863,6 +863,7 @@ class WorldV2TurnApplication:
         media_planning_worker: MediaPlanningWorker,
         media_ecology: EventEcologyMediaCandidateRuntime | None,
         life_ecology: LifeEcologyRuntime | None,
+        visual_evidence_author: LifeVisualEvidenceAuthor | None,
         event_ecology_worker_actor: str,
         media_selection_worker: MediaSelectionWorker | None,
         media_selection_worker_actor: str,
@@ -937,6 +938,7 @@ class WorldV2TurnApplication:
             MediaRequestRuntime(
                 ledger=ledger,
                 conductor=self._media_preview_conductor,
+                candidate_supplier=visual_evidence_author,
             )
             if self._media_preview_conductor is not None
             else None
@@ -4116,6 +4118,7 @@ def build_sqlite_world_v2_turn_application(
             ),
             media_ecology=media_ecology,
             life_ecology=life_ecology,
+            visual_evidence_author=visual_evidence_author,
             event_ecology_worker_actor=config.event_ecology_worker_actor,
             media_selection_worker=media_selection_worker,
             media_selection_worker_actor=config.media_selection_worker_actor,

@@ -341,9 +341,17 @@ class ExpressionDraft(FrozenModel):
     # provider call: CharacterInterior still makes the later select/no-op
     # decision over exact PhotoCandidate tokens.
     media_request: MediaRequestChoice = "none"
+    # Optional, explicit source selection for compiling a candidate when none
+    # is already open.  This is separate from PrivateTurnState attention: the
+    # latter is audit-only and must never authorize a durable effect.
+    media_source_refs: tuple[str, ...] = Field(default=(), max_length=8)
 
     @model_validator(mode="after")
     def timing_and_visible_expression_are_orthogonal_but_complete(self) -> "ExpressionDraft":
+        if len(self.media_source_refs) != len(set(self.media_source_refs)):
+            raise ValueError("media source refs must be unique")
+        if self.media_request == "none" and self.media_source_refs:
+            raise ValueError("media source refs require a media request")
         if self.media_request != "none" and self.timing_choice != "now":
             raise ValueError("media request requires an immediate expression")
         visible_content_seen = any(beat.modality != "typing" for beat in self.beats)
@@ -908,7 +916,7 @@ def expand_expression_source_ref_aliases(
     *,
     aliases: SourceRefAliasTable,
 ) -> dict[str, object]:
-    """Expand only the two model-owned source-ref fields, never prose or IDs."""
+    """Expand only model-owned source-ref fields, never prose or IDs."""
 
     expanded = dict(value)
     raw_state = expanded.get("private_turn_state")
@@ -921,6 +929,11 @@ def expand_expression_source_ref_aliases(
                     aliases.expand(ref) if isinstance(ref, str) else ref for ref in refs
                 ],
             }
+    media_refs = expanded.get("media_source_refs")
+    if isinstance(media_refs, (list, tuple)):
+        expanded["media_source_refs"] = [
+            aliases.expand(ref) if isinstance(ref, str) else ref for ref in media_refs
+        ]
     claims = expanded.get("world_claims")
     if isinstance(claims, (list, tuple)):
         expanded_claims: list[object] = []
@@ -1617,12 +1630,20 @@ def _world_claim_evidence(
         for ref in claim.source_refs
         if ref not in non_ledger_source_refs
     }
+    return _bound_context_event_evidence(cited=cited, request=request)
+
+
+def _bound_context_event_evidence(
+    *, cited: set[str], request: ModelInput
+) -> tuple[ProposalEvidenceRef, ...]:
+    """Bind selected refs to exact immutable Context event coordinates."""
+
     if not cited:
         return ()
     context = json.loads(request.model_content_json)
     slices = context.get("slices") if isinstance(context, dict) else None
     if not isinstance(slices, dict):
-        raise ValueError("world claim evidence requires Context slices")
+        raise ValueError("selected source evidence requires Context slices")
     coordinate_parents = {
         item.source_ref: item.parent_item_ref
         for item in biographical_coordinate_authorities(context)
@@ -1705,7 +1726,7 @@ def _world_claim_evidence(
             # proposal evidence closure below.
             continue
         if len(matches) != 1:
-            raise ValueError("world claim source has ambiguous authority binding")
+            raise ValueError("selected source has ambiguous authority binding")
         source_kind, revision, immutable_hash = next(iter(matches))
         if source_kind == "execution_receipt":
             kind = "settled_external_result"
@@ -1722,17 +1743,17 @@ def _world_claim_evidence(
                 if not authority_type.startswith("situation_source:")
             }
             if len(canonical_authority_types) > 1:
-                raise ValueError("world claim source has ambiguous authority binding")
+                raise ValueError("selected source has ambiguous authority binding")
             projected_kinds = {
                 _EVENT_EVIDENCE_KIND[authority_type]
                 for authority_type in authority_types
                 if authority_type in _EVENT_EVIDENCE_KIND
             }
             if len(projected_kinds) > 1:
-                raise ValueError("world claim source has ambiguous authority binding")
+                raise ValueError("selected source has ambiguous authority binding")
             kind = next(iter(projected_kinds), "committed_world_event")
         else:
-            raise ValueError("world claim source is not immutable event authority")
+            raise ValueError("selected source is not immutable event authority")
         evidence.append(
             ProposalEvidenceRef(
                 ref_id=ref,
@@ -2013,6 +2034,12 @@ def materialize_expression_draft(
     # JSON arrays are the natural wire representation of immutable tuples.
     # Field validators remain strict about every scalar and cross-field rule.
     draft = ExpressionDraft.model_validate_json(_canonical_json(value), strict=True)
+    if draft.media_source_refs:
+        context = json.loads(request.model_content_json)
+        allowed_media_refs = _all_context_attention_tokens(context)
+        outside = set(draft.media_source_refs) - allowed_media_refs
+        if outside:
+            raise ValueError("media request cites an unpinned source ref")
     if strip_unpinned_claims:
         draft = strip_unpinned_world_claims(
             draft=draft,
@@ -2051,6 +2078,8 @@ def materialize_expression_draft(
         # The unavailable/default media coordinate must not mint new proposal
         # identities for otherwise identical historical text turns.
         identity_draft.pop("media_request", None)
+    if not draft.media_source_refs:
+        identity_draft.pop("media_source_refs", None)
     if capabilities.recorded_cadence_mode == "off":
         identity_draft.pop("cadence", None)
     identity = _digest(
@@ -2081,14 +2110,13 @@ def materialize_expression_draft(
         }
     )
     proposal_id = f"proposal:expression:{identity}"
-    evidence = (
-        ProposalEvidenceRef(
+    trigger_evidence = ProposalEvidenceRef(
             ref_id=trigger.observation_ref,
             evidence_kind="observed_message",
             source_world_revision=trigger.source_world_revision,
             immutable_hash=trigger.event_payload_hash,
-        ),
-        *_world_claim_evidence(
+        )
+    world_evidence = _world_claim_evidence(
             draft=draft,
             request=request,
             # The current Observation is already the mandatory first evidence
@@ -2097,8 +2125,17 @@ def materialize_expression_draft(
             # again as a Context-slice ledger binding.
             non_ledger_source_refs=stable_identity_source_refs
             | frozenset((trigger.observation_ref,)),
-        ),
     )
+    media_evidence = _bound_context_event_evidence(
+        cited=set(draft.media_source_refs),
+        request=request,
+    )
+    if set(draft.media_source_refs) != {item.ref_id for item in media_evidence}:
+        raise ValueError("media request source lacks immutable event authority")
+    evidence_by_ref = {
+        item.ref_id: item for item in (*world_evidence, *media_evidence)
+    }
+    evidence = (trigger_evidence, *evidence_by_ref.values())
     if draft.timing_choice == "silent":
         return DecisionProposal(
             proposal_id=proposal_id,
@@ -2214,7 +2251,10 @@ def materialize_expression_draft(
                 ),
                 "world_claims": [item.model_dump(mode="json") for item in draft.world_claims],
                 **(
-                    {"media_request": draft.media_request}
+                    {
+                        "media_request": draft.media_request,
+                        "media_source_refs": list(draft.media_source_refs),
+                    }
                     if draft.media_request != "none"
                     else {}
                 ),

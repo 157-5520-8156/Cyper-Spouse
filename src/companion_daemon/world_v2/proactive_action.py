@@ -329,7 +329,10 @@ class _CharacterInteriorProactiveTransport:
         if decision.status == "technical_failure":
             failure = decision.failure_code or "unknown"
             raise ValidationTechnicalFailure(
-                "authored_subcall_timeout"
+                failure
+                if failure
+                in {"role_faculty_unavailable", "required_tool_choice_unsupported"}
+                else "authored_subcall_timeout"
                 if "timeout" in failure
                 else "authored_expression_reselection_invalid"
                 if "invalid" in failure
@@ -1417,6 +1420,8 @@ class ProactiveActionRuntime:
         {
             "source_review_timeout",
             "source_review_exception",
+            "role_faculty_unavailable",
+            "required_tool_choice_unsupported",
             "recall_choice_reselection_invalid",
             "authored_expression_reselection_invalid",
             "proactive_claim_binding_invalid",

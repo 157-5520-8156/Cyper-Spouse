@@ -6,7 +6,7 @@ import json
 import pytest
 
 from companion_daemon.world_v2.character_interior import CharacterInterior
-from companion_daemon.world_v2.character_interior.contracts import FACET_NAMES
+from companion_daemon.world_v2.character_interior.contracts import FACET_NAMES, InnerDecision
 from companion_daemon.world_v2.character_interior.structured_role import (
     StructuredCharacterRoleFaculty,
 )
@@ -150,6 +150,28 @@ def _adapter(model: _Model) -> _CharacterInteriorProactiveTransport:
     )
 
 
+class _FailedInterior:
+    async def consider(self, opportunity):  # type: ignore[no-untyped-def]
+        return InnerDecision(
+            inner_turn_id="inner-turn:missing-role",
+            opportunity_ref=opportunity.opportunity_ref,
+            actor_ref=opportunity.actor_ref,
+            cursor=opportunity.cursor,
+            status="technical_failure",
+            failure_code="role_faculty_unavailable",
+        )
+
+
+def _adapter_without_role() -> _CharacterInteriorProactiveTransport:
+    return _CharacterInteriorProactiveTransport(
+        character_interior=_FailedInterior(),  # type: ignore[arg-type]
+        world_id="world:test",
+        actor_ref="character:zhizhi",
+        target="user:primary",
+        expression_capabilities=TEXT_ONLY_EXPRESSION_CAPABILITIES,
+    )
+
+
 @pytest.mark.asyncio
 async def test_proactive_business_opportunity_uses_character_interior_consider() -> None:
     model = _Model(
@@ -194,3 +216,11 @@ async def test_proactive_interior_technical_failure_is_not_materialized_as_silen
     # Provider failure is already technical, so CharacterInterior neither
     # substitutes another author nor spends the structural-correction pass.
     assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_proactive_preserves_missing_role_faculty_as_exact_technical_failure() -> None:
+    with pytest.raises(ValidationTechnicalFailure) as raised:
+        await _adapter_without_role().propose(_request())
+
+    assert raised.value.failure_code == "role_faculty_unavailable"
