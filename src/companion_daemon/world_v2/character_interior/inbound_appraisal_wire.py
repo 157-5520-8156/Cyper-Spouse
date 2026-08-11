@@ -23,6 +23,7 @@ from ..affect_target_bounds import (
     validate_model_authored_targets,
 )
 from ..deliberation import ModelInput
+from ..interaction_act_identity import interaction_act_overlapping_occurrence_count
 from ..model_facing_context import compact_model_facing_context
 from ..proposal_envelope import (
     AppraisalSummary,
@@ -1132,14 +1133,22 @@ def _interaction_act(
     if wire.source_scope == "current_message":
         if (
             trigger.text is None
-            or trigger.text.count(wire.source_text_span) != 1
+            or interaction_act_overlapping_occurrence_count(
+                source_text=trigger.text,
+                selected_text=wire.source_text_span,
+            )
+            != 1
         ):
             raise ValueError(
                 "interaction act source span must occur exactly once in the verified message"
             )
         if (
             wire.object_label is not None
-            and trigger.text.count(wire.object_label) != 1
+            and interaction_act_overlapping_occurrence_count(
+                source_text=trigger.text,
+                selected_text=wire.object_label,
+            )
+            != 1
         ):
             raise ValueError(
                 "interaction act object label must occur exactly once in the verified message"

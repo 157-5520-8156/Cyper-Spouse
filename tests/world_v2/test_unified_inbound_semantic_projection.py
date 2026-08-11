@@ -449,6 +449,58 @@ def test_observed_interaction_act_rejects_ambiguous_repeated_source_span() -> No
         )
 
 
+def test_observed_interaction_act_rejects_overlapping_source_span() -> None:
+    request = _request(text="aaa")
+
+    with pytest.raises(ValueError, match="source span"):
+        _proposal_from_draft(
+            raw=json.dumps(
+                _base_appraisal(
+                    interaction_act={
+                        "operation": "declare",
+                        "status_code": "still in progress",
+                        "source_scope": "current_message",
+                        "source_text_span": "aa",
+                        "interaction_act_ref": None,
+                        "act_kind": "role-authored ongoing act",
+                        "subject_role": "current_counterpart",
+                        "counterparty_roles": ["self"],
+                        "object_ref": None,
+                        "object_label": None,
+                    }
+                ),
+                ensure_ascii=False,
+            ),
+            request=request,
+        )
+
+
+def test_observed_interaction_act_rejects_overlapping_object_label() -> None:
+    request = _request(text="aaa is the object")
+
+    with pytest.raises(ValueError, match="object label"):
+        _proposal_from_draft(
+            raw=json.dumps(
+                _base_appraisal(
+                    interaction_act={
+                        "operation": "declare",
+                        "status_code": "still in progress",
+                        "source_scope": "current_message",
+                        "source_text_span": "aaa is the object",
+                        "interaction_act_ref": None,
+                        "act_kind": "role-authored ongoing act",
+                        "subject_role": "current_counterpart",
+                        "counterparty_roles": ["self"],
+                        "object_ref": None,
+                        "object_label": "aa",
+                    }
+                ),
+                ensure_ascii=False,
+            ),
+            request=request,
+        )
+
+
 def test_interaction_act_does_not_exist_when_the_role_omits_it() -> None:
     proposal = DecisionProposal.model_validate_json(
         json.dumps(

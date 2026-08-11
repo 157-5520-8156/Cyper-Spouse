@@ -11,12 +11,16 @@ from __future__ import annotations
 import json
 from typing import Literal
 
+from .audited_proposal_settlement import settle_terminal_audited_proposal
 from .ledger import LedgerPort
 from .proposal_envelope import DecisionProposal, validate_proposal_envelope
 from .relationship_commitment_acceptance_runtime import (
     RelationshipCommitmentAcceptanceRuntime,
 )
-from .relationship_proposal_compiler import RelationshipProposalCompiler
+from .relationship_proposal_compiler import (
+    RelationshipProposalCompiler,
+    RelationshipProposalCompilerError,
+)
 from .schema_core import FrozenModel
 from .schemas import CommitResult, ProjectionCursor
 from .stale_proposal_settlement import settle_stale_typed_proposal
@@ -31,11 +35,12 @@ class RelationshipCommitmentWorkerError(ValueError):
 
 
 class RelationshipCommitmentWorkResult(FrozenModel):
-    status: Literal["accepted", "stale"] = "accepted"
+    status: Literal["accepted", "rejected", "stale"] = "accepted"
     source_proposal_id: str
-    typed_proposal_id: str
-    compile_commit: CommitResult
     acceptance_commit: CommitResult
+    typed_proposal_id: str | None = None
+    compile_commit: CommitResult | None = None
+    reason_code: str | None = None
 
 
 class RelationshipCommitmentWorker:
@@ -75,6 +80,9 @@ class RelationshipCommitmentWorker:
             deliberation_revision=projection.deliberation_revision,
             ledger_sequence=projection.ledger_sequence,
         )
+        terminal_source_proposals = {
+            item.proposal_id for item in projection.acceptance_decisions
+        }
         for audit in projection.proposal_audits:
             if audit.proposal_kind != "decision":
                 continue
@@ -85,6 +93,8 @@ class RelationshipCommitmentWorker:
                     "source_proposal_invalid"
                 ) from exc
             if not isinstance(proposal, DecisionProposal):
+                continue
+            if audit.proposal_id in terminal_source_proposals:
                 continue
             changes = tuple(
                 change
@@ -151,12 +161,33 @@ class RelationshipCommitmentWorker:
                 proposal_id=proposal.proposal_id,
             ):
                 continue
-            compiled = self._compiler.record_commitment_rebased(
-                world_id=self._ledger.world_id,
-                audit_cursor=audit_cursor,
-                current_cursor=current_cursor,
-                proposal_id=proposal.proposal_id,
-            )
+            try:
+                compiled = self._compiler.record_commitment_rebased(
+                    world_id=self._ledger.world_id,
+                    audit_cursor=audit_cursor,
+                    current_cursor=current_cursor,
+                    proposal_id=proposal.proposal_id,
+                )
+            except RelationshipProposalCompilerError as exc:
+                if exc.code not in {
+                    "relationship_proposal_compiler."
+                    "commitment_stage_transition_not_installed",
+                }:
+                    raise
+                terminal = settle_terminal_audited_proposal(
+                    ledger=self._ledger,
+                    audit=audit,
+                    current_cursor=current_cursor,
+                    reason_code=exc.code,
+                    actor=self._actor,
+                    source=self._source,
+                )
+                return RelationshipCommitmentWorkResult(
+                    status=terminal.status,
+                    source_proposal_id=proposal.proposal_id,
+                    acceptance_commit=terminal.commit,
+                    reason_code=terminal.reason_code,
+                )
             if (
                 compiled.status != "candidate_recorded"
                 or compiled.typed_proposal_id is None

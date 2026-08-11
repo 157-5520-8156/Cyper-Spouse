@@ -54,7 +54,18 @@ _POLICY = {
 
 
 def relationship_policy_digest() -> str:
-    encoded = json.dumps(_POLICY, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    commitment_stage_transitions = {
+        stage: tuple(sorted(targets))
+        for stage, targets in sorted(RELATIONSHIP_COMMITMENT_STAGE_TRANSITIONS.items())
+    }
+    encoded = json.dumps(
+        {
+            **_POLICY,
+            "commitment_stage_transitions": commitment_stage_transitions,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 

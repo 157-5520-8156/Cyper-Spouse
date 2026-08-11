@@ -517,6 +517,27 @@ class _DeliveredInteractionActInboundModel:
         )
 
 
+class _TwoCommitmentsThenInteractionActInboundModel:
+    """Author two same-head commitments, then one independent typed act."""
+
+    model = "test-two-commitments-then-interaction-act"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        if self.calls <= 2:
+            return await _RelationshipCommitmentInboundModel().complete(
+                messages,
+                temperature=temperature,
+            )
+        return await _DeliveredInteractionActInboundModel().complete(
+            messages,
+            temperature=temperature,
+        )
+
+
 class _SequenceTimingDraftChatModel:
     model = "test-flash-timing-sequence"
 
@@ -908,6 +929,68 @@ async def test_delivered_expression_interaction_act_waits_for_receipt_then_settl
         assert replayed.interaction_act_transitions == (
             projection.interaction_act_transitions
         )
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
+async def test_superseded_commitment_is_terminal_before_later_interaction_act(
+    tmp_path: Path,
+) -> None:
+    model = _TwoCommitmentsThenInteractionActInboundModel()
+    app = _build_application(
+        path=tmp_path / "semantic-worker-fairness.sqlite",
+        config=replace(
+            _config(),
+            reply_target="conversation:test:c2c:user.1",
+            counterpart_actor_ref="user:user.1",
+        ),
+        identities=_ConversationTargetIdentities(),
+        router=_Router(),
+        inbound_author=_InboundCharacterAuthor(flash_model=model),
+        transport=_DeliveredTransport(received_at=NOW),
+        now=NOW,
+    )
+    try:
+        turns = (
+            ("relationship-commitment:one", "我们可以成为好朋友吗？"),
+            ("relationship-commitment:two", "那我们就说定是好朋友了？"),
+            ("interaction-act:after-commitments", "你下次愿意把那本书带来吗？"),
+        )
+        for message_id, text in turns:
+            response = await app.respond(
+                InboundTurn(
+                    platform="test",
+                    platform_user_id="user.1",
+                    platform_message_id=message_id,
+                    text=text,
+                    observed_at=NOW,
+                    trace_id=f"trace:{message_id}",
+                )
+            )
+            assert response.status == "action_authorized"
+            delivery = await app.drain_actions_once()
+            assert delivery is not None and delivery.status == "settled"
+
+        first = await app.drain_background_once()
+        assert first is not None and first.status == "accepted"
+        assert len(app._ledger.project().relationship_commitments) == 1  # noqa: SLF001
+
+        superseded = await app.drain_background_once()
+        assert superseded is not None and superseded.status == "stale"
+        assert superseded.typed_proposal_id is None
+
+        later = await app.drain_background_once()
+        assert later is not None and later.status == "accepted"
+        projection = app._ledger.project()  # noqa: SLF001
+        assert len(projection.relationship_commitments) == 1
+        assert len(projection.interaction_acts) == 1
+        assert any(
+            item.proposal_id == superseded.source_proposal_id
+            and item.status == "stale"
+            for item in projection.acceptance_decisions
+        )
+        assert app._ledger.rebuild() == projection  # noqa: SLF001
     finally:
         app.close()
 
