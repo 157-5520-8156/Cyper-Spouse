@@ -23,6 +23,7 @@ from .schema_core import FrozenModel
 from .validation_failure_codes import (
     VALIDATION_MAIN_EXCEPTION_FAILURE_CODES,
     VALIDATION_MAIN_TIMEOUT_FAILURE_CODES,
+    physical_provider_failure_code_is_content_free,
     provider_subcall_failure_code_is_content_free,
     sanitize_physical_provider_failure_code,
 )
@@ -460,7 +461,7 @@ class RecordedModelResultAudit(FrozenModel):
                 raise ValueError("physical provider terminal has an invalid outcome")
             if (self.usage_status == "provider_reported") != (self.usage is not None):
                 raise ValueError("physical provider usage status is not truthful")
-            if self.failure_code != sanitize_physical_provider_failure_code(
+            if not physical_provider_failure_code_is_content_free(
                 self.failure_code,
                 outcome=self.outcome or "",
             ):

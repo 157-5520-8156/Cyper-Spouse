@@ -8,6 +8,7 @@ Deliberation classifier and immutable audit validator from drifting apart.
 
 from __future__ import annotations
 
+from types import MappingProxyType
 from typing import Literal, cast, get_args
 
 
@@ -59,6 +60,50 @@ PHYSICAL_PROVIDER_FAILURE_CODES = frozenset(
         "stream_tail_unresolved",
         "stream_tail_unresolved_after_bounded_cancellation",
         "stream_provider_unresolved",
+    }
+)
+_V55_RECORDED_PHYSICAL_VALIDATION_FAILURE_CODES = frozenset(
+    {
+        "source_review_timeout",
+        "source_review_exception",
+        "authored_subcall_timeout",
+        "authored_subcall_exception",
+        "role_faculty_unavailable",
+        "required_tool_choice_unsupported",
+        "recall_choice_reselection_invalid",
+        "authored_expression_reselection_invalid",
+        "proactive_claim_binding_invalid",
+        "affect_target_reselection_invalid",
+        "inventory_invalid",
+        "coverage_invalid",
+    }
+)
+_RECORDED_PHYSICAL_PROVIDER_FAILURE_OUTCOMES = MappingProxyType(
+    {
+        **{
+            code: frozenset({"unresolved"})
+            for code in _V55_RECORDED_PHYSICAL_VALIDATION_FAILURE_CODES
+        },
+        # Exact aliases emitted by the v55 candidate/stream producers. New
+        # writers collapse these through the installed sanitizer instead of
+        # extending this historical recorded-reader language.
+        "timeout": frozenset({"unresolved"}),
+        "invalid": frozenset({"unresolved"}),
+        "cancelled": frozenset({"unresolved"}),
+        "exception": frozenset({"unresolved"}),
+        "missing_output": frozenset({"unresolved"}),
+        "stream_author_identity_changed": frozenset({"unresolved"}),
+        "stream_reselected": frozenset({"cancelled"}),
+        "stream_reselection_unresolved": frozenset({"unresolved"}),
+        "stream_superseded_by_newer_input": frozenset({"cancelled"}),
+        "stream_tail_cancelled": frozenset({"cancelled"}),
+        "stream_tail_unresolved": frozenset({"unresolved"}),
+        "stream_tail_unresolved_after_bounded_cancellation": frozenset(
+            {"unresolved"}
+        ),
+        # Current installed physical-terminal codes remain accepted only for
+        # the outcomes their producer or fail-closed writer can emit.
+        "stream_provider_unresolved": frozenset({"cancelled", "unresolved"}),
     }
 )
 
@@ -168,6 +213,23 @@ def sanitize_physical_provider_failure_code(
     return "stream_provider_unresolved"
 
 
+def physical_provider_failure_code_is_content_free(
+    value: object,
+    *,
+    outcome: str,
+) -> bool:
+    """Accept only the frozen producer token/outcome pairs from recorded audits."""
+
+    if outcome == "completed":
+        return value is None
+    if not isinstance(value, str):
+        return False
+    return outcome in _RECORDED_PHYSICAL_PROVIDER_FAILURE_OUTCOMES.get(
+        value,
+        frozenset(),
+    )
+
+
 __all__ = [
     "VALIDATION_MAIN_EXCEPTION_FAILURE_CODES",
     "VALIDATION_MAIN_TIMEOUT_FAILURE_CODES",
@@ -175,6 +237,7 @@ __all__ = [
     "PHYSICAL_PROVIDER_FAILURE_CODES",
     "ValidationTechnicalFailureCode",
     "provider_subcall_failure_code_is_content_free",
+    "physical_provider_failure_code_is_content_free",
     "sanitize_physical_provider_failure_code",
     "sanitize_provider_subcall_failure_code",
     "sanitize_validation_technical_failure_code",

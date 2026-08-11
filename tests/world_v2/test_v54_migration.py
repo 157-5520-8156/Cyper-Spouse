@@ -12,6 +12,8 @@ import tarfile
 import textwrap
 import unicodedata
 
+import pytest
+
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.interaction_act_schemas import (
     InteractionActMutation,
@@ -167,13 +169,25 @@ V55_STREAM_AUDIT_APPEND_SCRIPT = textwrap.dedent(
     tail_call_id = "model-call:authentic-v55:tail"
     request_hash = hashlib.sha256(b"authentic-v55-physical-request").hexdigest()
     tail_response_hash = hashlib.sha256(b"authentic-v55-tail-response").hexdigest()
+    legacy_failure_code = sys.argv[3] if len(sys.argv) > 3 else None
     physical = PhysicalProviderInvocationAudit(
         model_call_id=physical_call_id,
         request_hash=request_hash,
         model_id="model:authentic-v55",
         model_version="2026-08",
-        outcome="completed",
-        response_hash=hashlib.sha256(b"authentic-v55-full-response").hexdigest(),
+        outcome=(
+            "cancelled"
+            if legacy_failure_code == "stream_reselected"
+            else "unresolved"
+            if legacy_failure_code is not None
+            else "completed"
+        ),
+        failure_code=legacy_failure_code,
+        response_hash=(
+            None
+            if legacy_failure_code is not None
+            else hashlib.sha256(b"authentic-v55-full-response").hexdigest()
+        ),
         usage_status="unresolved",
         semantic_model_call_ids=(head_call_id, tail_call_id),
     )
@@ -314,6 +328,7 @@ def _build_archived_database(
     expected_bundle: str,
     source_name: str,
     append_v55_stream_audit: bool = False,
+    append_v55_legacy_physical_failure: str | None = None,
 ) -> tuple[int, int, int]:
     repository_root = Path(__file__).resolve().parents[2]
     resolved = subprocess.run(
@@ -360,15 +375,18 @@ def _build_archived_database(
     assert metadata["projection_bundle"] == expected_bundle
     assert Path(str(metadata["module_file"])).is_relative_to(source_root)
     cursor = metadata["cursor"]
-    if append_v55_stream_audit:
+    if append_v55_stream_audit or append_v55_legacy_physical_failure:
+        arguments = [
+            sys.executable,
+            "-c",
+            V55_STREAM_AUDIT_APPEND_SCRIPT,
+            str(database_path),
+            WORLD,
+        ]
+        if append_v55_legacy_physical_failure is not None:
+            arguments.append(append_v55_legacy_physical_failure)
         appended = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                V55_STREAM_AUDIT_APPEND_SCRIPT,
-                str(database_path),
-                WORLD,
-            ],
+            arguments,
             cwd=source_root,
             env=environment,
             check=True,
@@ -410,6 +428,21 @@ def _head_coordinates(path: Path) -> tuple[int, int, int, str]:
         ).fetchone()
     assert row is not None
     return int(row[0]), int(row[1]), int(row[2]), str(row[3])
+
+
+def _last_model_result_audit_bytes(path: Path) -> tuple[str, str]:
+    with sqlite3.connect(path) as connection:
+        row = connection.execute(
+            """SELECT json_extract(json_extract(event_json, '$.payload_json'), '$.audit_json'),
+                      json_extract(json_extract(event_json, '$.payload_json'), '$.audit_hash')
+               FROM world_v2_events
+               WHERE world_id = ?
+                 AND json_extract(event_json, '$.event_type') = 'ModelResultRecorded'
+               ORDER BY ledger_sequence DESC LIMIT 1""",
+            (WORLD,),
+        ).fetchone()
+    assert row is not None
+    return str(row[0]), str(row[1])
 
 
 def test_authentic_v53_message_head_migrates_to_v56_without_rewriting_history(
@@ -557,6 +590,48 @@ def test_authentic_v55_stream_audit_migrates_to_v56_without_rewriting_history(
         projection.deliberation_revision,
         projection.ledger_sequence,
     ) == source_cursor
+    assert migrated.rebuild() == projection
+    migrated.close()
+
+    assert _event_rows_as_bytes(path) == old_events
+    assert _head_coordinates(path) == (*source_cursor, V56)
+
+    reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
+    assert reopened.project() == projection
+    assert reopened.rebuild() == projection
+    reopened.close()
+    assert _event_rows_as_bytes(path) == old_events
+
+
+@pytest.mark.parametrize("failure_code", ["cancelled", "missing_output"])
+def test_authentic_v55_legacy_physical_failure_is_preserved_without_rewriting_history(
+    tmp_path,
+    failure_code: str,
+) -> None:
+    path = tmp_path / f"v55-{failure_code}-physical-failure-to-v56.sqlite3"
+    source_cursor = _build_archived_database(
+        tmp_path=tmp_path,
+        database_path=path,
+        source_commit=V55_SOURCE_COMMIT,
+        expected_bundle=V55,
+        source_name=f"v55-{failure_code}-physical-failure-source",
+        append_v55_legacy_physical_failure=failure_code,
+    )
+    old_events = _event_rows_as_bytes(path)
+    old_audit_json, old_audit_hash = _last_model_result_audit_bytes(path)
+    assert len(old_events) == 3
+    assert _head_coordinates(path) == (*source_cursor, V55)
+
+    migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
+    projection = migrated.project()
+    physical = RecordedModelResultAudit.model_validate_json(
+        projection.model_result_audits[-1].audit_json
+    )
+    assert physical.status == "provider_unresolved"
+    assert physical.failure_code == failure_code
+    assert projection.model_result_audits[-1].audit_json == old_audit_json
+    assert projection.model_result_audits[-1].audit_hash == old_audit_hash
+    assert projection.reducer_bundle_version == V56
     assert migrated.rebuild() == projection
     migrated.close()
 

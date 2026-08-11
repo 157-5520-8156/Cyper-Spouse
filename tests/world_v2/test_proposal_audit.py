@@ -32,6 +32,7 @@ from companion_daemon.world_v2.proposal_audit_schemas import (
     ModelResultRecordedPayload,
     RecordedModelDecisionContext,
     RecordedModelResultAudit,
+    RecordedPhysicalProviderInvocationAudit,
     recorded_physical_provider_audit,
 )
 from companion_daemon.world_v2.proposal_envelope import DecisionProposal
@@ -66,6 +67,164 @@ def _hash(value: str) -> str:
 
 def _digest(value: object) -> str:
     return _hash(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+def _recorded_standalone_physical(
+    failure_code: str,
+    *,
+    outcome: str = "unresolved",
+) -> RecordedModelResultAudit:
+    model_call_id = "model-call:recorded-physical"
+    return RecordedModelResultAudit(
+        model_call_id=model_call_id,
+        model_result_ref=(
+            "model-result:"
+            + _digest({"model_call_id": model_call_id, "response_hash": None})
+        ),
+        attempt_id="attempt:recorded-physical",
+        route={
+            "tier": "flash",
+            "reason_code": "transport.expression_unit_stream.unresolved",
+            "router_version": "physical-provider-audit.1",
+        },
+        attempted_model_id="model:test",
+        attempted_model_version="1",
+        request_hash="a" * 64,
+        status=f"provider_{outcome}",
+        failure_code=failure_code,
+        slot="primary",
+        outcome=outcome,
+        usage_status=outcome,
+        semantic_model_call_ids=("model-call:recorded-head",),
+    )
+
+
+@pytest.mark.parametrize(
+    "failure_code",
+    [
+        "provider_http_500",
+        "RuntimeError:http_500",
+        "sk_live_SECRET_provider_body",
+    ],
+    ids=["http", "exception-detail", "secret"],
+)
+def test_recorded_physical_provider_rejects_unbounded_failure_codes(
+    failure_code: str,
+) -> None:
+    with pytest.raises(ValueError, match="failure code is not content-free"):
+        _recorded_standalone_physical(failure_code)
+
+
+@pytest.mark.parametrize(
+    ("failure_code", "outcome"),
+    [
+        ("timeout", "unresolved"),
+        ("invalid", "unresolved"),
+        ("cancelled", "unresolved"),
+        ("exception", "unresolved"),
+        ("missing_output", "unresolved"),
+        ("stream_author_identity_changed", "unresolved"),
+        ("stream_reselected", "cancelled"),
+        ("stream_reselection_unresolved", "unresolved"),
+        ("stream_superseded_by_newer_input", "cancelled"),
+        ("stream_tail_cancelled", "cancelled"),
+        ("stream_tail_unresolved", "unresolved"),
+        ("stream_tail_unresolved_after_bounded_cancellation", "unresolved"),
+        ("stream_provider_unresolved", "unresolved"),
+        ("stream_provider_unresolved", "cancelled"),
+    ],
+)
+def test_recorded_standalone_physical_accepts_bounded_v55_failure_code(
+    failure_code: str,
+    outcome: str,
+) -> None:
+    recorded = _recorded_standalone_physical(failure_code, outcome=outcome)
+
+    assert recorded.failure_code == failure_code
+
+
+@pytest.mark.parametrize(
+    "failure_code",
+    [
+        "source_review_timeout",
+        "source_review_exception",
+        "authored_subcall_timeout",
+        "authored_subcall_exception",
+        "role_faculty_unavailable",
+        "required_tool_choice_unsupported",
+        "recall_choice_reselection_invalid",
+        "authored_expression_reselection_invalid",
+        "proactive_claim_binding_invalid",
+        "affect_target_reselection_invalid",
+        "inventory_invalid",
+        "coverage_invalid",
+    ],
+)
+def test_recorded_standalone_physical_accepts_fixed_validation_failure_code(
+    failure_code: str,
+) -> None:
+    recorded = _recorded_standalone_physical(failure_code)
+
+    assert recorded.failure_code == failure_code
+
+
+@pytest.mark.parametrize(
+    ("failure_code", "outcome"),
+    [
+        ("cancelled", "cancelled"),
+        ("missing_output", "cancelled"),
+        ("stream_reselected", "unresolved"),
+        ("stream_superseded_by_newer_input", "unresolved"),
+    ],
+)
+def test_recorded_physical_rejects_v55_token_with_wrong_outcome(
+    failure_code: str,
+    outcome: str,
+) -> None:
+    with pytest.raises(ValueError, match="failure code is not content-free"):
+        _recorded_standalone_physical(failure_code, outcome=outcome)
+
+
+def test_recorded_physical_rejects_post_v55_validation_failure_code() -> None:
+    with pytest.raises(ValueError, match="failure code is not content-free"):
+        _recorded_standalone_physical("appraisal_result_missing")
+
+
+def test_recorded_embedded_physical_rejects_legacy_standalone_token() -> None:
+    with pytest.raises(ValueError, match="failure code is not content-free"):
+        RecordedPhysicalProviderInvocationAudit(
+            model_call_id="model-call:embedded-legacy-physical",
+            request_hash="c" * 64,
+            model_id="model:test",
+            model_version="1",
+            outcome="unresolved",
+            failure_code="cancelled",
+            usage_status="unresolved",
+            semantic_model_call_ids=("model-call:embedded-legacy-head",),
+        )
+
+
+@pytest.mark.parametrize(
+    "failure_code",
+    ["cancelled", "missing_output", "source_review_timeout", "stream_author_identity_changed"],
+)
+def test_physical_provider_writer_normalizes_bounded_legacy_failure_code(
+    failure_code: str,
+) -> None:
+    physical = PhysicalProviderInvocationAudit(
+        model_call_id="model-call:legacy-writer-physical",
+        request_hash="b" * 64,
+        model_id="model:test",
+        model_version="1",
+        outcome="unresolved",
+        failure_code=failure_code,
+        usage_status="unresolved",
+        semantic_model_call_ids=("model-call:legacy-writer-head",),
+    )
+
+    recorded = recorded_physical_provider_audit(physical)
+
+    assert recorded.failure_code == "stream_provider_unresolved"
 
 
 def _attempt_identity_material(audit: ModelResultAudit) -> dict[str, object]:
