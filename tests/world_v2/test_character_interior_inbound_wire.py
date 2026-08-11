@@ -9074,6 +9074,139 @@ async def test_v5_coverage_can_cite_current_relationship_authority_and_reclassif
 
 
 @pytest.mark.asyncio
+async def test_v5_interaction_act_authority_preserves_typed_frame_and_rejects_unset_outcome() -> (
+    None
+):
+    """One generic typed act can support its frame without fabricating its outcome."""
+
+    proposed_span = "你说要把那本旧书寄给我"
+    received_span = "我已经收到那本旧书了"
+    text = f"{proposed_span}，{received_span}。"
+    interaction_ref = "interior:interaction-act:book-transfer"
+    interaction_value = {
+        "frame": {
+            "subject_ref": "user:primary",
+            "counterparty_refs": ["agent:companion"],
+            "act_kind": "提出把书寄给对方",
+            "object": {
+                "object_ref": "interaction-object:sha256:" + "a" * 64,
+                "object_label": "那本旧书",
+                "epistemic_scope": "report_only",
+            },
+        },
+        "participant_statuses": [
+            {
+                "actor_ref": "user:primary",
+                "status_code": "已提出",
+                "source_ref": {
+                    "authority_kind": "observed_message",
+                    "source_event_ref": "event:observation:book-transfer",
+                    "source_actor_ref": "user:primary",
+                },
+                "source_text_span": "我把那本旧书寄给你",
+                "updated_at": "2026-08-11T12:00:00+00:00",
+            }
+        ],
+        "external_outcome": "not_established",
+    }
+    request = _qq_request_with_recent_dialogue(
+        trigger_text="那本书的事你还记得吗？",
+        records=[
+            {
+                "dialogue_ref": f"dialogue:observation:unrelated:{index}",
+                "speaker": "counterpart" if index % 2 else "companion",
+                "text": f"第 {index} 条无关消息",
+                "occurred_at": f"2026-08-11T11:0{index}:00+00:00",
+                "sequence": index,
+            }
+            for index in range(1, 5)
+        ],
+    )
+    context = json.loads(request.model_content_json)
+    context["slices"]["interaction_acts"] = {
+        "availability": "available",
+        "items": [
+            {
+                "item_ref": interaction_ref,
+                "privacy_class": "private",
+                "value": interaction_value,
+            }
+        ],
+    }
+    request = request.model_copy(
+        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
+    )
+
+    class _InteractionActAwareAuthority(_StrictCoverageSequenceJsonModel):
+        async def complete_json(  # type: ignore[override]
+            self,
+            messages: list[dict[str, str]],
+            *,
+            temperature: float = 0.8,
+        ) -> str:
+            self.calls.append((messages, temperature))
+            packet = json.loads(messages[-1]["content"])
+            source_refs = [item["source_ref"] for item in packet["source_ref_table"]]
+            act_entry = next(
+                entry
+                for entry in packet["source_evidence"]["entries"]
+                if entry.get("kind") == "pinned_context_item"
+                and entry.get("lane") == "interaction_acts"
+            )
+            assert act_entry["authority"] == ("typed_interaction_act_projection_exact_value_only")
+            assert act_entry["source_refs"] == [interaction_ref]
+            assert act_entry["item"]["value"] == interaction_value
+            return _coverage_wire_v5(
+                [
+                    _indexed_coverage_finding(
+                        0,
+                        decision="closed",
+                        relation="pinned_context_authority_coverage",
+                        source_ref_indexes=[source_refs.index(interaction_ref)],
+                    ),
+                    _indexed_coverage_finding(
+                        1,
+                        decision="unclosed",
+                        relation="unclosed",
+                    ),
+                ]
+            )
+
+    authority = _InteractionActAwareAuthority([])
+    result = await review_candidate_external_proposition_coverage(
+        inventory_model=_SequenceJsonModel(
+            [
+                _inventory_v5(
+                    [
+                        {
+                            "locator": _coverage_locator(proposed_span),
+                            "semantic_role": "standalone_external_proposition",
+                        },
+                        {
+                            "locator": _coverage_locator(
+                                received_span,
+                                char_start=text.index(received_span),
+                            ),
+                            "semantic_role": "standalone_external_proposition",
+                        },
+                    ]
+                )
+            ]
+        ),
+        authority_reviewer=authority,
+        request=request,
+        raw=_candidate_coverage_raw(text),
+        identity_frame=None,
+    )
+
+    assert result.review is not None
+    assert result.review.decision == "unsupported"
+    assert [finding.visible_span for finding in result.review.visible_findings] == [received_span]
+    assert result.visible_authority_exhaustive is True
+    assert len(authority.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_coverage_v2_binds_frozen_locator_by_index_without_echo() -> None:
     text = "她去了书店。"
     inventory = _SequenceJsonModel(

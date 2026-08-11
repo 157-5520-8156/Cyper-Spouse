@@ -164,6 +164,21 @@ _WORLD_CLAIM_REPAIR_TIMEOUT_SECONDS = 8.0
 _MAX_RECOVERY_CONTEXTS = 64
 _OPTIONAL_INVENTORY_CANCEL_GRACE_SECONDS = 0.1
 
+# Candidate-wide review may use exact values from these already-typed Context
+# projections.  This is a lane-level authority registry, not an utterance,
+# act-kind, object, or status classifier: the independent semantic reviewer
+# still decides what (if anything) each exact projection entails.
+_VISIBLE_PINNED_CONTEXT_AUTHORITIES: tuple[tuple[str, str], ...] = (
+    (
+        "relationship_slice",
+        "current_relationship_projection_exact_value_only",
+    ),
+    (
+        "interaction_acts",
+        "typed_interaction_act_projection_exact_value_only",
+    ),
+)
+
 
 @dataclass(slots=True)
 class _CapturedAuthoredCandidate:
@@ -2279,10 +2294,10 @@ def _source_closure_evidence(
     turn-local private state has no effect authority and is intentionally
     absent from this hard-review packet. Acceptance still uses the full
     immutable Capsule. Candidate-wide Coverage may additionally receive the
-    exact stable-identity and current-relationship authorities already pinned
-    into the visible turn. That lets the semantic authority close natural
-    visible facts without turning absence of a ``world_claim`` into absence of
-    evidence; the claim-only reviewer keeps the narrower default.
+    exact stable-identity and registered typed-projection authorities already
+    pinned into the visible turn. That lets the semantic authority close
+    natural visible facts without turning absence of a ``world_claim`` into
+    absence of evidence; the claim-only reviewer keeps the narrower default.
     """
 
     try:
@@ -2514,15 +2529,17 @@ def _source_closure_evidence(
                 )
                 represented_refs.add(source_ref)
         if isinstance(slices, dict):
-            relationship_slice = slices.get("relationship_slice")
-            relationship_items = (
-                relationship_slice.get("items")
-                if isinstance(relationship_slice, dict)
-                and relationship_slice.get("availability") == "available"
-                else None
-            )
-            if isinstance(relationship_items, list):
-                for item in relationship_items:
+            for lane, authority in _VISIBLE_PINNED_CONTEXT_AUTHORITIES:
+                raw_slice = slices.get(lane)
+                raw_items = (
+                    raw_slice.get("items")
+                    if isinstance(raw_slice, dict)
+                    and raw_slice.get("availability") == "available"
+                    else None
+                )
+                if not isinstance(raw_items, list):
+                    continue
+                for item in raw_items:
                     if not isinstance(item, dict):
                         continue
                     refs = _context_item_source_refs(item)
@@ -2531,8 +2548,8 @@ def _source_closure_evidence(
                     entries.append(
                         {
                             "kind": "pinned_context_item",
-                            "lane": "relationship_slice",
-                            "authority": ("current_relationship_projection_exact_value_only"),
+                            "lane": lane,
+                            "authority": authority,
                             "source_refs": sorted(refs),
                             "item": item,
                         }
@@ -6267,7 +6284,10 @@ async def review_candidate_external_proposition_coverage(
             entry.get("kind") == "identity_source"
             or (
                 entry.get("kind") == "pinned_context_item"
-                and entry.get("lane") == "relationship_slice"
+                and any(
+                    entry.get("lane") == lane and entry.get("authority") == authority
+                    for lane, authority in _VISIBLE_PINNED_CONTEXT_AUTHORITIES
+                )
             )
         )
         for source_ref in entry.get("source_refs", ())
