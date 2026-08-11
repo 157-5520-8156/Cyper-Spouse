@@ -69,8 +69,13 @@ from .fact_draft_adapter import FactObservationProposalAdapter
 from .fact_memory_candidate_lifecycle import FactMemoryCandidateLifecycle
 from .fact_v2_acceptance_runtime import FactV2AcceptanceRuntime
 from .interaction_fact_trigger_runtime import FactTriggerRunResult, InteractionFactTriggerRuntime
+from .interaction_act_worker import InteractionActWorker, InteractionActWorkResult
 from .character_interior import CharacterInterior
 from .character_interior.inbound_relationship import InboundRelationshipSignalWorker
+from .relationship_commitment_worker import (
+    RelationshipCommitmentWorker,
+    RelationshipCommitmentWorkResult,
+)
 from .batch_invariants import interaction_appraisal_trigger_identity
 from .appraisal_acceptance_runtime import (
     AppraisalAcceptanceError,
@@ -217,6 +222,8 @@ class WorldRuntime:
         appraisal_worker: AppraisalProposalWorker | None = None,
         immediate_emotion_worker: ImmediateEmotionProposalWorker | None = None,
         inbound_relationship_worker: InboundRelationshipSignalWorker | None = None,
+        relationship_commitment_worker: RelationshipCommitmentWorker | None = None,
+        interaction_act_worker: InteractionActWorker | None = None,
         outcome_deliberation_turn: OutcomeDeliberationTurn | None = None,
         outcome_worker: OutcomeProposalWorker | None = None,
         outcome_deliberation_owner: str | None = None,
@@ -308,6 +315,20 @@ class WorldRuntime:
         ):
             raise ValueError("inbound relationship worker must own this exact ledger")
         self._inbound_relationship_worker = inbound_relationship_worker
+        if (
+            relationship_commitment_worker is not None
+            and relationship_commitment_worker.ledger is not self._ledger
+        ):
+            raise ValueError(
+                "relationship commitment worker must own this exact ledger"
+            )
+        self._relationship_commitment_worker = relationship_commitment_worker
+        if (
+            interaction_act_worker is not None
+            and interaction_act_worker.ledger is not self._ledger
+        ):
+            raise ValueError("interaction act worker must own this exact ledger")
+        self._interaction_act_worker = interaction_act_worker
         if outcome_deliberation_owner is not None and not outcome_deliberation_owner:
             raise ValueError("outcome deliberation owner must not be empty")
         if outcome_worker is not None and outcome_worker.ledger is not self._ledger:
@@ -543,6 +564,8 @@ class WorldRuntime:
         self,
     ) -> (
         OutcomeTriggerRunResult
+        | RelationshipCommitmentWorkResult
+        | InteractionActWorkResult
         | FactTriggerRunResult
         | PerceptionTriggerRunResult
         | SocialActionRunResult
@@ -591,6 +614,14 @@ class WorldRuntime:
                 proactive = await self._character_interior._drain_proactive_once()  # noqa: SLF001
                 if proactive is not None:
                     return proactive
+            if self._relationship_commitment_worker is not None:
+                commitment = await self._relationship_commitment_worker.drain_one()
+                if commitment is not None:
+                    return commitment
+            if self._interaction_act_worker is not None:
+                interaction_act = await self._interaction_act_worker.drain_one()
+                if interaction_act is not None:
+                    return interaction_act
             if self._outcome_deliberation_turn is not None:
                 assert self._outcome_worker is not None
                 assert self._outcome_deliberation_owner is not None

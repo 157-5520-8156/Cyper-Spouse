@@ -97,6 +97,11 @@ CHANGE_TRANSITION_REGISTRY: dict[str, frozenset[str]] = {
     # accepted appraisal, derive identities, and decide whether it becomes a
     # typed relationship proposal.
     "relationship_signal": frozenset({"suggest"}),
+    # These are explicit CharacterInterior semantic choices, not text
+    # classifiers.  Specialized authorities still own compilation, CAS and
+    # accepted state below this inert proposal envelope.
+    "relationship_commitment": frozenset({"commit"}),
+    "interaction_act": frozenset({"declare", "revise"}),
     "relationship_adjustment": frozenset({"adjust", "compensate"}),
     "boundary_transition": frozenset({"open", "revise", "close"}),
     "thread_transition": frozenset({"open", "update", "resolve", "cancel", "expire"}),
@@ -310,6 +315,28 @@ PAYLOAD_CONTRACTS: dict[str, _PayloadContract] = {
             "persistence": str,
             "rationale_code": str,
             "suggested_deltas": dict,
+        }
+    ),
+    "relationship_commitment": _PayloadContract(
+        {
+            "subject_ref": str,
+            "target_stage": str,
+            "commitment_code": str,
+            "persistence": str,
+            "visible_text_span": str,
+        }
+    ),
+    "interaction_act": _PayloadContract(
+        {
+            "interaction_act_ref": (str, type(None)),
+            "act_kind": str,
+            "subject_ref": str,
+            "counterparty_refs": list,
+            "object_ref": (str, type(None)),
+            "object_label": (str, type(None)),
+            "source_scope": str,
+            "source_text_span": str,
+            "status_code": str,
         }
     ),
     "relationship_adjustment": _PayloadContract(
@@ -1266,6 +1293,45 @@ class GrantRequestPayload(FrozenModel):
     expiry: datetime | None
 
 
+class RelationshipCommitmentPayload(FrozenModel):
+    """One explicit role-authored relationship stage commitment candidate."""
+
+    subject_ref: BoundedRef
+    target_stage: Literal["acquaintance", "friend", "close_friend"]
+    commitment_code: BoundedLabel
+    persistence: Literal["durable"]
+    visible_text_span: str = Field(min_length=1, max_length=512)
+
+
+class InteractionActPayload(FrozenModel):
+    """Generic cross-turn act semantics; execution outcome is not represented here."""
+
+    interaction_act_ref: BoundedRef | None = None
+    act_kind: BoundedLabel
+    subject_ref: BoundedRef
+    counterparty_refs: list[BoundedRef] = Field(min_length=1, max_length=8)
+    object_ref: BoundedRef | None = None
+    object_label: str | None = Field(default=None, min_length=1, max_length=512)
+    source_scope: Literal["current_message", "delivered_expression"]
+    source_text_span: str = Field(min_length=1, max_length=1_024)
+    # Role-authored and deliberately opaque to the host.  The act projection
+    # attributes this status to its source actor instead of treating it as a
+    # global offer/accept lifecycle.
+    status_code: BoundedLabel
+
+    @model_validator(mode="after")
+    def participants_and_object_are_closed(self) -> "InteractionActPayload":
+        if self.subject_ref in self.counterparty_refs:
+            raise ValueError("interaction act subject cannot also be a counterparty")
+        if len(self.counterparty_refs) != len(set(self.counterparty_refs)):
+            raise ValueError("interaction act counterparties must be unique")
+        # Transition-specific closure is checked together with TypedChange in
+        # inspect_unified_inbound_decision.  Here both one-sided shapes are
+        # intentional: an opening authors a label before the host derives its
+        # ref; later turns select that ref without reauthoring the label.
+        return self
+
+
 PAYLOAD_MODEL_REGISTRY: dict[str, type[FrozenModel]] = {
     "fact_transition": FactPayload,
     "experience_transition": ExperiencePayload,
@@ -1285,6 +1351,8 @@ PAYLOAD_MODEL_REGISTRY: dict[str, type[FrozenModel]] = {
     "private_impression_transition": PrivateImpressionPayload,
     "aspiration_transition": AspirationTransitionPayload,
     "relationship_signal": RelationshipSignalPayload,
+    "relationship_commitment": RelationshipCommitmentPayload,
+    "interaction_act": InteractionActPayload,
     "relationship_adjustment": RelationshipAdjustmentPayload,
     "boundary_transition": BoundaryPayload,
     "thread_transition": ThreadPayload,

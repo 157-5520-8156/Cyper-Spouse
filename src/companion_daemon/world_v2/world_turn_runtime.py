@@ -17,10 +17,12 @@ from .action_pump import (
 )
 from .bounded_decision_vertical import AnchoredRunResult
 from .interaction_fact_trigger_runtime import FactTriggerRunResult
+from .interaction_act_worker import InteractionActWorkResult
 from .character_interior.run_result import CharacterInteriorRunResult
 from .outcome_trigger_runtime import OutcomeTriggerRunResult
 from .expression_reconsideration_runtime import ExpressionReconsiderationRunResult
 from .social_action_worker import SocialActionRunResult
+from .relationship_commitment_worker import RelationshipCommitmentWorkResult
 from .schemas import (
     ClockObservation,
     ExternalObservation,
@@ -219,6 +221,8 @@ class WorldTurnRuntime:
     ) -> (
         CharacterInteriorRunResult
         | OutcomeTriggerRunResult
+        | RelationshipCommitmentWorkResult
+        | InteractionActWorkResult
         | FactTriggerRunResult
         | ExpressionReconsiderationRunResult
         | AnchoredRunResult

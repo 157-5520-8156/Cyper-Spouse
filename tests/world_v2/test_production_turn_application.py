@@ -26,6 +26,9 @@ from companion_daemon.world_v2.appearance_state import (
 from companion_daemon.world_v2.character_interior.inbound_wire import (
     _ExpressionDraftWire,
 )
+from companion_daemon.world_v2.character_interior.inbound_author import (
+    _InboundCharacterAuthor,
+)
 from companion_daemon.world_v2.deliberation import (
     ModelInput,
     ModelOutput,
@@ -409,6 +412,104 @@ class _TimingDraftChatModel:
         return json.dumps(value, ensure_ascii=False)
 
 
+class _RelationshipCommitmentInboundModel:
+    model = "test-relationship-commitment-inbound"
+
+    async def complete(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        del temperature
+        observation_ref = _fixture_observation_ref(messages)
+        return json.dumps(
+            {
+                "appraisal_draft": {
+                    "appraise": False,
+                    "affect": "no_change",
+                    "relationship_commitment": {
+                        "target_stage": "friend",
+                        "commitment_code": "mutual_friendship",
+                        "persistence": "durable",
+                        "visible_text_span": "你是我朋友了",
+                    },
+                    "behavior_tendency": "明确回应",
+                    "stance": "接纳",
+                    "display_strategy": "直接表达",
+                    "brief_rationale": "她选择把自己的关系承诺明确说出来。",
+                    "confidence": 8200,
+                },
+                "expression_draft": {
+                    "private_turn_state": {
+                        "contract": "private-turn-state.1",
+                        "inner_state_summary": "我愿意明确把这段关系认作朋友。",
+                        "attended_source_refs": [observation_ref],
+                    },
+                    "timing_choice": "now",
+                    "beats": [
+                        {
+                            "modality": "text",
+                            "text": "好呀，那说好了，你是我朋友了。",
+                        }
+                    ],
+                    "stance": "接纳",
+                    "brief_rationale": "她选择把自己的关系承诺明确说出来。",
+                    "confidence": 8200,
+                    "world_claims": [],
+                },
+            },
+            ensure_ascii=False,
+        )
+
+
+class _DeliveredInteractionActInboundModel:
+    model = "test-delivered-interaction-act-inbound"
+
+    async def complete(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        del temperature
+        observation_ref = _fixture_observation_ref(messages)
+        return json.dumps(
+            {
+                "appraisal_draft": {
+                    "appraise": False,
+                    "affect": "no_change",
+                    "interaction_act": {
+                        "operation": "declare",
+                        "status_code": "等待后续交接",
+                        "source_scope": "delivered_expression",
+                        "source_text_span": "下次见面我把这本书给你",
+                        "interaction_act_ref": None,
+                        "act_kind": "约定后续交接",
+                        "subject_role": "self",
+                        "counterparty_roles": ["current_counterpart"],
+                        "object_ref": None,
+                        "object_label": "这本书",
+                    },
+                    "behavior_tendency": "明确提出后续安排",
+                    "stance": "认真",
+                    "display_strategy": "自然说明",
+                    "brief_rationale": "她选择提出一个跨轮保留的后续交接动作。",
+                    "confidence": 8200,
+                },
+                "expression_draft": {
+                    "private_turn_state": {
+                        "contract": "private-turn-state.1",
+                        "inner_state_summary": "我愿意明确提出下一次见面的安排。",
+                        "attended_source_refs": [observation_ref],
+                    },
+                    "timing_choice": "now",
+                    "beats": [
+                        {
+                            "modality": "text",
+                            "text": "好呀，下次见面我把这本书给你。",
+                        }
+                    ],
+                    "stance": "认真",
+                    "brief_rationale": "她选择提出一个跨轮保留的后续交接动作。",
+                    "confidence": 8200,
+                    "world_claims": [],
+                },
+            },
+            ensure_ascii=False,
+        )
+
+
 class _SequenceTimingDraftChatModel:
     model = "test-flash-timing-sequence"
 
@@ -657,6 +758,151 @@ def test_runtime_has_no_legacy_two_author_episode_execution_branch() -> None:
     assert "_resolve_expression_episode_before_dispatch" not in source
     assert 'expression_episode_mode == "on"' not in source
     assert 'mode == "on"' not in source
+
+
+def test_production_composes_delivered_relationship_commitment_recovery(
+    tmp_path: Path,
+) -> None:
+    app = _build_application(
+        path=tmp_path / "relationship-commitment-recovery.sqlite",
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        inbound_author=_ExpressionDraftWire(model=_TimingDraftChatModel("now")),
+        transport=_DeliveredTransport(received_at=NOW),
+        now=NOW,
+    )
+    try:
+        worker = app._turns._runtime._relationship_commitment_worker  # noqa: SLF001
+        assert worker is not None
+        assert worker.ledger is app._ledger  # noqa: SLF001
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
+async def test_delivered_role_commitment_advances_relationship_in_background(
+    tmp_path: Path,
+) -> None:
+    app = _build_application(
+        path=tmp_path / "delivered-relationship-commitment.sqlite",
+        config=replace(
+            _config(),
+            reply_target="conversation:test:c2c:user.1",
+            counterpart_actor_ref="user:user.1",
+        ),
+        identities=_ConversationTargetIdentities(),
+        router=_Router(),
+        inbound_author=_InboundCharacterAuthor(
+            flash_model=_RelationshipCommitmentInboundModel()
+        ),
+        transport=_DeliveredTransport(received_at=NOW),
+        now=NOW,
+    )
+    try:
+        response = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="relationship-commitment",
+                text="我们可以成为好朋友吗？",
+                observed_at=NOW,
+                trace_id="trace:relationship-commitment",
+            )
+        )
+        assert response.status == "action_authorized"
+        assert app._ledger.project().relationship_commitments == ()  # noqa: SLF001
+        await app.drain_background_once()
+        assert app._ledger.project().relationship_commitments == ()  # noqa: SLF001
+
+        delivery = await app.drain_actions_once()
+        assert delivery is not None and delivery.status == "settled"
+        assert app._ledger.project().relationship_commitments == ()  # noqa: SLF001
+
+        recovery = await app.drain_background_once()
+        assert recovery is not None and recovery.status == "accepted"
+        projection = app._ledger.project()  # noqa: SLF001
+        assert len(projection.relationship_commitments) == 1
+        assert projection.relationship_commitments[0].visible_text_span == (
+            "你是我朋友了"
+        )
+        assert projection.relationship_states[0].subject_ref == "user:user.1"
+        assert projection.relationship_states[0].stage == "friend"
+        assert projection.relationship_states[0].commitment_refs == (
+            projection.relationship_commitments[0].commitment_id,
+        )
+        await app.drain_background_once()
+        replayed = app._ledger.project()  # noqa: SLF001
+        assert replayed.relationship_commitments == projection.relationship_commitments
+        assert replayed.relationship_states == projection.relationship_states
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
+async def test_delivered_expression_interaction_act_waits_for_receipt_then_settles(
+    tmp_path: Path,
+) -> None:
+    app = _build_application(
+        path=tmp_path / "delivered-interaction-act.sqlite",
+        config=replace(
+            _config(),
+            reply_target="conversation:test:c2c:user.1",
+            counterpart_actor_ref="user:user.1",
+        ),
+        identities=_ConversationTargetIdentities(),
+        router=_Router(),
+        inbound_author=_InboundCharacterAuthor(
+            flash_model=_DeliveredInteractionActInboundModel()
+        ),
+        transport=_DeliveredTransport(received_at=NOW),
+        now=NOW,
+    )
+    try:
+        response = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="interaction-act-delivered",
+                text="你下次愿意把那本书带来吗？",
+                observed_at=NOW,
+                trace_id="trace:interaction-act-delivered",
+            )
+        )
+        assert response.status == "action_authorized"
+        assert app._ledger.project().interaction_acts == ()  # noqa: SLF001
+
+        await app.drain_background_once()
+        assert app._ledger.project().interaction_acts == ()  # noqa: SLF001
+
+        delivery = await app.drain_actions_once()
+        assert delivery is not None and delivery.status == "settled"
+        assert app._ledger.project().interaction_acts == ()  # noqa: SLF001
+
+        settlement = await app.drain_background_once()
+        assert settlement is not None and settlement.status == "accepted"
+        projection = app._ledger.project()  # noqa: SLF001
+        assert len(projection.interaction_acts) == 1
+        act = projection.interaction_acts[0]
+        assert act.subject_ref == "agent:companion"
+        assert act.counterparty_refs == ("user:user.1",)
+        assert act.act_kind == "约定后续交接"
+        assert act.object_descriptor is not None
+        assert act.object_descriptor.object_label == "这本书"
+        assert tuple(
+            (item.actor_ref, item.status_code)
+            for item in act.participant_statuses
+        ) == (("agent:companion", "等待后续交接"),)
+        assert act.external_outcome == "not_established"
+
+        await app.drain_background_once()
+        replayed = app._ledger.project()  # noqa: SLF001
+        assert replayed.interaction_acts == projection.interaction_acts
+        assert replayed.interaction_act_transitions == (
+            projection.interaction_act_transitions
+        )
+    finally:
+        app.close()
 
 
 def test_retired_independent_character_lanes_are_not_production_builder_surfaces() -> None:

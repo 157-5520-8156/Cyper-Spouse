@@ -653,6 +653,191 @@ async def test_metered_correction_emits_the_exact_durable_request_identity() -> 
     assert captured_headers["x-girl-agent-request-identity"] == result.winning_request_hash
 
 
+@pytest.mark.parametrize(
+    "select_role_changes",
+    [False, True],
+    ids=["required-null-is-semantically-omitted", "both-selected-in-one-tool-call"],
+)
+@pytest.mark.asyncio
+async def test_deepseek_strict_forced_tool_transports_generic_role_changes(
+    select_role_changes: bool,
+) -> None:
+    contract = InboundToolContracts().contract_for(
+        phase="final",
+        capabilities=qq_expression_capabilities("napcat", media_request_available=True),
+        recall_allowed=False,
+        schema_dialect="deepseek-strict",
+    )
+    commitment = {
+        "target_stage": "friend",
+        "commitment_code": "mutual_friendship",
+        "persistence": "durable",
+        "visible_text_span": "那我们就是朋友了。",
+    }
+    interaction_act = {
+        "operation": "declare",
+        "status_code": "等我下次带上",
+        "source_scope": "delivered_expression",
+        "source_text_span": "那本书还在我这里，下次带给你。",
+        "interaction_act_ref": None,
+        "act_kind": "物品后续携带",
+        "subject_role": "self",
+        "counterparty_roles": ["current_counterpart"],
+        "object_ref": None,
+        "object_label": "那本书",
+    }
+    appraisal = _appraisal() | {
+        "components": [
+            {
+                "component_id": None,
+                "dimension": "warmth",
+                "target_intensity_bp": 4200,
+            }
+        ],
+        "episode_id": None,
+        "resolution_summary": None,
+        "relationship_commitment": commitment if select_role_changes else None,
+        "interaction_act": interaction_act if select_role_changes else None,
+    }
+    arguments = {
+        "result_kind": "decision",
+        "appraisal_draft": appraisal,
+        "expression_draft": {
+            "private_turn_state": None,
+            "timing_choice": "now",
+            "turn_posture": None,
+            "cadence": "conversational",
+            "beats": [
+                {
+                    "modality": "text",
+                    "text": "那我们就是朋友了。那本书还在我这里，下次带给你。",
+                    "reaction_id": None,
+                    "sticker_id": None,
+                }
+            ],
+            "delay_seconds": None,
+            "expires_after_seconds": None,
+            "stance": "坦诚",
+            "brief_rationale": "我想清楚地说出来。",
+            "impulse_summary": None,
+            "confidence": 7300,
+            "variation_profile": None,
+            "response_expectation": None,
+            "response_expectation_assessment": None,
+            "world_claims": [],
+            "media_request": "none",
+            "media_source_refs": [],
+        },
+    }
+    arguments_json = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+    captured: dict[str, object] = {}
+    captured_headers: dict[str, str] = {}
+    captured_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        captured.update(payload)
+        captured_headers.update(request.headers)
+        captured_paths.append(request.url.path)
+        assert payload["tools"] == list(contract.provider_tools)
+        assert payload["tool_choice"] == contract.provider_tool_choice
+        function = payload["tools"][0]["function"]
+        Draft202012Validator(function["parameters"]).validate(arguments)
+        appraisal_schema = function["parameters"]["properties"]["appraisal_draft"]
+        assert {"relationship_commitment", "interaction_act"} <= set(appraisal_schema["required"])
+        expression_schema = function["parameters"]["properties"]["expression_draft"]
+        for field_name in ("world_claims", "media_source_refs"):
+            assert expression_schema["properties"][field_name]["type"] == "array"
+            assert "anyOf" not in expression_schema["properties"][field_name]
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": contract.identity.tool_name,
+                                        "arguments": arguments_json,
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
+        )
+
+    model = DeepSeekChatModel(
+        "key",
+        "http://127.0.0.1:32124",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    object.__setattr__(model, "_test_only_capture_exact_request_identity", True)
+    parent_call_id = f"call:strict-role-changes:{select_role_changes}"
+    messages = [{"role": "user", "content": "choose"}]
+    try:
+        result = await complete_bounded_validation_reselection(
+            model=model,
+            messages=messages,
+            raw="{}",
+            instruction="choose again",
+            temperature=0.8,
+            timeout_seconds=1.0,
+            parent_call_id=parent_call_id,
+            tools=list(contract.provider_tools),
+            tool_choice=contract.provider_tool_choice,
+            tool_contract_identity=contract.identity.request_identity_material(),
+            unwrap_tool_result=contract.unwrap,
+        )
+    finally:
+        await model.aclose()
+
+    expected_identity = _provider_invocation_identity(
+        parent_call_id=parent_call_id,
+        purpose="validation_reselection",
+        messages=[
+            *messages,
+            {"role": "assistant", "content": "{}"},
+            {"role": "user", "content": "choose again"},
+        ],
+        temperature=0.8,
+        tools=list(contract.provider_tools),
+        tool_choice=contract.provider_tool_choice,
+        tool_contract_identity=contract.identity.request_identity_material(),
+    )
+    assert captured_paths == ["/beta/chat/completions"]
+    assert "response_format" not in captured
+    assert (
+        captured_headers["x-girl-agent-request-identity"]
+        == result.winning_request_hash
+        == expected_identity.request_hash
+    )
+    selected_appraisal = json.loads(result.raw)["appraisal_draft"]
+    appraisal_wire = AppraisalDraftWire.model_validate_json(
+        json.dumps(selected_appraisal, ensure_ascii=False), strict=True
+    )
+    if not select_role_changes:
+        semantic_appraisal = appraisal_wire.model_dump(mode="json", exclude_none=True)
+        assert "relationship_commitment" not in semantic_appraisal
+        assert "interaction_act" not in semantic_appraisal
+    else:
+        assert appraisal_wire.relationship_commitment is not None
+        assert appraisal_wire.relationship_commitment.model_dump(mode="json") == commitment
+        assert appraisal_wire.interaction_act is not None
+        assert appraisal_wire.interaction_act.operation == "declare"
+        assert appraisal_wire.interaction_act.status_code == "等我下次带上"
+
+
 def test_later_branch_carries_the_stricter_capability_beat_limit() -> None:
     capabilities = QQ_NAPCAT_EXPRESSION_CAPABILITIES.model_copy(
         update={"max_beats": 6, "max_later_beats": 2}

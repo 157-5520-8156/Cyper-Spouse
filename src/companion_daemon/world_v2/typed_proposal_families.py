@@ -381,6 +381,13 @@ class _RelationshipFamilyCodec:
     ) -> IdentityComponents:
         if event_type == "RelationshipSignalAccepted":
             return world_id, _nested(payload, "signal", "semantic_fingerprint")
+        if event_type == "RelationshipCommitmentAccepted":
+            return (
+                world_id,
+                _nested(payload, "commitment", "commitment_id"),
+                payload.get("expected_entity_revision"),
+                payload.get("transition_id"),
+            )
         if event_type == "RelationshipSlowVariableAdjusted":
             return (
                 payload.get("relationship_id"),

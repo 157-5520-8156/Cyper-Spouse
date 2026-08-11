@@ -24,7 +24,7 @@ from .contracts import (
 )
 
 
-SNAPSHOT_COMPILER_VERSION = "inner-life-snapshot-compiler.6"
+SNAPSHOT_COMPILER_VERSION = "inner-life-snapshot-compiler.7"
 
 _AUTHORITY_VALUE_KEYS = frozenset(
     {
@@ -613,6 +613,15 @@ def compile_inner_life_snapshot(
                 "observable_act",
             ),
         ),
+        (
+            "interaction_acts",
+            "interaction_acts",
+            (
+                "frame",
+                "participant_statuses",
+                "external_outcome",
+            ),
+        ),
         ("appraisals", "appraisals", (
             "subject_ref", "source_cluster_ref", "hypotheses", "evidence_refs",
             "confidence_bp", "accepted_at", "expires_at",
@@ -738,6 +747,7 @@ def compile_inner_life_snapshot(
             "npc_observable_attitudes",
             "private_impressions",
             "recent_dialogue",
+            "interaction_acts",
         ),
         "aspirations_conflicts": ("situation", "unresolved"),
         "autonomous_impulses": (
@@ -752,6 +762,7 @@ def compile_inner_life_snapshot(
             "recent_self_experiences",
             "recent_dialogue",
             "relevant_facts",
+            "interaction_acts",
         ),
         "expression_stance": (
             "stable_self",
@@ -764,6 +775,7 @@ def compile_inner_life_snapshot(
             "private_impressions",
             "recent_dialogue",
             "relevant_facts",
+            "interaction_acts",
         ),
     }
     facets: list[_InteriorFacet] = []

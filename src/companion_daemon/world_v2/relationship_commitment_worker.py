@@ -1,0 +1,202 @@
+"""Provider-free recovery of delivered, role-authored relationship commitments.
+
+The durable DecisionProposal is the only commitment author.  This worker waits
+until the same proposal's expression has a terminal delivered receipt, then
+invokes the deterministic compiler and the atomic commitment acceptance
+vertical.  It never calls a model and never classifies message text.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Literal
+
+from .ledger import LedgerPort
+from .proposal_envelope import DecisionProposal, validate_proposal_envelope
+from .relationship_commitment_acceptance_runtime import (
+    RelationshipCommitmentAcceptanceRuntime,
+)
+from .relationship_proposal_compiler import RelationshipProposalCompiler
+from .schema_core import FrozenModel
+from .schemas import CommitResult, ProjectionCursor
+
+
+class RelationshipCommitmentWorkerError(ValueError):
+    """Stable technical or authority failure at background settlement."""
+
+    def __init__(self, code: str) -> None:
+        self.code = f"relationship_commitment_worker.{code}"
+        super().__init__(self.code)
+
+
+class RelationshipCommitmentWorkResult(FrozenModel):
+    status: Literal["accepted"] = "accepted"
+    source_proposal_id: str
+    typed_proposal_id: str
+    compile_commit: CommitResult
+    acceptance_commit: CommitResult
+
+
+class RelationshipCommitmentWorker:
+    """Settle at most one delivered commitment from immutable ledger authority."""
+
+    def __init__(
+        self,
+        *,
+        ledger: LedgerPort,
+        compiler: RelationshipProposalCompiler,
+        acceptance: RelationshipCommitmentAcceptanceRuntime,
+        actor: str,
+        source: str = "world-v2:relationship-commitment-worker",
+    ) -> None:
+        if not actor or not source:
+            raise ValueError("relationship commitment worker needs actor and source")
+        if compiler.ledger is not ledger or acceptance.ledger is not ledger:
+            raise ValueError(
+                "relationship commitment worker dependencies must own the same ledger"
+            )
+        self._ledger = ledger
+        self._compiler = compiler
+        self._acceptance = acceptance
+        self._actor = actor
+        self._source = source
+
+    @property
+    def ledger(self) -> LedgerPort:
+        return self._ledger
+
+    async def drain_one(self) -> RelationshipCommitmentWorkResult | None:
+        """Accept one exact delivered commitment, or remain idle."""
+
+        projection = self._ledger.project()
+        current_cursor = ProjectionCursor(
+            world_revision=projection.world_revision,
+            deliberation_revision=projection.deliberation_revision,
+            ledger_sequence=projection.ledger_sequence,
+        )
+        for audit in projection.proposal_audits:
+            if audit.proposal_kind != "decision":
+                continue
+            try:
+                proposal = validate_proposal_envelope(json.loads(audit.proposal_json))
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise RelationshipCommitmentWorkerError(
+                    "source_proposal_invalid"
+                ) from exc
+            if not isinstance(proposal, DecisionProposal):
+                continue
+            changes = tuple(
+                change
+                for change in proposal.proposed_changes
+                if change.kind == "relationship_commitment"
+            )
+            if not changes:
+                continue
+            if len(changes) != 1 or changes[0].transition != "commit":
+                raise RelationshipCommitmentWorkerError(
+                    "commitment_change_invalid"
+                )
+            located = self._ledger.lookup_event_commit(audit.event_ref)
+            if (
+                located is None
+                or located[0].event_type != "ProposalRecorded"
+                or located[0].payload_hash != audit.event_payload_hash
+            ):
+                raise RelationshipCommitmentWorkerError(
+                    "source_proposal_event_missing"
+                )
+            audit_commit = located[1]
+            audit_cursor = ProjectionCursor(
+                world_revision=audit_commit.world_revision,
+                deliberation_revision=audit_commit.deliberation_revision,
+                ledger_sequence=audit_commit.ledger_sequence,
+            )
+            if (
+                self._compiler.accepted_commitment_descendant(
+                    world_id=self._ledger.world_id,
+                    audit_cursor=audit_cursor,
+                    current_cursor=current_cursor,
+                    proposal_id=proposal.proposal_id,
+                )
+                is not None
+            ):
+                continue
+            if not self._has_terminal_delivered_expression(
+                projection=projection,
+                proposal_id=proposal.proposal_id,
+            ):
+                continue
+            compiled = self._compiler.record_commitment_rebased(
+                world_id=self._ledger.world_id,
+                audit_cursor=audit_cursor,
+                current_cursor=current_cursor,
+                proposal_id=proposal.proposal_id,
+            )
+            if (
+                compiled.status != "candidate_recorded"
+                or compiled.typed_proposal_id is None
+                or compiled.commit is None
+                or compiled.acceptance_cursor is None
+            ):
+                raise RelationshipCommitmentWorkerError(
+                    "compiled_candidate_incomplete"
+                )
+            accepted = self._acceptance.accept_runtime_owned(
+                handle=self._acceptance.pin_proposal(
+                    cursor=compiled.acceptance_cursor,
+                    proposal_id=compiled.typed_proposal_id,
+                ),
+                actor=self._actor,
+                source=self._source,
+            )
+            return RelationshipCommitmentWorkResult(
+                source_proposal_id=proposal.proposal_id,
+                typed_proposal_id=compiled.typed_proposal_id,
+                compile_commit=compiled.commit,
+                acceptance_commit=accepted,
+            )
+        return None
+
+    @staticmethod
+    def _has_terminal_delivered_expression(*, projection, proposal_id: str) -> bool:
+        plans = tuple(
+            item
+            for item in projection.expression_plans
+            if item.proposal_id == proposal_id and item.state == "completed"
+        )
+        for plan in plans:
+            beats = tuple(
+                item
+                for item in projection.expression_beats
+                if item.proposal_id == proposal_id
+                and item.plan_id == plan.plan_id
+                and item.acceptance_id == plan.acceptance_id
+                and item.state == "settled"
+                and item.action_id is not None
+            )
+            for beat in beats:
+                actions = tuple(
+                    item
+                    for item in projection.actions
+                    if item.action_id == beat.action_id
+                    and item.expression_plan_id == plan.plan_id
+                    and item.expression_beat_id == beat.beat_id
+                    and item.state == "delivered"
+                )
+                for action in actions:
+                    if any(
+                        receipt.action_id == action.action_id
+                        and receipt.receipt_kind == "terminal"
+                        and receipt.observed_state == "delivered"
+                        and receipt.is_terminal
+                        for receipt in projection.execution_receipts
+                    ):
+                        return True
+        return False
+
+
+__all__ = [
+    "RelationshipCommitmentWorker",
+    "RelationshipCommitmentWorkerError",
+    "RelationshipCommitmentWorkResult",
+]

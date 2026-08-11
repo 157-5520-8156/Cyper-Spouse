@@ -381,6 +381,7 @@ def test_sqlite_migrates_verified_v39_head_and_cold_replays_same_history(tmp_pat
         "world-v2-reducers.48",
         "world-v2-reducers.50",
         "world-v2-reducers.51",
+        "world-v2-reducers.52",
     ),
 )
 def test_sqlite_migrates_recent_verified_head_without_rewriting_immutable_history(
@@ -542,7 +543,7 @@ def test_sqlite_migrates_recent_verified_head_without_rewriting_immutable_histor
         assert immutable_history_after == immutable_history_before
 
 
-def test_v51_aspiration_head_hash_is_verified_then_cold_replayed_into_v52(
+def test_v51_aspiration_head_hash_is_verified_then_cold_replayed_into_v54(
     tmp_path,
 ) -> None:
     """New default fields cannot rewrite one archived .51 aspiration head."""
@@ -655,13 +656,13 @@ def test_v51_aspiration_head_hash_is_verified_then_cold_replayed_into_v52(
         expected_world_revision=head.world_revision,
         expected_deliberation_revision=head.deliberation_revision,
     )
-    expected_v52 = ledger.project()
+    expected_v54 = ledger.project()
     cursor = ProjectionCursor(
-        world_revision=expected_v52.world_revision,
-        deliberation_revision=expected_v52.deliberation_revision,
-        ledger_sequence=expected_v52.ledger_sequence,
+        world_revision=expected_v54.world_revision,
+        deliberation_revision=expected_v54.deliberation_revision,
+        ledger_sequence=expected_v54.ledger_sequence,
     )
-    state = ledger._state_from_projection(expected_v52)  # noqa: SLF001
+    state = ledger._state_from_projection(expected_v54)  # noqa: SLF001
     state_value = json.loads(ledger._encode_state(state))  # noqa: SLF001
     for item in state_value["aspirations"]:
         for field in (
@@ -721,8 +722,8 @@ def test_v51_aspiration_head_hash_is_verified_then_cold_replayed_into_v52(
 
     migrated = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
     projection = migrated.project()
-    assert projection.reducer_bundle_version == "world-v2-reducers.53"
-    assert projection == expected_v52
+    assert projection.reducer_bundle_version == "world-v2-reducers.54"
+    assert projection == expected_v54
     assert migrated.rebuild() == projection
     migrated.close()
     same_bundle = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")

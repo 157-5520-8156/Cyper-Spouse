@@ -13,7 +13,10 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from ..life_events import WorldOccurrenceSettledPayload
-from ..relationship_events import RelationshipSlowVariableAdjustedPayload
+from ..relationship_events import (
+    RelationshipCommitmentAcceptedPayload,
+    RelationshipSlowVariableAdjustedPayload,
+)
 from ..schemas import LedgerProjection, ProjectionCursor, validate_plan_authority_state
 
 
@@ -110,24 +113,55 @@ async def build_relationship_context_join(
             cursor=cursor,
             event_ref=state.origin.accepted_event_ref,
         )
-        if event.event_type != "RelationshipSlowVariableAdjusted":
+        if event.event_type == "RelationshipSlowVariableAdjusted":
+            payload = RelationshipSlowVariableAdjustedPayload.model_validate_json(
+                event.payload_json
+            )
+            head_matches = (
+                payload.relationship_id == state.relationship_id
+                and payload.subject_ref == state.subject_ref
+                and payload.expected_entity_revision + 1 == state.entity_revision
+                and payload.variables_after == state.variables
+                and payload.stage_after == state.stage
+                and payload.hysteresis_after == state.hysteresis
+                and payload.commitment_refs == state.commitment_refs
+                and payload.policy_version == state.policy_version
+                and payload.policy_digest == state.policy_digest
+                and payload.adjusted_at == state.last_adjusted_at
+                and payload.change_id == state.origin.change_id
+                and payload.transition_id == state.origin.transition_id
+                and payload.policy_refs == state.origin.policy_refs
+            )
+        elif event.event_type == "RelationshipCommitmentAccepted":
+            payload = RelationshipCommitmentAcceptedPayload.model_validate_json(
+                event.payload_json
+            )
+            projected_commitments = tuple(
+                item
+                for item in projection.relationship_commitments
+                if item.commitment_id == payload.commitment.commitment_id
+            )
+            head_matches = (
+                len(projected_commitments) == 1
+                and projected_commitments[0] == payload.commitment
+                and payload.relationship_id == state.relationship_id
+                and payload.subject_ref == state.subject_ref
+                and payload.expected_entity_revision + 1 == state.entity_revision
+                and payload.stage_after == state.stage
+                and payload.hysteresis_after == state.hysteresis
+                and state.commitment_refs
+                == (*payload.commitment_refs_before, payload.commitment.commitment_id)
+                and payload.policy_version == state.policy_version
+                and payload.policy_digest == state.policy_digest
+                and payload.change_id == state.origin.change_id
+                and payload.transition_id == state.origin.transition_id
+                and payload.policy_refs == state.origin.policy_refs
+                and payload.commitment.origin.accepted_event_ref == event.event_id
+                and payload.commitment.committed_at == event.logical_time
+            )
+        else:
             raise ValueError("NPC relationship head has the wrong authority type")
-        payload = RelationshipSlowVariableAdjustedPayload.model_validate_json(event.payload_json)
-        if (
-            payload.relationship_id != state.relationship_id
-            or payload.subject_ref != state.subject_ref
-            or payload.expected_entity_revision + 1 != state.entity_revision
-            or payload.variables_after != state.variables
-            or payload.stage_after != state.stage
-            or payload.hysteresis_after != state.hysteresis
-            or payload.commitment_refs != state.commitment_refs
-            or payload.policy_version != state.policy_version
-            or payload.policy_digest != state.policy_digest
-            or payload.adjusted_at != state.last_adjusted_at
-            or payload.change_id != state.origin.change_id
-            or payload.transition_id != state.origin.transition_id
-            or payload.policy_refs != state.origin.policy_refs
-        ):
+        if not head_matches:
             raise ValueError("NPC relationship head changed accepted meaning")
         item_ref = f"interior:relationship:protagonist:{state.relationship_id}"
         value = {

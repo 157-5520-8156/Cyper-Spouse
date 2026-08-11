@@ -64,6 +64,7 @@ from .reducers import (
     V48_REDUCER_BUNDLE_VERSION,
     V50_REDUCER_BUNDLE_VERSION,
     V51_REDUCER_BUNDLE_VERSION,
+    V52_REDUCER_BUNDLE_VERSION,
     ReducerState,
     RevisionClass,
     _expression_beat_semantic_dump,
@@ -173,6 +174,9 @@ _SEMANTIC_CONDITIONAL_FIELDS = frozenset(
         "external_perceptions",
         "external_perception_acceptance_manifests",
         "life_ecology_schedule",
+        "relationship_commitments",
+        "interaction_acts",
+        "interaction_act_transitions",
     }
 )
 
@@ -3038,6 +3042,7 @@ class SQLiteWorldLedger:
                 V48_REDUCER_BUNDLE_VERSION,
                 V50_REDUCER_BUNDLE_VERSION,
                 V51_REDUCER_BUNDLE_VERSION,
+                V52_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -3063,6 +3068,7 @@ class SQLiteWorldLedger:
                     V48_REDUCER_BUNDLE_VERSION,
                     V50_REDUCER_BUNDLE_VERSION,
                     V51_REDUCER_BUNDLE_VERSION,
+                    V52_REDUCER_BUNDLE_VERSION,
                     PREVIOUS_REDUCER_BUNDLE_VERSION,
                 }:
                     canonical_legacy_state = json.dumps(
@@ -3393,6 +3399,7 @@ class SQLiteWorldLedger:
                 V48_REDUCER_BUNDLE_VERSION,
                 V50_REDUCER_BUNDLE_VERSION,
                 V51_REDUCER_BUNDLE_VERSION,
+                V52_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
             }:
                 state = ReducerState.model_validate_json(
@@ -3872,6 +3879,10 @@ class SQLiteWorldLedger:
             affect_proposals=projection.affect_proposals,
             affect_proposal_ids=projection.affect_proposal_ids,
             relationship_signals=projection.relationship_signals,
+            relationship_commitments=projection.relationship_commitments,
+            interaction_acts=projection.interaction_acts,
+            interaction_act_transitions=projection.interaction_act_transitions,
+            interaction_act_proposals=projection.interaction_act_proposals,
             relationship_adjustments=projection.relationship_adjustments,
             relationship_states=projection.relationship_states,
             boundaries=projection.boundaries,

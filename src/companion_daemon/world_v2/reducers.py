@@ -8,6 +8,7 @@ from functools import partial
 import hashlib
 import json
 from typing import Any
+import unicodedata
 
 from pydantic import ValidationInfo, model_validator
 
@@ -52,6 +53,33 @@ from .relationship_acceptance_manifest import (
     RelationshipAcceptanceManifest,
     canonical_relationship_acceptance_value_hash,
 )
+from .relationship_commitment_acceptance_manifest import (
+    RELATIONSHIP_COMMITMENT_ACCEPTANCE_MANIFEST_VERSION,
+    RelationshipCommitmentAcceptanceManifest,
+    canonical_relationship_commitment_acceptance_value_hash,
+)
+from .interaction_act_acceptance_manifest import (
+    INTERACTION_ACT_ACCEPTANCE_MANIFEST_VERSION,
+    InteractionActAcceptanceManifest,
+)
+from .interaction_act_events import (
+    InteractionActAcceptedPayload,
+    InteractionActProposalRecordedPayload,
+    canonical_interaction_act_change_hash,
+    canonical_interaction_act_accepted_payload_hash,
+    canonical_interaction_act_mutation_hash,
+    interaction_act_typed_proposal_id,
+)
+from .interaction_act_identity import (
+    interaction_act_conversation_ref,
+    interaction_act_id,
+    interaction_act_object_ref,
+    interaction_act_overlapping_occurrence_count,
+    interaction_act_role_output_hash,
+    interaction_act_transition_id,
+)
+from .interaction_act_reducers import reduce_interaction_act
+from .interaction_act_schemas import InteractionActRoleOutput
 from .relationship_adjustment_acceptance_manifest import (
     RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION,
     RelationshipAdjustmentAcceptanceManifest,
@@ -410,10 +438,12 @@ from .relationship_events import (
     RELATIONSHIP_PAYLOAD_MODELS,
     BoundaryChangedPayload,
     RelationshipAuthorizedMutationPayload,
+    RelationshipCommitmentAcceptedPayload,
     RelationshipSignalAcceptedPayload,
     RelationshipSlowVariableAdjustedPayload,
 )
 from .relationship_reducers import (
+    accept_relationship_commitment,
     accept_relationship_signal,
     adjust_relationship_slow_variables,
     change_boundary,
@@ -511,6 +541,8 @@ from .schemas import (
     FactTransitionProjection,
     InteractionBidProjection,
     InteractionBidProposalProjection,
+    InteractionActProjection,
+    InteractionActTransitionProjection,
     MediaDeliveryThreadProposalProjection,
     LedgerProjection,
     MessageObservationRef,
@@ -535,6 +567,8 @@ from .schemas import (
     PlanStateProjection,
     ProposalRevisionRef,
     RelationshipAdjustmentProjection,
+    RelationshipCommitmentProjection,
+    InteractionActProposalProjection,
     RelationshipProposalProjection,
     RelationshipSignalProjection,
     RelationshipStateProjection,
@@ -567,8 +601,9 @@ V48_REDUCER_BUNDLE_VERSION = "world-v2-reducers.48"
 _V49_REDUCER_BUNDLE_VERSION = "world-v2-reducers.49"
 V50_REDUCER_BUNDLE_VERSION = "world-v2-reducers.50"
 V51_REDUCER_BUNDLE_VERSION = "world-v2-reducers.51"
-PREVIOUS_REDUCER_BUNDLE_VERSION = "world-v2-reducers.52"
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.53"
+V52_REDUCER_BUNDLE_VERSION = "world-v2-reducers.52"
+PREVIOUS_REDUCER_BUNDLE_VERSION = "world-v2-reducers.53"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.54"
 _CONTEXTUAL_LIFE_SOURCE_EVENT_TYPES = frozenset(
     {
         "ObservationRecorded",
@@ -627,6 +662,7 @@ def _experience_semantic_dump(
         _V49_REDUCER_BUNDLE_VERSION,
         V50_REDUCER_BUNDLE_VERSION,
         V51_REDUCER_BUNDLE_VERSION,
+        V52_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     } and isinstance(experience, LegacyExperienceProjection):
@@ -656,6 +692,7 @@ def _actor_authority_transition_semantic_dump(
         _V49_REDUCER_BUNDLE_VERSION,
         V50_REDUCER_BUNDLE_VERSION,
         V51_REDUCER_BUNDLE_VERSION,
+        V52_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -685,6 +722,7 @@ def _life_arc_semantic_dump(
         _V49_REDUCER_BUNDLE_VERSION,
         V50_REDUCER_BUNDLE_VERSION,
         V51_REDUCER_BUNDLE_VERSION,
+        V52_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -707,6 +745,7 @@ def _aspiration_semantic_dump(
 
     dumped = aspiration.model_dump(mode="json")
     if reducer_bundle_version not in {
+        V52_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -735,6 +774,7 @@ def _npc_semantic_dump(
         # Promotion authority was introduced by .51, while .50 must retain
         # its pre-promotion projection bytes.
         V51_REDUCER_BUNDLE_VERSION,
+        V52_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -752,6 +792,7 @@ def _npc_semantic_dump(
         _V49_REDUCER_BUNDLE_VERSION,
         V50_REDUCER_BUNDLE_VERSION,
         V51_REDUCER_BUNDLE_VERSION,
+        V52_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -781,6 +822,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         _V49_REDUCER_BUNDLE_VERSION,
         V50_REDUCER_BUNDLE_VERSION,
         V51_REDUCER_BUNDLE_VERSION,
+        V52_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -801,6 +843,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         _V49_REDUCER_BUNDLE_VERSION,
         V50_REDUCER_BUNDLE_VERSION,
         V51_REDUCER_BUNDLE_VERSION,
+        V52_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -814,6 +857,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         _V49_REDUCER_BUNDLE_VERSION,
         V50_REDUCER_BUNDLE_VERSION,
         V51_REDUCER_BUNDLE_VERSION,
+        V52_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -843,6 +887,7 @@ def _expression_plan_semantic_dump(
         _V49_REDUCER_BUNDLE_VERSION,
         V50_REDUCER_BUNDLE_VERSION,
         V51_REDUCER_BUNDLE_VERSION,
+        V52_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -873,6 +918,7 @@ def _expression_beat_semantic_dump(
         _V49_REDUCER_BUNDLE_VERSION,
         V50_REDUCER_BUNDLE_VERSION,
         V51_REDUCER_BUNDLE_VERSION,
+        V52_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -997,6 +1043,10 @@ class ReducerState(FrozenModel):
     affect_proposals: tuple[AffectProposalProjection, ...] = ()
     affect_proposal_ids: tuple[str, ...] = ()
     relationship_signals: tuple[RelationshipSignalProjection, ...] = ()
+    relationship_commitments: tuple[RelationshipCommitmentProjection, ...] = ()
+    interaction_acts: tuple[InteractionActProjection, ...] = ()
+    interaction_act_transitions: tuple[InteractionActTransitionProjection, ...] = ()
+    interaction_act_proposals: tuple[InteractionActProposalProjection, ...] = ()
     relationship_adjustments: tuple[RelationshipAdjustmentProjection, ...] = ()
     relationship_states: tuple[RelationshipStateProjection, ...] = ()
     boundaries: tuple[BoundaryProjection, ...] = ()
@@ -1668,6 +1718,7 @@ class ReducerState(FrozenModel):
             _V49_REDUCER_BUNDLE_VERSION,
             V50_REDUCER_BUNDLE_VERSION,
             V51_REDUCER_BUNDLE_VERSION,
+            V52_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
         }:
             # .33-.36 only add current-generation conditional fields. Their
@@ -1710,7 +1761,18 @@ class ReducerState(FrozenModel):
             "observation_refs": self.observation_refs,
             "message_observations": tuple(
                 (
-                    item.model_dump(mode="json")
+                    item.model_dump(
+                        mode="json",
+                        exclude=(
+                            None
+                            if declared_reducer_bundle_version == REDUCER_BUNDLE_VERSION
+                            else {
+                                "normalized_text_hash",
+                                "reply_context_present",
+                                "reply_target",
+                            }
+                        ),
+                    )
                     if reducer_bundle_version
                     in {
                         "world-v2-reducers.12",
@@ -1728,7 +1790,17 @@ class ReducerState(FrozenModel):
                         "world-v2-reducers.24",
                         REDUCER_BUNDLE_VERSION,
                     }
-                    else item.model_dump(mode="json", exclude={"actor", "channel", "payload_ref"})
+                    else item.model_dump(
+                        mode="json",
+                        exclude={
+                            "actor",
+                            "channel",
+                            "payload_ref",
+                            "normalized_text_hash",
+                            "reply_context_present",
+                            "reply_target",
+                        },
+                    )
                 )
                 for item in self.message_observations
             ),
@@ -1821,6 +1893,7 @@ class ReducerState(FrozenModel):
                                 _V49_REDUCER_BUNDLE_VERSION,
                                 V50_REDUCER_BUNDLE_VERSION,
                                 V51_REDUCER_BUNDLE_VERSION,
+                                V52_REDUCER_BUNDLE_VERSION,
                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                 REDUCER_BUNDLE_VERSION,
                             }
@@ -1909,6 +1982,7 @@ class ReducerState(FrozenModel):
                             in {
                                 V50_REDUCER_BUNDLE_VERSION,
                                 V51_REDUCER_BUNDLE_VERSION,
+                                V52_REDUCER_BUNDLE_VERSION,
                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                 REDUCER_BUNDLE_VERSION,
                             }
@@ -1925,6 +1999,7 @@ class ReducerState(FrozenModel):
                                         _V49_REDUCER_BUNDLE_VERSION,
                                         V50_REDUCER_BUNDLE_VERSION,
                                         V51_REDUCER_BUNDLE_VERSION,
+                                        V52_REDUCER_BUNDLE_VERSION,
                                         PREVIOUS_REDUCER_BUNDLE_VERSION,
                                     }
                                     else {"settled_dynamic_life_direction_adopted": True}
@@ -1944,6 +2019,7 @@ class ReducerState(FrozenModel):
                                                 _V49_REDUCER_BUNDLE_VERSION,
                                                 V50_REDUCER_BUNDLE_VERSION,
                                                 V51_REDUCER_BUNDLE_VERSION,
+                                                V52_REDUCER_BUNDLE_VERSION,
                                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                             }
                                             else (
@@ -2035,6 +2111,22 @@ class ReducerState(FrozenModel):
             ),
             "boundaries": tuple(item.model_dump(mode="json") for item in self.boundaries),
         }
+        # This projection family was introduced after the installed .53
+        # histories.  Omitting an empty slice preserves the semantic hashes of
+        # those immutable histories while non-empty commitment state remains
+        # fully hash-bound for new events.
+        if self.relationship_commitments:
+            payload["relationship_commitments"] = tuple(
+                item.model_dump(mode="json") for item in self.relationship_commitments
+            )
+        if self.interaction_acts:
+            payload["interaction_acts"] = tuple(
+                item.model_dump(mode="json") for item in self.interaction_acts
+            )
+        if self.interaction_act_transitions:
+            payload["interaction_act_transitions"] = tuple(
+                item.model_dump(mode="json") for item in self.interaction_act_transitions
+            )
         if declared_reducer_bundle_version in {
             "world-v2-reducers.26",
             "world-v2-reducers.27",
@@ -2059,6 +2151,7 @@ class ReducerState(FrozenModel):
             _V49_REDUCER_BUNDLE_VERSION,
             V50_REDUCER_BUNDLE_VERSION,
             V51_REDUCER_BUNDLE_VERSION,
+            V52_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -2091,6 +2184,7 @@ class ReducerState(FrozenModel):
                 _V49_REDUCER_BUNDLE_VERSION,
                 V50_REDUCER_BUNDLE_VERSION,
                 V51_REDUCER_BUNDLE_VERSION,
+                V52_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2120,6 +2214,7 @@ class ReducerState(FrozenModel):
             _V49_REDUCER_BUNDLE_VERSION,
             V50_REDUCER_BUNDLE_VERSION,
             V51_REDUCER_BUNDLE_VERSION,
+            V52_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -2148,6 +2243,7 @@ class ReducerState(FrozenModel):
                     _V49_REDUCER_BUNDLE_VERSION,
                     V50_REDUCER_BUNDLE_VERSION,
                     V51_REDUCER_BUNDLE_VERSION,
+                    V52_REDUCER_BUNDLE_VERSION,
                     PREVIOUS_REDUCER_BUNDLE_VERSION,
                     REDUCER_BUNDLE_VERSION,
                 }
@@ -2178,6 +2274,7 @@ class ReducerState(FrozenModel):
             _V49_REDUCER_BUNDLE_VERSION,
             V50_REDUCER_BUNDLE_VERSION,
             V51_REDUCER_BUNDLE_VERSION,
+            V52_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -2209,6 +2306,7 @@ class ReducerState(FrozenModel):
                 _V49_REDUCER_BUNDLE_VERSION,
                 V50_REDUCER_BUNDLE_VERSION,
                 V51_REDUCER_BUNDLE_VERSION,
+                V52_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2402,6 +2500,7 @@ class ReducerState(FrozenModel):
                 _V49_REDUCER_BUNDLE_VERSION,
                 V50_REDUCER_BUNDLE_VERSION,
                 V51_REDUCER_BUNDLE_VERSION,
+                V52_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2424,6 +2523,7 @@ class ReducerState(FrozenModel):
                 _V49_REDUCER_BUNDLE_VERSION,
                 V50_REDUCER_BUNDLE_VERSION,
                 V51_REDUCER_BUNDLE_VERSION,
+                V52_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -3744,6 +3844,7 @@ def _relationship_proposal_recorded(
         raise ValueError("persisted relationship proposal body does not match its index")
     installed_policy = {
         "signal": INSTALLED_RELATIONSHIP_SIGNAL_POLICY_REFS,
+        "commitment": INSTALLED_RELATIONSHIP_POLICY_REFS,
         "adjust": INSTALLED_RELATIONSHIP_POLICY_REFS,
         "compensate": INSTALLED_RELATIONSHIP_POLICY_REFS,
         "boundary_open": INSTALLED_BOUNDARY_POLICY_REFS,
@@ -3757,6 +3858,14 @@ def _relationship_proposal_recorded(
     if isinstance(proposed_payload, RelationshipSignalAcceptedPayload):
         accept_relationship_signal(
             state.relationship_signals, proposed_payload, logical_time=logical_time
+        )
+    elif isinstance(proposed_payload, RelationshipCommitmentAcceptedPayload):
+        accept_relationship_commitment(
+            state.relationship_commitments,
+            state.relationship_states,
+            proposed_payload,
+            logical_time=logical_time,
+            accepted_event_ref=proposed_payload.commitment.origin.accepted_event_ref,
         )
     elif isinstance(proposed_payload, RelationshipSlowVariableAdjustedPayload):
         adjust_relationship_slow_variables(
@@ -4727,7 +4836,7 @@ def _validate_compiled_affect_proposal_source(
 def _validate_compiled_relationship_proposal_source(
     state: ReducerState, proposal: RelationshipProposalProjection
 ) -> None:
-    """Reprove the audited generic signal behind a production candidate."""
+    """Reprove the exact audited relationship choice behind a candidate."""
 
     source = proposal.source_audit
     assert source is not None
@@ -4748,7 +4857,13 @@ def _validate_compiled_relationship_proposal_source(
         raise ValueError("compiled relationship proposal source proposal is invalid") from exc
     if not isinstance(generic, DecisionProposal):
         raise ValueError("compiled relationship proposal source is not a decision")
-    if audit.evaluated_world_revision != proposal.evaluated_world_revision:
+    if proposal.transition_kind == "commitment":
+        if audit.evaluated_world_revision >= proposal.evaluated_world_revision:
+            raise ValueError(
+                "compiled relationship commitment must follow its delivered expression"
+            )
+        _validate_relationship_commitment_delivery_rebase(state, proposal)
+    elif audit.evaluated_world_revision != proposal.evaluated_world_revision:
         # Expression and immediate inner-state effects from this same inbound
         # decision may become authoritative before its optional relationship
         # signal.  Permit only a forward rebase while the exact Observation-
@@ -4781,17 +4896,637 @@ def _validate_compiled_relationship_proposal_source(
             or process.source_evidence_ref != audit.trigger_ref
         ):
             raise ValueError("compiled relationship proposal source audit revision does not rebase")
+    source_shape = {
+        "signal": ("relationship_signal", "suggest"),
+        "commitment": ("relationship_commitment", "commit"),
+    }.get(proposal.transition_kind)
+    if source_shape is None:
+        raise ValueError("compiled relationship proposal transition is unsupported")
+    source_kind, source_transition = source_shape
     changes = tuple(
         item
         for item in generic.proposed_changes
-        if item.kind == "relationship_signal" and item.change_id == source.change_id
+        if item.kind == source_kind and item.change_id == source.change_id
     )
     if (
         len(changes) != 1
-        or changes[0].transition != "suggest"
+        or changes[0].transition != source_transition
         or (changes[0].payload.payload_hash != source.change_payload_hash)
     ):
         raise ValueError("compiled relationship proposal source change does not resolve")
+    if proposal.transition_kind == "commitment":
+        _validate_relationship_commitment_source_semantics(
+            state,
+            proposal,
+            trigger_ref=audit.trigger_ref,
+            source_change=changes[0],
+        )
+
+
+def _validate_relationship_commitment_source_semantics(
+    state: ReducerState,
+    proposal: RelationshipProposalProjection,
+    *,
+    trigger_ref: str,
+    source_change: object,
+) -> None:
+    """Re-bind every host and role coordinate behind a commitment proposal."""
+
+    try:
+        payload = RelationshipCommitmentAcceptedPayload.model_validate_json(
+            proposal.proposed_mutation.payload_json,
+            strict=True,
+        )
+        raw = source_change.payload.value()
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("relationship commitment source semantics are invalid") from exc
+    commitment = payload.commitment
+    if set(raw) != {
+        "subject_ref",
+        "target_stage",
+        "commitment_code",
+        "persistence",
+        "visible_text_span",
+    } or (
+        raw["subject_ref"] != payload.subject_ref
+        or raw["target_stage"] != payload.stage_after
+        or raw["target_stage"] != commitment.committed_stage
+        or raw["commitment_code"] != commitment.commitment_code
+        or raw["persistence"] != commitment.persistence
+        or raw["visible_text_span"] != commitment.visible_text_span
+    ):
+        raise ValueError(
+            "relationship commitment mutation changed its typed source semantics"
+        )
+    source_event = next(
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == trigger_ref and item.event_type == "ObservationRecorded"
+        ),
+        None,
+    )
+    observations = tuple(
+        item
+        for item in state.message_observations
+        if source_event is not None
+        and item.event_payload_hash == source_event.payload_hash
+        and item.world_revision == source_event.world_revision
+    )
+    if len(observations) != 1:
+        raise ValueError("relationship commitment source observation is not exact")
+    observation = observations[0]
+    if observation.actor is None or observation.actor != payload.subject_ref:
+        raise ValueError(
+            "relationship commitment subject is not bound to observation actor"
+        )
+    if observation.reply_context_present:
+        expected_target = observation.reply_target
+        if expected_target is None:
+            raise ValueError("relationship commitment observation reply target is invalid")
+    else:
+        expected_target = observation.actor
+    if commitment.delivery_proof.action_target_ref != expected_target:
+        raise ValueError(
+            "relationship commitment action target is not bound to observation reply target"
+        )
+
+
+def _validate_relationship_commitment_delivery_rebase(
+    state: ReducerState,
+    proposal: RelationshipProposalProjection,
+) -> None:
+    try:
+        payload = RelationshipCommitmentAcceptedPayload.model_validate_json(
+            proposal.proposed_mutation.payload_json,
+            strict=True,
+        )
+    except ValueError as exc:
+        raise ValueError("relationship commitment delivery proof is invalid") from exc
+    commitment = payload.commitment
+    proof = commitment.delivery_proof
+    plans = tuple(
+        item
+        for item in state.expression_plans
+        if item.proposal_id == proof.expression_proposal_id
+        and item.acceptance_id == proof.expression_acceptance_id
+        and item.plan_id == proof.expression_plan_id
+        and item.event_ref == proof.plan_event_ref
+        and item.event_payload_hash == proof.plan_event_payload_hash
+        and item.state == "completed"
+    )
+    beats = tuple(
+        item
+        for item in state.expression_beats
+        if item.proposal_id == proof.expression_proposal_id
+        and item.acceptance_id == proof.expression_acceptance_id
+        and item.plan_id == proof.expression_plan_id
+        and item.beat_id == proof.expression_beat_id
+        and item.payload_ref == proof.message_payload_ref
+        and item.payload_hash == proof.message_payload_hash
+        and item.action_id == proof.action_id
+        and item.event_ref == proof.beat_event_ref
+        and item.event_payload_hash == proof.beat_event_payload_hash
+        and item.state == "settled"
+    )
+    stored = tuple(
+        item
+        for item in state.stored_message_payloads
+        if item.proposal_id == proof.expression_proposal_id
+        and item.acceptance_id == proof.expression_acceptance_id
+        and item.payload_ref == proof.message_payload_ref
+        and item.payload_hash == proof.message_payload_hash
+        and item.event_ref == proof.stored_payload_event_ref
+        and item.event_payload_hash == proof.stored_payload_event_hash
+    )
+    actions = tuple(
+        item
+        for item in state.actions
+        if item.action_id == proof.action_id
+        and item.expression_plan_id == proof.expression_plan_id
+        and item.expression_beat_id == proof.expression_beat_id
+        and item.payload_ref == proof.message_payload_ref
+        and item.payload_hash == proof.message_payload_hash
+        and item.target == proof.action_target_ref
+        and item.state == "delivered"
+    )
+    receipts = tuple(
+        item
+        for item in state.execution_receipts
+        if item.receipt_id == proof.receipt_id
+        and item.action_id == proof.action_id
+        and item.receipt_kind == "terminal"
+        and item.observed_state == "delivered"
+        and item.is_terminal
+    )
+    if not (
+        len(plans) == len(beats) == len(stored) == len(actions) == len(receipts) == 1
+    ):
+        raise ValueError("relationship commitment delivered expression is not exact")
+    message = stored[0]
+    expected_message_hash = "sha256:" + hashlib.sha256(
+        message.text.encode("utf-8")
+    ).hexdigest()
+    if (
+        message.payload_hash != expected_message_hash
+        or message.text.count(commitment.visible_text_span) != 1
+        or not any(
+            item.state == "completed"
+            and item.receipt_id == proof.receipt_id
+            and item.terminal_action_state == "delivered"
+            for item in plans[0].history
+        )
+        or not any(
+            item.state == "settled"
+            and item.receipt_id == proof.receipt_id
+            and item.terminal_action_state == "delivered"
+            for item in beats[0].history
+        )
+    ):
+        raise ValueError("relationship commitment delivered expression is not terminal")
+    expected_events = (
+        (proof.plan_event_ref, "ExpressionPlanAccepted", proof.plan_event_payload_hash, None),
+        (proof.beat_event_ref, "ExpressionBeatAuthorized", proof.beat_event_payload_hash, None),
+        (
+            proof.stored_payload_event_ref,
+            "MessagePayloadStored",
+            proof.stored_payload_event_hash,
+            None,
+        ),
+        (proof.action_event_ref, "ActionAuthorized", proof.action_event_payload_hash, None),
+        (
+            proof.receipt_event_ref,
+            "ExecutionReceiptRecorded",
+            proof.receipt_event_payload_hash,
+            proof.receipt_world_revision,
+        ),
+    )
+    for event_ref, event_type, payload_hash, world_revision in expected_events:
+        matches = tuple(
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == event_ref
+            and item.event_type == event_type
+            and item.payload_hash == payload_hash
+            and (world_revision is None or item.world_revision == world_revision)
+        )
+        if len(matches) != 1:
+            raise ValueError("relationship commitment delivered event closure is invalid")
+
+
+def _interaction_act_role_output_hash(change: object) -> str:
+    payload = change.payload.value()
+    role_output = InteractionActRoleOutput(
+        contract="interaction-act-role-output.2",
+        source_text_span=payload["source_text_span"],
+        operation=change.transition,
+        status_code=payload["status_code"],
+        interaction_act_ref=payload["interaction_act_ref"],
+        act_kind=payload["act_kind"],
+        subject_ref=payload["subject_ref"],
+        counterparty_refs=tuple(payload["counterparty_refs"]),
+        object_ref=payload["object_ref"],
+        object_label=payload["object_label"],
+    )
+    return interaction_act_role_output_hash(role_output)
+
+
+def _validate_interaction_act_source(
+    state: ReducerState,
+    proposal: InteractionActProposalRecordedPayload,
+    *,
+    source_scope: str,
+    trigger_ref: str,
+    source_proposal_id: str,
+) -> None:
+    source = proposal.mutation.source_ref
+    committed = next(
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == source.source_event_ref
+        ),
+        None,
+    )
+    if committed is None or (
+        committed.world_revision != source.source_world_revision
+        or committed.payload_hash != source.source_payload_hash
+    ):
+        raise ValueError("interaction act source event does not resolve exactly")
+    if source_scope == "current_message":
+        if (
+            source.authority_kind != "observed_message"
+            or committed.event_type != "ObservationRecorded"
+            or source.source_event_ref != trigger_ref
+            or proposal.observed_source_text is None
+        ):
+            raise ValueError("interaction act observed source authority is invalid")
+        observations = tuple(
+            item
+            for item in state.message_observations
+            if item.event_payload_hash == source.source_payload_hash
+            and item.world_revision == source.source_world_revision
+            and item.actor == source.source_actor_ref
+        )
+        if len(observations) != 1:
+            raise ValueError("interaction act observed message does not resolve exactly")
+        normalized_text_hash = "sha256:" + hashlib.sha256(
+            proposal.observed_source_text.encode("utf-8")
+        ).hexdigest()
+        if (
+            observations[0].normalized_text_hash != normalized_text_hash
+            or interaction_act_overlapping_occurrence_count(
+                source_text=proposal.observed_source_text,
+                selected_text=proposal.mutation.source_text_span,
+            )
+            != 1
+        ):
+            raise ValueError("interaction act observed source text is not exact")
+        return
+    if source_scope != "delivered_expression" or source.authority_kind != "delivered_expression":
+        raise ValueError("interaction act source scope is invalid")
+    proof = source.delivery_proof
+    if proof is None or committed.event_type != "MessagePayloadStored":
+        raise ValueError("interaction act delivered expression proof is incomplete")
+    messages = tuple(
+        item
+        for item in state.stored_message_payloads
+        if item.event_ref == source.source_event_ref
+        and item.event_payload_hash == source.source_payload_hash
+        and item.proposal_id == source_proposal_id
+    )
+    if len(messages) != 1:
+        raise ValueError("interaction act delivered message does not resolve exactly")
+    message = messages[0]
+    if (
+        interaction_act_overlapping_occurrence_count(
+            source_text=message.text,
+            selected_text=proposal.mutation.source_text_span,
+        )
+        != 1
+    ):
+        raise ValueError("interaction act delivered source span is not exact-once")
+    plans = tuple(
+        item
+        for item in state.expression_plans
+        if item.plan_id == proof.expression_plan_id
+        and item.proposal_id == source_proposal_id
+        and item.proposal_id == message.proposal_id
+        and item.acceptance_id == message.acceptance_id
+        and item.event_ref == proof.expression_plan_event_ref
+        and item.event_payload_hash == proof.expression_plan_event_payload_hash
+        and item.state == "completed"
+    )
+    beats = tuple(
+        item
+        for item in state.expression_beats
+        if item.plan_id == proof.expression_plan_id
+        and item.beat_id == proof.expression_beat_id
+        and item.proposal_id == source_proposal_id
+        and item.proposal_id == message.proposal_id
+        and item.acceptance_id == message.acceptance_id
+        and item.action_id == proof.action_id
+        and item.payload_ref == message.payload_ref
+        and item.payload_hash == message.payload_hash
+        and item.event_ref == proof.expression_beat_event_ref
+        and item.event_payload_hash == proof.expression_beat_event_payload_hash
+        and item.state == "settled"
+    )
+    trigger = next(
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == trigger_ref
+            and item.event_type == "ObservationRecorded"
+        ),
+        None,
+    )
+    trigger_observations = tuple(
+        item
+        for item in state.message_observations
+        if trigger is not None
+        and item.event_payload_hash == trigger.payload_hash
+        and item.world_revision == trigger.world_revision
+    )
+    if len(trigger_observations) != 1 or trigger_observations[0].actor is None:
+        raise ValueError("interaction act trigger observation is not exact")
+    trigger_observation = trigger_observations[0]
+    if trigger_observation.reply_context_present:
+        if trigger_observation.reply_target is None:
+            raise ValueError("interaction act reply target is incomplete")
+        expected_action_target = trigger_observation.reply_target
+    else:
+        expected_action_target = trigger_observation.actor
+    if proof.action_target_ref != expected_action_target:
+        raise ValueError("interaction act action target is not host-bound")
+    actions = tuple(
+        item
+        for item in state.actions
+        if item.action_id == proof.action_id
+        and item.actor == source.source_actor_ref
+        and item.payload_hash == proof.action_payload_hash
+        and item.payload_hash == message.payload_hash
+        and item.target == proof.action_target_ref
+        and item.expression_plan_id == proof.expression_plan_id
+        and item.expression_beat_id == proof.expression_beat_id
+        and item.state == "delivered"
+    )
+    receipts = tuple(
+        item
+        for item in state.execution_receipts
+        if item.receipt_id == proof.receipt_id
+        and item.action_id == proof.action_id
+        and item.receipt_kind == "terminal"
+        and item.observed_state == "delivered"
+        and item.is_terminal
+    )
+    if (
+        len(plans) != 1
+        or len(beats) != 1
+        or len(actions) != 1
+        or len(receipts) != 1
+        or sum(
+            item.state == "completed"
+            and item.receipt_id == proof.receipt_id
+            and item.terminal_action_state == "delivered"
+            for item in plans[0].history
+        )
+        != 1
+        or sum(
+            item.state == "settled"
+            and item.receipt_id == proof.receipt_id
+            and item.terminal_action_state == "delivered"
+            for item in beats[0].history
+        )
+        != 1
+    ):
+        raise ValueError("interaction act delivered expression closure is invalid")
+    expected_events = (
+        (
+            proof.expression_plan_event_ref,
+            "ExpressionPlanAccepted",
+            proof.expression_plan_event_payload_hash,
+            None,
+        ),
+        (
+            proof.expression_beat_event_ref,
+            "ExpressionBeatAuthorized",
+            proof.expression_beat_event_payload_hash,
+            None,
+        ),
+        (
+            proof.stored_payload_event_ref,
+            "MessagePayloadStored",
+            proof.stored_payload_event_payload_hash,
+            source.source_world_revision,
+        ),
+        (
+            proof.action_event_ref,
+            "ActionAuthorized",
+            proof.action_event_payload_hash,
+            None,
+        ),
+        (
+            proof.receipt_event_ref,
+            "ExecutionReceiptRecorded",
+            proof.receipt_payload_hash,
+            proof.receipt_world_revision,
+        ),
+    )
+    for event_ref, event_type, payload_hash, world_revision in expected_events:
+        matches = tuple(
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == event_ref
+            and item.event_type == event_type
+            and item.payload_hash == payload_hash
+            and (world_revision is None or item.world_revision == world_revision)
+        )
+        if len(matches) != 1:
+            raise ValueError("interaction act delivered event closure is invalid")
+
+
+def _validate_interaction_act_identities(
+    state: ReducerState,
+    event: WorldEvent,
+    proposal: InteractionActProposalRecordedPayload,
+    *,
+    audit: Any,
+) -> None:
+    mutation = proposal.mutation
+    after = mutation.act_after
+    trigger = next(
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == audit.trigger_ref
+            and item.event_type == "ObservationRecorded"
+        ),
+        None,
+    )
+    observations = tuple(
+        item
+        for item in state.message_observations
+        if trigger is not None
+        and item.event_payload_hash == trigger.payload_hash
+        and item.world_revision == trigger.world_revision
+    )
+    if len(observations) != 1 or observations[0].channel is None:
+        raise ValueError("interaction act trigger observation is not exact")
+    observation = observations[0]
+    participants = (after.subject_ref, *after.counterparty_refs)
+    if observation.actor not in participants:
+        raise ValueError("interaction act trigger actor is not a bound participant")
+    expected_conversation_ref = interaction_act_conversation_ref(
+        world_id=event.world_id,
+        channel=observation.channel,
+        participant_refs=participants,
+    )
+    if after.conversation_ref != expected_conversation_ref:
+        raise ValueError("interaction act conversation identity is invalid")
+    if mutation.operation == "declare":
+        descriptor = after.object_descriptor
+        if descriptor is not None:
+            expected_object_ref = interaction_act_object_ref(
+                conversation_ref=expected_conversation_ref,
+                object_label=descriptor.object_label,
+                opening_source_event_ref=mutation.source_ref.source_event_ref,
+                opening_source_payload_hash=mutation.source_ref.source_payload_hash,
+            )
+            if descriptor.object_ref != expected_object_ref:
+                raise ValueError("interaction act object identity is invalid")
+        expected_act_id = interaction_act_id(
+            world_id=event.world_id,
+            conversation_ref=expected_conversation_ref,
+            source_ref=mutation.source_ref,
+            role_output_hash=mutation.role_output_hash,
+        )
+        if after.interaction_act_id != expected_act_id:
+            raise ValueError("interaction act identity is invalid")
+    expected_transition_id = interaction_act_transition_id(
+        interaction_act_ref=after.interaction_act_id,
+        operation=mutation.operation,
+        source_ref=mutation.source_ref,
+        role_output_hash=mutation.role_output_hash,
+    )
+    if mutation.transition_id != expected_transition_id:
+        raise ValueError("interaction act transition identity is invalid")
+    expected_proposal_id = interaction_act_typed_proposal_id(
+        source_audit_event_ref=audit.event_ref,
+        source_audit_event_payload_hash=audit.event_payload_hash,
+        source_change_id=proposal.change_id,
+        evaluated_world_revision=proposal.evaluated_world_revision,
+        mutation_payload_hash=proposal.mutation_payload_hash,
+    )
+    if proposal.proposal_id != expected_proposal_id:
+        raise ValueError("interaction act typed proposal identity is invalid")
+
+
+def _interaction_act_proposal_recorded(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    proposal = InteractionActProposalRecordedPayload.model_validate_json(
+        event.payload_json,
+        strict=True,
+    )
+    if proposal.evaluated_world_revision != len(state.committed_world_event_refs):
+        raise ValueError("interaction act proposal must evaluate the current world")
+    if proposal.proposal_id in state.proposal_ids or any(
+        item.proposal_id == proposal.proposal_id for item in state.interaction_act_proposals
+    ):
+        raise ValueError("interaction act proposal identity is already registered")
+    audit = next(
+        (item for item in state.proposal_audits if item.event_ref == event.causation_id),
+        None,
+    )
+    if audit is None or (
+        audit.event_ref != event.causation_id
+        or audit.proposal_hash != proposal.proposal_hash
+        or audit.evaluated_world_revision > proposal.evaluated_world_revision
+    ):
+        raise ValueError("interaction act proposal audit does not resolve")
+    try:
+        generic = validate_proposal_envelope(json.loads(audit.proposal_json))
+        shape = (
+            inspect_unified_inbound_decision(generic)
+            if isinstance(generic, DecisionProposal)
+            else None
+        )
+    except (TypeError, ValueError, json.JSONDecodeError, UnifiedInboundDecisionError) as exc:
+        raise ValueError("interaction act source proposal is invalid") from exc
+    change = shape.interaction_act if shape is not None else None
+    if change is None or (
+        change.change_id != proposal.change_id
+        or canonical_interaction_act_change_hash(change)
+        != proposal.accepted_change_hash
+        or _interaction_act_role_output_hash(change) != proposal.mutation.role_output_hash
+        or change.transition != proposal.mutation.operation
+    ):
+        raise ValueError("interaction act proposal does not bind its typed change")
+    raw = change.payload.value()
+    after = proposal.mutation.act_after
+    descriptor = after.object_descriptor
+    selected_object_ref = descriptor.object_ref if descriptor is not None else None
+    selected_object_label = descriptor.object_label if descriptor is not None else None
+    authored_statuses = tuple(
+        item
+        for item in after.participant_statuses
+        if item.actor_ref == proposal.mutation.source_ref.source_actor_ref
+    )
+    if (
+        len(authored_statuses) != 1
+        or raw["source_text_span"] != proposal.mutation.source_text_span
+        or raw["status_code"] != authored_statuses[0].status_code
+        or raw["act_kind"] != after.act_kind
+        or raw["subject_ref"] != after.subject_ref
+        or tuple(raw["counterparty_refs"]) != after.counterparty_refs
+        or raw["object_ref"]
+        != (None if proposal.mutation.operation == "declare" else selected_object_ref)
+        or raw["object_label"]
+        != (selected_object_label if proposal.mutation.operation == "declare" else None)
+        or raw["interaction_act_ref"]
+        != (None if proposal.mutation.operation == "declare" else after.interaction_act_id)
+    ):
+        raise ValueError("interaction act proposal semantic coordinates changed")
+    _validate_interaction_act_source(
+        state,
+        proposal,
+        source_scope=raw["source_scope"],
+        trigger_ref=audit.trigger_ref,
+        source_proposal_id=generic.proposal_id,
+    )
+    _validate_interaction_act_identities(state, event, proposal, audit=audit)
+    reduce_interaction_act(
+        state.interaction_acts,
+        state.interaction_act_transitions,
+        proposal.mutation,
+        logical_time=event.logical_time,
+        accepted_event_ref=f"proposal-validation:{event.event_id}",
+    )
+    projection = InteractionActProposalProjection(
+        proposal_id=proposal.proposal_id,
+        proposal_hash=proposal.proposal_hash,
+        change_id=proposal.change_id,
+        accepted_change_hash=proposal.accepted_change_hash,
+        evaluated_world_revision=proposal.evaluated_world_revision,
+        mutation_payload_hash=proposal.mutation_payload_hash,
+        mutation=proposal.mutation,
+        recorded_event_ref=event.event_id,
+        recorded_event_payload_hash=event.payload_hash,
+    )
+    return state.model_copy(
+        update={
+            "interaction_act_proposals": (*state.interaction_act_proposals, projection),
+            "proposal_ids": (*state.proposal_ids, proposal.proposal_id),
+            "proposal_revisions": (
+                *state.proposal_revisions,
+                ProposalRevisionRef(
+                    proposal_id=proposal.proposal_id,
+                    evaluated_world_revision=proposal.evaluated_world_revision,
+                ),
+            ),
+        }
+    )
 
 
 def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
@@ -4804,6 +5539,8 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
         AFFECT_ACCEPTANCE_MANIFEST_VERSION,
         RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION,
+        RELATIONSHIP_COMMITMENT_ACCEPTANCE_MANIFEST_VERSION,
+        INTERACTION_ACT_ACCEPTANCE_MANIFEST_VERSION,
         RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION,
         OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
         ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
@@ -4869,6 +5606,13 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         return _affect_acceptance_manifest_recorded(state, event)
     if raw.get("manifest_version") == RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION:
         return _relationship_acceptance_manifest_recorded(state, event)
+    if (
+        raw.get("manifest_version")
+        == RELATIONSHIP_COMMITMENT_ACCEPTANCE_MANIFEST_VERSION
+    ):
+        return _relationship_commitment_acceptance_manifest_recorded(state, event)
+    if raw.get("manifest_version") == INTERACTION_ACT_ACCEPTANCE_MANIFEST_VERSION:
+        return _interaction_act_acceptance_manifest_recorded(state, event)
     if raw.get("manifest_version") == RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION:
         return _relationship_adjustment_acceptance_manifest_recorded(state, event)
     if raw.get("manifest_version") == OUTCOME_ACCEPTANCE_MANIFEST_VERSION:
@@ -5750,6 +6494,135 @@ def _relationship_acceptance_manifest_recorded(
     proposed = json.loads(proposal.proposed_mutation.payload_json)
     if canonical_relationship_acceptance_value_hash(proposed) != manifest.mutation_payload_hash:
         raise ValueError("relationship acceptance manifest mutation hash is invalid")
+    return state.model_copy(
+        update={
+            "acceptance_decisions": (
+                *state.acceptance_decisions,
+                AcceptanceDecisionRef(
+                    proposal_id=manifest.proposal_id,
+                    evaluated_world_revision=manifest.evaluated_world_revision,
+                    acceptance_id=manifest.acceptance_id,
+                    status="accepted",
+                    accepted_change_id=manifest.accepted_change_id,
+                    accepted_change_hash=manifest.accepted_change_hash,
+                    manifest_version=manifest.manifest_version,
+                    manifest_hash=manifest.manifest_hash,
+                    acceptance_event_ref=event.event_id,
+                    acceptance_event_payload_hash=event.payload_hash,
+                ),
+            )
+        }
+    )
+
+
+def _relationship_commitment_acceptance_manifest_recorded(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    """Record the decision half of one explicit relationship commitment."""
+
+    manifest = RelationshipCommitmentAcceptanceManifest.model_validate_json(
+        event.payload_json
+    )
+    current_world_revision = len(state.committed_world_event_refs)
+    if manifest.evaluated_world_revision != current_world_revision:
+        raise ValueError(
+            "relationship commitment acceptance manifest must evaluate the current world"
+        )
+    if event.causation_id != manifest.proposal_event_ref:
+        raise ValueError(
+            "relationship commitment acceptance manifest causation does not bind proposal"
+        )
+    if any(
+        item.acceptance_id == manifest.acceptance_id
+        or item.proposal_id == manifest.proposal_id
+        for item in state.acceptance_decisions
+    ):
+        raise ValueError("relationship commitment proposal or acceptance is already decided")
+    proposal = next(
+        (
+            item
+            for item in state.relationship_proposals
+            if item.proposal_id == manifest.proposal_id
+        ),
+        None,
+    )
+    if proposal is None or (
+        proposal.transition_kind != "commitment"
+        or proposal.change_id != manifest.accepted_change_id
+        or proposal.evaluated_world_revision != manifest.evaluated_world_revision
+        or proposal.proposed_change_hash != manifest.accepted_change_hash
+        or proposal.proposed_mutation.event_type != manifest.mutation_event_type
+        or proposal.recorded_event_ref != manifest.proposal_event_ref
+        or proposal.recorded_event_payload_hash != manifest.proposal_event_payload_hash
+    ):
+        raise ValueError(
+            "relationship commitment acceptance manifest does not bind persisted proposal"
+        )
+    proposed = json.loads(proposal.proposed_mutation.payload_json)
+    if (
+        canonical_relationship_commitment_acceptance_value_hash(proposed)
+        != manifest.mutation_payload_hash
+    ):
+        raise ValueError(
+            "relationship commitment acceptance manifest mutation hash is invalid"
+        )
+    return state.model_copy(
+        update={
+            "acceptance_decisions": (
+                *state.acceptance_decisions,
+                AcceptanceDecisionRef(
+                    proposal_id=manifest.proposal_id,
+                    evaluated_world_revision=manifest.evaluated_world_revision,
+                    acceptance_id=manifest.acceptance_id,
+                    status="accepted",
+                    accepted_change_id=manifest.accepted_change_id,
+                    accepted_change_hash=manifest.accepted_change_hash,
+                    manifest_version=manifest.manifest_version,
+                    manifest_hash=manifest.manifest_hash,
+                    acceptance_event_ref=event.event_id,
+                    acceptance_event_payload_hash=event.payload_hash,
+                ),
+            )
+        }
+    )
+
+
+def _interaction_act_acceptance_manifest_recorded(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    manifest = InteractionActAcceptanceManifest.model_validate_json(
+        event.payload_json,
+        strict=True,
+    )
+    if manifest.evaluated_world_revision != len(state.committed_world_event_refs):
+        raise ValueError("interaction act acceptance must evaluate the current world")
+    if event.causation_id != manifest.source_proposal_event_ref:
+        raise ValueError("interaction act acceptance does not bind its proposal event")
+    if any(
+        item.proposal_id == manifest.proposal_id
+        or item.acceptance_id == manifest.acceptance_id
+        for item in state.acceptance_decisions
+    ):
+        raise ValueError("interaction act proposal or acceptance is already decided")
+    proposal = next(
+        (
+            item
+            for item in state.interaction_act_proposals
+            if item.proposal_id == manifest.proposal_id
+        ),
+        None,
+    )
+    if proposal is None or (
+        proposal.recorded_event_ref != manifest.source_proposal_event_ref
+        or proposal.recorded_event_payload_hash
+        != manifest.source_proposal_event_payload_hash
+        or proposal.proposal_hash != manifest.proposal_hash
+        or proposal.change_id != manifest.accepted_change_id
+        or proposal.accepted_change_hash != manifest.accepted_change_hash
+        or proposal.evaluated_world_revision != manifest.evaluated_world_revision
+        or proposal.mutation_payload_hash != manifest.mutation_payload_hash
+    ):
+        raise ValueError("interaction act acceptance does not bind persisted proposal")
     return state.model_copy(
         update={
             "acceptance_decisions": (
@@ -6980,6 +7853,20 @@ def _observation_recorded(
         and observation.world_id == event.world_id
         and observation.observation_id == observation_id
     )
+    normalized_text_hash: str | None = None
+    reply_context_present = False
+    reply_target: str | None = None
+    if is_message:
+        if observation.text is not None:
+            normalized = unicodedata.normalize("NFC", observation.text)
+            normalized_text_hash = "sha256:" + hashlib.sha256(
+                normalized.encode("utf-8")
+            ).hexdigest()
+        reply_context_present = observation.reply_context is not None
+        if observation.reply_context is not None:
+            raw_reply_target = observation.reply_context.get("target")
+            if isinstance(raw_reply_target, str) and raw_reply_target:
+                reply_target = raw_reply_target
     schedule = state.life_ecology_schedule
     if is_message and schedule is not None:
         schedule = schedule.model_copy(
@@ -7007,6 +7894,9 @@ def _observation_recorded(
                         actor=observation.actor,
                         channel=observation.channel,
                         payload_ref=observation.payload_ref,
+                        normalized_text_hash=normalized_text_hash,
+                        reply_context_present=reply_context_present,
+                        reply_target=reply_target,
                     ),
                 )
                 if is_message
@@ -12544,6 +13434,107 @@ def _relationship_signal_accepted(state: ReducerState, event: WorldEvent) -> Red
     )
 
 
+def _relationship_commitment_accepted(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    logical_time = _require_life_time(state, event)
+    payload = RelationshipCommitmentAcceptedPayload.model_validate_json(
+        event.payload_json
+    )
+    if payload.policy_refs != INSTALLED_RELATIONSHIP_POLICY_REFS:
+        raise ValueError("relationship commitment references an uninstalled policy")
+    if payload.commitment.origin.accepted_event_ref != event.event_id:
+        raise ValueError(
+            "relationship commitment origin does not identify its mutation event"
+        )
+    proposal = _require_authorized_relationship(
+        state,
+        payload,
+        transition_kind="commitment",
+    )
+    commitments, states = accept_relationship_commitment(
+        state.relationship_commitments,
+        state.relationship_states,
+        payload,
+        logical_time=logical_time,
+        accepted_event_ref=event.event_id,
+    )
+    return state.model_copy(
+        update={
+            "relationship_commitments": commitments,
+            "relationship_states": states,
+            "relationship_proposals": tuple(
+                item for item in state.relationship_proposals if item != proposal
+            ),
+        }
+    )
+
+
+def _interaction_act_transition_accepted(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    logical_time = _require_life_time(state, event)
+    payload = InteractionActAcceptedPayload.model_validate_json(
+        event.payload_json,
+        strict=True,
+    )
+    if payload.world_id != event.world_id or payload.accepted_event_ref != event.event_id:
+        raise ValueError("interaction act accepted effect identity is invalid")
+    decision = next(
+        (
+            item
+            for item in state.acceptance_decisions
+            if item.proposal_id == payload.proposal_id
+        ),
+        None,
+    )
+    proposal = next(
+        (
+            item
+            for item in state.interaction_act_proposals
+            if item.proposal_id == payload.proposal_id
+        ),
+        None,
+    )
+    if decision is None or proposal is None or (
+        decision.status != "accepted"
+        or decision.acceptance_id != payload.acceptance_id
+        or decision.accepted_change_id != payload.change_id
+        or decision.accepted_change_hash != payload.accepted_change_hash
+        or decision.evaluated_world_revision != payload.evaluated_world_revision
+        or decision.manifest_version != INTERACTION_ACT_ACCEPTANCE_MANIFEST_VERSION
+        or proposal.recorded_event_ref != payload.source_proposal_event_ref
+        or proposal.recorded_event_payload_hash
+        != payload.source_proposal_event_payload_hash
+        or proposal.proposal_hash != payload.proposal_hash
+        or proposal.change_id != payload.change_id
+        or proposal.accepted_change_hash != payload.accepted_change_hash
+        or proposal.evaluated_world_revision != payload.evaluated_world_revision
+        or proposal.mutation_payload_hash != payload.mutation_payload_hash
+        or proposal.mutation != payload.mutation
+        or canonical_interaction_act_mutation_hash(payload.mutation)
+        != payload.mutation_payload_hash
+        or canonical_interaction_act_accepted_payload_hash(payload) != event.payload_hash
+    ):
+        raise ValueError("interaction act accepted effect lacks exact proposal authority")
+    acts, history = reduce_interaction_act(
+        state.interaction_acts,
+        state.interaction_act_transitions,
+        payload.mutation,
+        logical_time=logical_time,
+        accepted_event_ref=event.event_id,
+    )
+    return state.model_copy(
+        update={
+            "interaction_acts": acts,
+            "interaction_act_transitions": history,
+            "interaction_act_proposals": tuple(
+                item for item in state.interaction_act_proposals if item != proposal
+            ),
+        }
+    )
+
+
 def _private_impression_accepted(state: ReducerState, event: WorldEvent) -> ReducerState:
     logical_time = _require_life_time(state, event)
     payload = PrivateImpressionAcceptedPayload.model_validate_json(event.payload_json)
@@ -13822,6 +14813,11 @@ _EVENTS = {
         ),
         EventDefinition("ProposalRecorded", RevisionClass.DELIBERATION, _proposal_recorded),
         EventDefinition(
+            "InteractionActProposalRecorded",
+            RevisionClass.DELIBERATION,
+            _interaction_act_proposal_recorded,
+        ),
+        EventDefinition(
             "FactCommitProposalRecorded",
             RevisionClass.DELIBERATION,
             _fact_commit_proposal_audit_v2_recorded,
@@ -13967,6 +14963,16 @@ _EVENTS = {
             "RelationshipSignalAccepted",
             RevisionClass.WORLD,
             _relationship_signal_accepted,
+        ),
+        EventDefinition(
+            "RelationshipCommitmentAccepted",
+            RevisionClass.WORLD,
+            _relationship_commitment_accepted,
+        ),
+        EventDefinition(
+            "InteractionActTransitionAccepted",
+            RevisionClass.WORLD,
+            _interaction_act_transition_accepted,
         ),
         EventDefinition(
             "RelationshipSlowVariableAdjusted",
@@ -14642,6 +15648,10 @@ def make_projection(
         affect_proposals=state.affect_proposals,
         affect_proposal_ids=state.affect_proposal_ids,
         relationship_signals=state.relationship_signals,
+        relationship_commitments=state.relationship_commitments,
+        interaction_acts=state.interaction_acts,
+        interaction_act_transitions=state.interaction_act_transitions,
+        interaction_act_proposals=state.interaction_act_proposals,
         relationship_adjustments=state.relationship_adjustments,
         relationship_states=state.relationship_states,
         boundaries=state.boundaries,

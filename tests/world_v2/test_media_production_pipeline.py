@@ -152,6 +152,7 @@ class _Delivery:
     def __init__(self) -> None:
         self.texts: list[tuple[str, str]] = []
         self.images: list[tuple[str, bytes]] = []
+        self.lookups: list[tuple[str, str]] = []
 
     async def send_text(self, recipient_id: str, text: str) -> dict[str, object]:
         self.texts.append((recipient_id, text))
@@ -169,6 +170,16 @@ class _Delivery:
     async def send_image_message(self, recipient_id: str, *, image_path: Path) -> dict[str, object]:
         self.images.append((recipient_id, image_path.read_bytes()))
         return {"status": "ok", "data": {"message_id": f"qq-image-{len(self.images)}"}}
+
+    async def get_message(
+        self, recipient_id: str, *, message_id: str
+    ) -> dict[str, object]:
+        self.lookups.append((recipient_id, message_id))
+        return {
+            "status": "ok",
+            "retcode": 0,
+            "data": {"message_id": message_id},
+        }
 
 
 def _config() -> WorldV2TurnApplicationConfig:
@@ -411,6 +422,46 @@ async def test_full_media_pipeline_delivers_through_world_owned_policy_without_a
         )
         assert second is not None and second.status == "delivered_attempted"
         assert len(delivery.images) == 1
+        provider_accepted = app._ledger.project()  # noqa: SLF001 - test assertion
+        observed = app.media_preview_operator(
+            preview_dir=tmp_path / "preview-queue"
+        ).queue()
+    finally:
+        app.close()
+        transport.close()
+
+    delivery_action = next(
+        item for item in provider_accepted.actions if item.kind == "media_delivery"
+    )
+    assert delivery_action.state == "provider_accepted"
+
+    # Restart after the dispatch lease expires.  Recovery may only verify the
+    # acknowledged provider message via read-only ``get_msg``; it must never
+    # send the image a second time.
+    app, transport = build()
+    try:
+        await app.tick(
+            tick_id="pipeline:receipt-recovery-clock",
+            logical_time_from=NOW + timedelta(minutes=1),
+            logical_time_to=NOW + timedelta(minutes=4),
+            observed_at=NOW + timedelta(minutes=4),
+            trace_id="trace:pipeline:receipt-recovery-clock",
+            causation_id=delivery_action.action_id,
+            correlation_id="correlation:pipeline",
+            reason="provider receipt recovery",
+        )
+        recovered = await app.drain_action(delivery_action.action_id)
+        assert recovered is not None
+        assert recovered.status == "settled"
+        assert recovered.provider_status == "delivered"
+
+        # Replaying both the targeted Action and the world-owned delivery lane
+        # is terminal/effect-once across restart.
+        repeated_action = await app.drain_action(delivery_action.action_id)
+        repeated_delivery = await app.drain_media_auto_delivery_once(
+            trace_id="trace:pipeline:auto-delivery-replay",
+            correlation_id="correlation:pipeline",
+        )
         after = app._ledger.project()  # noqa: SLF001 - test assertion
         observed = app.media_preview_operator(
             preview_dir=tmp_path / "preview-queue"
@@ -422,15 +473,27 @@ async def test_full_media_pipeline_delivers_through_world_owned_policy_without_a
     assert len(delivery.images) == 1
     assert delivery.images[0][0] == RECIPIENT
     assert delivery.images[0][1] == image.read_bytes()
-    delivery_action = next(
-        item for item in after.actions if item.kind == "media_delivery"
+    assert delivery.lookups == [(RECIPIENT, "qq-image-1")]
+    final_delivery_action = next(
+        item for item in after.actions if item.action_id == delivery_action.action_id
     )
-    # NapCat's synchronous response proves provider acceptance, not terminal
-    # delivery; MediaDeliveryShared may only materialize after a terminal
-    # delivered receipt (via the existing verification/recovery lanes).
-    assert delivery_action.state == "provider_accepted"
+    assert final_delivery_action.state == "delivered"
+    assert repeated_action is not None and repeated_action.status == "idle"
+    assert repeated_delivery is not None and repeated_delivery.status == "idle"
+    receipts = tuple(
+        item
+        for item in after.execution_receipts
+        if item.action_id == delivery_action.action_id
+    )
+    assert tuple(item.observed_state for item in receipts) == (
+        "provider_accepted",
+        "delivered",
+    )
+    assert len(after.media_deliveries) == 1
+    assert after.media_deliveries[0].action_id == delivery_action.action_id
     assert (
         after.media_delivery_approvals[-1].operator_ref
         == "system:world-v2:media-delivery-policy"
     )
+    assert observed[0]["delivered"] is True
     assert observed[0]["delivery_decided_by"] == "system:world-v2:media-delivery-policy"

@@ -53,7 +53,14 @@ def _cursor(ledger) -> ProjectionCursor:
     )
 
 
-def _record_relationship_decision(ledger, *, include_signal: bool = True):
+def _record_relationship_decision(
+    ledger,
+    *,
+    include_signal: bool = True,
+    include_commitment: bool = False,
+    commitment_target_stage: str = "friend",
+    commitment_subject_ref: str = "user:test",
+):
     source_event = ledger.lookup_event_commit("message-event:1")[0]
     evidence = ProposalEvidenceRef(
         ref_id=source_event.event_id,
@@ -89,6 +96,27 @@ def _record_relationship_decision(ledger, *, include_signal: bool = True):
                             "mutuality_bp": 130,
                             "repair_confidence_bp": 20,
                         },
+                    },
+                ),
+            ),
+        )
+    if include_commitment:
+        changes = (
+            *changes,
+            TypedChange(
+                change_id="change:inbound-relationship-commitment:1",
+                kind="relationship_commitment",
+                target_id="relationship-commitment:user:test:friend",
+                transition="commit",
+                evidence_refs=(source_event.event_id,),
+                payload=CanonicalTypedPayload.from_value(
+                    payload_schema="relationship_commitment.v1",
+                    value={
+                        "subject_ref": commitment_subject_ref,
+                        "target_stage": commitment_target_stage,
+                        "commitment_code": "mutual_friendship",
+                        "persistence": "durable",
+                        "visible_text_span": "你是我朋友了",
                     },
                 ),
             ),

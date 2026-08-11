@@ -152,6 +152,8 @@ _APPRAISAL_COMMON_FIELDS = frozenset(
         "display_strategy",
         "confidence",
         "relationship_signal",
+        "relationship_commitment",
+        "interaction_act",
     }
 )
 _APPRAISAL_EVENT_FIELDS = frozenset({"meanings", "attribution", "severity"})
@@ -806,10 +808,34 @@ def _merge_cognition_outputs(
         change
         for change in appraisal_proposal.proposed_changes
         if change.kind
-        in {"appraisal_transition", "affect_transition", "relationship_signal"}
+        in {
+            "appraisal_transition",
+            "affect_transition",
+            "relationship_signal",
+            "relationship_commitment",
+            "interaction_act",
+        }
     )
     if not state_changes:
         return expression
+    visible_texts = _expression_inline_texts(expression_proposal)
+    for change in state_changes:
+        payload = change.payload.value()
+        spans: tuple[object, ...] = ()
+        if change.kind == "relationship_commitment":
+            spans = (payload.get("visible_text_span"),)
+        elif (
+            change.kind == "interaction_act"
+            and payload.get("source_scope") == "delivered_expression"
+        ):
+            spans = (payload.get("source_text_span"), payload.get("object_label"))
+        for span in spans:
+            if span is None:
+                continue
+            if not isinstance(span, str) or sum(text.count(span) for text in visible_texts) != 1:
+                raise ValueError(
+                    f"{change.kind} visible span must occur exactly once in the expression"
+                )
     evidence = _merge_evidence(
         appraisal_proposal.evidence_refs,
         expression_proposal.evidence_refs,
@@ -859,6 +885,28 @@ def _merge_cognition_outputs(
     else:
         raise ValueError("inbound expression returned an unsupported proposal kind")
     return expression.model_copy(update={"raw_proposal": merged.model_dump(mode="json")})
+
+
+def _expression_inline_texts(proposal: object) -> tuple[str, ...]:
+    changes = getattr(proposal, "proposed_changes", ())
+    expression_changes = tuple(
+        change
+        for change in changes
+        if change.kind == "expression_plan_transition" and change.transition == "accept"
+    )
+    if len(expression_changes) != 1:
+        return ()
+    drafts = expression_changes[0].payload.value().get("beat_drafts")
+    if not isinstance(drafts, list):
+        return ()
+    texts: list[str] = []
+    for item in drafts:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("inline_text")
+        if isinstance(text, str) and text:
+            texts.append(text)
+    return tuple(texts)
 
 
 class _PairedAppraisalMaterializer:

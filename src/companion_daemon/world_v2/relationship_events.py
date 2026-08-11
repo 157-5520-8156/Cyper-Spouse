@@ -15,6 +15,7 @@ from .schemas import (
     BoundaryProjection,
     EvidenceRef,
     FrozenModel,
+    RelationshipCommitmentProjection,
     RelationshipSignalProjection,
     RelationshipHysteresisProjection,
     RelationshipStage,
@@ -59,6 +60,47 @@ class RelationshipSignalAcceptedPayload(RelationshipAuthorizedMutationPayload):
             or self.signal.origin.policy_refs != self.policy_refs
         ):
             raise ValueError("relationship signal origin does not match payload")
+        return self
+
+
+class RelationshipCommitmentAcceptedPayload(RelationshipAuthorizedMutationPayload):
+    """One explicit character-authored relationship-stage commitment."""
+
+    relationship_id: str = Field(min_length=1)
+    subject_ref: str = Field(min_length=1)
+    stage_before: RelationshipStage
+    stage_after: RelationshipStage
+    hysteresis_before: RelationshipHysteresisProjection
+    hysteresis_after: RelationshipHysteresisProjection
+    commitment_refs_before: tuple[str, ...] = ()
+    commitment: RelationshipCommitmentProjection
+    policy_version: str = Field(min_length=1)
+    policy_digest: str = Field(min_length=64, max_length=64)
+
+    @model_validator(mode="after")
+    def commitment_matches_authority(self) -> RelationshipCommitmentAcceptedPayload:
+        _validate_hash(self)
+        if len(self.commitment_refs_before) != len(set(self.commitment_refs_before)):
+            raise ValueError("relationship commitment refs must be unique")
+        if self.commitment.commitment_id in self.commitment_refs_before:
+            raise ValueError("relationship commitment must append new lineage")
+        if (
+            self.commitment.relationship_id != self.relationship_id
+            or self.commitment.subject_ref != self.subject_ref
+            or self.commitment.stage_before != self.stage_before
+            or self.commitment.committed_stage != self.stage_after
+        ):
+            raise ValueError("relationship commitment state does not match payload")
+        if self.commitment.evidence_refs != self.evidence_refs:
+            raise ValueError("relationship commitment evidence does not match payload")
+        if (
+            self.commitment.origin.change_id != self.change_id
+            or self.commitment.origin.transition_id != self.transition_id
+            or self.commitment.origin.policy_refs != self.policy_refs
+        ):
+            raise ValueError("relationship commitment origin does not match payload")
+        if self.hysteresis_after != RelationshipHysteresisProjection():
+            raise ValueError("relationship commitment must settle stage hysteresis")
         return self
 
 
@@ -132,6 +174,7 @@ class BoundaryChangedPayload(RelationshipAuthorizedMutationPayload):
 
 RELATIONSHIP_PAYLOAD_MODELS = {
     "RelationshipSignalAccepted": RelationshipSignalAcceptedPayload,
+    "RelationshipCommitmentAccepted": RelationshipCommitmentAcceptedPayload,
     "RelationshipSlowVariableAdjusted": RelationshipSlowVariableAdjustedPayload,
     "BoundaryChanged": BoundaryChangedPayload,
 }
