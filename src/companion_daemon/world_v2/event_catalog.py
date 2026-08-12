@@ -91,6 +91,18 @@ from .relationship_acceptance_manifest import (
     RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION,
     RelationshipAcceptanceManifest,
 )
+from .relationship_commitment_acceptance_manifest import (
+    RELATIONSHIP_COMMITMENT_ACCEPTANCE_MANIFEST_VERSION,
+    RelationshipCommitmentAcceptanceManifest,
+)
+from .interaction_act_acceptance_manifest import (
+    INTERACTION_ACT_ACCEPTANCE_MANIFEST_VERSION,
+    InteractionActAcceptanceManifest,
+)
+from .interaction_act_events import (
+    InteractionActAcceptedPayload,
+    InteractionActProposalRecordedPayload,
+)
 from .relationship_adjustment_acceptance_manifest import (
     RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION,
     RelationshipAdjustmentAcceptanceManifest,
@@ -162,7 +174,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.53"
+    reducer_bundle: str = "world-v2-reducers.56"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -204,6 +216,8 @@ class EventContract:
                 APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
                 AFFECT_ACCEPTANCE_MANIFEST_VERSION,
                 RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION,
+                RELATIONSHIP_COMMITMENT_ACCEPTANCE_MANIFEST_VERSION,
+                INTERACTION_ACT_ACCEPTANCE_MANIFEST_VERSION,
                 RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION,
                 OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
                 INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
@@ -299,6 +313,22 @@ class EventContract:
             and payload.get("manifest_version") == RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION
         ):
             RelationshipAcceptanceManifest.model_validate(dict(payload), strict=True)
+            return
+        if (
+            self.event_type == "AcceptanceRecorded"
+            and payload.get("manifest_version")
+            == RELATIONSHIP_COMMITMENT_ACCEPTANCE_MANIFEST_VERSION
+        ):
+            RelationshipCommitmentAcceptanceManifest.model_validate(
+                dict(payload), strict=True
+            )
+            return
+        if (
+            self.event_type == "AcceptanceRecorded"
+            and payload.get("manifest_version")
+            == INTERACTION_ACT_ACCEPTANCE_MANIFEST_VERSION
+        ):
+            InteractionActAcceptanceManifest.model_validate(dict(payload), strict=True)
             return
         if (
             self.event_type == "AcceptanceRecorded"
@@ -435,6 +465,8 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
             "ProposalRecordedPayload", {"proposal_id": _ID}, allow_audit_extensions=True
         ),
         "FactCommitProposalRecorded": FactCommitProposalRecordedPayloadV2,
+        "InteractionActProposalRecorded": InteractionActProposalRecordedPayload,
+        "InteractionActTransitionAccepted": InteractionActAcceptedPayload,
         "FactCommittedV2": FactCommitMaterializedPayloadV2,
         "ModelResultRecorded": ModelResultRecordedPayload,
         "LifeDevelopmentRecallResultRecorded": (LifeDevelopmentRecallResultRecordedPayload),
@@ -621,6 +653,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "LifeAvailabilitySnapshotRecorded": "world_id+snapshot_id",
         "MediaSelectionAttemptRecorded": "world_id+attempt_id",
         "MediaSelectionProposalRecorded": "world_id+proposal_id",
+        "InteractionActProposalRecorded": "world_id+proposal_id+change_id+mutation_payload_hash",
         "MediaOpportunityFrozen": "world_id+opportunity_id",
         "MediaPlanRecorded": "world_id+planning_request_id+plan_id",
         "MediaNotRenderableRecorded": "world_id+planning_request_id+not_renderable",
@@ -688,6 +721,12 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "AppraisalSuperseded": "appraisal_id+transition_id",
         "PrivateImpressionAccepted": "world_id+impression_id+transition_id",
         "RelationshipSignalAccepted": "world_id+signal_semantic_fingerprint",
+        "RelationshipCommitmentAccepted": (
+            "world_id+commitment_id+expected_entity_revision+transition_id"
+        ),
+        "InteractionActTransitionAccepted": (
+            "world_id+proposal_id+change_id+mutation_payload_hash"
+        ),
         "RelationshipSlowVariableAdjusted": "relationship_id+expected_entity_revision+adjustment_id",
         "BoundaryChanged": "boundary_id+expected_entity_revision+transition_id",
         **{
@@ -1448,6 +1487,15 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                     "TriggerProcessReclaimed",
                 ),
                 evidence_types=("media_delivery_shared", "claimed_media_delivery_interaction"),
+                successors=("AcceptanceRecorded",),
+            ),
+            _contract(
+                "InteractionActProposalRecorded",
+                "interaction_act_proposal_compiler",
+                "deliberation",
+                "InteractionActProposalRecordedPayload",
+                allowed_predecessors=("ProposalRecorded",),
+                evidence_types=("observed_message", "delivered_expression"),
                 successors=("AcceptanceRecorded",),
             ),
             _contract(
@@ -2368,6 +2416,22 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "RelationshipSignalAcceptedPayload",
                 allowed_predecessors=("AcceptanceRecorded",),
                 evidence_types=_RELATIONSHIP_EVIDENCE_TYPES,
+            ),
+            _contract(
+                "RelationshipCommitmentAccepted",
+                "proposal_acceptance",
+                "world",
+                "RelationshipCommitmentAcceptedPayload",
+                allowed_predecessors=("AcceptanceRecorded",),
+                evidence_types=_RELATIONSHIP_EVIDENCE_TYPES,
+            ),
+            _contract(
+                "InteractionActTransitionAccepted",
+                "interaction_act_atomic_recorder",
+                "world",
+                "InteractionActAcceptedPayload",
+                allowed_predecessors=("AcceptanceRecorded",),
+                evidence_types=("observed_message", "delivered_expression"),
             ),
             _contract(
                 "RelationshipSlowVariableAdjusted",

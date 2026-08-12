@@ -3,10 +3,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import json
 
+import httpx
+from jsonschema import Draft202012Validator
 import pytest
 
+from companion_daemon.llm import DeepSeekChatModel
 from companion_daemon.world_v2.character_interior import CharacterInterior
-from companion_daemon.world_v2.character_interior.contracts import FACET_NAMES
+from companion_daemon.world_v2.character_interior.contracts import FACET_NAMES, InnerDecision
 from companion_daemon.world_v2.character_interior.structured_role import (
     StructuredCharacterRoleFaculty,
 )
@@ -150,6 +153,28 @@ def _adapter(model: _Model) -> _CharacterInteriorProactiveTransport:
     )
 
 
+class _FailedInterior:
+    async def consider(self, opportunity):  # type: ignore[no-untyped-def]
+        return InnerDecision(
+            inner_turn_id="inner-turn:missing-role",
+            opportunity_ref=opportunity.opportunity_ref,
+            actor_ref=opportunity.actor_ref,
+            cursor=opportunity.cursor,
+            status="technical_failure",
+            failure_code="role_faculty_unavailable",
+        )
+
+
+def _adapter_without_role() -> _CharacterInteriorProactiveTransport:
+    return _CharacterInteriorProactiveTransport(
+        character_interior=_FailedInterior(),  # type: ignore[arg-type]
+        world_id="world:test",
+        actor_ref="character:zhizhi",
+        target="user:primary",
+        expression_capabilities=TEXT_ONLY_EXPRESSION_CAPABILITIES,
+    )
+
+
 @pytest.mark.asyncio
 async def test_proactive_business_opportunity_uses_character_interior_consider() -> None:
     model = _Model(
@@ -185,6 +210,120 @@ async def test_proactive_business_opportunity_uses_character_interior_consider()
 
 
 @pytest.mark.asyncio
+async def test_proactive_deepseek_transport_uses_strict_beta_tool_contract() -> None:
+    captured: dict[str, object] = {}
+    raw_result = json.dumps(
+        {
+            "status": "decision",
+            "summary": "She notices the impulse and keeps it private.",
+            "attended_source_refs": [SOURCE],
+            "decision": {
+                "source_refs": [SOURCE],
+                "payload": {
+                    "timing_choice": "silent",
+                    "turn_posture": None,
+                    "cadence": "conversational",
+                    "beats": [],
+                    "delay_seconds": None,
+                    "expires_after_seconds": None,
+                    "stance": "quietly keeping it to herself",
+                    "brief_rationale": "she does not want to reach out this time",
+                    "impulse_summary": "the other person crossed her mind",
+                    "confidence": 7200,
+                    "variation_profile": None,
+                    "response_expectation": None,
+                    "response_expectation_assessment": None,
+                    "world_claims": [],
+                    "media_request": "none",
+                    "media_source_refs": [],
+                },
+            },
+            "recall_query": None,
+            "proposals": [],
+        },
+        ensure_ascii=False,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        captured.update(payload)
+        tools = payload.get("tools")
+        function = (
+            tools[0].get("function")
+            if isinstance(tools, list) and tools and isinstance(tools[0], dict)
+            else None
+        )
+        if request.url.path != "/beta/chat/completions" or not (
+            isinstance(function, dict) and function.get("strict") is True
+        ):
+            return httpx.Response(
+                400,
+                json={"error": {"message": "strict beta tool contract required"}},
+            )
+        arguments = {"result": json.loads(raw_result)}
+        Draft202012Validator(function["parameters"]).validate(arguments)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "character_role_proactive_contact_v1",
+                                        "arguments": json.dumps(arguments, ensure_ascii=False),
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    model = DeepSeekChatModel(
+        "key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    interior = CharacterInterior(
+        projection=_Projection(),
+        role=StructuredCharacterRoleFaculty(
+            model=model,
+            model_id="deepseek-v4-flash",
+        ),
+    )
+    adapter = _CharacterInteriorProactiveTransport(
+        character_interior=interior,
+        world_id="world:test",
+        actor_ref="character:zhizhi",
+        target="user:primary",
+        expression_capabilities=TEXT_ONLY_EXPRESSION_CAPABILITIES,
+    )
+    try:
+        output = await adapter.propose(_request())
+    finally:
+        await model.aclose()
+
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    assert isinstance(proposal, DecisionProposal)
+    assert proposal.timing_choice == "silent"
+    assert captured["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "character_role_proactive_contact_v1"},
+    }
+    tools = captured["tools"]
+    assert isinstance(tools, list) and len(tools) == 1
+    function = tools[0]["function"]
+    assert function["strict"] is True
+    assert set(function["parameters"]["properties"]) == {"result"}
+
+
+@pytest.mark.asyncio
 async def test_proactive_interior_technical_failure_is_not_materialized_as_silence() -> None:
     model = _Model(TimeoutError("provider unavailable"))
 
@@ -194,3 +333,11 @@ async def test_proactive_interior_technical_failure_is_not_materialized_as_silen
     # Provider failure is already technical, so CharacterInterior neither
     # substitutes another author nor spends the structural-correction pass.
     assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_proactive_preserves_missing_role_faculty_as_exact_technical_failure() -> None:
+    with pytest.raises(ValidationTechnicalFailure) as raised:
+        await _adapter_without_role().propose(_request())
+
+    assert raised.value.failure_code == "role_faculty_unavailable"

@@ -1,6 +1,6 @@
 # ADR 0017: Selective Proof-Carrying Source Review
 
-- Status: Accepted as staging opt-in; production default and qualification incomplete
+- Status: Accepted as the only production visible-chat route; qualification incomplete
 - Date: 2026-08-10
 
 ## Context
@@ -62,6 +62,14 @@ It uses these routes in order:
    Character author one bounded correction with the exact failure; there is no
    implicit GPT/Qwen/full-V7 availability fallback and no local fallback prose.
 
+The production setting now defaults to this topology. An explicit false value
+fails startup, and an auto/provider-backed composition rejects an injected
+legacy full-V7 reviewer. The OpenAI/OpenRouter `SourceReviewAuthority` remains
+available only to the separately owned Life source-review runtime; it is not a
+reserve, recovery, Inventory, or report-relative lane for visible chat. The
+simulator, QQ host, HTTP host, and loopback capture all inherit this same
+composition boundary.
+
 An Inventory-only positive can never authorize visible prose.  Coverage may
 authorize the source-free case only when it returns an exhaustive typed verdict
 for every independently inventoried coordinate.  Declared `WorldClaim`
@@ -91,12 +99,14 @@ transport but deliberately does not establish independent review.
 
 ## Qualification
 
-Before enabling the selective route by default, retain exact evidence for the
-installed schema digests and run the fixed adversarial corpus through the
-actual endpoint.  Report first-attempt schema validity, false support, false
-rejection, p50/p95/p99 latency, tokens, CNY cost, timeout/429/5xx rate, restart
-reuse, and cold replay.  At least 100 calls are required for route selection;
-this sample is not statistical proof of the 99.9% design target.
+The route is enabled by default to remove a measured pathological production
+topology; that choice is not a release-qualification claim. Retain exact
+evidence for the installed schema digests and run the fixed adversarial corpus
+through the actual endpoint. Report first-attempt schema validity, false
+support, false rejection, p50/p95/p99 latency, tokens, CNY cost,
+timeout/429/5xx rate, restart reuse, and cold replay. At least 100 calls are
+required for route selection; this sample is not statistical proof of the
+99.9% design target.
 
 The 2-3 second and CNY 0.03 targets are met only when measured on an isolated
 staging path that includes author, review, acceptance, dispatch, and first
@@ -107,6 +117,16 @@ remain manual release gates.
 The first slice performs a fresh guard call for each newly authored candidate;
 restart-stable verdict reuse remains an explicit cost optimization and
 qualification item rather than an implemented capability claim.
+
+A 2026-08-11 staging regression demonstrated why the old topology may not be
+reused: one accepted inbound took 18.212 seconds and recorded at least CNY
+0.1129. It paid for one cancelled Character call, one corrective Character
+call, full V7 review, report-relative adjudication, and a Qwen wire retry. The
+immediate wire cause was a strict-tool branch permitting
+`media_source_refs=null`; the canonical decoder correctly rejected it. The
+production tool contract now requires non-null `media_source_refs` and
+`world_claims` arrays in both atomic and stream heads, eliminating that
+avoidable correction without deciding media semantics for the role.
 
 The retained 2026-08-10 route-selection audit for schema digest
 `347069477180408b262fd4ac7da64341c07b8456d18ad6bd6ab7dee7f9ea78e7`

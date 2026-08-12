@@ -20,6 +20,13 @@ from .recall_audit import (
 )
 from .recall_index import RecallCursor
 from .schema_core import FrozenModel
+from .validation_failure_codes import (
+    VALIDATION_MAIN_EXCEPTION_FAILURE_CODES,
+    VALIDATION_MAIN_TIMEOUT_FAILURE_CODES,
+    physical_provider_failure_code_is_content_free,
+    provider_subcall_failure_code_is_content_free,
+    sanitize_physical_provider_failure_code,
+)
 
 
 _HASH = r"^[0-9a-f]{64}$"
@@ -65,6 +72,67 @@ class RecordedModelUsage(FrozenModel):
         material = self.model_dump(mode="json", exclude={"provider_usage_hash"})
         if self.provider_usage_hash != sha256(canonical_json(material)):
             raise ValueError("provider usage hash is not bound to metering fields")
+        return self
+
+
+class RecordedPhysicalProviderInvocationAudit(FrozenModel):
+    """Exact physical terminal expected by one failed main ModelResult."""
+
+    purpose: Literal["expression_unit_stream"] = "expression_unit_stream"
+    model_call_id: str = Field(min_length=1, max_length=256)
+    request_hash: str = Field(pattern=_HASH)
+    model_id: str = Field(min_length=1, max_length=256)
+    model_version: str = Field(min_length=1, max_length=256)
+    outcome: Literal["completed", "cancelled", "unresolved"]
+    failure_code: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        exclude_if=lambda value: value is None,
+    )
+    response_hash: str | None = Field(
+        default=None,
+        pattern=_HASH,
+        exclude_if=lambda value: value is None,
+    )
+    usage_status: Literal["provider_reported", "unresolved", "cancelled"]
+    usage: RecordedModelUsage | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    semantic_model_call_ids: tuple[str, ...] = Field(min_length=1, max_length=2)
+
+    @model_validator(mode="after")
+    def terminal_evidence_is_truthful(self) -> Self:
+        if (
+            self.model_call_id in self.semantic_model_call_ids
+            or len(set(self.semantic_model_call_ids)) != len(self.semantic_model_call_ids)
+        ):
+            raise ValueError("physical provider semantic lineage is invalid")
+        completed = self.outcome == "completed"
+        if completed != (self.response_hash is not None):
+            raise ValueError("completed physical provider call must bind response bytes")
+        if completed and self.failure_code is not None:
+            raise ValueError("completed physical provider call cannot carry a failure code")
+        if not completed and self.failure_code is None:
+            raise ValueError("incomplete physical provider call requires a failure code")
+        if self.failure_code != sanitize_physical_provider_failure_code(
+            self.failure_code,
+            outcome=self.outcome,
+        ):
+            raise ValueError("physical provider failure code is not content-free")
+        if (self.usage_status == "provider_reported") != (self.usage is not None):
+            raise ValueError("reported physical usage must carry provider provenance")
+        if self.outcome == "cancelled" and self.usage_status not in {
+            "cancelled",
+            "provider_reported",
+        }:
+            raise ValueError("cancelled physical call has an invalid usage state")
+        if self.outcome == "unresolved" and self.usage_status not in {
+            "unresolved",
+            "provider_reported",
+        }:
+            raise ValueError("unresolved physical call has an invalid usage state")
         return self
 
 
@@ -362,6 +430,11 @@ class RecordedModelResultAudit(FrozenModel):
         max_length=4,
         exclude_if=lambda value: not value,
     )
+    physical_provider_audits: tuple[RecordedPhysicalProviderInvocationAudit, ...] = Field(
+        default=(),
+        max_length=1,
+        exclude_if=lambda value: not value,
+    )
 
     @model_validator(mode="after")
     def output_and_failure_are_consistent(self) -> Self:
@@ -388,8 +461,26 @@ class RecordedModelResultAudit(FrozenModel):
                 raise ValueError("physical provider terminal has an invalid outcome")
             if (self.usage_status == "provider_reported") != (self.usage is not None):
                 raise ValueError("physical provider usage status is not truthful")
+            if not physical_provider_failure_code_is_content_free(
+                self.failure_code,
+                outcome=self.outcome or "",
+            ):
+                raise ValueError("physical provider result failure code is not content-free")
         elif self.usage_status is not None:
             raise ValueError("usage status is reserved for physical provider terminals")
+        if self.physical_provider_audits:
+            terminal = self.physical_provider_audits[0]
+            if (
+                self.parent_model_call_id is not None
+                or self.semantic_stream_part is not None
+                or self.status not in {"main_timeout", "main_exception"}
+                or self.outcome not in {"timeout", "exception"}
+                or self.model_call_id == terminal.model_call_id
+                or self.model_call_id in terminal.semantic_model_call_ids
+            ):
+                raise ValueError(
+                    "embedded physical terminal requires an independent failed main result"
+                )
         encoded = canonical_json(
             {"model_call_id": self.model_call_id, "response_hash": self.response_hash}
         )
@@ -457,8 +548,7 @@ class RecordedModelResultAudit(FrozenModel):
                 "main_timeout",
                 "primary_timeout",
                 "corrective_timeout",
-                "source_review_timeout",
-                "authored_subcall_timeout",
+                *VALIDATION_MAIN_TIMEOUT_FAILURE_CODES,
             },
             "main_invalid": {
                 "main_invalid_output",
@@ -468,15 +558,8 @@ class RecordedModelResultAudit(FrozenModel):
             "main_exception": {
                 "main_exception",
                 "primary_exception",
-                "source_review_exception",
-                "authored_subcall_exception",
-                "recall_choice_reselection_invalid",
-                "authored_expression_reselection_invalid",
-                "proactive_claim_binding_invalid",
-                "affect_target_reselection_invalid",
+                *VALIDATION_MAIN_EXCEPTION_FAILURE_CODES,
                 "recall_exception",
-                "inventory_invalid",
-                "coverage_invalid",
                 "stream_superseded_by_newer_input",
                 "stream_tail_cancelled",
                 "stream_tail_unresolved",
@@ -485,8 +568,7 @@ class RecordedModelResultAudit(FrozenModel):
                 "main_timeout",
                 "primary_timeout",
                 "corrective_timeout",
-                "source_review_timeout",
-                "authored_subcall_timeout",
+                *VALIDATION_MAIN_TIMEOUT_FAILURE_CODES,
             },
             "main_invalid_recovered": {
                 "main_invalid_output",
@@ -496,40 +578,15 @@ class RecordedModelResultAudit(FrozenModel):
             "main_exception_recovered": {
                 "main_exception",
                 "primary_exception",
-                "source_review_exception",
-                "authored_subcall_exception",
-                "recall_choice_reselection_invalid",
-                "authored_expression_reselection_invalid",
-                "proactive_claim_binding_invalid",
-                "affect_target_reselection_invalid",
-                "inventory_invalid",
-                "coverage_invalid",
+                *VALIDATION_MAIN_EXCEPTION_FAILURE_CODES,
             },
         }.get(self.status)
-        provider_failure_type, separator, provider_failure_detail = (
-            self.failure_code or ""
-        ).partition(":")
         typed_provider_subcall_failure = (
             self.route.router_version == "provider-subcall-audit.1"
             and self.outcome in {"timeout", "exception"}
-            and (
-                (
-                    self.outcome == "timeout"
-                    and self.failure_code in {"provider_timeout", "caller_cancelled"}
-                )
-                or (
-                    self.outcome == "exception"
-                    and provider_failure_type.replace("_", "").isalnum()
-                    and (
-                        (separator == "" and provider_failure_detail == "")
-                        or (
-                            separator == ":"
-                            and provider_failure_detail.startswith("http_")
-                            and provider_failure_detail.removeprefix("http_").isdigit()
-                            and 100 <= int(provider_failure_detail.removeprefix("http_")) <= 599
-                        )
-                    )
-                )
+            and provider_subcall_failure_code_is_content_free(
+                self.failure_code,
+                outcome=self.outcome,
             )
         )
         typed_character_interior_failure = (
@@ -546,7 +603,11 @@ class RecordedModelResultAudit(FrozenModel):
                     "returned candidate audit requires output without semantic acceptance"
                 )
         elif self.status in {"main_timeout", "main_exception"}:
-            if has_output or (
+            terminal_validation_candidate = self.failure_code in {
+                *VALIDATION_MAIN_TIMEOUT_FAILURE_CODES,
+                *VALIDATION_MAIN_EXCEPTION_FAILURE_CODES,
+            }
+            if (has_output and not terminal_validation_candidate) or (
                 self.failure_code not in (required or set())
                 and not typed_provider_subcall_failure
                 and not typed_character_interior_failure
@@ -586,6 +647,74 @@ def sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def recorded_physical_provider_audit(value: object) -> RecordedPhysicalProviderInvocationAudit:
+    """Revalidate one process-local physical terminal into durable safe fields."""
+
+    return RecordedPhysicalProviderInvocationAudit(
+        purpose=getattr(value, "purpose"),
+        model_call_id=getattr(value, "model_call_id"),
+        request_hash=getattr(value, "request_hash"),
+        model_id=getattr(value, "model_id"),
+        model_version=getattr(value, "model_version"),
+        outcome=getattr(value, "outcome"),
+        failure_code=sanitize_physical_provider_failure_code(
+            getattr(value, "failure_code"),
+            outcome=getattr(value, "outcome"),
+        ),
+        response_hash=getattr(value, "response_hash"),
+        usage_status=getattr(value, "usage_status"),
+        usage=getattr(value, "usage"),
+        semantic_model_call_ids=getattr(value, "semantic_model_call_ids"),
+    )
+
+
+def physical_provider_terminal_matches(
+    *,
+    expected: RecordedPhysicalProviderInvocationAudit,
+    recorded: RecordedModelResultAudit,
+    attempt_id: str,
+) -> bool:
+    """Compare an expanded physical row with its failed-main embedded binding."""
+
+    completed = expected.outcome == "completed"
+    expected_result = RecordedModelResultAudit(
+        model_call_id=expected.model_call_id,
+        model_result_ref=(
+            "model-result:"
+            + sha256(
+                canonical_json(
+                    {
+                        "model_call_id": expected.model_call_id,
+                        "response_hash": expected.response_hash,
+                    }
+                )
+            )
+        ),
+        attempt_id=attempt_id,
+        route=RecordedModelRoute(
+            tier="flash",
+            reason_code=f"transport.{expected.purpose}.{expected.outcome}"[:128],
+            router_version="physical-provider-audit.1",
+        ),
+        model_id=expected.model_id if completed else None,
+        model_version=expected.model_version if completed else None,
+        attempted_model_id=None if completed else expected.model_id,
+        attempted_model_version=None if completed else expected.model_version,
+        request_hash=expected.request_hash,
+        response_hash=expected.response_hash,
+        status=f"provider_{expected.outcome}",  # type: ignore[arg-type]
+        failure_code=expected.failure_code,
+        slot="primary",
+        outcome=expected.outcome,
+        input_tokens=expected.usage.input_tokens if expected.usage is not None else None,
+        output_tokens=expected.usage.output_tokens if expected.usage is not None else None,
+        usage=expected.usage,
+        usage_status=expected.usage_status,
+        semantic_model_call_ids=expected.semantic_model_call_ids,
+    )
+    return recorded == expected_result
+
+
 def model_audit_json(audit: RecordedModelResultAudit) -> str:
     """Canonical bytes while preserving v1 audit bytes exactly.
 
@@ -595,6 +724,21 @@ def model_audit_json(audit: RecordedModelResultAudit) -> str:
     """
 
     payload = audit.model_dump(mode="json")
+    physical_provider_audits = (
+        tuple(
+            recorded_physical_provider_audit(item)
+            for item in getattr(audit, "physical_provider_audits", ())
+        )
+        if getattr(audit, "semantic_stream_part", None) is None
+        and getattr(audit, "parent_model_call_id", None) is None
+        and getattr(audit, "status", None) in {"main_timeout", "main_exception"}
+        and getattr(audit, "outcome", None) in {"timeout", "exception"}
+        else ()
+    )
+    if physical_provider_audits:
+        payload["physical_provider_audits"] = [
+            item.model_dump(mode="json") for item in physical_provider_audits
+        ]
     if audit.usage is None:
         payload.pop("usage", None)
     if audit.slot is None:
@@ -683,6 +827,7 @@ class ModelResultRecordedPayload(FrozenModel):
         "model-result-audit.5",
         "model-result-audit.6",
         "model-result-audit.7",
+        "model-result-audit.8",
     ] = "model-result-audit.1"
     model_result_ref: str = Field(min_length=1, max_length=256)
     deliberation_result_id: str = Field(min_length=1, max_length=256)
@@ -726,6 +871,12 @@ class ModelResultRecordedPayload(FrozenModel):
             raise ValueError("usage provenance requires model-result-audit.2")
         if self.audit_contract == "model-result-audit.3" and audit.slot is None:
             raise ValueError("hedged model result requires slot outcome metadata")
+        if (self.audit_contract == "model-result-audit.8") != bool(
+            audit.physical_provider_audits
+        ):
+            raise ValueError(
+                "independent physical terminal binding requires model-result-audit.8"
+            )
         if (
             self.audit_contract
             not in {
@@ -734,6 +885,7 @@ class ModelResultRecordedPayload(FrozenModel):
                 "model-result-audit.5",
                 "model-result-audit.6",
                 "model-result-audit.7",
+                "model-result-audit.8",
             }
             and audit.slot is not None
         ):
@@ -759,12 +911,18 @@ class ModelResultRecordedPayload(FrozenModel):
                 "model-result-audit.5",
                 "model-result-audit.6",
                 "model-result-audit.7",
+                "model-result-audit.8",
             }
             and has_recall_audit
         ):
             raise ValueError("recall trace requires model-result-audit.4")
-        if self.audit_contract not in {"model-result-audit.6", "model-result-audit.7"} and (
-            (self.audit_contract == "model-result-audit.5") != bool(audit.presented_prefetch_traces)
+        if self.audit_contract not in {
+            "model-result-audit.6",
+            "model-result-audit.7",
+            "model-result-audit.8",
+        } and (
+            (self.audit_contract == "model-result-audit.5")
+            != bool(audit.presented_prefetch_traces)
         ):
             raise ValueError("prefetch presentation sequence requires model-result-audit.5")
         is_stream_audit = audit.semantic_stream_part is not None or audit.status.startswith(
@@ -777,9 +935,14 @@ class ModelResultRecordedPayload(FrozenModel):
             and is_stream_audit
         ):
             raise ValueError("stream lineage requires model-result-audit.6")
-        if (self.audit_contract == "model-result-audit.7") != (
-            audit.character_interior_lineage is not None
+        if self.audit_contract == "model-result-audit.7" and (
+            audit.character_interior_lineage is None
         ):
+            raise ValueError("CharacterInterior lineage requires model-result-audit.7")
+        if self.audit_contract not in {
+            "model-result-audit.7",
+            "model-result-audit.8",
+        } and audit.character_interior_lineage is not None:
             raise ValueError("CharacterInterior lineage requires model-result-audit.7")
         if (
             audit.route.router_version == "life-development-router.2"
@@ -911,8 +1074,7 @@ def validate_recorded_attempt_lineage(
                         "main_timeout",
                         "primary_timeout",
                         "corrective_timeout",
-                        "source_review_timeout",
-                        "authored_subcall_timeout",
+                        *VALIDATION_MAIN_TIMEOUT_FAILURE_CODES,
                     },
                     "main_timeout_recovered",
                 ),
@@ -924,14 +1086,7 @@ def validate_recorded_attempt_lineage(
                     {
                         "main_exception",
                         "primary_exception",
-                        "source_review_exception",
-                        "authored_subcall_exception",
-                        "recall_choice_reselection_invalid",
-                        "authored_expression_reselection_invalid",
-                        "proactive_claim_binding_invalid",
-                        "affect_target_reselection_invalid",
-                        "inventory_invalid",
-                        "coverage_invalid",
+                        *VALIDATION_MAIN_EXCEPTION_FAILURE_CODES,
                     },
                     "main_exception_recovered",
                 ),
@@ -1026,12 +1181,15 @@ __all__ = [
     "LifeDevelopmentRecallResultRecordedPayload",
     "ModelResultAuditProjection",
     "RecordedCharacterInteriorTurnLineage",
+    "RecordedPhysicalProviderInvocationAudit",
     "RecordedModelUsage",
     "ModelResultRecordedPayload",
     "ProposalAuditProjection",
     "ProposalRecordedV2Payload",
     "canonical_json",
     "model_audit_json",
+    "physical_provider_terminal_matches",
+    "recorded_physical_provider_audit",
     "sha256",
     "validate_recorded_attempt_lineage",
 ]

@@ -283,14 +283,12 @@ def create_qq_c2c_onebot_app(
             "supports_strict_output_contract",
             None,
         )
-        if not callable(strict_checker) or not all(
-            strict_checker(contract) is True
-            for contract in (
-                "report-relative-entailment-adjudication.3",
-                "source-closure-review.7",
-            )
+        if not callable(strict_checker) or not strict_checker(
+            "visible-beat-source-verdict.1"
         ):
-            raise ValueError("test source reviewer requires exact RR.3/V7 qualification")
+            raise ValueError(
+                "test source reviewer requires the compact visible-Beat contract"
+            )
     if (
         not use_fake_model
         and _test_only_model is None

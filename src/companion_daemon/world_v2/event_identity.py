@@ -11,6 +11,12 @@ from .typed_proposal_families import family_for_mutation, family_for_record
 from .appraisal_acceptance_manifest import APPRAISAL_ACCEPTANCE_MANIFEST_VERSION
 from .affect_acceptance_manifest import AFFECT_ACCEPTANCE_MANIFEST_VERSION
 from .relationship_acceptance_manifest import RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION
+from .relationship_commitment_acceptance_manifest import (
+    RELATIONSHIP_COMMITMENT_ACCEPTANCE_MANIFEST_VERSION,
+)
+from .interaction_act_acceptance_manifest import (
+    INTERACTION_ACT_ACCEPTANCE_MANIFEST_VERSION,
+)
 from .relationship_adjustment_acceptance_manifest import (
     RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION,
 )
@@ -78,6 +84,8 @@ def _life_identity_components(
             APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
             AFFECT_ACCEPTANCE_MANIFEST_VERSION,
             RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION,
+            RELATIONSHIP_COMMITMENT_ACCEPTANCE_MANIFEST_VERSION,
+            INTERACTION_ACT_ACCEPTANCE_MANIFEST_VERSION,
             RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION,
             OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
             INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
@@ -203,6 +211,13 @@ def _life_identity_components(
         return world_id, payload.get("attempt_id")
     if event_type == "MediaSelectionProposalRecorded":
         return world_id, payload.get("proposal_id")
+    if event_type == "InteractionActProposalRecorded":
+        return (
+            world_id,
+            payload.get("proposal_id"),
+            payload.get("change_id"),
+            payload.get("mutation_payload_hash"),
+        )
     if event_type == "MediaOpportunityFrozen":
         return world_id, _nested(payload, "opportunity", "opportunity_id")
     if event_type == "MediaPlanRecorded":
@@ -458,6 +473,28 @@ def _life_identity_components(
         )
     if (
         event_type == "AcceptanceRecorded"
+        and payload.get("manifest_version")
+        == RELATIONSHIP_COMMITMENT_ACCEPTANCE_MANIFEST_VERSION
+    ):
+        return (
+            world_id,
+            payload.get("manifest_version"),
+            payload.get("acceptance_id"),
+            payload.get("manifest_hash"),
+        )
+    if (
+        event_type == "AcceptanceRecorded"
+        and payload.get("manifest_version")
+        == INTERACTION_ACT_ACCEPTANCE_MANIFEST_VERSION
+    ):
+        return (
+            world_id,
+            payload.get("manifest_version"),
+            payload.get("acceptance_id"),
+            payload.get("manifest_hash"),
+        )
+    if (
+        event_type == "AcceptanceRecorded"
         and payload.get("manifest_version") == RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION
     ):
         return (
@@ -564,6 +601,13 @@ def _life_identity_components(
             payload.get("fact_id"),
             payload.get("transition_id"),
             payload.get("materialized_change_hash"),
+        )
+    if event_type == "InteractionActTransitionAccepted":
+        return (
+            world_id,
+            payload.get("proposal_id"),
+            payload.get("change_id"),
+            payload.get("mutation_payload_hash"),
         )
     if (
         event_type == "AcceptanceRecorded"

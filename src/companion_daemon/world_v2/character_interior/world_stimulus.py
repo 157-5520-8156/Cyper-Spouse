@@ -1790,13 +1790,37 @@ class CharacterInteriorWorldStimulusRuntime:
         # teaching the generic relationship reducer a second rebase bypass.
         relationship_status = "no_change"
         if self._relationship_settlement is not None:
-            relationship = await self._relationship_settlement.process(
-                world_id=self._ledger.world_id,
-                audit_cursor=audit_cursor,
-                current_cursor=_cursor(await self._project()),
-                proposal_id=audit.proposal_id,
-                source_event=authority_source_event,
-            )
+            try:
+                relationship = await self._relationship_settlement.process(
+                    world_id=self._ledger.world_id,
+                    audit_cursor=audit_cursor,
+                    current_cursor=_cursor(await self._project()),
+                    proposal_id=audit.proposal_id,
+                    source_event=authority_source_event,
+                )
+            except ConcurrencyConflict:
+                # CAS contention is an ordinary retry signal owned by the
+                # surrounding world runtime, not a semantic/technical model
+                # failure and therefore must not create a failure audit.
+                raise
+            except ValueError as exc:
+                # A compiler or acceptance failure is durable technical work.
+                # Do not crash the whole scheduler or let a claimed trigger
+                # silently spin. The model-result failure code has a compact
+                # identifier contract, so the compiler's dotted diagnostic
+                # stays in sanitized logs instead of breaking failure audit.
+                _LOG.warning(
+                    "world stimulus relationship settlement failed; "
+                    "keeping trigger retryable type=%s compiler_code=%s",
+                    type(exc).__name__,
+                    getattr(exc, "code", "unavailable"),
+                )
+                await self._record_technical_failure(
+                    process=active,
+                    source_event=source_event,
+                    failure_code="relationship_settlement_failure",
+                )
+                return result(work_status="technical_failure")
             relationship_status = getattr(relationship, "status", "")
             if relationship_status not in {"no_change", "accepted"}:
                 # The exact source trigger stays claimed/retryable. Contention

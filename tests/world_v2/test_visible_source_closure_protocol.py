@@ -6,11 +6,16 @@ import httpx
 import pytest
 
 from companion_daemon.llm import DeepSeekChatModel
+from companion_daemon.world_v2.character_interior.inbound_wire import (
+    _metered_review_call,
+    _ProviderSubcallAuditCapture,
+)
 from companion_daemon.world_v2.structured_source_review_model import (
     StrictOutputCapabilityEvidence,
 )
 from companion_daemon.world_v2.visible_source_closure_protocol import (
     VISIBLE_SOURCE_CLOSURE_CONTRACT,
+    VisibleSourceClosureWireFailure,
     parse_visible_source_closure,
     visible_source_closure_messages,
     visible_source_closure_schema,
@@ -90,7 +95,7 @@ def test_visible_source_verdict_request_carries_one_compact_evidence_table() -> 
     assert "我有点担心你，你现在发烧了" in messages[0]["content"]
 
 
-def test_visible_source_verdict_requires_one_ordered_decision_per_beat() -> None:
+def test_visible_source_verdict_requires_one_complete_unique_decision_per_beat() -> None:
     raw = _wire(
         _decision(
             beat_index=1,
@@ -99,12 +104,75 @@ def test_visible_source_verdict_requires_one_ordered_decision_per_beat() -> None
         )
     )
 
-    with pytest.raises(ValueError, match="each visible Beat exactly once"):
+    with pytest.raises(
+        VisibleSourceClosureWireFailure,
+        match="each visible Beat exactly once",
+    ) as raised:
         parse_visible_source_closure(
             raw,
             visible_beats=("第一条", "第二条"),
             source_ref_kinds=(),
         )
+
+    assert raised.value.code == "beat_coverage_invalid"
+    assert raised.value.beat_index is None
+    assert raised.value.field == "decisions"
+
+
+def test_visible_source_verdict_canonicalizes_complete_unique_beat_order() -> None:
+    proof = parse_visible_source_closure(
+        _wire(
+            _decision(
+                beat_index=1,
+                verdict="source_free",
+                role="commitment",
+            ),
+            _decision(
+                beat_index=0,
+                verdict="source_free",
+                role="private_state",
+            ),
+        ),
+        visible_beats=("我现在有点担心。", "这件事我会记着。"),
+        source_ref_kinds=(),
+    )
+
+    assert [segment.locator.beat_index for segment in proof.segments] == [0, 1]
+    assert [segment.locator.text for segment in proof.segments] == [
+        "我现在有点担心。",
+        "这件事我会记着。",
+    ]
+
+
+def test_visible_source_verdict_schema_failure_has_content_free_coordinate() -> None:
+    raw = json.dumps(
+        {
+            "contract": "visible-beat-source-verdict.1",
+            "decisions": [
+                {
+                    "beat_index": 0,
+                    "verdict": "source_free",
+                    "semantic_role": "private_state",
+                    "source_ref_indexes": [],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(VisibleSourceClosureWireFailure) as raised:
+        parse_visible_source_closure(
+            raw,
+            visible_beats=("模型正文不应出现在修复坐标里。",),
+            source_ref_kinds=(),
+        )
+
+    assert raised.value.code == "schema_invalid"
+    assert raised.value.beat_index == 0
+    assert raised.value.field == "decisions.0.subject_role"
+    assert "模型正文" not in json.dumps(
+        raised.value.correction_coordinate(),
+        ensure_ascii=False,
+    )
 
 
 def test_visible_source_verdict_derives_whole_beat_locator_host_side() -> None:
@@ -226,13 +294,20 @@ def test_visible_source_verdict_rejects_cross_actor_source_binding() -> None:
         )
     )
 
-    with pytest.raises(ValueError, match="source actor does not match"):
+    with pytest.raises(
+        VisibleSourceClosureWireFailure,
+        match="source actor does not match",
+    ) as raised:
         parse_visible_source_closure(
             raw,
             visible_beats=("我今天淋雨了。",),
             source_ref_kinds=("current_counterpart_report",),
             source_ref_subject_roles=("counterpart",),
         )
+
+    assert raised.value.code == "subject_binding_invalid"
+    assert raised.value.beat_index == 0
+    assert raised.value.field == "decisions.0.subject_role"
 
 
 @pytest.mark.parametrize("subject_role", ["general", "none"])
@@ -393,3 +468,86 @@ async def test_visible_source_review_model_forces_one_tool_without_response_form
     assert len(functions) == 1
     assert functions[0]["strict"] is True
     assert functions[0]["parameters"] == visible_source_closure_schema()
+
+
+@pytest.mark.asyncio
+async def test_compact_guard_emits_the_exact_durable_request_identity() -> None:
+    captured_header: list[str | None] = []
+    result = _wire(_decision(verdict="source_free", role="private_state"))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured_header.append(
+            request.headers.get("X-Girl-Agent-Request-Identity")
+        )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call.identity",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "visible_beat_source_verdict_v1",
+                                        "arguments": result,
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 10},
+            },
+        )
+
+    leaf = DeepSeekChatModel(
+        "key",
+        "http://127.0.0.1:19876",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    leaf._test_only_capture_exact_request_identity = True
+    evidence = StrictOutputCapabilityEvidence.verified(
+        evidence_source="test",
+        provider="deepseek",
+        model="deepseek-v4-flash",
+        contracts=(VISIBLE_SOURCE_CLOSURE_CONTRACT,),
+        observed_at="2026-08-10",
+        contract_schema_digests=(
+            (VISIBLE_SOURCE_CLOSURE_CONTRACT, visible_source_verdict_schema_digest()),
+        ),
+    )
+    model = VisibleSourceReviewModel(
+        transport_model=leaf,
+        strict_output_capability_evidence=evidence,
+    )
+    messages = visible_source_closure_messages(
+        visible_beats=("我有点担心你。",),
+        world_claims=(),
+        source_references=(),
+    )
+    try:
+        with _ProviderSubcallAuditCapture(
+            owner_model_call_id="model-call:author",
+            owner_request_hash="a" * 64,
+            owner_raw="{}",
+            owner_model_id="deepseek-v4-flash",
+            owner_model_version="character-interior.1",
+            purpose="character_author",
+        ) as audit_capture:
+            await _metered_review_call(
+                model,
+                messages,
+                temperature=0.0,
+                audit_purpose="visible_source_closure_proof_v1",
+            )
+            attempts = audit_capture.finalize()
+    finally:
+        await model.aclose()
+
+    assert len(attempts) == 1
+    assert captured_header == [attempts[0].request_hash]

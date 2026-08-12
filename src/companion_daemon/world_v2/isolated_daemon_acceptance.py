@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 from typing import Literal, Mapping
+from urllib.parse import urlsplit
 
 
 ModelMode = Literal["fake", "loopback-stub", "real-provider"]
@@ -39,23 +40,15 @@ _QUALIFIED_INVENTORY_RELEASE_EVIDENCE = {
         "openai:api.openai.com:gpt-5.4-mini",
     ),
 }
-_FULL_SOURCE_REVIEW_CONTRACT = "source-closure-review.7"
-_FULL_SOURCE_REVIEW_SCHEMA_DIGEST = (
-    "99e95d9e68eb7648f8aa282d675ce0f"
-    "bbf293078f1d6640031d693d23ee48beb"
+_VISIBLE_SOURCE_GUARD_CONTRACT = "visible-beat-source-verdict.1"
+_VISIBLE_SOURCE_GUARD_SCHEMA_DIGEST = (
+    "347069477180408b262fd4ac7da64341c"
+    "07b8456d18ad6bd6ab7dee7f9ea78e7"
 )
-_QUALIFIED_FULL_REVIEW_RELEASES = {
-    ("openrouter", "qwen/qwen-plus"): (
-        "source-review-openrouter-qwen-qwen-plus-20260801.active-v7-rra3.2",
-        13,
-        13,
-    ),
-    ("openai", "gpt-4.1-mini"): (
-        "source-review-openai-gpt-4.1-mini-20260801.active-v7-rra3.1",
-        16,
-        13,
-    ),
-}
+_VISIBLE_SOURCE_GUARD_EVIDENCE_REVISION = (
+    "visible-beat-verdict-deepseek-v4-flash-20260810.3"
+)
+_VISIBLE_SOURCE_GUARD_MODEL = "deepseek-v4-flash"
 
 
 def _mapping(value: object) -> Mapping[str, object]:
@@ -87,6 +80,26 @@ def _positive_number(value: object) -> float | None:
         return None
     normalized = float(value)
     return normalized if math.isfinite(normalized) and normalized > 0 else None
+
+
+def _exact_loopback_capture_route(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "http"
+        and parsed.hostname == "127.0.0.1"
+        and port is not None
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path in {"", "/"}
+        and not parsed.query
+        and not parsed.fragment
+    )
 
 
 def qualified_inventory_route_models(value: object) -> tuple[str, ...]:
@@ -216,11 +229,7 @@ def qualified_inventory_route_models(value: object) -> tuple[str, ...]:
 
     runtime = _mapping(health.get("inventory_runtime"))
     runtime_status = runtime.get("status")
-    if runtime_status not in {
-        "qualified_unprobed",
-        "runtime_succeeded",
-        "degraded",
-    }:
+    if runtime_status not in {"qualified_unprobed", "runtime_succeeded"}:
         return ()
     lane_models = _mapping(runtime.get("lane_models"))
     lane_providers = _mapping(runtime.get("lane_providers"))
@@ -239,98 +248,58 @@ def qualified_inventory_route_models(value: object) -> tuple[str, ...]:
         "secondary",
     }:
         return ()
-    if (
-        runtime_status == "degraded"
-        and runtime.get("last_winner_protocol")
-        != "full_source_closure_review.7"
-    ):
-        return ()
     return tuple(models)
 
 
-def qualified_full_review_route_models(value: object) -> tuple[str, ...]:
-    """Return exact reviewer leaves qualified for strict full review v7."""
+def _visible_source_guard_ready(value: object) -> bool:
+    """Recognize only the retained correlated Flash contract evidence."""
 
     health = _mapping(value)
-    authority = _mapping(health.get("source_review_authority"))
-    lane_models = _mapping(authority.get("lane_models"))
-    lane_providers = _mapping(authority.get("lane_providers"))
-    lane_evidence = _mapping(authority.get("lane_capability_evidence"))
-    models: list[str] = []
-    for lane in ("primary", "secondary"):
-        model = lane_models.get(lane)
-        provider = lane_providers.get(lane)
-        evidence = _mapping(lane_evidence.get(lane))
-        if not isinstance(model, str) or not isinstance(provider, str):
-            return ()
-        expected_release = _QUALIFIED_FULL_REVIEW_RELEASES.get((provider, model))
-        contracts = _string_sequence(evidence.get("contracts"))
-        digests = _mapping(evidence.get("contract_schema_digests"))
-        if not (
-            expected_release is not None
-            and evidence.get("status") == "verified"
-            and evidence.get("evidence_source")
-            == "production_contract_audit"
-            and evidence.get("reason_code")
-            == "strict_output.endpoint_capability_verified"
-            and evidence.get("provider") == provider
-            and evidence.get("model") == model
-            and _FULL_SOURCE_REVIEW_CONTRACT in contracts
-            and digests.get(_FULL_SOURCE_REVIEW_CONTRACT)
-            == _FULL_SOURCE_REVIEW_SCHEMA_DIGEST
-            and evidence.get("evidence_revision") == expected_release[0]
-            and evidence.get("audit_sample_count") == expected_release[1]
-            and evidence.get("audit_success_count") == expected_release[2]
-            and isinstance(evidence.get("qualified_at"), str)
-            and bool(evidence.get("qualified_at"))
-        ):
-            return ()
-        models.append(model)
-    if len(set(models)) != len(models):
-        return ()
-    return tuple(models)
-
-
-def _v5_source_authority_ready(value: object) -> bool:
-    health = _mapping(value)
-    capabilities = _mapping(health.get("candidate_review_capabilities"))
-    strategy = health.get("visible_review_strategy")
-    lanes = tuple(
-        _mapping(capabilities.get(lane))
-        for lane in ("ordinary", "recovery", "reselection")
-    )
-    inventory_and_independence_ready = all(
-        lane.get("inventory_v5") is True
-        and lane.get("roles_independent") is True
-        for lane in lanes
-    )
-    if not (
-        health.get("status") == "ready"
-        and len(qualified_inventory_route_models(health)) == 2
-        and health.get("redundancy_state") == "redundant"
-        and inventory_and_independence_ready
-    ):
-        return False
-    if strategy == "inventory_v5_coverage_v5":
-        return all(lane.get("coverage_v5") is True for lane in lanes)
-    if strategy == "inventory_v5_guard_then_full_source_review":
-        return (
-            all(lane.get("coverage_v5") is False for lane in lanes)
-            and len(qualified_full_review_route_models(health)) == 2
-            and health.get("active_source_review_protocol")
-            == "inventory_v5_guard_then_full_source_review.7"
-        )
-    return False
-
-
-def _full_source_authority_ready(value: object) -> bool:
-    health = _mapping(value)
+    selective = _mapping(health.get("selective_source_review"))
+    runtime = _mapping(selective.get("runtime"))
+    strict_output = _mapping(runtime.get("strict_output"))
+    contracts = _string_sequence(strict_output.get("contracts"))
+    digests = _mapping(strict_output.get("contract_schema_digests"))
     return (
-        health.get("status") == "ready"
-        and health.get("visible_review_strategy") == "full_source_review"
-        and len(qualified_full_review_route_models(health)) == 2
-        and health.get("redundancy_state") == "redundant"
+        health.get("status") == "correlated_guard"
+        and health.get("visible_review_strategy") == "visible_beat_verdict"
+        and health.get("active_source_review_protocol")
+        == "visible_beat_source_verdict.1"
+        and health.get("source_guard_relation") == "correlated_same_checkpoint"
+        and health.get("independent_reviewer") is False
+        and health.get("reviewer_model") == _VISIBLE_SOURCE_GUARD_MODEL
+        and health.get("redundancy_state") == "single_active_correlated_lane"
+        and health.get("source_review_authority") is None
+        and selective.get("enabled") is True
+        and runtime.get("contract") == "visible-source-review-model.1"
+        and runtime.get("model") == _VISIBLE_SOURCE_GUARD_MODEL
+        and _exact_loopback_capture_route(runtime.get("route"))
+        and runtime.get("semantic_authority_relation")
+        == "correlated_same_checkpoint"
+        and runtime.get("independent_semantic_authority") is False
+        and strict_output.get("status") == "verified"
+        and strict_output.get("evidence_source")
+        == "isolated_correlated_checkpoint_contract_audit"
+        and strict_output.get("reason_code")
+        == "strict_output.endpoint_capability_verified"
+        and strict_output.get("provider") == "deepseek"
+        and strict_output.get("model") == _VISIBLE_SOURCE_GUARD_MODEL
+        and contracts == (_VISIBLE_SOURCE_GUARD_CONTRACT,)
+        and strict_output.get("observed_at") == "2026-08-10"
+        and strict_output.get("qualified_at") == "2026-08-10"
+        and strict_output.get("evidence_revision")
+        == _VISIBLE_SOURCE_GUARD_EVIDENCE_REVISION
+        and _integer(strict_output.get("audit_sample_count")) == 100
+        and _integer(strict_output.get("audit_success_count")) == 100
+        and digests.get(_VISIBLE_SOURCE_GUARD_CONTRACT)
+        == _VISIBLE_SOURCE_GUARD_SCHEMA_DIGEST
     )
+
+
+def qualified_visible_source_guard_models(value: object) -> tuple[str, ...]:
+    """Return the correlated model only for the exact retained guard evidence."""
+
+    return (_VISIBLE_SOURCE_GUARD_MODEL,) if _visible_source_guard_ready(value) else ()
 
 
 def evaluate_deterministic_invariants(
@@ -415,21 +384,65 @@ def evaluate_deterministic_invariants(
             failures.append("source_authority.invalid_model_mode")
         first_health = source_authority.get("first_start_health")
         restart_health = source_authority.get("after_restart_health")
+        compact_acceptance_contract = (
+            source_authority.get("contract")
+            == "isolated-source-authority-acceptance.3"
+            and source_authority.get("qualification_scope")
+            == "isolated_test_only_correlated_capture"
+            and source_authority.get("production_qualification_claimed") is False
+        )
         if not (
-            _v5_source_authority_ready(first_health)
-            or _full_source_authority_ready(first_health)
+            compact_acceptance_contract
+            and _visible_source_guard_ready(first_health)
         ):
             failures.append("source_authority.first_start_not_qualified")
         if not (
-            _v5_source_authority_ready(restart_health)
-            or _full_source_authority_ready(restart_health)
+            compact_acceptance_contract
+            and _visible_source_guard_ready(restart_health)
         ):
             failures.append("source_authority.restart_not_qualified")
         terminal_source = _mapping(
             source_authority.get("terminal_candidate_source_authority")
         )
-        if terminal_source.get("all_source_review_eligible_terminal_candidates_proven") is not True:
+        compact_route = (
+            compact_acceptance_contract
+            and _visible_source_guard_ready(first_health)
+            and _visible_source_guard_ready(restart_health)
+        )
+        if compact_route and terminal_source.get("proof_contract") != (
+            _VISIBLE_SOURCE_GUARD_CONTRACT
+        ):
             failures.append("source_authority.terminal_source_review_not_proven")
+        eligible_count = _integer(
+            terminal_source.get(
+                "source_review_eligible_terminal_candidate_count"
+            )
+        )
+        proven_count = _integer(
+            terminal_source.get(
+                "source_authority_proven_terminal_candidate_count"
+            )
+        )
+        compact_terminal_proven = (
+            eligible_count is not None
+            and eligible_count > 0
+            and proven_count == eligible_count
+            and terminal_source.get(
+                "all_source_review_eligible_terminal_candidates_proven"
+            )
+            is True
+        )
+        terminal_not_proven = (
+            not compact_terminal_proven
+            if compact_route
+            else terminal_source.get(
+                "all_source_review_eligible_terminal_candidates_proven"
+            )
+            is not True
+        )
+        if terminal_not_proven:
+            if "source_authority.terminal_source_review_not_proven" not in failures:
+                failures.append("source_authority.terminal_source_review_not_proven")
         coverage = _mapping(source_authority.get("coverage_assurance"))
         if (
             coverage.get("proof_source") != "private_self_expression_audit"
@@ -464,6 +477,6 @@ __all__ = [
     "ModelMode",
     "deterministic_acceptance_exit_code",
     "evaluate_deterministic_invariants",
-    "qualified_full_review_route_models",
     "qualified_inventory_route_models",
+    "qualified_visible_source_guard_models",
 ]

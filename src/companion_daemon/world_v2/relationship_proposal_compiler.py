@@ -1,9 +1,9 @@
-"""Compile one audited relationship-signal suggestion into typed authority.
+"""Compile audited relationship choices into typed relationship authority.
 
-The model never writes relationship state.  It suggests one bounded signal in
-a generic, replayable decision audit; this compiler re-proves the accepted
-appraisal and claimed relationship trigger, then derives every authority id
-and the only possible ``RelationshipSignalAccepted`` candidate.
+The model never writes relationship state.  It may author a bounded signal or
+an explicit visible stage commitment in one replayable decision audit.  This
+compiler re-proves the source and derives the mechanical authority candidate;
+it never infers either choice from dialogue text.
 """
 
 from __future__ import annotations
@@ -17,8 +17,21 @@ from .character_interior.relationship_context import (
     relationship_transition_subject_refs,
 )
 from .event_identity import domain_idempotency_key
+from .interaction_act_identity import interaction_act_overlapping_occurrence_count
 from .ledger import LedgerPort
-from .relationship_events import relationship_mutation_hash
+from .minimal_reply_events import MessagePayloadStoredPayload
+from .relationship_events import (
+    RelationshipCommitmentAcceptedPayload,
+    relationship_mutation_hash,
+)
+from .relationship_commitment_acceptance_runtime import (
+    relationship_commitment_mutation_event_id,
+)
+from .relationship_reducers import (
+    RELATIONSHIP_COMMITMENT_STAGE_TRANSITIONS,
+    RELATIONSHIP_POLICY_DIGEST,
+    relationship_primary_id,
+)
 from .relationship_trigger import (
     relationship_continuity_trigger_id,
     relationship_deliberation_trigger_id,
@@ -28,6 +41,10 @@ from .schemas import (
     CommitResult,
     Observation,
     ProjectionCursor,
+    RelationshipCommitmentDeliveryProof,
+    RelationshipCommitmentOrigin,
+    RelationshipCommitmentProjection,
+    RelationshipHysteresisProjection,
     RelationshipProposalAuditBinding,
     RelationshipProposalProjection,
     RelationshipProposedMutation,
@@ -40,13 +57,16 @@ from .schemas import (
 
 
 _CONTRACT = "relationship-proposal-compiler.1"
+_COMMITMENT_CONTRACT = "relationship-commitment-proposal-compiler.1"
 _WORLD_STIMULUS_CONTRACT = "relationship-proposal-compiler.world-stimulus.1"
 _POLICY_REFS = ("policy:relationship-signal-v1",)
+_COMMITMENT_POLICY_REFS = ("policy:relationship-v1",)
 _WORLD_STIMULUS_SOURCE_EVIDENCE = {
     "WorldOccurrenceSettled": "settled_world_event",
     "ExecutionReceiptRecorded": "committed_world_event",
     "ActivityAbandoned": "committed_world_event",
     "PerceptionResultAccepted": "committed_world_event",
+    "AppraisalAccepted": "committed_world_event",
 }
 
 
@@ -174,6 +194,97 @@ class RelationshipProposalCompiler:
             identity_world_revision=current_cursor.world_revision,
         )
 
+    def record_commitment_rebased(
+        self,
+        *,
+        world_id: str,
+        audit_cursor: ProjectionCursor,
+        current_cursor: ProjectionCursor,
+        proposal_id: str,
+    ) -> RelationshipProposalCompilation:
+        """Compile one delivered, explicitly authored stage commitment.
+
+        The DecisionProposal remains pinned at ``audit_cursor``.  The visible
+        expression and its terminal receipt are proved at ``current_cursor``;
+        no model is called and message text is used only for exact span
+        identity, never for semantic classification.
+        """
+
+        self._require_rebase_order(
+            audit_cursor=audit_cursor,
+            current_cursor=current_cursor,
+        )
+        authority = self._reader.read(
+            self._reader.pin(
+                world_id=world_id,
+                cursor=audit_cursor,
+                proposal_id=proposal_id,
+            )
+        )
+        changes = tuple(
+            item
+            for item in authority.proposal.proposed_changes
+            if item.kind == "relationship_commitment"
+        )
+        if not changes:
+            return RelationshipProposalCompilation(
+                status="no_change",
+                source_proposal_id=authority.proposal.proposal_id,
+                source_proposal_event_ref=authority.audit.event_ref,
+            )
+        if len(changes) != 1 or changes[0].transition != "commit":
+            raise RelationshipProposalCompilerError("commitment_change_invalid")
+        projection = self._ledger.project_at(current_cursor)
+        existing = self._existing_rebased_candidate(
+            projection=projection,
+            authority=authority,
+            change=changes[0],
+            current_cursor=current_cursor,
+            acceptance_manifest_version="relationship-commitment-acceptance.1",
+        )
+        if existing is not None:
+            candidate, commit, acceptance_cursor = existing
+            return RelationshipProposalCompilation(
+                status="candidate_recorded",
+                source_proposal_id=authority.proposal.proposal_id,
+                source_proposal_event_ref=authority.audit.event_ref,
+                typed_proposal_id=candidate.proposal_id,
+                commit=commit,
+                acceptance_cursor=acceptance_cursor,
+            )
+        typed = self._compile_commitment(
+            authority=authority,
+            change=changes[0],
+            projection=projection,
+            current_cursor=current_cursor,
+        )
+        source_event = self._event(authority.audit.event_ref)
+        event = self._proposal_event(
+            typed=typed,
+            source_event=source_event,
+            logical_time=projection.logical_time,
+        )
+        commit = self._ledger.commit_at_cursor(
+            [event],
+            expected_cursor=current_cursor,
+            commit_id="commit:relationship-commitment-proposal-compiler:"
+            + _digest(
+                {
+                    "cursor": current_cursor.model_dump(mode="json"),
+                    "source": authority.audit.event_ref,
+                    "typed_proposal_id": typed.proposal_id,
+                }
+            ),
+        )
+        return RelationshipProposalCompilation(
+            status="candidate_recorded",
+            source_proposal_id=authority.proposal.proposal_id,
+            source_proposal_event_ref=authority.audit.event_ref,
+            typed_proposal_id=typed.proposal_id,
+            commit=commit,
+            acceptance_cursor=self._cursor_from_commit(commit),
+        )
+
     def accepted_descendant(
         self,
         *,
@@ -208,6 +319,44 @@ class RelationshipProposalCompiler:
             projection=self._ledger.project_at(current_cursor),
             authority=authority,
             change=changes[0],
+        )
+        return accepted[0].proposal_id if accepted is not None else None
+
+    def accepted_commitment_descendant(
+        self,
+        *,
+        world_id: str,
+        audit_cursor: ProjectionCursor,
+        current_cursor: ProjectionCursor,
+        proposal_id: str,
+    ) -> str | None:
+        """Return the accepted typed commitment for one exact role audit."""
+
+        self._require_rebase_order(
+            audit_cursor=audit_cursor,
+            current_cursor=current_cursor,
+        )
+        authority = self._reader.read(
+            self._reader.pin(
+                world_id=world_id,
+                cursor=audit_cursor,
+                proposal_id=proposal_id,
+            )
+        )
+        changes = tuple(
+            item
+            for item in authority.proposal.proposed_changes
+            if item.kind == "relationship_commitment"
+        )
+        if not changes:
+            return None
+        if len(changes) != 1 or changes[0].transition != "commit":
+            raise RelationshipProposalCompilerError("commitment_change_invalid")
+        accepted = self._accepted_rebased_candidate(
+            projection=self._ledger.project_at(current_cursor),
+            authority=authority,
+            change=changes[0],
+            acceptance_manifest_version="relationship-commitment-acceptance.1",
         )
         return accepted[0].proposal_id if accepted is not None else None
 
@@ -431,11 +580,13 @@ class RelationshipProposalCompiler:
         authority,
         change,
         current_cursor: ProjectionCursor,
+        acceptance_manifest_version: str = "relationship-acceptance.1",
     ) -> tuple[RelationshipProposalProjection, CommitResult, ProjectionCursor] | None:
         accepted = self._accepted_rebased_candidate(
             projection=projection,
             authority=authority,
             change=change,
+            acceptance_manifest_version=acceptance_manifest_version,
         )
         if accepted is not None:
             candidate, commit = accepted
@@ -444,10 +595,16 @@ class RelationshipProposalCompiler:
         located_existing: list[
             tuple[RelationshipProposalProjection, CommitResult]
         ] = []
+        terminal_proposal_ids = {
+            item.proposal_id
+            for item in projection.acceptance_decisions
+            if item.status in {"rejected", "stale"}
+        }
         for candidate in projection.relationship_proposals:
             binding = candidate.source_audit
             if (
-                binding is None
+                candidate.proposal_id in terminal_proposal_ids
+                or binding is None
                 or binding.proposal_event_ref != authority.audit.event_ref
                 or binding.proposal_event_payload_hash
                 != authority.audit.event_payload_hash
@@ -496,11 +653,12 @@ class RelationshipProposalCompiler:
         projection,
         authority,
         change,
+        acceptance_manifest_version: str = "relationship-acceptance.1",
     ) -> tuple[RelationshipProposalProjection, CommitResult] | None:
         matches: list[tuple[RelationshipProposalProjection, CommitResult]] = []
         for decision in projection.acceptance_decisions:
             if (
-                decision.manifest_version != "relationship-acceptance.1"
+                decision.manifest_version != acceptance_manifest_version
                 or decision.status != "accepted"
                 or decision.acceptance_event_ref is None
             ):
@@ -550,6 +708,464 @@ class RelationshipProposalCompiler:
             deliberation_revision=commit.deliberation_revision,
             ledger_sequence=commit.ledger_sequence,
         )
+
+    def _compile_commitment(
+        self,
+        *,
+        authority,
+        change,
+        projection,
+        current_cursor: ProjectionCursor,
+    ) -> RelationshipProposalProjection:
+        source_event, subject_ref = self._source_relationship_subject(
+            trigger_ref=authority.proposal.trigger_ref,
+            projection=projection,
+        )
+        if source_event.event_type != "ObservationRecorded":
+            raise RelationshipProposalCompilerError(
+                "commitment_source_must_be_observation"
+            )
+        source_observation = Observation.model_validate_json(source_event.payload_json)
+        delivery_target = subject_ref
+        if source_observation.reply_context is not None:
+            reply_target = source_observation.reply_context.get("target")
+            if not isinstance(reply_target, str) or not reply_target:
+                raise RelationshipProposalCompilerError(
+                    "commitment_delivery_target_invalid"
+                )
+            delivery_target = reply_target
+        evidence = self._evidence(
+            authority.proposal,
+            change.evidence_refs,
+            source_event,
+            projection,
+        )
+        raw = change.payload.value()
+        if set(raw) != {
+            "subject_ref",
+            "target_stage",
+            "commitment_code",
+            "persistence",
+            "visible_text_span",
+        }:
+            raise RelationshipProposalCompilerError("commitment_payload_invalid")
+        if raw.get("subject_ref") != subject_ref:
+            raise RelationshipProposalCompilerError("subject_not_bound_to_source")
+        target_stage = raw.get("target_stage")
+        commitment_code = raw.get("commitment_code")
+        persistence = raw.get("persistence")
+        visible_text_span = raw.get("visible_text_span")
+        if (
+            target_stage not in {"acquaintance", "friend", "close_friend"}
+            or not isinstance(commitment_code, str)
+            or not 1 <= len(commitment_code) <= 128
+            or commitment_code != commitment_code.strip()
+            or persistence != "durable"
+            or not isinstance(visible_text_span, str)
+            or not 1 <= len(visible_text_span) <= 1_200
+            or visible_text_span != visible_text_span.strip()
+        ):
+            raise RelationshipProposalCompilerError("commitment_payload_invalid")
+        if projection.logical_time is None:
+            raise RelationshipProposalCompilerError("logical_time_missing")
+
+        delivery_proof = self._commitment_delivery_proof(
+            projection=projection,
+            current_cursor=current_cursor,
+            expression_proposal_id=authority.proposal.proposal_id,
+            delivery_target=delivery_target,
+            visible_text_span=visible_text_span,
+        )
+        state_matches = tuple(
+            item for item in projection.relationship_states if item.subject_ref == subject_ref
+        )
+        if len(state_matches) > 1:
+            raise RelationshipProposalCompilerError("relationship_state_ambiguous")
+        primary_id = relationship_primary_id(subject_ref=subject_ref)
+        if state_matches:
+            current = state_matches[0]
+            if current.relationship_id != primary_id:
+                raise RelationshipProposalCompilerError(
+                    "relationship_state_identity_invalid"
+                )
+            if (
+                current.policy_version != "relationship-policy.1"
+                or current.policy_digest != RELATIONSHIP_POLICY_DIGEST
+            ):
+                raise RelationshipProposalCompilerError(
+                    "relationship_state_policy_uninstalled"
+                )
+            revision = current.entity_revision
+            stage_before = current.stage
+            hysteresis_before = current.hysteresis
+            commitment_refs_before = current.commitment_refs
+        else:
+            revision = 0
+            stage_before = "stranger"
+            hysteresis_before = RelationshipHysteresisProjection()
+            commitment_refs_before = ()
+        if target_stage not in RELATIONSHIP_COMMITMENT_STAGE_TRANSITIONS.get(
+            stage_before, frozenset()
+        ):
+            raise RelationshipProposalCompilerError(
+                "commitment_stage_transition_not_installed"
+            )
+
+        identity = _digest(
+            {
+                "source_proposal_event": authority.audit.event_ref,
+                "source_change": change.change_id,
+                "typed_contract": _COMMITMENT_CONTRACT,
+                "rebase_world_revision": current_cursor.world_revision,
+                "delivery_proof": delivery_proof.model_dump(mode="json"),
+            }
+        )
+        typed_proposal_id = f"proposal:relationship-commitment-compiled:{identity}"
+        typed_change_id = f"change:relationship-commitment-compiled:{identity}"
+        transition_id = f"transition:relationship-commitment-compiled:{identity}"
+        mutation_event_id = relationship_commitment_mutation_event_id(
+            world_id=self._ledger.world_id,
+            proposal_id=typed_proposal_id,
+            transition_id=transition_id,
+        )
+        commitment = RelationshipCommitmentProjection(
+            commitment_id=f"relationship-commitment:compiled:{identity}",
+            relationship_id=primary_id,
+            subject_ref=subject_ref,
+            stage_before=stage_before,
+            committed_stage=target_stage,
+            status="active",
+            commitment_code=commitment_code,
+            persistence="durable",
+            visible_text_span=visible_text_span,
+            delivery_proof=delivery_proof,
+            evidence_refs=evidence,
+            origin=RelationshipCommitmentOrigin(
+                change_id=typed_change_id,
+                transition_id=transition_id,
+                policy_refs=_COMMITMENT_POLICY_REFS,
+                accepted_event_ref=mutation_event_id,
+            ),
+            committed_at=projection.logical_time,
+        )
+        mutation: dict[str, object] = {
+            "change_id": typed_change_id,
+            "transition_id": transition_id,
+            "expected_entity_revision": revision,
+            "evidence_refs": [item.model_dump(mode="json") for item in evidence],
+            "policy_refs": list(_COMMITMENT_POLICY_REFS),
+            "acceptance_id": f"acceptance:relationship-commitment-compiled:{identity}",
+            "proposal_id": typed_proposal_id,
+            "evaluated_world_revision": projection.world_revision,
+            "accepted_change_hash": "0" * 64,
+            "relationship_id": primary_id,
+            "subject_ref": subject_ref,
+            "stage_before": stage_before,
+            "stage_after": target_stage,
+            "hysteresis_before": hysteresis_before.model_dump(mode="json"),
+            "hysteresis_after": RelationshipHysteresisProjection().model_dump(mode="json"),
+            "commitment_refs_before": list(commitment_refs_before),
+            "commitment": commitment.model_dump(mode="json"),
+            "policy_version": "relationship-policy.1",
+            "policy_digest": RELATIONSHIP_POLICY_DIGEST,
+        }
+        mutation["accepted_change_hash"] = relationship_mutation_hash(mutation)
+        RelationshipCommitmentAcceptedPayload.model_validate_json(_canonical(mutation))
+        return RelationshipProposalProjection(
+            proposal_id=typed_proposal_id,
+            proposal_encoding="typed-authority-v1",
+            authority_contract_ref="proposal-contract:relationship.1",
+            transition_kind="commitment",
+            change_id=typed_change_id,
+            transition_id=transition_id,
+            evaluated_world_revision=projection.world_revision,
+            expected_entity_revision=revision,
+            proposed_change_hash=str(mutation["accepted_change_hash"]),
+            evidence_refs=evidence,
+            policy_refs=_COMMITMENT_POLICY_REFS,
+            proposed_mutation=RelationshipProposedMutation(
+                event_type="RelationshipCommitmentAccepted",
+                payload_json=_canonical(mutation),
+            ),
+            source_audit=RelationshipProposalAuditBinding(
+                proposal_event_ref=authority.audit.event_ref,
+                proposal_event_payload_hash=authority.audit.event_payload_hash,
+                model_result_ref=authority.audit.model_result_ref,
+                capsule_id=authority.audit.capsule_id,
+                change_id=change.change_id,
+                change_payload_hash=change.payload.payload_hash,
+            ),
+        )
+
+    def _commitment_delivery_proof(
+        self,
+        *,
+        projection,
+        current_cursor: ProjectionCursor,
+        expression_proposal_id: str,
+        delivery_target: str,
+        visible_text_span: str,
+    ) -> RelationshipCommitmentDeliveryProof:
+        text_candidates: list[tuple[object, object, object]] = []
+        for plan in projection.expression_plans:
+            if (
+                plan.proposal_id != expression_proposal_id
+                or plan.state != "completed"
+            ):
+                continue
+            for beat in projection.expression_beats:
+                if (
+                    beat.proposal_id != expression_proposal_id
+                    or beat.plan_id != plan.plan_id
+                    or beat.acceptance_id != plan.acceptance_id
+                    or beat.state != "settled"
+                ):
+                    continue
+                stored = tuple(
+                    item
+                    for item in projection.stored_message_payloads
+                    if item.proposal_id == expression_proposal_id
+                    and item.acceptance_id == plan.acceptance_id
+                    and item.payload_ref == beat.payload_ref
+                    and item.payload_hash == beat.payload_hash
+                )
+                if len(stored) != 1:
+                    continue
+                payload = stored[0]
+                expected_payload_hash = "sha256:" + hashlib.sha256(
+                    payload.text.encode("utf-8")
+                ).hexdigest()
+                if (
+                    payload.payload_hash != expected_payload_hash
+                    or interaction_act_overlapping_occurrence_count(
+                        source_text=payload.text,
+                        selected_text=visible_text_span,
+                    )
+                    != 1
+                ):
+                    continue
+                text_candidates.append((plan, beat, payload))
+        if not text_candidates:
+            raise RelationshipProposalCompilerError(
+                "commitment_visible_span_not_exact"
+            )
+        if len(text_candidates) != 1:
+            raise RelationshipProposalCompilerError(
+                "commitment_expression_ambiguous"
+            )
+        plan, beat, stored = text_candidates[0]
+        if beat.action_id is None:
+            raise RelationshipProposalCompilerError(
+                "commitment_expression_not_delivered"
+            )
+        actions = tuple(
+            item
+            for item in projection.actions
+            if item.action_id == beat.action_id
+            and item.expression_plan_id == plan.plan_id
+            and item.expression_beat_id == beat.beat_id
+            and item.payload_ref == stored.payload_ref
+            and item.payload_hash == stored.payload_hash
+            and item.target == delivery_target
+            and item.state == "delivered"
+        )
+        if len(actions) != 1:
+            raise RelationshipProposalCompilerError(
+                "commitment_expression_not_delivered"
+            )
+        action = actions[0]
+        receipts = tuple(
+            item
+            for item in projection.execution_receipts
+            if item.action_id == action.action_id
+            and item.receipt_kind == "terminal"
+            and item.observed_state == "delivered"
+            and item.is_terminal
+        )
+        if len(receipts) != 1:
+            raise RelationshipProposalCompilerError(
+                "commitment_expression_not_delivered"
+            )
+        receipt = receipts[0]
+        plan_terminal = tuple(
+            item
+            for item in plan.history
+            if item.state == "completed"
+            and item.receipt_id == receipt.receipt_id
+            and item.terminal_action_state == "delivered"
+        )
+        beat_terminal = tuple(
+            item
+            for item in beat.history
+            if item.state == "settled"
+            and item.receipt_id == receipt.receipt_id
+            and item.terminal_action_state == "delivered"
+        )
+        if len(plan_terminal) != 1 or len(beat_terminal) != 1:
+            raise RelationshipProposalCompilerError(
+                "commitment_expression_not_delivered"
+            )
+
+        plan_event, _ = self._pinned_projected_event(
+            projection=projection,
+            current_cursor=current_cursor,
+            event_ref=plan.event_ref,
+            payload_hash=plan.event_payload_hash,
+            event_type="ExpressionPlanAccepted",
+        )
+        beat_event, _ = self._pinned_projected_event(
+            projection=projection,
+            current_cursor=current_cursor,
+            event_ref=beat.event_ref,
+            payload_hash=beat.event_payload_hash,
+            event_type="ExpressionBeatAuthorized",
+        )
+        stored_event, _ = self._pinned_projected_event(
+            projection=projection,
+            current_cursor=current_cursor,
+            event_ref=stored.event_ref,
+            payload_hash=stored.event_payload_hash,
+            event_type="MessagePayloadStored",
+        )
+        try:
+            stored_authority = MessagePayloadStoredPayload.model_validate_json(
+                stored_event.payload_json
+            )
+        except ValueError as exc:
+            raise RelationshipProposalCompilerError(
+                "commitment_expression_authority_mismatch"
+            ) from exc
+        if (
+            stored_authority.acceptance_id != stored.acceptance_id
+            or stored_authority.proposal_id != stored.proposal_id
+            or stored_authority.message.payload_ref != stored.payload_ref
+            or stored_authority.message.payload_hash != stored.payload_hash
+            or stored_authority.message.text != stored.text
+            or stored_authority.message.content_type != stored.content_type
+        ):
+            raise RelationshipProposalCompilerError(
+                "commitment_expression_authority_mismatch"
+            )
+        action_matches = self._committed_payload_events(
+            projection=projection,
+            current_cursor=current_cursor,
+            event_type="ActionAuthorized",
+            nested_key="action",
+            identity_key="action_id",
+            identity_value=action.action_id,
+        )
+        receipt_matches = self._committed_payload_events(
+            projection=projection,
+            current_cursor=current_cursor,
+            event_type="ExecutionReceiptRecorded",
+            nested_key="receipt",
+            identity_key="receipt_id",
+            identity_value=receipt.receipt_id,
+        )
+        if len(action_matches) != 1 or len(receipt_matches) != 1:
+            raise RelationshipProposalCompilerError(
+                "commitment_expression_not_delivered"
+            )
+        action_event, _action_committed, action_raw = action_matches[0]
+        receipt_event, receipt_committed, receipt_raw = receipt_matches[0]
+        if (
+            action_raw.get("expression_plan_id") != plan.plan_id
+            or action_raw.get("expression_beat_id") != beat.beat_id
+            or action_raw.get("payload_ref") != stored.payload_ref
+            or action_raw.get("payload_hash") != stored.payload_hash
+            or action_raw.get("target") != delivery_target
+            or receipt_raw != receipt.model_dump(mode="json")
+        ):
+            raise RelationshipProposalCompilerError(
+                "commitment_expression_not_delivered"
+            )
+        return RelationshipCommitmentDeliveryProof(
+            expression_proposal_id=expression_proposal_id,
+            expression_acceptance_id=plan.acceptance_id,
+            expression_plan_id=plan.plan_id,
+            plan_event_ref=plan_event.event_id,
+            plan_event_payload_hash=plan_event.payload_hash,
+            expression_beat_id=beat.beat_id,
+            beat_event_ref=beat_event.event_id,
+            beat_event_payload_hash=beat_event.payload_hash,
+            message_payload_ref=stored.payload_ref,
+            message_payload_hash=stored.payload_hash,
+            stored_payload_event_ref=stored_event.event_id,
+            stored_payload_event_hash=stored_event.payload_hash,
+            action_id=action.action_id,
+            action_target_ref=delivery_target,
+            action_event_ref=action_event.event_id,
+            action_event_payload_hash=action_event.payload_hash,
+            receipt_id=receipt.receipt_id,
+            receipt_event_ref=receipt_event.event_id,
+            receipt_event_payload_hash=receipt_event.payload_hash,
+            receipt_world_revision=receipt_committed.world_revision,
+        )
+
+    def _pinned_projected_event(
+        self,
+        *,
+        projection,
+        current_cursor: ProjectionCursor,
+        event_ref: str,
+        payload_hash: str,
+        event_type: str,
+    ):
+        committed = tuple(
+            item
+            for item in projection.committed_world_event_refs
+            if item.event_id == event_ref
+        )
+        located = self._ledger.lookup_event_commit(event_ref)
+        if len(committed) != 1 or located is None:
+            raise RelationshipProposalCompilerError(
+                "commitment_expression_authority_missing"
+            )
+        event, commit = located
+        authority = committed[0]
+        if (
+            event.world_id != self._ledger.world_id
+            or event.event_type != event_type
+            or authority.event_type != event_type
+            or event.payload_hash != payload_hash
+            or authority.payload_hash != payload_hash
+            or event.event_id not in commit.event_ids
+            or authority.world_revision > commit.world_revision
+            or authority.logical_time != event.logical_time
+            or commit.world_revision > current_cursor.world_revision
+            or commit.deliberation_revision > current_cursor.deliberation_revision
+            or commit.ledger_sequence > current_cursor.ledger_sequence
+        ):
+            raise RelationshipProposalCompilerError(
+                "commitment_expression_authority_mismatch"
+            )
+        return event, authority
+
+    def _committed_payload_events(
+        self,
+        *,
+        projection,
+        current_cursor: ProjectionCursor,
+        event_type: str,
+        nested_key: str,
+        identity_key: str,
+        identity_value: str,
+    ) -> tuple[tuple[object, object, dict[str, object]], ...]:
+        matches: list[tuple[object, object, dict[str, object]]] = []
+        for committed in projection.committed_world_event_refs:
+            if committed.event_type != event_type:
+                continue
+            event, authority = self._pinned_projected_event(
+                projection=projection,
+                current_cursor=current_cursor,
+                event_ref=committed.event_id,
+                payload_hash=committed.payload_hash,
+                event_type=event_type,
+            )
+            raw = event.payload().get(nested_key)
+            if isinstance(raw, dict) and raw.get(identity_key) == identity_value:
+                matches.append((event, authority, raw))
+        return tuple(matches)
 
     def _compile_signal(
         self,

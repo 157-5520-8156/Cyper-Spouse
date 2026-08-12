@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 import json
 
 import pytest
@@ -11,12 +12,20 @@ from companion_daemon.world_v2.character_interior import (
     InteriorOpportunity,
 )
 from companion_daemon.world_v2.character_interior.inbound_turn import InboundTurnFaculty
-from companion_daemon.world_v2.deliberation import ModelInput, ModelOutput, ModelRoute
+from companion_daemon.world_v2.deliberation import (
+    ModelInput,
+    ModelOutput,
+    ModelRoute,
+    ModelUsageProvenance,
+)
 from companion_daemon.world_v2.private_turn_state import PrivateTurnState
 from companion_daemon.world_v2.proposal_envelope import MinimalProposal
 from companion_daemon.world_v2.schemas import ProjectionCursor
 from companion_daemon.world_v2.character_interior.inbound_author import (
     _InboundRecallRequested,
+)
+from companion_daemon.world_v2.character_interior.turn_store import (
+    open_sqlite_character_interior_turn_store,
 )
 
 
@@ -194,6 +203,29 @@ class _RecallingInboundCognition:
             winning_model_call_id="model-call:inbound-final",
             winning_request_hash="e" * 64,
         )
+
+
+def _usage(ref: str) -> ModelUsageProvenance:
+    material = {
+        "usage_contract": "model-usage.1",
+        "route_class": "chat",
+        "input_tokens": 12,
+        "output_tokens": 3,
+        "thinking_tokens": 0,
+        "token_provenance": "provider_reported",
+        "transport": "provider_api",
+        "provider": "cold-recall-fixture",
+        "provider_usage_ref": ref,
+    }
+    usage_hash = sha256(
+        json.dumps(
+            material,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return ModelUsageProvenance(**material, provider_usage_hash=usage_hash)
 
 
 class _MissingPrivateSelfThenCorrectedInboundCognition:
@@ -381,6 +413,160 @@ async def test_inbound_recall_preserves_the_model_authored_initial_private_self(
     assert result.author_lineage is not None
     assert result.author_lineage.attempt_ordinal == 0
     assert result.author_lineage.parent_model_call_id is None
+
+
+@pytest.mark.asyncio
+async def test_cold_inbound_recall_resume_keeps_gate_audit_without_recalling_model(
+    tmp_path,
+) -> None:
+    class _CrashAfterFirstCheckpoint:
+        def __init__(self, delegate) -> None:  # type: ignore[no-untyped-def]
+            self._delegate = delegate
+            self._crashed = False
+
+        def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
+            return getattr(self._delegate, name)
+
+        def checkpoint(self, **kwargs):  # type: ignore[no-untyped-def]
+            recorded = self._delegate.checkpoint(**kwargs)
+            if not self._crashed:
+                self._crashed = True
+                raise RuntimeError("simulated crash after durable Recall choice")
+            return recorded
+
+    class _ColdRecallCognition:
+        _recall = None
+
+        def __init__(self, *, followup_only: bool) -> None:
+            self.followup_only = followup_only
+            self.calls = 0
+
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            self.calls += 1
+            content = json.loads(request.model_content_json)
+            recall_consumed = content.get("recall_control") == {
+                "remaining_character_pulls": 0
+            }
+            if not self.followup_only:
+                assert not recall_consumed
+                raise _InboundRecallRequested(
+                    query="the walk this rain brought back",
+                    model_id="combined-role",
+                    model_version="combined-role.1",
+                    model_call_id="model-call:cold-inbound-initial",
+                    request_hash="c" * 64,
+                    response_hash="d" * 64,
+                    usage=_usage("usage:cold-inbound-initial"),
+                    private_turn_state=PrivateTurnState(
+                        inner_state_summary="The rain made one exact memory salient.",
+                        attended_source_refs=("source:situation",),
+                    ),
+                )
+            assert recall_consumed, "cold recovery repeated the initial role gate"
+            proposal = MinimalProposal(
+                proposal_id="proposal:cold-inbound-after-recall",
+                trigger_ref="source:situation",
+                evaluated_world_revision=_CURSOR.world_revision,
+                confidence=7_200,
+                brief_rationale="She integrated the memory before answering.",
+                private_turn_state=PrivateTurnState(
+                    inner_state_summary="She now wants to answer from that memory.",
+                    attended_source_refs=("experience:rain-walk",),
+                ),
+                source_model_result="model-result:cold-inbound-final",
+                response_text="I remember that walk.",
+                stance="answer_without_world_claims",
+            )
+            return ModelOutput(
+                model_id="combined-role",
+                model_version="combined-role.1",
+                raw_proposal=proposal.model_dump(mode="json"),
+                winning_model_call_id="model-call:cold-inbound-final",
+                winning_request_hash="e" * 64,
+                input_tokens=12,
+                output_tokens=3,
+                usage=_usage("usage:cold-inbound-final"),
+            )
+
+    def _input() -> ModelInput:
+        return ModelInput(
+            call_id="model-input:cold-inbound-recall",
+            attempt_id="attempt:cold-inbound-recall",
+            route=ModelRoute(tier="flash", reason_code="test", router_version="test.1"),
+            capsule_id="f" * 64,
+            trigger_ref="source:situation",
+            evaluated_world_revision=_CURSOR.world_revision,
+            evaluated_deliberation_revision=_CURSOR.deliberation_revision,
+            evaluated_ledger_sequence=_CURSOR.ledger_sequence,
+            model_content_json=json.dumps(
+                {"logical_time": _NOW.isoformat(), "slices": {}},
+                separators=(",", ":"),
+            ),
+        )
+
+    path = tmp_path / "cold-inbound-recall.sqlite"
+    first_delegate = open_sqlite_character_interior_turn_store(
+        path=path,
+        world_id="world:test",
+    )
+    second_store = open_sqlite_character_interior_turn_store(
+        path=path,
+        world_id="world:test",
+    )
+    recall = _Recall()
+    first_cognition = _ColdRecallCognition(followup_only=False)
+    second_cognition = _ColdRecallCognition(followup_only=True)
+    first_faculty = InboundTurnFaculty(author=first_cognition)
+    second_faculty = InboundTurnFaculty(author=second_cognition)
+    first_manifest = first_faculty.register_capability(_input())
+    second_manifest = second_faculty.register_capability(_input())
+    assert first_manifest == second_manifest
+    opportunity = _opportunity(suffix="cold-inbound-recall").model_copy(
+        update={"capability_manifest": first_manifest}
+    )
+    first = CharacterInterior(
+        projection=_Projection(),
+        role=first_faculty,
+        recall=recall,
+        turn_store=_CrashAfterFirstCheckpoint(first_delegate),
+        turn_owner_id="runtime:first",
+        turn_lease_seconds=30,
+        turn_clock=lambda: _NOW,
+    )
+    second = CharacterInterior(
+        projection=_Projection(),
+        role=second_faculty,
+        recall=recall,
+        turn_store=second_store,
+        turn_owner_id="runtime:second",
+        turn_lease_seconds=30,
+        turn_clock=lambda: _NOW + timedelta(seconds=31),
+    )
+
+    interrupted = await first.consider(opportunity)
+    recovered = await second.consider(opportunity)
+
+    assert interrupted.status == "technical_failure"
+    assert recovered.status == "decided", recovered.failure_code
+    assert first_cognition.calls == 1
+    assert second_cognition.calls == 1
+    assert recovered.decision is not None
+    output = second_faculty.consume_output(
+        output_ref=str(recovered.decision["output_ref"]),
+        output_hash=str(recovered.decision["output_hash"]),
+    )
+    recall_audits = tuple(
+        item
+        for item in output.authored_candidate_audits
+        if item.purpose == "recall_control_transfer"
+    )
+    assert len(recall_audits) == 1
+    assert recall_audits[0].model_call_id == "model-call:cold-inbound-initial"
+    assert recall_audits[0].outcome == "control_transfer"
+    assert recall_audits[0].usage is not None
+    assert recall_audits[0].usage.provider_usage_ref == "usage:cold-inbound-initial"
+    first_delegate.close()
+    second_store.close()
 
 
 @pytest.mark.asyncio

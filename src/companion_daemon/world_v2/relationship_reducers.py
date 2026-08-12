@@ -8,6 +8,7 @@ import json
 
 from .relationship_events import (
     BoundaryChangedPayload,
+    RelationshipCommitmentAcceptedPayload,
     RelationshipSignalAcceptedPayload,
     RelationshipSlowVariableAdjustedPayload,
 )
@@ -15,6 +16,7 @@ from .schema_core import FrozenModel
 from .schemas import (
     BoundaryProjection,
     RelationshipAdjustmentProjection,
+    RelationshipCommitmentProjection,
     RelationshipHysteresisProjection,
     RelationshipStateOrigin,
     RelationshipSignalProjection,
@@ -33,6 +35,11 @@ _VARIABLE_NAMES = (
     "repair_confidence_bp",
 )
 _STAGES = ("stranger", "acquaintance", "friend", "close_friend")
+RELATIONSHIP_COMMITMENT_STAGE_TRANSITIONS = {
+    "stranger": frozenset({"acquaintance", "friend"}),
+    "acquaintance": frozenset({"friend"}),
+    "friend": frozenset({"close_friend"}),
+}
 _POLICY = {
     "policy_version": "relationship-policy.1",
     "delta_cap_bp": 500,
@@ -47,7 +54,18 @@ _POLICY = {
 
 
 def relationship_policy_digest() -> str:
-    encoded = json.dumps(_POLICY, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    commitment_stage_transitions = {
+        stage: tuple(sorted(targets))
+        for stage, targets in sorted(RELATIONSHIP_COMMITMENT_STAGE_TRANSITIONS.items())
+    }
+    encoded = json.dumps(
+        {
+            **_POLICY,
+            "commitment_stage_transitions": commitment_stage_transitions,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -195,6 +213,116 @@ def accept_relationship_signal(
     if any(item.semantic_fingerprint == signal.semantic_fingerprint for item in signals):
         raise ValueError("relationship signal semantic evidence already exists")
     return (*signals, signal)
+
+
+def accept_relationship_commitment(
+    commitments: tuple[RelationshipCommitmentProjection, ...],
+    states: tuple[RelationshipStateProjection, ...],
+    payload: RelationshipCommitmentAcceptedPayload,
+    *,
+    logical_time: datetime,
+    accepted_event_ref: str,
+) -> tuple[
+    tuple[RelationshipCommitmentProjection, ...],
+    tuple[RelationshipStateProjection, ...],
+]:
+    """Atomically derive commitment history and the relationship head.
+
+    The caller supplies one already-authored typed commitment.  This reducer
+    validates mechanical authority only; it never derives a commitment from
+    message text, signals, scores, or local social rules.
+    """
+
+    _require_aware(logical_time)
+    commitment = payload.commitment
+    if commitment.committed_at != logical_time:
+        raise ValueError("relationship commitment must use authoritative logical time")
+    if commitment.origin.accepted_event_ref != accepted_event_ref:
+        raise ValueError("relationship commitment origin does not identify its mutation event")
+    if payload.policy_version != _POLICY["policy_version"]:
+        raise ValueError("uninstalled relationship policy")
+    if payload.policy_digest != RELATIONSHIP_POLICY_DIGEST:
+        raise ValueError("relationship policy digest is not installed")
+    if payload.relationship_id != relationship_primary_id(subject_ref=payload.subject_ref):
+        raise ValueError("relationship commitment must use the primary relationship identity")
+    if any(item.commitment_id == commitment.commitment_id for item in commitments):
+        raise ValueError("relationship commitment already exists")
+
+    identity_matches = [
+        (index, item)
+        for index, item in enumerate(states)
+        if item.relationship_id == payload.relationship_id
+    ]
+    subject_matches = [
+        (index, item)
+        for index, item in enumerate(states)
+        if item.subject_ref == payload.subject_ref
+    ]
+    if len(identity_matches) > 1 or len(subject_matches) > 1:
+        raise ValueError("duplicate relationship state authority")
+    if identity_matches and identity_matches[0][1].subject_ref != payload.subject_ref:
+        raise ValueError("relationship identity changed subject")
+    if subject_matches and subject_matches[0][1].relationship_id != payload.relationship_id:
+        raise ValueError("relationship subject changed authority identity")
+
+    if subject_matches:
+        index, current = subject_matches[0]
+        revision = current.entity_revision
+        stage = current.stage
+        hysteresis = current.hysteresis
+        commitment_refs = current.commitment_refs
+        variables = current.variables
+        temperature = current.temperature
+        last_adjusted_at = current.last_adjusted_at
+        if (
+            current.policy_version != _POLICY["policy_version"]
+            or current.policy_digest != RELATIONSHIP_POLICY_DIGEST
+        ):
+            raise ValueError("relationship state references an uninstalled policy")
+    else:
+        index = None
+        revision = 0
+        stage = "stranger"
+        hysteresis = RelationshipHysteresisProjection()
+        commitment_refs = ()
+        variables = RelationshipVariablesProjection()
+        temperature = "ordinary"
+        last_adjusted_at = None
+
+    if revision != payload.expected_entity_revision:
+        raise ValueError("stale relationship commitment")
+    if stage != payload.stage_before:
+        raise ValueError("relationship commitment stage before is stale")
+    if hysteresis != payload.hysteresis_before:
+        raise ValueError("relationship commitment hysteresis is stale")
+    if commitment_refs != payload.commitment_refs_before:
+        raise ValueError("relationship commitment lineage is stale")
+    if payload.stage_after not in RELATIONSHIP_COMMITMENT_STAGE_TRANSITIONS.get(
+        stage, frozenset()
+    ):
+        raise ValueError("relationship commitment stage transition is not installed")
+
+    updated = RelationshipStateProjection(
+        relationship_id=payload.relationship_id,
+        subject_ref=payload.subject_ref,
+        entity_revision=revision + 1,
+        stage=payload.stage_after,
+        variables=variables,
+        temperature=temperature,
+        policy_version=payload.policy_version,
+        policy_digest=payload.policy_digest,
+        hysteresis=payload.hysteresis_after,
+        commitment_refs=(*commitment_refs, commitment.commitment_id),
+        last_adjusted_at=last_adjusted_at,
+        origin=RelationshipStateOrigin(
+            change_id=payload.change_id,
+            transition_id=payload.transition_id,
+            policy_refs=payload.policy_refs,
+            accepted_event_ref=accepted_event_ref,
+        ),
+    )
+    next_states = (*states, updated) if index is None else states[:index] + (updated,) + states[index + 1 :]
+    return (*commitments, commitment), next_states
 
 
 def adjust_relationship_slow_variables(

@@ -35,6 +35,7 @@ from companion_daemon.world_v2.character_interior.run_result import (
     causal_opportunity_policy_from_attempt_id,
 )
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
+from companion_daemon.world_v2.errors import ConcurrencyConflict
 from companion_daemon.world_v2.immediate_emotion_proposal_worker import (
     ImmediateEmotionProposalWorker,
 )
@@ -61,6 +62,7 @@ from companion_daemon.world_v2.relationship_events import (
 )
 from companion_daemon.world_v2.relationship_proposal_compiler import (
     RelationshipProposalCompiler,
+    RelationshipProposalCompilerError,
 )
 from companion_daemon.world_v2.proposal_envelope import (
     DecisionProposal,
@@ -2093,6 +2095,126 @@ async def test_settled_world_occurrence_relationship_signal_is_settled_once_and_
 
 
 @pytest.mark.asyncio
+async def test_relationship_compiler_failure_is_durable_and_recovers_without_reauthoring(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = WorldLedger.in_memory(
+        world_id=WORLD_ID,
+        accepted_batch_issuer=issuer,
+    )
+    seed_through_proposal(ledger)
+    commit(ledger, settlement_batch())
+    await _seed_relationship_state(
+        ledger=ledger,
+        issuer=issuer,
+        source_ref=SOURCE_REF,
+        subject_ref="user:geoff",
+    )
+    model = _RoleModel(
+        decision="activate",
+        relationship_subject_ref="user:geoff",
+    )
+    runtime, _ledger, _projection = _runtime_for_ledger(
+        ledger=ledger,
+        issuer=issuer,
+        model=model,
+        source_ref=SOURCE_REF,
+        companion_actor_ref="actor:companion",
+        settle_relationship=True,
+    )
+    settlement = runtime._relationship_settlement  # noqa: SLF001 - failure seam
+    assert settlement is not None
+
+    async def fail_compilation(**_kwargs):  # type: ignore[no-untyped-def]
+        raise RelationshipProposalCompilerError("injected_failure")
+
+    monkeypatch.setattr(settlement, "process", fail_compilation)
+    failed = await runtime.drain_one()
+
+    assert failed.work_status == "technical_failure"
+    interrupted = ledger.project()
+    failure_audits = [
+        json.loads(item.audit_json)
+        for item in interrupted.model_result_audits
+        if json.loads(item.audit_json).get("failure_code") is not None
+    ]
+    assert [item["failure_code"] for item in failure_audits] == [
+        "relationship_settlement_failure"
+    ]
+    process = next(
+        item
+        for item in interrupted.trigger_processes
+        if item.process_kind == "npc_world_appraisal"
+    )
+    assert process.state == "claimed"
+    assert ledger.rebuild() == interrupted
+
+    recovery_model = _RoleModel(
+        failure=AssertionError("durable relationship recovery must not re-author")
+    )
+    recovered_runtime, _ledger, _projection = _runtime_for_ledger(
+        ledger=ledger,
+        issuer=issuer,
+        model=recovery_model,
+        source_ref=SOURCE_REF,
+        companion_actor_ref="actor:companion",
+        settle_relationship=True,
+    )
+    recovered = await recovered_runtime.drain_one()
+
+    assert recovered.work_status == "accepted"
+    assert recovery_model.calls == 0
+    assert len(ledger.project().relationship_signals) == 2
+    assert (await recovered_runtime.drain_one()).status == "idle"
+    assert ledger.rebuild() == ledger.project()
+
+
+@pytest.mark.asyncio
+async def test_relationship_settlement_cas_is_not_recorded_as_model_failure(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = WorldLedger.in_memory(
+        world_id=WORLD_ID,
+        accepted_batch_issuer=issuer,
+    )
+    seed_through_proposal(ledger)
+    commit(ledger, settlement_batch())
+    await _seed_relationship_state(
+        ledger=ledger,
+        issuer=issuer,
+        source_ref=SOURCE_REF,
+        subject_ref="user:geoff",
+    )
+    runtime, _ledger, _projection = _runtime_for_ledger(
+        ledger=ledger,
+        issuer=issuer,
+        model=_RoleModel(
+            decision="activate",
+            relationship_subject_ref="user:geoff",
+        ),
+        source_ref=SOURCE_REF,
+        companion_actor_ref="actor:companion",
+        settle_relationship=True,
+    )
+    settlement = runtime._relationship_settlement  # noqa: SLF001 - CAS seam
+    assert settlement is not None
+
+    async def collide(**_kwargs):  # type: ignore[no-untyped-def]
+        raise ConcurrencyConflict("injected cursor race")
+
+    monkeypatch.setattr(settlement, "process", collide)
+    with pytest.raises(ConcurrencyConflict):
+        await runtime.drain_one()
+
+    assert not any(
+        json.loads(item.audit_json).get("failure_code") is not None
+        for item in ledger.project().model_result_audits
+    )
+
+
+@pytest.mark.asyncio
 async def test_world_stimulus_cannot_target_a_subject_outside_the_pinned_relationship_manifest() -> None:
     issuer = AcceptedLedgerBatchIssuer()
     ledger = WorldLedger.in_memory(
@@ -2339,14 +2461,14 @@ async def test_character_can_open_one_source_bound_thread_in_the_same_experience
             "operation": "open",
             "target_id": None,
             "expected_entity_revision": 0,
-            "thread_kind": "topic_open",
+            "thread_kind": "reply_reconsideration",
             "importance_bp": 6100,
             "due_at": "2026-08-05T18:00:00Z",
             "expires_at": "2026-08-06T18:00:00Z",
             "resolution_kind": None,
             "cancellation_reason_code": None,
             "source_refs": [SOURCE_REF],
-            "reason_summary": "她觉得这件事值得以后再回来看。",
+            "reason_summary": "她真的想过一会儿再决定要不要主动联系。",
         },
     )
     runtime, ledger, _projection = _runtime(model=model)
@@ -2355,6 +2477,9 @@ async def test_character_can_open_one_source_bound_thread_in_the_same_experience
 
     assert result.work_status == "accepted"
     assert model.calls == 1
+    role_contract = json.dumps(model.messages[0], ensure_ascii=False)
+    assert "thread_kind=reply_reconsideration" in role_contract
+    assert "does not send or schedule a message" in role_contract
     audits = ledger.project().proposal_audits
     assert len(audits) == 1
     proposal = validate_proposal_envelope(json.loads(audits[0].proposal_json))
@@ -2373,7 +2498,11 @@ async def test_character_can_open_one_source_bound_thread_in_the_same_experience
     )
     assert len(settled.threads) == 1
     assert settled.threads[0].thread_id == change.target_id
-    assert settled.threads[0].values.kind == "topic_open"
+    assert settled.threads[0].values.kind == "reply_reconsideration"
+    assert settled.threads[0].values.due_window is not None
+    assert settled.threads[0].values.due_window.opens_at < (
+        settled.threads[0].values.due_window.closes_at
+    )
     assert settled.thread_transitions[-1].change_id == change.change_id
 
     # Restart/replay sees the terminal source and never re-authors the choice.
@@ -2521,6 +2650,14 @@ async def test_life_reflection_reuses_accepted_appraisal_as_source_bound_stimulu
     first = await runtime.drain_one()
     assert first.work_status == "accepted"
     accepted_ref = ledger.project().appraisals[0].origin.accepted_event_ref
+    issuer = ledger._accepted_batch_issuer  # noqa: SLF001 - fixture authority
+    assert issuer is not None
+    await _seed_relationship_state(
+        ledger=ledger,
+        issuer=issuer,
+        source_ref=SOURCE_REF,
+        subject_ref="user:geoff",
+    )
 
     from companion_daemon.world_v2.reflection_scheduler import ReflectionScheduler
 
@@ -2533,14 +2670,16 @@ async def test_life_reflection_reuses_accepted_appraisal_as_source_bound_stimulu
     reflection_model = _RoleModel(
         decision="activate",
         include_affect=True,
+        relationship_subject_ref="user:geoff",
         source_ref=accepted_ref,
     )
     reflection_runtime, _ledger, _projection = _runtime_for_ledger(
         ledger=ledger,
-        issuer=ledger._accepted_batch_issuer,  # noqa: SLF001 - fixture authority
+        issuer=issuer,
         model=reflection_model,
         source_ref=accepted_ref,
         companion_actor_ref="actor:companion",
+        settle_relationship=True,
     )
     reflected = await reflection_runtime.drain_one()
 
@@ -2553,3 +2692,21 @@ async def test_life_reflection_reuses_accepted_appraisal_as_source_bound_stimulu
     )
     assert process.state == "terminal"
     assert len(ledger.project().affect_episodes) == 1
+    assert len(ledger.project().relationship_signals) == 2
+    authored = next(
+        item
+        for item in ledger.project().relationship_signals
+        if item.signal_code == "她觉得这件事改变了自己对这段关系的感受"
+    )
+    assert len(authored.evidence_refs) == 1
+    evidence = authored.evidence_refs[0]
+    assert evidence.ref_id == accepted_ref
+    assert evidence.evidence_type == "committed_world_event"
+    located = ledger.lookup_event_commit(accepted_ref)
+    assert located is not None
+    source_event, source_commit = located
+    assert evidence.source_world_revision == source_commit.world_revision
+    assert evidence.immutable_hash == source_event.payload_hash
+    before_repeat = ledger.project()
+    assert (await reflection_runtime.drain_one()).status == "idle"
+    assert ledger.project() == before_repeat

@@ -78,6 +78,26 @@ class QQDelivery:
                     return f"platform:{key}:{value}"
         return None
 
+    @staticmethod
+    def response_is_rejected(response: object) -> bool:
+        """Recognize a synchronous QQ/OneBot business rejection.
+
+        NapCat can return HTTP 200 while the OneBot envelope reports failure.
+        Keep this content-free predicate shared by every caller that translates
+        a raw send response into durable delivery evidence.
+        """
+
+        if not isinstance(response, Mapping):
+            return False
+        provider_status = str(response.get("status") or "").strip().lower()
+        retcode = response.get("retcode")
+        try:
+            return provider_status == "failed" or (
+                retcode is not None and int(str(retcode)) != 0
+            )
+        except (TypeError, ValueError):
+            return provider_status == "failed"
+
     async def get_message(self, recipient_id: str, *, message_id: str) -> dict[str, object]:
         """Query one platform-persisted message by id (OneBot/NapCat only).
 

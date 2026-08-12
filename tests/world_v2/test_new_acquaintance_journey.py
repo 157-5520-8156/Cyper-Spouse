@@ -8,6 +8,7 @@ import pytest
 
 from companion_daemon.config import Settings
 from companion_daemon.world_v2.qq_c2c_host import build_qq_c2c_host
+from compact_source_review_fixture import compact_source_review_wire
 
 
 NOW = datetime(2026, 7, 17, 1, 0, tzinfo=UTC)
@@ -331,14 +332,13 @@ class _JourneySourceReviewer:
     semantic_authority_id = "semantic-authority:test:new-acquaintance-source-reviewer"
 
     def supports_strict_output_contract(self, contract: str) -> bool:
-        return contract in {
-            "report-relative-entailment-adjudication.3",
-            "source-closure-review.7",
-        }
+        return contract == "visible-beat-source-verdict.1"
 
     async def complete(self, messages, *, temperature=0.0):  # type: ignore[no-untyped-def]
         del temperature
         system = str(messages[0]["content"])
+        if "factual source-boundary classifier" in system:
+            return compact_source_review_wire(messages)
         if "Audit only factual source closure" not in system:
             raise AssertionError(f"unexpected source review prompt: {system[:120]}")
         return json.dumps(

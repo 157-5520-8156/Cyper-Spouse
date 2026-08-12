@@ -48,9 +48,19 @@ from .experience_memory_decision import (
 )
 from .fact_v2_acceptance_runtime import FactV2AcceptanceRuntime
 from .interaction_fact_trigger_runtime import FactTriggerRunResult
+from .interaction_act_acceptance_runtime import InteractionActAcceptanceRuntime
+from .interaction_act_proposal_compiler import InteractionActProposalCompiler
+from .interaction_act_worker import InteractionActWorker, InteractionActWorkResult
 from .affect_acceptance_runtime import AffectAcceptanceRuntime
 from .affect_proposal_compiler import AffectProposalCompiler
 from .relationship_acceptance_runtime import RelationshipAcceptanceRuntime
+from .relationship_commitment_acceptance_runtime import (
+    RelationshipCommitmentAcceptanceRuntime,
+)
+from .relationship_commitment_worker import (
+    RelationshipCommitmentWorker,
+    RelationshipCommitmentWorkResult,
+)
 from .relationship_proposal_compiler import RelationshipProposalCompiler
 from .relationship_adjustment_acceptance_runtime import (
     RelationshipAdjustmentAcceptanceRuntime,
@@ -863,6 +873,7 @@ class WorldV2TurnApplication:
         media_planning_worker: MediaPlanningWorker,
         media_ecology: EventEcologyMediaCandidateRuntime | None,
         life_ecology: LifeEcologyRuntime | None,
+        visual_evidence_author: LifeVisualEvidenceAuthor | None,
         event_ecology_worker_actor: str,
         media_selection_worker: MediaSelectionWorker | None,
         media_selection_worker_actor: str,
@@ -937,6 +948,7 @@ class WorldV2TurnApplication:
             MediaRequestRuntime(
                 ledger=ledger,
                 conductor=self._media_preview_conductor,
+                candidate_supplier=visual_evidence_author,
             )
             if self._media_preview_conductor is not None
             else None
@@ -2058,6 +2070,8 @@ class WorldV2TurnApplication:
     ) -> (
         CharacterInteriorRunResult
         | OutcomeTriggerRunResult
+        | RelationshipCommitmentWorkResult
+        | InteractionActWorkResult
         | FactTriggerRunResult
         | MemoryWithdrawalReviewRunResult
         | AnchoredRunResult
@@ -3628,15 +3642,34 @@ def build_sqlite_world_v2_turn_application(
         # inbound role call. A second relationship model must not reinterpret
         # that same Observation. Existing accepted relationship signals still
         # use the deterministic adjustment authority below.
+        relationship_compiler = RelationshipProposalCompiler(ledger=ledger)
         relationship_acceptance = RelationshipAcceptanceRuntime(
             ledger=ledger,
             batch_issuer=issuer,
         )
         inbound_relationship_worker = InboundRelationshipSignalWorker(
             ledger=ledger,
-            compiler=RelationshipProposalCompiler(ledger=ledger),
+            compiler=relationship_compiler,
             acceptance=relationship_acceptance,
             owner_id=config.relationship_settlement_owner,
+        )
+        relationship_commitment_worker = RelationshipCommitmentWorker(
+            ledger=ledger,
+            compiler=relationship_compiler,
+            acceptance=RelationshipCommitmentAcceptanceRuntime(
+                ledger=ledger,
+                batch_issuer=issuer,
+            ),
+            actor=config.relationship_settlement_owner,
+        )
+        interaction_act_worker = InteractionActWorker(
+            ledger=ledger,
+            compiler=InteractionActProposalCompiler(ledger=ledger),
+            acceptance=InteractionActAcceptanceRuntime(
+                ledger=ledger,
+                batch_issuer=issuer,
+            ),
+            actor=config.inner_state_settlement_owner,
         )
         relationship_adjustment_acceptance = (
             RelationshipAdjustmentAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
@@ -3795,6 +3828,8 @@ def build_sqlite_world_v2_turn_application(
             ),
             immediate_emotion_worker=immediate_emotion_worker,
             inbound_relationship_worker=inbound_relationship_worker,
+            relationship_commitment_worker=relationship_commitment_worker,
+            interaction_act_worker=interaction_act_worker,
             outcome_deliberation_turn=outcome_turn,
             outcome_worker=outcome_worker,
             outcome_deliberation_owner=config.outcome_worker_owner,
@@ -4116,6 +4151,7 @@ def build_sqlite_world_v2_turn_application(
             ),
             media_ecology=media_ecology,
             life_ecology=life_ecology,
+            visual_evidence_author=visual_evidence_author,
             event_ecology_worker_actor=config.event_ecology_worker_actor,
             media_selection_worker=media_selection_worker,
             media_selection_worker_actor=config.media_selection_worker_actor,

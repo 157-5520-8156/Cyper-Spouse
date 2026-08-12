@@ -26,18 +26,25 @@ from companion_daemon.world_v2.appearance_state import (
 from companion_daemon.world_v2.character_interior.inbound_wire import (
     _ExpressionDraftWire,
 )
+from companion_daemon.world_v2.character_interior.inbound_author import (
+    _InboundCharacterAuthor,
+)
 from companion_daemon.world_v2.deliberation import (
     ModelInput,
     ModelOutput,
     ModelRoute,
     RouteRequest,
 )
+from companion_daemon.world_v2.errors import ConcurrencyConflict
 from companion_daemon.world_v2.event_ecology_media import EcologyPolicy
 from companion_daemon.world_v2.image_evidence_contract import (
     CharacterMediaEvidenceV1,
     ImageEvidenceV1,
 )
 from companion_daemon.world_v2.image_evidence_runtime import ImageEvidenceDeclarationCommand
+from companion_daemon.world_v2.interaction_act_acceptance_runtime import (
+    InteractionActAcceptanceRuntime,
+)
 from companion_daemon.world_v2.life_ecology_runtime import LifeEcologyRunResult
 from companion_daemon.world_v2.media_v2 import MediaNotRenderable, MediaPlanningResult
 from companion_daemon.world_v2.memory_retrieval import MemoryRetrievalCompiler
@@ -45,6 +52,9 @@ from companion_daemon.world_v2.platform_action_executor import PlatformDispatchR
 from companion_daemon.world_v2.private_image_evidence_contract import RecipientScopedImageEvidenceV1
 from companion_daemon.world_v2.private_image_evidence_runtime import (
     RecipientScopedImageEvidenceDeclarationCommand,
+)
+from companion_daemon.world_v2.relationship_commitment_acceptance_runtime import (
+    RelationshipCommitmentAcceptanceRuntime,
 )
 from companion_daemon.world_v2.production_turn_application import (
     LifeEcologyComposition,
@@ -409,6 +419,125 @@ class _TimingDraftChatModel:
         return json.dumps(value, ensure_ascii=False)
 
 
+class _RelationshipCommitmentInboundModel:
+    model = "test-relationship-commitment-inbound"
+
+    async def complete(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        del temperature
+        observation_ref = _fixture_observation_ref(messages)
+        return json.dumps(
+            {
+                "appraisal_draft": {
+                    "appraise": False,
+                    "affect": "no_change",
+                    "relationship_commitment": {
+                        "target_stage": "friend",
+                        "commitment_code": "mutual_friendship",
+                        "persistence": "durable",
+                        "visible_text_span": "你是我朋友了",
+                    },
+                    "behavior_tendency": "明确回应",
+                    "stance": "接纳",
+                    "display_strategy": "直接表达",
+                    "brief_rationale": "她选择把自己的关系承诺明确说出来。",
+                    "confidence": 8200,
+                },
+                "expression_draft": {
+                    "private_turn_state": {
+                        "contract": "private-turn-state.1",
+                        "inner_state_summary": "我愿意明确把这段关系认作朋友。",
+                        "attended_source_refs": [observation_ref],
+                    },
+                    "timing_choice": "now",
+                    "beats": [
+                        {
+                            "modality": "text",
+                            "text": "好呀，那说好了，你是我朋友了。",
+                        }
+                    ],
+                    "stance": "接纳",
+                    "brief_rationale": "她选择把自己的关系承诺明确说出来。",
+                    "confidence": 8200,
+                    "world_claims": [],
+                },
+            },
+            ensure_ascii=False,
+        )
+
+
+class _DeliveredInteractionActInboundModel:
+    model = "test-delivered-interaction-act-inbound"
+
+    async def complete(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        del temperature
+        observation_ref = _fixture_observation_ref(messages)
+        return json.dumps(
+            {
+                "appraisal_draft": {
+                    "appraise": False,
+                    "affect": "no_change",
+                    "interaction_act": {
+                        "operation": "declare",
+                        "status_code": "等待后续交接",
+                        "source_scope": "delivered_expression",
+                        "source_text_span": "下次见面我把这本书给你",
+                        "interaction_act_ref": None,
+                        "act_kind": "约定后续交接",
+                        "subject_role": "self",
+                        "counterparty_roles": ["current_counterpart"],
+                        "object_ref": None,
+                        "object_label": "这本书",
+                    },
+                    "behavior_tendency": "明确提出后续安排",
+                    "stance": "认真",
+                    "display_strategy": "自然说明",
+                    "brief_rationale": "她选择提出一个跨轮保留的后续交接动作。",
+                    "confidence": 8200,
+                },
+                "expression_draft": {
+                    "private_turn_state": {
+                        "contract": "private-turn-state.1",
+                        "inner_state_summary": "我愿意明确提出下一次见面的安排。",
+                        "attended_source_refs": [observation_ref],
+                    },
+                    "timing_choice": "now",
+                    "beats": [
+                        {
+                            "modality": "text",
+                            "text": "好呀，下次见面我把这本书给你。",
+                        }
+                    ],
+                    "stance": "认真",
+                    "brief_rationale": "她选择提出一个跨轮保留的后续交接动作。",
+                    "confidence": 8200,
+                    "world_claims": [],
+                },
+            },
+            ensure_ascii=False,
+        )
+
+
+class _TwoCommitmentsThenInteractionActInboundModel:
+    """Author two same-head commitments, then one independent typed act."""
+
+    model = "test-two-commitments-then-interaction-act"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        if self.calls <= 2:
+            return await _RelationshipCommitmentInboundModel().complete(
+                messages,
+                temperature=temperature,
+            )
+        return await _DeliveredInteractionActInboundModel().complete(
+            messages,
+            temperature=temperature,
+        )
+
+
 class _SequenceTimingDraftChatModel:
     model = "test-flash-timing-sequence"
 
@@ -657,6 +786,442 @@ def test_runtime_has_no_legacy_two_author_episode_execution_branch() -> None:
     assert "_resolve_expression_episode_before_dispatch" not in source
     assert 'expression_episode_mode == "on"' not in source
     assert 'mode == "on"' not in source
+
+
+def test_production_composes_delivered_relationship_commitment_recovery(
+    tmp_path: Path,
+) -> None:
+    app = _build_application(
+        path=tmp_path / "relationship-commitment-recovery.sqlite",
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        inbound_author=_ExpressionDraftWire(model=_TimingDraftChatModel("now")),
+        transport=_DeliveredTransport(received_at=NOW),
+        now=NOW,
+    )
+    try:
+        worker = app._turns._runtime._relationship_commitment_worker  # noqa: SLF001
+        assert worker is not None
+        assert worker.ledger is app._ledger  # noqa: SLF001
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
+async def test_delivered_role_commitment_advances_relationship_in_background(
+    tmp_path: Path,
+) -> None:
+    app = _build_application(
+        path=tmp_path / "delivered-relationship-commitment.sqlite",
+        config=replace(
+            _config(),
+            reply_target="conversation:test:c2c:user.1",
+            counterpart_actor_ref="user:user.1",
+        ),
+        identities=_ConversationTargetIdentities(),
+        router=_Router(),
+        inbound_author=_InboundCharacterAuthor(
+            flash_model=_RelationshipCommitmentInboundModel()
+        ),
+        transport=_DeliveredTransport(received_at=NOW),
+        now=NOW,
+    )
+    try:
+        response = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="relationship-commitment",
+                text="我们可以成为好朋友吗？",
+                observed_at=NOW,
+                trace_id="trace:relationship-commitment",
+            )
+        )
+        assert response.status == "action_authorized"
+        assert app._ledger.project().relationship_commitments == ()  # noqa: SLF001
+        await app.drain_background_once()
+        assert app._ledger.project().relationship_commitments == ()  # noqa: SLF001
+
+        delivery = await app.drain_actions_once()
+        assert delivery is not None and delivery.status == "settled"
+        assert app._ledger.project().relationship_commitments == ()  # noqa: SLF001
+
+        recovery = await app.drain_background_once()
+        assert recovery is not None and recovery.status == "accepted"
+        projection = app._ledger.project()  # noqa: SLF001
+        assert len(projection.relationship_commitments) == 1
+        assert projection.relationship_commitments[0].visible_text_span == (
+            "你是我朋友了"
+        )
+        assert projection.relationship_states[0].subject_ref == "user:user.1"
+        assert projection.relationship_states[0].stage == "friend"
+        assert projection.relationship_states[0].commitment_refs == (
+            projection.relationship_commitments[0].commitment_id,
+        )
+        await app.drain_background_once()
+        replayed = app._ledger.project()  # noqa: SLF001
+        assert replayed.relationship_commitments == projection.relationship_commitments
+        assert replayed.relationship_states == projection.relationship_states
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
+async def test_delivered_expression_interaction_act_waits_for_receipt_then_settles(
+    tmp_path: Path,
+) -> None:
+    app = _build_application(
+        path=tmp_path / "delivered-interaction-act.sqlite",
+        config=replace(
+            _config(),
+            reply_target="conversation:test:c2c:user.1",
+            counterpart_actor_ref="user:user.1",
+        ),
+        identities=_ConversationTargetIdentities(),
+        router=_Router(),
+        inbound_author=_InboundCharacterAuthor(
+            flash_model=_DeliveredInteractionActInboundModel()
+        ),
+        transport=_DeliveredTransport(received_at=NOW),
+        now=NOW,
+    )
+    try:
+        response = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="interaction-act-delivered",
+                text="你下次愿意把那本书带来吗？",
+                observed_at=NOW,
+                trace_id="trace:interaction-act-delivered",
+            )
+        )
+        assert response.status == "action_authorized"
+        assert app._ledger.project().interaction_acts == ()  # noqa: SLF001
+
+        await app.drain_background_once()
+        assert app._ledger.project().interaction_acts == ()  # noqa: SLF001
+
+        delivery = await app.drain_actions_once()
+        assert delivery is not None and delivery.status == "settled"
+        assert app._ledger.project().interaction_acts == ()  # noqa: SLF001
+
+        settlement = await app.drain_background_once()
+        assert settlement is not None and settlement.status == "accepted"
+        projection = app._ledger.project()  # noqa: SLF001
+        assert len(projection.interaction_acts) == 1
+        act = projection.interaction_acts[0]
+        assert act.subject_ref == "agent:companion"
+        assert act.counterparty_refs == ("user:user.1",)
+        assert act.act_kind == "约定后续交接"
+        assert act.object_descriptor is not None
+        assert act.object_descriptor.object_label == "这本书"
+        assert tuple(
+            (item.actor_ref, item.status_code)
+            for item in act.participant_statuses
+        ) == (("agent:companion", "等待后续交接"),)
+        assert act.external_outcome == "not_established"
+
+        await app.drain_background_once()
+        replayed = app._ledger.project()  # noqa: SLF001
+        assert replayed.interaction_acts == projection.interaction_acts
+        assert replayed.interaction_act_transitions == (
+            projection.interaction_act_transitions
+        )
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
+async def test_superseded_commitment_is_terminal_before_later_interaction_act(
+    tmp_path: Path,
+) -> None:
+    model = _TwoCommitmentsThenInteractionActInboundModel()
+    app = _build_application(
+        path=tmp_path / "semantic-worker-fairness.sqlite",
+        config=replace(
+            _config(),
+            reply_target="conversation:test:c2c:user.1",
+            counterpart_actor_ref="user:user.1",
+        ),
+        identities=_ConversationTargetIdentities(),
+        router=_Router(),
+        inbound_author=_InboundCharacterAuthor(flash_model=model),
+        transport=_DeliveredTransport(received_at=NOW),
+        now=NOW,
+    )
+    try:
+        turns = (
+            ("relationship-commitment:one", "我们可以成为好朋友吗？"),
+            ("relationship-commitment:two", "那我们就说定是好朋友了？"),
+            ("interaction-act:after-commitments", "你下次愿意把那本书带来吗？"),
+        )
+        for message_id, text in turns:
+            response = await app.respond(
+                InboundTurn(
+                    platform="test",
+                    platform_user_id="user.1",
+                    platform_message_id=message_id,
+                    text=text,
+                    observed_at=NOW,
+                    trace_id=f"trace:{message_id}",
+                )
+            )
+            assert response.status == "action_authorized"
+            delivery = await app.drain_actions_once()
+            assert delivery is not None and delivery.status == "settled"
+
+        first = await app.drain_background_once()
+        assert first is not None and first.status == "accepted"
+        assert len(app._ledger.project().relationship_commitments) == 1  # noqa: SLF001
+
+        superseded = await app.drain_background_once()
+        assert superseded is not None and superseded.status == "stale"
+        assert superseded.typed_proposal_id is None
+
+        later = await app.drain_background_once()
+        assert later is not None and later.status == "accepted"
+        projection = app._ledger.project()  # noqa: SLF001
+        assert len(projection.relationship_commitments) == 1
+        assert len(projection.interaction_acts) == 1
+        assert all(
+            item.proposal_id != superseded.source_proposal_id
+            for item in projection.acceptance_decisions
+        )
+        assert len(superseded.acceptance_commit.event_ids) == 1
+        terminal = app._ledger.lookup_event_commit(  # noqa: SLF001
+            superseded.acceptance_commit.event_ids[0]
+        )
+        assert terminal is not None
+        terminal_payload = terminal[0].payload()
+        assert terminal[0].event_type == "AdvisoryAcceptanceRejected"
+        assert terminal_payload["advisory_kind"] == "typed_change_terminal"
+        assert terminal_payload["stage"] == "stale"
+        assert terminal_payload["proposal_id"] != superseded.source_proposal_id
+        assert app._ledger.rebuild() == projection  # noqa: SLF001
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
+async def test_relationship_commitment_stale_candidate_is_closed_after_cold_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "relationship-commitment-stale-recovery.sqlite"
+    config = replace(
+        _config(),
+        reply_target="conversation:test:c2c:user.1",
+        counterpart_actor_ref="user:user.1",
+    )
+    app = _build_application(
+        path=path,
+        config=config,
+        identities=_ConversationTargetIdentities(),
+        router=_Router(),
+        inbound_author=_InboundCharacterAuthor(
+            flash_model=_RelationshipCommitmentInboundModel()
+        ),
+        transport=_DeliveredTransport(received_at=NOW),
+        now=NOW,
+    )
+    try:
+        response = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="relationship-commitment-stale",
+                text="我们可以成为好朋友吗？",
+                observed_at=NOW,
+                trace_id="trace:relationship-commitment-stale",
+            )
+        )
+        assert response.status == "action_authorized"
+        await app.drain_background_once()
+        delivery = await app.drain_actions_once()
+        assert delivery is not None and delivery.status == "settled"
+
+        def lose_acceptance(
+            _self,
+            *,
+            handle,
+            actor: str,
+            source: str,
+        ) -> None:
+            del handle, actor, source
+            raise ConcurrencyConflict("injected relationship acceptance race")
+
+        with monkeypatch.context() as race:
+            race.setattr(
+                RelationshipCommitmentAcceptanceRuntime,
+                "accept_runtime_owned",
+                lose_acceptance,
+            )
+            assert await app.drain_background_once() is None
+
+        pending = app._ledger.project()  # noqa: SLF001 - restart/replay evidence
+        assert len(pending.relationship_proposals) == 1
+        stale_proposal_id = pending.relationship_proposals[0].proposal_id
+        await app.tick(
+            tick_id="relationship-commitment-stale:advance",
+            logical_time_from=pending.logical_time or NOW,
+            logical_time_to=NOW + timedelta(seconds=1),
+            observed_at=NOW + timedelta(seconds=1),
+            trace_id="trace:relationship-commitment-stale:advance",
+            causation_id="scheduler:test",
+            correlation_id="conversation:test:c2c:user.1",
+            reason="test_relationship_commitment_stale_recovery",
+            run_life_ecology=False,
+        )
+    finally:
+        app.close()
+
+    rebuilt = _build_application(
+        path=path,
+        config=config,
+        identities=_ConversationTargetIdentities(),
+        router=_Router(),
+        inbound_author=_InboundCharacterAuthor(
+            flash_model=_RelationshipCommitmentInboundModel()
+        ),
+        transport=_DeliveredTransport(received_at=NOW + timedelta(seconds=1)),
+        now=NOW + timedelta(seconds=1),
+    )
+    try:
+        worker = rebuilt._turns._runtime._relationship_commitment_worker  # noqa: SLF001
+        assert worker is not None
+
+        stale = await worker.drain_one()
+
+        assert stale is not None and stale.status == "stale"
+        after_stale = rebuilt._ledger.project()  # noqa: SLF001
+        assert any(
+            item.proposal_id == stale_proposal_id and item.status == "stale"
+            for item in after_stale.acceptance_decisions
+        )
+        assert after_stale.relationship_commitments == ()
+
+        accepted = await worker.drain_one()
+
+        assert accepted is not None and accepted.status == "accepted"
+        settled = rebuilt._ledger.project()  # noqa: SLF001
+        assert len(settled.relationship_commitments) == 1
+        assert settled.relationship_states[0].stage == "friend"
+        assert all(
+            item.proposal_id
+            in {decision.proposal_id for decision in settled.acceptance_decisions}
+            for item in settled.relationship_proposals
+        )
+        assert rebuilt._ledger.rebuild() == settled  # noqa: SLF001
+    finally:
+        rebuilt.close()
+
+
+@pytest.mark.asyncio
+async def test_interaction_act_stale_candidate_is_closed_before_recompile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "interaction-act-stale-recovery.sqlite"
+    config = replace(
+        _config(),
+        reply_target="conversation:test:c2c:user.1",
+        counterpart_actor_ref="user:user.1",
+    )
+    app = _build_application(
+        path=path,
+        config=config,
+        identities=_ConversationTargetIdentities(),
+        router=_Router(),
+        inbound_author=_InboundCharacterAuthor(
+            flash_model=_DeliveredInteractionActInboundModel()
+        ),
+        transport=_DeliveredTransport(received_at=NOW),
+        now=NOW,
+    )
+    try:
+        response = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="interaction-act-stale",
+                text="你下次愿意把那本书带来吗？",
+                observed_at=NOW,
+                trace_id="trace:interaction-act-stale",
+            )
+        )
+        assert response.status == "action_authorized"
+        await app.drain_background_once()
+        delivery = await app.drain_actions_once()
+        assert delivery is not None and delivery.status == "settled"
+
+        def lose_acceptance(_self, **_kwargs) -> None:
+            raise ConcurrencyConflict("injected interaction-act acceptance race")
+
+        with monkeypatch.context() as race:
+            race.setattr(
+                InteractionActAcceptanceRuntime,
+                "accept",
+                lose_acceptance,
+            )
+            assert await app.drain_background_once() is None
+
+        pending = app._ledger.project()  # noqa: SLF001 - restart/replay evidence
+        assert len(pending.interaction_act_proposals) == 1
+        stale_proposal_id = pending.interaction_act_proposals[0].proposal_id
+        await app.tick(
+            tick_id="interaction-act-stale:advance",
+            logical_time_from=pending.logical_time or NOW,
+            logical_time_to=NOW + timedelta(seconds=1),
+            observed_at=NOW + timedelta(seconds=1),
+            trace_id="trace:interaction-act-stale:advance",
+            causation_id="scheduler:test",
+            correlation_id="conversation:test:c2c:user.1",
+            reason="test_interaction_act_stale_recovery",
+            run_life_ecology=False,
+        )
+    finally:
+        app.close()
+
+    rebuilt = _build_application(
+        path=path,
+        config=config,
+        identities=_ConversationTargetIdentities(),
+        router=_Router(),
+        inbound_author=_InboundCharacterAuthor(
+            flash_model=_DeliveredInteractionActInboundModel()
+        ),
+        transport=_DeliveredTransport(received_at=NOW + timedelta(seconds=1)),
+        now=NOW + timedelta(seconds=1),
+    )
+    try:
+        worker = rebuilt._turns._runtime._interaction_act_worker  # noqa: SLF001
+        assert worker is not None
+
+        stale = await worker.drain_one()
+
+        assert stale is not None and stale.status == "stale"
+        after_stale = rebuilt._ledger.project()  # noqa: SLF001
+        assert any(
+            item.proposal_id == stale_proposal_id and item.status == "stale"
+            for item in after_stale.acceptance_decisions
+        )
+        assert after_stale.interaction_acts == ()
+
+        accepted = await worker.drain_one()
+
+        assert accepted is not None and accepted.status == "accepted"
+        settled = rebuilt._ledger.project()  # noqa: SLF001
+        assert len(settled.interaction_acts) == 1
+        assert all(
+            item.proposal_id
+            in {decision.proposal_id for decision in settled.acceptance_decisions}
+            for item in settled.interaction_act_proposals
+        )
+        assert rebuilt._ledger.rebuild() == settled  # noqa: SLF001
+    finally:
+        rebuilt.close()
 
 
 def test_retired_independent_character_lanes_are_not_production_builder_surfaces() -> None:

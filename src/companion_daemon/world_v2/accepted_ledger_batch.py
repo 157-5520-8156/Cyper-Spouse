@@ -19,6 +19,12 @@ from .schemas import ProjectionCursor, WorldEvent
 from .appraisal_acceptance_manifest import APPRAISAL_ACCEPTANCE_MANIFEST_VERSION
 from .affect_acceptance_manifest import AFFECT_ACCEPTANCE_MANIFEST_VERSION
 from .relationship_acceptance_manifest import RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION
+from .relationship_commitment_acceptance_manifest import (
+    RELATIONSHIP_COMMITMENT_ACCEPTANCE_MANIFEST_VERSION,
+)
+from .interaction_act_acceptance_manifest import (
+    INTERACTION_ACT_ACCEPTANCE_MANIFEST_VERSION,
+)
 from .relationship_adjustment_acceptance_manifest import (
     RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION,
 )
@@ -154,6 +160,8 @@ class AcceptedLedgerBatchIssuer:
             APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
             AFFECT_ACCEPTANCE_MANIFEST_VERSION,
             RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION,
+            RELATIONSHIP_COMMITMENT_ACCEPTANCE_MANIFEST_VERSION,
+            INTERACTION_ACT_ACCEPTANCE_MANIFEST_VERSION,
             RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION,
             ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
             *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,

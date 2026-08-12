@@ -22,6 +22,7 @@ No new authority is created here:
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 import logging
@@ -35,7 +36,10 @@ logger = logging.getLogger(__name__)
 # Flood protection for the first run after this feature ships; the durable
 # dedupe, not this window, is the correctness mechanism.
 DEFAULT_BACKFILL_WINDOW = timedelta(hours=48)
-DEFAULT_BACKFILL_COUNT = 30
+# One restart catch-up is one sender volley.  Keep the provider fetch within
+# the ingress matrix's maximum batch membership so a stale/migrated database
+# can never turn one startup into a sequence of visible character replies.
+DEFAULT_BACKFILL_COUNT = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +124,7 @@ async def backfill_missed_private_messages(
 
     replayed = deduplicated = skipped = failed = 0
     statuses: list[str] = []
+    missed_fragments = []
     ordered = sorted(
         messages,
         key=lambda item: (
@@ -159,16 +164,29 @@ async def backfill_missed_private_messages(
         if already is not None:
             deduplicated += 1
             continue
+        missed_fragments.append(fragment)
+
+    async def _submit(fragment):  # type: ignore[no-untyped-def]
         try:
-            result = await host.inbound_fragment(fragment)
+            return await host.inbound_fragment(fragment)
         except Exception:  # noqa: BLE001 - one bad record must not stop the rest
             logger.exception(
                 "QQ history backfill failed for message %s", fragment.source_event_id
             )
+            return None
+
+    # Submit the complete historical window concurrently.  QQC2CHost persists
+    # every immutable provider message id, then its ordinary ingress matrix
+    # joins these fragments into one bounded batch.  Sequentially awaiting
+    # each fragment would let every old bubble finish a separate role turn and
+    # flood the user with replies immediately after restart.
+    results = await asyncio.gather(*(_submit(fragment) for fragment in missed_fragments))
+    for result in results:
+        if result is None:
             failed += 1
-            continue
-        statuses.append(result.status)
-        replayed += 1
+        else:
+            statuses.append(result.status)
+            replayed += 1
     if replayed or failed:
         logger.info(
             "QQ history backfill fetched=%s replayed=%s deduplicated=%s skipped=%s failed=%s",

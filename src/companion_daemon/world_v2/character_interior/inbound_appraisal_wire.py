@@ -23,6 +23,7 @@ from ..affect_target_bounds import (
     validate_model_authored_targets,
 )
 from ..deliberation import ModelInput
+from ..interaction_act_identity import interaction_act_overlapping_occurrence_count
 from ..model_facing_context import compact_model_facing_context
 from ..proposal_envelope import (
     AppraisalSummary,
@@ -31,6 +32,7 @@ from ..proposal_envelope import (
     ProposalEvidenceRef,
     TypedChange,
 )
+from ..relationship_reducers import RELATIONSHIP_COMMITMENT_STAGE_TRANSITIONS
 from ..schema_core import FrozenModel
 
 
@@ -124,6 +126,74 @@ class RelationshipSignalWire(FrozenModel):
     suggested_deltas: RelationshipSuggestedDeltasWire
 
 
+class RelationshipCommitmentWire(FrozenModel):
+    """Provider-visible choice; the trusted boundary binds the counterpart."""
+
+    target_stage: Literal["acquaintance", "friend", "close_friend"]
+    commitment_code: str = Field(min_length=1, max_length=128)
+    persistence: Literal["durable"]
+    visible_text_span: str = Field(min_length=1, max_length=512)
+
+    @model_validator(mode="after")
+    def free_text_is_trimmed(self) -> "RelationshipCommitmentWire":
+        if (
+            self.commitment_code != self.commitment_code.strip()
+            or self.visible_text_span != self.visible_text_span.strip()
+        ):
+            raise ValueError("relationship commitment text must be trimmed")
+        return self
+
+
+class InteractionActWire(FrozenModel):
+    """Generic role-authored cross-turn act semantics.
+
+    Actor coordinates are closed aliases.  The model cannot name arbitrary
+    principals; the materializer binds these aliases to the verified current
+    counterpart and the pinned CharacterInterior actor.
+    """
+
+    operation: Literal["declare", "revise"]
+    status_code: str = Field(min_length=1, max_length=128)
+    source_scope: Literal["current_message", "delivered_expression"]
+    source_text_span: str = Field(min_length=1, max_length=1_024)
+    interaction_act_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    act_kind: str = Field(min_length=1, max_length=128)
+    subject_role: Literal["current_counterpart", "self"]
+    counterparty_roles: tuple[Literal["current_counterpart", "self"], ...] = Field(
+        min_length=1, max_length=2
+    )
+    object_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    object_label: str | None = Field(default=None, min_length=1, max_length=512)
+
+    @model_validator(mode="after")
+    def operation_and_roles_are_closed(self) -> "InteractionActWire":
+        if self.subject_role in self.counterparty_roles:
+            raise ValueError("interaction act subject cannot be its counterparty")
+        if len(self.counterparty_roles) != len(set(self.counterparty_roles)):
+            raise ValueError("interaction act counterparties must be unique")
+        if self.operation == "declare" and self.interaction_act_ref is not None:
+            raise ValueError("interaction act declaration cannot select an existing act")
+        if self.operation == "revise" and self.interaction_act_ref is None:
+            raise ValueError("interaction act revision requires an existing act")
+        if self.operation == "declare":
+            if self.object_ref is not None:
+                raise ValueError("interaction act declaration object ref is host-derived")
+        elif self.object_label is not None:
+            # Revisions select the exact content-addressed object from
+            # the existing projection.  Repeating free text here would let a
+            # later turn silently rename it.
+            raise ValueError("interaction act revision cannot reauthor object label")
+        for value in (
+            self.source_text_span,
+            self.act_kind,
+            self.status_code,
+            self.object_label,
+        ):
+            if value is not None and value != value.strip():
+                raise ValueError("interaction act text must be trimmed")
+        return self
+
+
 class AppraisalDraftWire(FrozenModel):
     """Authoritative provider wire for one inbound private appraisal.
 
@@ -150,6 +220,8 @@ class AppraisalDraftWire(FrozenModel):
     episode_id: str | None = Field(default=None, min_length=1, max_length=256)
     resolution_summary: str | None = Field(default=None, min_length=1, max_length=1_200)
     relationship_signal: RelationshipSignalWire | None = None
+    relationship_commitment: RelationshipCommitmentWire | None = None
+    interaction_act: InteractionActWire | None = None
 
     @model_validator(mode="after")
     def appraisal_fields_match_selected_lifecycle(self) -> "AppraisalDraftWire":
@@ -492,7 +564,29 @@ def _appraisal_draft_messages(
         "change, behavior, stance, or display choice from this wire contract. Critical distinction: "
         "trust is not an affect component dimension. Never put the word trust in components[].dimension; "
         "if the character forms a relationship change, trust belongs only in relationship_signal."
-        "suggested_deltas.trust_bp."
+        "suggested_deltas.trust_bp. "
+        "If and only if she explicitly chooses to establish an ordinary relationship stage in "
+        "this same visible reply, she may include relationship_commitment with exactly "
+        "target_stage (acquaintance, friend, or close_friend), commitment_code (her own bounded "
+        "free-text code), persistence=durable, and visible_text_span copied exactly once from "
+        "the expression she is authoring. Omit it when she does not make that commitment; never "
+        "derive it from scores, message counts, or expected politeness. The system binds the "
+        "verified counterpart and does not let her return subject_ref. "
+        "She may also include at most one interaction_act when she explicitly identifies a "
+        "cross-turn act. This is a generic continuity record, not a prescribed social lifecycle. "
+        "Choose operation declare for a newly identified act or revise for one exact existing act; "
+        "write status_code as her own short free-text description rather than selecting from a "
+        "host status vocabulary. Also return source_scope current_message or delivered_expression, "
+        "an exact source_text_span, interaction_act_ref (null for declare), a short free-text "
+        "act_kind, subject_role and counterparty_roles drawn only from current_counterpart/self, "
+        "and optional object_ref/object_label. For declare, return object_ref=null and copy any "
+        "object_label exactly from the selected source text. For revise, select the exact existing "
+        "interaction_act_ref identified by the pinned interaction-act source_ref "
+        "interior:interaction-act:<interaction_act_ref>, plus its act coordinates and object_ref, "
+        "and return object_label=null. The "
+        "trusted host binds the source actor, and a revision records only that actor's status mark. "
+        "Ledger acceptance records the typed statement; it never proves an external action or "
+        "outcome completed. Omit interaction_act entirely when she does not choose one."
     )
     request_material = request.model_dump(mode="json")
     # The full ModelInput remains available to proposal materialization,
@@ -553,6 +647,14 @@ def _proposal_from_draft(*, raw: str, request: ModelInput) -> dict[str, object]:
         draft.get("relationship_signal"),
         request=request,
     )
+    relationship_commitment = _relationship_commitment(
+        draft.get("relationship_commitment"),
+        request=request,
+    )
+    interaction_act = _interaction_act(
+        draft.get("interaction_act"),
+        request=request,
+    )
     rationale = draft.get("brief_rationale")
     confidence = draft.get("confidence")
     tendency = draft.get("behavior_tendency")
@@ -579,6 +681,8 @@ def _proposal_from_draft(*, raw: str, request: ModelInput) -> dict[str, object]:
             stance=stance,
             display=display,
             relationship_signal=relationship_signal,
+            relationship_commitment=relationship_commitment,
+            interaction_act=interaction_act,
         )
     source_ref, _source_hash, evidence = _trigger_binding(request)
     if request.trigger_message is None and affect != "no_change":
@@ -683,6 +787,8 @@ def _proposal_from_draft(*, raw: str, request: ModelInput) -> dict[str, object]:
         episode_id=episode_id,
         resolution_summary=resolution_summary,
         relationship_signal=relationship_signal,
+        relationship_commitment=relationship_commitment,
+        interaction_act=interaction_act,
     )
     proposal_id = f"proposal:appraisal-draft:{identity}"
     change_id = f"change:appraisal-draft:{identity}"
@@ -771,8 +877,51 @@ def _proposal_from_draft(*, raw: str, request: ModelInput) -> dict[str, object]:
                 ),
             )
         )
+    if relationship_commitment is not None:
+        changes.append(
+            TypedChange(
+                change_id=f"change:relationship-commitment-appraisal-draft:{identity}",
+                kind="relationship_commitment",
+                target_id=f"relationship-commitment:appraisal-draft:{identity}",
+                transition="commit",
+                evidence_refs=(request.trigger_message.event_ref,),
+                payload=CanonicalTypedPayload.from_value(
+                    payload_schema="relationship_commitment.v1",
+                    value=relationship_commitment,
+                ),
+            )
+        )
+    if interaction_act is not None:
+        operation = str(interaction_act["operation"])
+        target_id = (
+            str(interaction_act["interaction_act_ref"])
+            if interaction_act["interaction_act_ref"] is not None
+            else f"interaction-act:appraisal-draft:{identity}"
+        )
+        changes.append(
+            TypedChange(
+                change_id=f"change:interaction-act-appraisal-draft:{identity}",
+                kind="interaction_act",
+                target_id=target_id,
+                expected_entity_revision=(0 if operation == "declare" else None),
+                transition=operation,
+                evidence_refs=(request.trigger_message.event_ref,),
+                payload=CanonicalTypedPayload.from_value(
+                    payload_schema="interaction_act.v1",
+                    value={
+                        key: value
+                        for key, value in interaction_act.items()
+                        if key != "operation"
+                    },
+                ),
+            )
+        )
     proposal_evidence = [evidence]
-    if relationship_signal is not None:
+    if (
+        relationship_signal is not None
+        or relationship_commitment is not None
+        or interaction_act is not None
+    ):
         proposal_evidence.append(_relationship_event_evidence(request))
     proposal = DecisionProposal(
         proposal_id=proposal_id,
@@ -914,6 +1063,219 @@ def _relationship_signal(
     }
 
 
+def _relationship_commitment(
+    value: object,
+    *,
+    request: ModelInput,
+) -> dict[str, object] | None:
+    """Bind an explicit stage commitment to the verified current counterpart."""
+
+    if value is None:
+        return None
+    trigger = request.trigger_message
+    if trigger is None:
+        raise ValueError("relationship commitment requires a verified message actor")
+    try:
+        wire = RelationshipCommitmentWire.model_validate(value, strict=True)
+    except ValidationError as exc:
+        raise ValueError("AppraisalDraft relationship commitment is invalid") from exc
+    relationship_heads = tuple(
+        item
+        for item in _pinned_slice_values(request, "relationship_slice")
+        if item.get("subject_ref") == trigger.actor
+    )
+    if len(relationship_heads) > 1:
+        raise ValueError("relationship commitment pinned head is not exact")
+    current_stage: object = (
+        relationship_heads[0].get("stage") if relationship_heads else "stranger"
+    )
+    if (
+        not isinstance(current_stage, str)
+        or wire.target_stage
+        not in RELATIONSHIP_COMMITMENT_STAGE_TRANSITIONS.get(
+            current_stage,
+            frozenset(),
+        )
+    ):
+        raise ValueError(
+            "relationship commitment target stage is not installed from pinned head"
+        )
+    return {
+        "subject_ref": trigger.actor,
+        **wire.model_dump(mode="json"),
+    }
+
+
+def _interaction_act(
+    value: object,
+    *,
+    request: ModelInput,
+) -> dict[str, object] | None:
+    """Bind generic role aliases and exact source bytes without classifying prose."""
+
+    if value is None:
+        return None
+    trigger = request.trigger_message
+    if trigger is None:
+        raise ValueError("interaction act requires a verified current message")
+    try:
+        wire = InteractionActWire.model_validate_json(
+            json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+            strict=True,
+        )
+    except ValidationError as exc:
+        raise ValueError("AppraisalDraft interaction act is invalid") from exc
+    companion_ref = _companion_actor_ref(request)
+    bindings = {
+        "current_counterpart": trigger.actor,
+        "self": companion_ref,
+    }
+    if wire.source_scope == "current_message":
+        if (
+            trigger.text is None
+            or interaction_act_overlapping_occurrence_count(
+                source_text=trigger.text,
+                selected_text=wire.source_text_span,
+            )
+            != 1
+        ):
+            raise ValueError(
+                "interaction act source span must occur exactly once in the verified message"
+            )
+        if (
+            wire.object_label is not None
+            and interaction_act_overlapping_occurrence_count(
+                source_text=trigger.text,
+                selected_text=wire.object_label,
+            )
+            != 1
+        ):
+            raise ValueError(
+                "interaction act object label must occur exactly once in the verified message"
+            )
+        source_role = "current_counterpart"
+    else:
+        source_role = "self"
+    if wire.operation == "declare" and wire.subject_role != source_role:
+        raise ValueError("interaction act declaration changed the verified subject")
+    source_actor_ref = bindings[source_role]
+    participant_refs = (
+        bindings[wire.subject_role],
+        *(bindings[item] for item in wire.counterparty_roles),
+    )
+    if source_actor_ref not in participant_refs:
+        raise ValueError("interaction act source actor is not a participant")
+    if wire.operation == "revise":
+        matching_heads = tuple(
+            item
+            for item in _pinned_slice_values(request, "interaction_acts")
+            if item.get("source_ref")
+            == f"interior:interaction-act:{wire.interaction_act_ref}"
+            and isinstance(item.get("frame"), dict)
+        )
+        if len(matching_heads) != 1:
+            raise ValueError(
+                "interaction act revision did not select exactly one pinned act"
+            )
+        frame = matching_heads[0]["frame"]
+        assert isinstance(frame, dict)
+        object_descriptor = frame.get("object")
+        pinned_object_ref = (
+            object_descriptor.get("object_ref")
+            if isinstance(object_descriptor, dict)
+            else None
+        )
+        if (
+            frame.get("subject_ref") != bindings[wire.subject_role]
+            or frame.get("counterparty_refs")
+            != [bindings[item] for item in wire.counterparty_roles]
+            or frame.get("act_kind") != wire.act_kind
+            or pinned_object_ref != wire.object_ref
+        ):
+            raise ValueError("interaction act revision changed pinned act coordinates")
+    return {
+        "operation": wire.operation,
+        "interaction_act_ref": wire.interaction_act_ref,
+        "act_kind": wire.act_kind,
+        "subject_ref": bindings[wire.subject_role],
+        "counterparty_refs": [bindings[item] for item in wire.counterparty_roles],
+        "object_ref": wire.object_ref,
+        "object_label": wire.object_label,
+        "source_scope": wire.source_scope,
+        "source_text_span": wire.source_text_span,
+        "status_code": wire.status_code,
+    }
+
+
+def _pinned_slice_values(
+    request: ModelInput,
+    slice_name: str,
+) -> tuple[dict[str, object], ...]:
+    """Read one cursor-pinned typed view without interpreting role-authored text."""
+
+    try:
+        context = json.loads(request.model_content_json)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("typed semantic choice requires pinned Context") from exc
+    if not isinstance(context, dict):
+        raise ValueError("typed semantic choice requires pinned Context")
+    snapshot = context.get("inner_life_snapshot")
+    if snapshot is not None:
+        if not isinstance(snapshot, dict):
+            raise ValueError("typed semantic choice pinned snapshot is invalid")
+        materials = snapshot.get("materials")
+        if not isinstance(materials, dict):
+            raise ValueError("typed semantic choice pinned snapshot is invalid")
+        material_name = {
+            "relationship_slice": "relationship",
+            "interaction_acts": "interaction_acts",
+        }.get(slice_name)
+        if material_name is None:
+            raise ValueError("typed semantic choice requested an unknown pinned view")
+        material = materials.get(material_name, [])
+        if not isinstance(material, list) or any(
+            not isinstance(item, dict) for item in material
+        ):
+            raise ValueError("typed semantic choice pinned snapshot is invalid")
+        return tuple(material)
+    slices = context.get("slices")
+    if slices is None:
+        return ()
+    if not isinstance(slices, dict):
+        raise ValueError("typed semantic choice pinned Context is invalid")
+    lane = slices.get(slice_name)
+    if lane is None:
+        return ()
+    if not isinstance(lane, dict):
+        raise ValueError("typed semantic choice pinned Context is invalid")
+    if lane.get("availability") != "available":
+        return ()
+    items = lane.get("items")
+    if not isinstance(items, list):
+        raise ValueError("typed semantic choice pinned Context is invalid")
+    values: list[dict[str, object]] = []
+    for item in items:
+        value = item.get("value") if isinstance(item, dict) else None
+        item_ref = item.get("item_ref") if isinstance(item, dict) else None
+        if not isinstance(value, dict) or not isinstance(item_ref, str):
+            raise ValueError("typed semantic choice pinned Context is invalid")
+        if "source_ref" in value:
+            raise ValueError("typed semantic choice pinned Context reused source_ref")
+        values.append({**value, "source_ref": item_ref})
+    return tuple(values)
+
+
+def _companion_actor_ref(request: ModelInput) -> str:
+    try:
+        context = json.loads(request.model_content_json)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("interaction act requires pinned companion authority") from exc
+    actor_ref = context.get("actor_ref") if isinstance(context, dict) else None
+    if not isinstance(actor_ref, str) or not actor_ref:
+        raise ValueError("interaction act requires pinned companion authority")
+    return actor_ref
+
+
 def _relationship_event_evidence(request: ModelInput) -> ProposalEvidenceRef:
     trigger = request.trigger_message
     if trigger is None:
@@ -972,6 +1334,8 @@ def _identity(
     episode_id: str | None = None,
     resolution_summary: str | None = None,
     relationship_signal: object = (),
+    relationship_commitment: object = (),
+    interaction_act: object = (),
 ) -> str:
     source_ref, source_hash, _ = _trigger_binding(request)
     material: dict[str, object] = {
@@ -993,6 +1357,8 @@ def _identity(
             "affect": affect,
             "components": components,
             "relationship_signal": relationship_signal,
+            "relationship_commitment": relationship_commitment,
+            "interaction_act": interaction_act,
         }
     # Preserve existing open/no-change identities across deployment while
     # binding every newly reachable existing-episode transition completely.
@@ -1012,6 +1378,8 @@ def _no_change_proposal(
     stance: str = "wait",
     display: str = "withhold",
     relationship_signal: dict[str, object] | None = None,
+    relationship_commitment: dict[str, object] | None = None,
+    interaction_act: dict[str, object] | None = None,
 ) -> dict[str, object]:
     identity = _identity(
         request=request,
@@ -1022,14 +1390,16 @@ def _no_change_proposal(
         stance=stance,
         display_strategy=display,
         relationship_signal=relationship_signal,
+        relationship_commitment=relationship_commitment,
+        interaction_act=interaction_act,
     )
-    changes: tuple[TypedChange, ...] = ()
+    changes: list[TypedChange] = []
     evidence_refs: tuple[ProposalEvidenceRef, ...] = ()
     if relationship_signal is not None:
         trigger = request.trigger_message
         if trigger is None:
             raise ValueError("relationship signal requires a verified message")
-        changes = (
+        changes.append(
             TypedChange(
                 change_id=f"change:relationship-appraisal-draft:{identity}",
                 kind="relationship_signal",
@@ -1041,15 +1411,61 @@ def _no_change_proposal(
                     payload_schema="relationship_signal.v1",
                     value=relationship_signal,
                 ),
-            ),
+            )
         )
+    if relationship_commitment is not None:
+        trigger = request.trigger_message
+        if trigger is None:
+            raise ValueError("relationship commitment requires a verified message")
+        changes.append(
+            TypedChange(
+                change_id=f"change:relationship-commitment-appraisal-draft:{identity}",
+                kind="relationship_commitment",
+                target_id=f"relationship-commitment:appraisal-draft:{identity}",
+                transition="commit",
+                evidence_refs=(trigger.event_ref,),
+                payload=CanonicalTypedPayload.from_value(
+                    payload_schema="relationship_commitment.v1",
+                    value=relationship_commitment,
+                ),
+            )
+        )
+    if interaction_act is not None:
+        trigger = request.trigger_message
+        if trigger is None:
+            raise ValueError("interaction act requires a verified message")
+        operation = str(interaction_act["operation"])
+        target_id = (
+            str(interaction_act["interaction_act_ref"])
+            if interaction_act["interaction_act_ref"] is not None
+            else f"interaction-act:appraisal-draft:{identity}"
+        )
+        changes.append(
+            TypedChange(
+                change_id=f"change:interaction-act-appraisal-draft:{identity}",
+                kind="interaction_act",
+                target_id=target_id,
+                expected_entity_revision=(0 if operation == "declare" else None),
+                transition=operation,
+                evidence_refs=(trigger.event_ref,),
+                payload=CanonicalTypedPayload.from_value(
+                    payload_schema="interaction_act.v1",
+                    value={
+                        key: value
+                        for key, value in interaction_act.items()
+                        if key != "operation"
+                    },
+                ),
+            )
+        )
+    if changes:
         evidence_refs = (_relationship_event_evidence(request),)
     proposal = DecisionProposal(
         proposal_id=f"proposal:appraisal-draft:{identity}",
         trigger_ref=request.trigger_ref,
         evaluated_world_revision=request.evaluated_world_revision,
         evidence_refs=evidence_refs,
-        proposed_changes=changes,
+        proposed_changes=tuple(changes),
         action_intents=(),
         confidence=confidence,
         brief_rationale=rationale,

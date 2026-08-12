@@ -347,6 +347,18 @@ health 中名为 `autonomous_impulses` 的 facet 也不能当成这类持久 imp
 
 同一 impulse 类型还应能请求媒体候选编译，但不能把动机枚举化或让本地规则按情绪/关系自动决定联系与拍照。
 
+**2026-08-11 当前薄片**
+
+- 后台 world-stimulus 角色现在获得明确的 `reply_reconsideration` 能力语义：它可自主打开带
+  due/expiry/importance 的私有 Thread；该操作只记录“以后再决定是否联系”，不会直接调度或发送。
+- 到期后仍由现有 proactive CharacterInterior 再次选择 `now/later/silent`，没有新增本地 `act/hold`
+  规则，也没有常驻轮询模型。
+- proactive 适配器不再把 `role_faculty_unavailable` 和
+  `required_tool_choice_unsupported` 压扁为通用 `authored_subcall_exception`。
+
+这只闭合“已有事件触发的后台意图”薄片，不等于角色拥有无事件的常驻思维流，也不证明主动联系的真实 QQ
+频率、延迟和送达已经资格化。
+
 ## 3. 已排除的误报／当前不是 Bug
 
 ### “窗边看雨”不是对话模型临场幻觉
@@ -382,6 +394,26 @@ effect-once 和回执，不应固定私密话题必须双气泡，也不应由�
 - durable 技术失败已有独立 System Notice 路径，不再冒充角色沉默；仍需真实 QQ 故障注入与 terminal receipt 证据。
 - source review 已路由到 DeepSeek Flash，并有 100 次精确契约样本；该样本只证明孤立 verdict schema，
   不证明端到端首 Beat、真实 QQ 或独立语义权威。
+- 2026-08-11 现场确认一次消息的旧路径为：DeepSeek 首次流取消 → 同角色纠正 → GPT full V7 → GPT
+  report-relative adjudication → Qwen wire retry；首个 QQ provider-accepted 为 18.212 秒，已记录成功调用成本
+  至少 CNY 0.1129。根因是 selective 开关默认 false、composition 会把 GPT/Qwen 重新装回 ordinary/recovery，
+  compact wire 失败及含 `world_claims` 时又可隐式进入 full V7。当前生产默认只允许 compact Flash；显式 false、
+  自动/Provider-backed 注入旧 full reviewer 均 fail-closed；compact 失败只进入同角色纠正，不再第三方回退。
+  独立 GPT/Qwen authority 仅由 Life runtime 持有，自动聊天 Inventory 路由也已移除。
+- 同次 18.212 秒样本的首轮角色输出含 `media_source_refs:null`。DeepSeek strict timing branch 曾把 canonical
+  非 nullable 数组投影为 nullable，导致一次 4.689 秒调用被 canonical decoder 拒绝后重选。Atomic 与 stream
+  生产工具契约现在都要求显式非 null 的 `media_source_refs` / `world_claims` 数组；`[]` 表示角色没有选择新来源，
+  不由宿主猜测拍摄内容。该修复只去掉无意义 wire 重试，尚未证明 2–3 秒端到端目标。
+- 角色选择 `consider_available_candidate` 并在独立 `media_source_refs` 中选择精确、已审查生活来源时，
+  MediaRequestRuntime 现在可在 media selection 前请求 LifeVisualEvidenceAuthor 编译一个 source-closed
+  候选；它支持 settlement 以及由 typed Experience/LifeContent 绑定证明的 Snapshot 来源别名，不按“最近事件”
+  猜场景。PrivateTurnState 注意力本身不授权候选编译；无来源时仍可消费已有候选。
+- 后台 world-stimulus 可用已有 Thread authority 持久化 `reply_reconsideration`，proactive 到期后仍需角色再次
+  决定；技术失败码与角色 `silent` 保持分离。
+- QQ 启动历史补偿不再逐条等待并为每条旧气泡单独生成回复。一个 restart window 现在并发提交给既有
+  ingress coalescer，最多 16 条原始 provider message id 保持独立去重、但只形成一个 bounded user volley。
+  2026-08-11 staging 复现曾从陈旧临时库导入 11 条历史 Observation 并发送 11 条回复；修复后的同库受控
+  重启只执行历史 dedupe 与既有 provider-accepted receipt reconciliation，没有再次调用 `send_private_msg`。
 
 ## 5. 尚未完成的发布资格门
 

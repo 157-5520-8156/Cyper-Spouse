@@ -32,6 +32,8 @@ from companion_daemon.world_v2.proposal_audit_schemas import (
     ModelResultRecordedPayload,
     RecordedModelDecisionContext,
     RecordedModelResultAudit,
+    RecordedPhysicalProviderInvocationAudit,
+    recorded_physical_provider_audit,
 )
 from companion_daemon.world_v2.proposal_envelope import DecisionProposal
 from companion_daemon.world_v2.recall_audit import (
@@ -45,7 +47,7 @@ from companion_daemon.world_v2.recall_index import (
     recall_query_hash,
     recall_result_hash,
 )
-from companion_daemon.world_v2.reducers import ReducerState
+from companion_daemon.world_v2.reducers import ReducerState, reduce_event
 from companion_daemon.world_v2.schemas import WorldEvent
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from companion_daemon.world_v2.test_economy import (
@@ -65,6 +67,177 @@ def _hash(value: str) -> str:
 
 def _digest(value: object) -> str:
     return _hash(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+def _recorded_standalone_physical(
+    failure_code: str,
+    *,
+    outcome: str = "unresolved",
+) -> RecordedModelResultAudit:
+    model_call_id = "model-call:recorded-physical"
+    return RecordedModelResultAudit(
+        model_call_id=model_call_id,
+        model_result_ref=(
+            "model-result:"
+            + _digest({"model_call_id": model_call_id, "response_hash": None})
+        ),
+        attempt_id="attempt:recorded-physical",
+        route={
+            "tier": "flash",
+            "reason_code": "transport.expression_unit_stream.unresolved",
+            "router_version": "physical-provider-audit.1",
+        },
+        attempted_model_id="model:test",
+        attempted_model_version="1",
+        request_hash="a" * 64,
+        status=f"provider_{outcome}",
+        failure_code=failure_code,
+        slot="primary",
+        outcome=outcome,
+        usage_status=outcome,
+        semantic_model_call_ids=("model-call:recorded-head",),
+    )
+
+
+@pytest.mark.parametrize(
+    "failure_code",
+    [
+        "provider_http_500",
+        "RuntimeError:http_500",
+        "sk_live_SECRET_provider_body",
+    ],
+    ids=["http", "exception-detail", "secret"],
+)
+def test_recorded_physical_provider_rejects_unbounded_failure_codes(
+    failure_code: str,
+) -> None:
+    with pytest.raises(ValueError, match="failure code is not content-free"):
+        _recorded_standalone_physical(failure_code)
+
+
+@pytest.mark.parametrize(
+    ("failure_code", "outcome"),
+    [
+        ("timeout", "unresolved"),
+        ("invalid", "unresolved"),
+        ("cancelled", "unresolved"),
+        ("exception", "unresolved"),
+        ("missing_output", "unresolved"),
+        ("stream_author_identity_changed", "unresolved"),
+        ("stream_reselected", "cancelled"),
+        ("stream_reselection_unresolved", "unresolved"),
+        ("stream_superseded_by_newer_input", "cancelled"),
+        ("stream_tail_cancelled", "cancelled"),
+        ("stream_tail_unresolved", "unresolved"),
+        ("stream_tail_unresolved_after_bounded_cancellation", "unresolved"),
+        ("stream_provider_unresolved", "unresolved"),
+        ("stream_provider_unresolved", "cancelled"),
+    ],
+)
+def test_recorded_standalone_physical_accepts_bounded_v55_failure_code(
+    failure_code: str,
+    outcome: str,
+) -> None:
+    recorded = _recorded_standalone_physical(failure_code, outcome=outcome)
+
+    assert recorded.failure_code == failure_code
+
+
+@pytest.mark.parametrize(
+    "failure_code",
+    [
+        "source_review_timeout",
+        "source_review_exception",
+        "authored_subcall_timeout",
+        "authored_subcall_exception",
+        "role_faculty_unavailable",
+        "required_tool_choice_unsupported",
+        "recall_choice_reselection_invalid",
+        "authored_expression_reselection_invalid",
+        "proactive_claim_binding_invalid",
+        "affect_target_reselection_invalid",
+        "inventory_invalid",
+        "coverage_invalid",
+    ],
+)
+def test_recorded_standalone_physical_accepts_fixed_validation_failure_code(
+    failure_code: str,
+) -> None:
+    recorded = _recorded_standalone_physical(failure_code)
+
+    assert recorded.failure_code == failure_code
+
+
+@pytest.mark.parametrize(
+    ("failure_code", "outcome"),
+    [
+        ("cancelled", "cancelled"),
+        ("missing_output", "cancelled"),
+        ("stream_reselected", "unresolved"),
+        ("stream_superseded_by_newer_input", "unresolved"),
+    ],
+)
+def test_recorded_physical_rejects_v55_token_with_wrong_outcome(
+    failure_code: str,
+    outcome: str,
+) -> None:
+    with pytest.raises(ValueError, match="failure code is not content-free"):
+        _recorded_standalone_physical(failure_code, outcome=outcome)
+
+
+def test_recorded_physical_rejects_post_v55_validation_failure_code() -> None:
+    with pytest.raises(ValueError, match="failure code is not content-free"):
+        _recorded_standalone_physical("appraisal_result_missing")
+
+
+def test_recorded_embedded_physical_rejects_legacy_standalone_token() -> None:
+    with pytest.raises(ValueError, match="failure code is not content-free"):
+        RecordedPhysicalProviderInvocationAudit(
+            model_call_id="model-call:embedded-legacy-physical",
+            request_hash="c" * 64,
+            model_id="model:test",
+            model_version="1",
+            outcome="unresolved",
+            failure_code="cancelled",
+            usage_status="unresolved",
+            semantic_model_call_ids=("model-call:embedded-legacy-head",),
+        )
+
+
+@pytest.mark.parametrize(
+    "failure_code",
+    ["cancelled", "missing_output", "source_review_timeout", "stream_author_identity_changed"],
+)
+def test_physical_provider_writer_normalizes_bounded_legacy_failure_code(
+    failure_code: str,
+) -> None:
+    physical = PhysicalProviderInvocationAudit(
+        model_call_id="model-call:legacy-writer-physical",
+        request_hash="b" * 64,
+        model_id="model:test",
+        model_version="1",
+        outcome="unresolved",
+        failure_code=failure_code,
+        usage_status="unresolved",
+        semantic_model_call_ids=("model-call:legacy-writer-head",),
+    )
+
+    recorded = recorded_physical_provider_audit(physical)
+
+    assert recorded.failure_code == "stream_provider_unresolved"
+
+
+def _attempt_identity_material(audit: ModelResultAudit) -> dict[str, object]:
+    material = audit.model_dump(mode="json")
+    if (
+        audit.physical_provider_audits
+        and audit.semantic_stream_part is None
+        and audit.status in {"main_timeout", "main_exception"}
+    ):
+        material["physical_provider_audits"] = [
+            item.model_dump(mode="json") for item in audit.physical_provider_audits
+        ]
+    return material
 
 
 def _event(event_id: str, event_type: str, payload: dict[str, object]) -> WorldEvent:
@@ -282,6 +455,67 @@ def _failed_result() -> DeliberationResult:
     )
 
 
+def _independent_physical_failure_result(
+    *,
+    attempt_id: str = "attempt:audit:independent-physical",
+    physical_variant: str = "original",
+    root_variant: str = "original",
+) -> tuple[DeliberationResult, PhysicalProviderInvocationAudit]:
+    base = _result()
+    physical_suffix = "" if physical_variant == "original" else f":{physical_variant}"
+    physical = PhysicalProviderInvocationAudit(
+        model_call_id=f"model-call:independent-physical:transport{physical_suffix}",
+        request_hash=_hash(
+            f"independent-physical-transport-request{physical_suffix}"
+        ),
+        model_id="model:character-author",
+        model_version=f"2026-08{physical_suffix}",
+        outcome="unresolved",
+        failure_code="stream_reselection_unresolved",
+        usage_status="unresolved",
+        semantic_model_call_ids=(
+            f"model-call:independent-physical:head{physical_suffix}",
+            f"model-call:independent-physical:tail{physical_suffix}",
+        ),
+    )
+    root_suffix = "" if root_variant == "original" else f":{root_variant}"
+    root_call_id = f"model-call:independent-physical:root{root_suffix}"
+    audit = ModelResultAudit(
+        model_call_id=root_call_id,
+        model_result_ref=(
+            "model-result:"
+            + _digest({"model_call_id": root_call_id, "response_hash": None})
+        ),
+        attempt_id=attempt_id,
+        route=base.audit.route,
+        attempted_model_id="model:character-author",
+        attempted_model_version="2026-08",
+        request_hash=_hash(f"independent-physical-root-request{root_suffix}"),
+        status="main_exception",
+        failure_code="authored_subcall_exception",
+        slot="primary",
+        outcome="exception",
+        physical_provider_audits=(physical,),
+    )
+    result_id = "deliberation:" + _digest(
+        {
+            "capsule_id": base.capsule_id,
+            "proposal_hash": None,
+            "attempt_audits": [_attempt_identity_material(audit)],
+        }
+    )
+    return (
+        DeliberationResult(
+            result_id=result_id,
+            capsule_id=base.capsule_id,
+            proposal=None,
+            audit=audit,
+            attempt_audits=(audit,),
+        ),
+        physical,
+    )
+
+
 def _second_result() -> DeliberationResult:
     base = _result()
     proposal = base.proposal.model_copy(update={"proposal_id": "proposal:audit:2"})
@@ -493,7 +727,7 @@ def test_nested_source_review_provider_invocations_are_individually_immutable(
     assert primary.attempted_model_id == "model:review-primary"
     assert primary.request_hash == _hash("source-review-primary-request")
     assert primary.outcome == "exception"
-    assert primary.failure_code == "HTTPStatusError:http_403"
+    assert primary.failure_code == "provider_http_403"
     secondary = RecordedModelResultAudit.model_validate_json(
         projection.model_result_audits[2].audit_json
     )
@@ -518,6 +752,60 @@ def test_nested_source_review_provider_invocations_are_individually_immutable(
         reopened.project().model_result_audits[1].parent_model_call_id
         == parent_call_id
     )
+
+
+def test_recorder_collapses_untrusted_nested_provider_failure_codes() -> None:
+    base = _result()
+    untrusted = ProviderSubcallAudit(
+        purpose="source_review",
+        parent_model_call_id=base.audit.model_call_id,
+        model_call_id="model-call:untrusted-source-review",
+        request_hash=_hash("untrusted-source-review-request"),
+        model_id="model:review-primary",
+        model_version="2026-08",
+        lane="direct",
+        outcome="exception",
+        failure_code="sk_live_SECRET_provider_body",
+    )
+    audit = base.audit.model_copy(
+        update={"provider_subcall_audits": (untrusted,)}
+    )
+    result = base.model_copy(update={"audit": audit, "attempt_audits": (audit,)})
+    events = ProposalAuditRecorder(
+        ledger=WorldLedger.in_memory(world_id=WORLD)
+    ).build_events(result, _context())
+    encoded = "\n".join(event.payload_json for event in events)
+
+    assert "SECRET" not in encoded
+    assert "provider_exception" in encoded
+
+
+def test_recorder_rejects_untrusted_embedded_physical_failure_codes() -> None:
+    base, physical = _independent_physical_failure_result()
+    untrusted = physical.model_copy(
+        update={"failure_code": "sk_live_SECRET_provider_body"}
+    )
+    audit = base.audit.model_copy(
+        update={"physical_provider_audits": (untrusted,)}
+    )
+    result_id = "deliberation:" + _digest(
+        {
+            "capsule_id": base.capsule_id,
+            "proposal_hash": None,
+            "attempt_audits": [_attempt_identity_material(audit)],
+        }
+    )
+    result = base.model_copy(
+        update={
+            "result_id": result_id,
+            "audit": audit,
+            "attempt_audits": (audit,),
+        }
+    )
+    with pytest.raises(ValueError, match="failed strict revalidation"):
+        ProposalAuditRecorder(
+            ledger=WorldLedger.in_memory(world_id=WORLD)
+        ).build_events(result, _context())
 
 
 def test_reviewer_technical_failure_is_durable_under_the_authored_candidate(
@@ -594,7 +882,7 @@ def test_reviewer_technical_failure_is_durable_under_the_authored_candidate(
                 {
                     "capsule_id": base.capsule_id,
                     "proposal_hash": None,
-                    "attempt_audits": [audit.model_dump(mode="json")],
+                    "attempt_audits": [_attempt_identity_material(audit)],
                 }
             )
         ),
@@ -643,6 +931,52 @@ def test_reviewer_technical_failure_is_durable_under_the_authored_candidate(
     reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
     assert reopened.rebuild().semantic_hash == reopened.project().semantic_hash
     assert len(reopened.project().model_result_audits) == 4
+
+
+def test_recall_control_transfer_is_its_own_model_result_not_a_provider_subcall(
+    tmp_path,
+) -> None:
+    path = tmp_path / "audit-recall-control-transfer.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    _started(ledger)
+    base = _result(metered=True)
+    assert base.audit.usage is not None
+    recall = AuthoredCandidateInvocationAudit(
+        purpose="recall_control_transfer",
+        model_call_id="model-call:character:recall-control-transfer",
+        request_hash=_hash("recall-control-transfer-request"),
+        response_hash=_hash("recall-control-transfer-response"),
+        model_id="model:character-author",
+        model_version="2026-08",
+        outcome="control_transfer",
+        usage=base.audit.usage,
+    )
+    audit = base.audit.model_copy(
+        update={"authored_candidate_audits": (recall,)}
+    )
+    result = base.model_copy(
+        update={"audit": audit, "attempt_audits": (audit,)}
+    )
+
+    committed = ProposalAuditRecorder(ledger=ledger).record(result, _context())
+
+    assert len(committed.event_ids) == 3
+    projection = ledger.project()
+    assert [item.model_call_id for item in projection.model_result_audits] == [
+        base.audit.model_call_id,
+        recall.model_call_id,
+    ]
+    recorded = RecordedModelResultAudit.model_validate_json(
+        projection.model_result_audits[1].audit_json
+    )
+    assert recorded.status == "candidate_returned"
+    assert recorded.outcome == "returned"
+    assert recorded.failure_code is None
+    assert recorded.parent_model_call_id is None
+    assert recorded.request_hash == recall.request_hash
+    assert recorded.response_hash == recall.response_hash
+    assert recorded.usage is not None
+    ledger.close()
 
 
 def test_provider_subcall_parent_must_match_its_owning_author_attempt() -> None:
@@ -860,6 +1194,638 @@ def test_stream_unit_can_record_physical_lineage_when_sibling_is_not_persisted()
         head_call_id,
         parent_call_id,
     ]
+
+
+def test_failed_main_audit_records_its_independent_physical_terminal(tmp_path) -> None:
+    """A pre-authorization stream terminal is evidence, not a fake tail result."""
+
+    path = tmp_path / "audit-failed-main-physical.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    _started(ledger)
+    base = _result(metered=True)
+    assert base.audit.usage is not None
+    author = AuthoredCandidateInvocationAudit(
+        purpose="primary_initial",
+        model_call_id="model-call:failed-physical:author",
+        request_hash=_hash("failed-physical-author-request"),
+        response_hash=_hash("failed-physical-author-response"),
+        model_id="model:character-author",
+        model_version="2026-08",
+        outcome="validation_unresolved",
+        usage=base.audit.usage,
+    )
+    reviewer = ProviderSubcallAudit(
+        purpose="source_review",
+        parent_model_call_id=author.model_call_id,
+        model_call_id="model-call:failed-physical:reviewer",
+        request_hash=_hash("failed-physical-review-request"),
+        model_id="model:source-reviewer",
+        model_version="2026-08",
+        lane="direct",
+        outcome="exception",
+        failure_code="source_review_exception",
+    )
+    head_call_id = "model-call:failed-physical:semantic-head"
+    tail_call_id = "model-call:failed-physical:semantic-tail"
+    physical = PhysicalProviderInvocationAudit(
+        model_call_id="model-call:failed-physical:transport",
+        request_hash=_hash("failed-physical-transport-request"),
+        model_id="model:character-author",
+        model_version="2026-08",
+        outcome="unresolved",
+        failure_code="stream_reselection_unresolved",
+        usage_status="unresolved",
+        semantic_model_call_ids=(head_call_id, tail_call_id),
+    )
+    root_call_id = "model-call:failed-physical:orchestrator"
+    audit = ModelResultAudit(
+        model_call_id=root_call_id,
+        model_result_ref=(
+            "model-result:"
+            + _digest({"model_call_id": root_call_id, "response_hash": None})
+        ),
+        attempt_id="attempt:audit:failed-physical",
+        route=base.audit.route,
+        attempted_model_id="model:source-reviewer",
+        attempted_model_version="2026-08",
+        request_hash=_hash("failed-physical-orchestrator-request"),
+        status="main_exception",
+        failure_code="source_review_exception",
+        slot="primary",
+        outcome="exception",
+        input_tokens=base.audit.usage.input_tokens,
+        output_tokens=base.audit.usage.output_tokens,
+        usage=base.audit.usage,
+        authored_candidate_audits=(author,),
+        provider_subcall_audits=(reviewer,),
+        physical_provider_audits=(physical,),
+    )
+    result = DeliberationResult(
+        result_id=(
+            "deliberation:"
+            + _digest(
+                {
+                    "capsule_id": base.capsule_id,
+                    "proposal_hash": None,
+                    "attempt_audits": [_attempt_identity_material(audit)],
+                }
+            )
+        ),
+        capsule_id=base.capsule_id,
+        proposal=None,
+        audit=audit,
+        attempt_audits=(audit,),
+    )
+
+    committed = ProposalAuditRecorder(ledger=ledger).record(result, _context())
+
+    assert len(committed.event_ids) == 4
+    projection = ledger.project()
+    assert [item.model_call_id for item in projection.model_result_audits] == [
+        root_call_id,
+        author.model_call_id,
+        reviewer.model_call_id,
+        physical.model_call_id,
+    ]
+    root = RecordedModelResultAudit.model_validate_json(
+        projection.model_result_audits[0].audit_json
+    )
+    assert projection.model_result_audits[0].audit_contract == "model-result-audit.8"
+    assert root.parent_model_call_id is None
+    assert root.semantic_stream_part is None
+    assert root.request_hash == audit.request_hash
+    assert root.attempted_model_id == audit.attempted_model_id
+    assert root.usage is not None and audit.usage is not None
+    assert root.usage.model_dump(mode="json") == audit.usage.model_dump(mode="json")
+    assert root.physical_provider_audits == (
+        recorded_physical_provider_audit(physical),
+    )
+    terminal = RecordedModelResultAudit.model_validate_json(
+        projection.model_result_audits[-1].audit_json
+    )
+    assert terminal.status == "provider_unresolved"
+    assert terminal.model_call_id == physical.model_call_id
+    assert terminal.request_hash == physical.request_hash
+    assert terminal.semantic_model_call_ids == (head_call_id, tail_call_id)
+
+    ledger.close()
+    reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
+    assert reopened.rebuild().semantic_hash == reopened.project().semantic_hash
+    assert [item.model_call_id for item in reopened.project().model_result_audits] == [
+        root_call_id,
+        author.model_call_id,
+        reviewer.model_call_id,
+        physical.model_call_id,
+    ]
+
+
+def test_successful_nonstream_audit_cannot_claim_an_independent_physical_terminal() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    _started(ledger)
+    base = _result()
+    physical = PhysicalProviderInvocationAudit(
+        model_call_id="model-call:misbound-success:transport",
+        request_hash=_hash("misbound-success-transport-request"),
+        model_id="model:test",
+        model_version="1",
+        outcome="unresolved",
+        failure_code="stream_reselection_unresolved",
+        usage_status="unresolved",
+        semantic_model_call_ids=(
+            "model-call:misbound-success:head",
+            "model-call:misbound-success:tail",
+        ),
+    )
+    audit = base.audit.model_copy(update={"physical_provider_audits": (physical,)})
+    result = base.model_copy(update={"audit": audit, "attempt_audits": (audit,)})
+
+    with pytest.raises(ValueError, match="strict revalidation"):
+        ProposalAuditRecorder(ledger=ledger).build_events(result, _context())
+
+
+def test_independent_physical_terminal_rejects_a_cross_attempt_splice() -> None:
+    source = WorldLedger.in_memory(world_id=WORLD)
+    _started(source)
+    recorder = ProposalAuditRecorder(ledger=source)
+    first, _physical = _independent_physical_failure_result(
+        attempt_id="attempt:audit:independent-physical:first"
+    )
+    second, _physical = _independent_physical_failure_result(
+        attempt_id="attempt:audit:independent-physical:second"
+    )
+    first_events = recorder.build_events(first, _context())
+    second_events = recorder.build_events(second, _context())
+    assert len(first_events) == len(second_events) == 2
+
+    with pytest.raises(ValueError, match="physical provider terminal"):
+        source.commit(
+            (first_events[0], second_events[1]),
+            expected_world_revision=1,
+            expected_deliberation_revision=0,
+        )
+
+    assert source.project().model_result_audits == ()
+
+
+def test_independent_physical_terminal_must_exactly_match_its_failed_root_binding() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    _started(ledger)
+    recorder = ProposalAuditRecorder(ledger=ledger)
+    legitimate, _physical = _independent_physical_failure_result()
+    forged, _physical = _independent_physical_failure_result(
+        physical_variant="forged",
+    )
+    legitimate_events = recorder.build_events(legitimate, _context())
+    forged_events = recorder.build_events(forged, _context())
+    assert len(legitimate_events) == len(forged_events) == 2
+    # The attacker recomputed both payload identities.  The owning root event
+    # identity is intentionally stable because its call/result refs are the
+    # same, so ordinary causation adjacency alone cannot detect the splice.
+    assert legitimate_events[0].event_id == forged_events[0].event_id
+    assert forged_events[1].causation_id == legitimate_events[0].event_id
+    assert legitimate_events[1].payload_hash != forged_events[1].payload_hash
+
+    with pytest.raises(ValueError, match="physical provider terminal"):
+        ledger.commit(
+            (legitimate_events[0], forged_events[1]),
+            expected_world_revision=1,
+            expected_deliberation_revision=0,
+        )
+
+    assert ledger.project().model_result_audits == ()
+
+    # Replay applies one event at a time inside the already-authenticated
+    # transaction.  Its reducer must independently reject the same forged
+    # terminal instead of relying on the live batch guard.
+    replay_state = reduce_event(
+        ReducerState(),
+        _event("event:replay:start", "WorldStarted", {}),
+    )
+    replay_state = reduce_event(replay_state, legitimate_events[0])
+    with pytest.raises(ValueError, match="physical provider terminal changed"):
+        reduce_event(replay_state, forged_events[1])
+
+
+def test_independent_physical_terminal_cannot_reserve_another_attempt_call_id() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    _started(ledger)
+    single, physical = _independent_physical_failure_result()
+    root = single.audit
+    recovery_call_id = physical.semantic_model_call_ids[0]
+    recovery = ModelResultAudit(
+        model_call_id=recovery_call_id,
+        model_result_ref=(
+            "model-result:"
+            + _digest({"model_call_id": recovery_call_id, "response_hash": None})
+        ),
+        attempt_id=root.attempt_id,
+        route=root.route,
+        request_hash=_hash("reserved-recovery-request"),
+        status="recovery_failed",
+        failure_code="quick_exception",
+    )
+    attempts = (root, recovery)
+    result = DeliberationResult(
+        result_id=(
+            "deliberation:"
+            + _digest(
+                {
+                    "capsule_id": single.capsule_id,
+                    "proposal_hash": None,
+                    "attempt_audits": [
+                        _attempt_identity_material(attempt) for attempt in attempts
+                    ],
+                }
+            )
+        ),
+        capsule_id=single.capsule_id,
+        proposal=None,
+        audit=recovery,
+        attempt_audits=attempts,
+    )
+
+    with pytest.raises(ValueError, match="physical provider semantic identities"):
+        ProposalAuditRecorder(ledger=ledger).record(result, _context())
+
+    assert ledger.project().model_result_audits == ()
+
+
+def test_failed_root_cannot_promise_a_physical_terminal_outside_its_commit() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    _started(ledger)
+    result, _physical = _independent_physical_failure_result()
+    root_event, _physical_event = ProposalAuditRecorder(ledger=ledger).build_events(
+        result,
+        _context(),
+    )
+
+    with pytest.raises(ValueError, match="embedded physical provider terminal must be adjacent"):
+        ledger.commit(
+            (root_event,),
+            expected_world_revision=1,
+            expected_deliberation_revision=0,
+        )
+
+    assert ledger.project().model_result_audits == ()
+
+
+def test_physical_terminal_cannot_borrow_a_failed_root_from_an_older_commit() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    _started(ledger)
+    recorder = ProposalAuditRecorder(ledger=ledger)
+    full_result, _physical = _independent_physical_failure_result()
+    root_without_physical = full_result.audit.model_copy(
+        update={"physical_provider_audits": ()}
+    )
+    root_only = DeliberationResult(
+        result_id=(
+            "deliberation:"
+            + _digest(
+                {
+                    "capsule_id": full_result.capsule_id,
+                    "proposal_hash": None,
+                    "attempt_audits": [
+                        _attempt_identity_material(root_without_physical)
+                    ],
+                }
+            )
+        ),
+        capsule_id=full_result.capsule_id,
+        proposal=None,
+        audit=root_without_physical,
+        attempt_audits=(root_without_physical,),
+    )
+    recorder.record(root_only, _context())
+    before = ledger.project()
+    _root_event, standalone_physical = recorder.build_events(
+        full_result,
+        _context(deliberation_revision=before.deliberation_revision),
+    )
+
+    with pytest.raises(ValueError, match="must be adjacent to its owning model attempt"):
+        ledger.commit(
+            (standalone_physical,),
+            expected_world_revision=before.world_revision,
+            expected_deliberation_revision=before.deliberation_revision,
+        )
+
+    assert ledger.project().semantic_hash == before.semantic_hash
+
+
+def test_each_failed_main_binds_its_own_physical_terminal_across_commits() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    _started(ledger)
+    recorder = ProposalAuditRecorder(ledger=ledger)
+    first, first_physical = _independent_physical_failure_result()
+    recorder.record(first, _context())
+    after_first = ledger.project()
+    second, second_physical = _independent_physical_failure_result(
+        attempt_id="attempt:audit:independent-physical:second-valid",
+        physical_variant="second-valid",
+        root_variant="second-valid",
+    )
+
+    recorder.record(
+        second,
+        _context(
+            deliberation_revision=after_first.deliberation_revision,
+            commit_world_revision=after_first.world_revision,
+        ),
+    )
+
+    assert [
+        item.model_call_id for item in ledger.project().model_result_audits
+    ] == [
+        first.audit.model_call_id,
+        first_physical.model_call_id,
+        second.audit.model_call_id,
+        second_physical.model_call_id,
+    ]
+
+
+def test_independent_terminal_rejects_later_children_and_keeps_semantic_ids_reserved(
+) -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    _started(ledger)
+    recorder = ProposalAuditRecorder(ledger=ledger)
+    result, physical = _independent_physical_failure_result()
+    recorder.record(result, _context())
+    before = ledger.project()
+    unrelated_call_id = "model-call:audit:unrelated-physical-child"
+    unrelated = ModelResultAudit(
+        model_call_id=unrelated_call_id,
+        parent_model_call_id=physical.model_call_id,
+        model_result_ref=(
+            "model-result:"
+            + _digest({"model_call_id": unrelated_call_id, "response_hash": None})
+        ),
+        attempt_id="attempt:audit:unrelated-physical-child",
+        route=result.audit.route,
+        request_hash=_hash("unrelated-physical-child-request"),
+        status="main_exception",
+        failure_code="main_exception",
+        slot="primary",
+        outcome="exception",
+    )
+    unrelated_result = DeliberationResult(
+        result_id=(
+            "deliberation:"
+            + _digest(
+                {
+                    "capsule_id": result.capsule_id,
+                    "proposal_hash": None,
+                    "attempt_audits": [unrelated.model_dump(mode="json")],
+                }
+            )
+        ),
+        capsule_id=result.capsule_id,
+        proposal=None,
+        audit=unrelated,
+        attempt_audits=(unrelated,),
+    )
+    with pytest.raises(ValueError, match="cannot gain a child"):
+        recorder.record(
+            unrelated_result,
+            _context(
+                deliberation_revision=before.deliberation_revision,
+                commit_world_revision=before.world_revision,
+            ),
+        )
+    assert ledger.project().semantic_hash == before.semantic_hash
+
+    reserved_call_id = physical.semantic_model_call_ids[0]
+    forged = ModelResultAudit(
+        model_call_id=reserved_call_id,
+        model_result_ref=(
+            "model-result:"
+            + _digest({"model_call_id": reserved_call_id, "response_hash": None})
+        ),
+        attempt_id="attempt:audit:forged-reserved-semantic-id",
+        route=result.audit.route,
+        request_hash=_hash("forged-reserved-semantic-request"),
+        status="main_exception",
+        failure_code="main_exception",
+        slot="primary",
+        outcome="exception",
+    )
+    forged_result = DeliberationResult(
+        result_id=(
+            "deliberation:"
+            + _digest(
+                {
+                    "capsule_id": result.capsule_id,
+                    "proposal_hash": None,
+                    "attempt_audits": [forged.model_dump(mode="json")],
+                }
+            )
+        ),
+        capsule_id=result.capsule_id,
+        proposal=None,
+        audit=forged,
+        attempt_audits=(forged,),
+    )
+
+    with pytest.raises(ValueError, match="reserved semantic identity"):
+        recorder.record(
+            forged_result,
+            _context(
+                deliberation_revision=before.deliberation_revision,
+                commit_world_revision=before.world_revision,
+            ),
+        )
+
+    assert ledger.project().semantic_hash == before.semantic_hash
+
+
+def test_audit_v8_keeps_recall_and_prefetch_evidence_with_its_physical_binding() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    _started(ledger)
+    base = _result()
+    cursor = RecallCursor(
+        world_revision=1,
+        deliberation_revision=0,
+        ledger_sequence=1,
+    )
+    recall_request = CharacterRecallRequest(query_text="the exact remembered exchange")
+    recall_query = RecallQuery(
+        query_text=recall_request.query_text,
+        cursor=cursor,
+        actor_ref="actor:companion",
+        subject_refs=("actor:companion",),
+        viewer_privacy_ceiling="withhold",
+        at=NOW,
+        accessibility_seed="draw:audit:v8-recall",
+    )
+    recall_query_digest = recall_query_hash(
+        index_version="recall-index:test",
+        query=recall_query,
+    )
+    recall_trace = RecallAuditTrace(
+        trigger_ref="trigger:audit:1",
+        request=recall_request,
+        query=recall_query,
+        query_hash=recall_query_digest,
+        result_hash=recall_result_hash(
+            query_hash=recall_query_digest,
+            cursor=cursor,
+            hit_values=[],
+        ),
+        index_version="recall-index:test",
+        embedding_version="embedding:test",
+        index_cursor=cursor,
+        hits=(),
+    )
+    prefetch_request = CharacterRecallRequest(query_text="the prefetch context")
+    prefetch_query = RecallQuery(
+        query_text=prefetch_request.query_text,
+        cursor=cursor,
+        actor_ref="actor:companion",
+        subject_refs=("actor:companion",),
+        viewer_privacy_ceiling="withhold",
+        at=NOW,
+        accessibility_seed="draw:audit:v8-prefetch",
+    )
+    prefetch_query_digest = recall_query_hash(
+        index_version="recall-index:test",
+        query=prefetch_query,
+    )
+    prefetch_trace = RecallAuditTrace(
+        mode="prefetch",
+        trigger_ref="trigger:audit:1",
+        request=prefetch_request,
+        query=prefetch_query,
+        query_hash=prefetch_query_digest,
+        result_hash=recall_result_hash(
+            query_hash=prefetch_query_digest,
+            cursor=cursor,
+            hit_values=[],
+        ),
+        index_version="recall-index:test",
+        embedding_version="embedding:test",
+        index_cursor=cursor,
+        hits=(),
+    )
+    physical = PhysicalProviderInvocationAudit(
+        model_call_id="model-call:audit-v8:physical",
+        request_hash=_hash("audit-v8-physical-request"),
+        model_id="model:test",
+        model_version="1",
+        outcome="unresolved",
+        failure_code="stream_tail_unresolved",
+        usage_status="unresolved",
+        semantic_model_call_ids=(
+            "model-call:audit-v8:head",
+            "model-call:audit-v8:tail",
+        ),
+    )
+    audit = base.audit.model_copy(
+        update={
+            "status": "main_exception",
+            "failure_code": "source_review_exception",
+            "slot": "primary",
+            "outcome": "exception",
+            "recall_trace": recall_trace,
+            "presented_prefetch_traces": (
+                PrefetchPresentationAudit(
+                    phase="initial",
+                    model_call_id=base.audit.model_call_id,
+                    trace=prefetch_trace,
+                ),
+            ),
+            "physical_provider_audits": (physical,),
+        }
+    )
+    result = DeliberationResult(
+        result_id=(
+            "deliberation:"
+            + _digest(
+                {
+                    "capsule_id": base.capsule_id,
+                    "proposal_hash": None,
+                    "attempt_audits": [_attempt_identity_material(audit)],
+                }
+            )
+        ),
+        capsule_id=base.capsule_id,
+        proposal=None,
+        audit=audit,
+        attempt_audits=(audit,),
+    )
+
+    ProposalAuditRecorder(ledger=ledger).record(result, _context())
+
+    root_projection = ledger.project().model_result_audits[0]
+    root = RecordedModelResultAudit.model_validate_json(root_projection.audit_json)
+    assert root_projection.audit_contract == "model-result-audit.8"
+    assert root.recall_trace == recall_trace
+    assert root.presented_prefetch_traces[0].trace == prefetch_trace
+    assert root.physical_provider_audits[0].model_call_id == physical.model_call_id
+
+
+def test_independent_physical_terminal_cannot_gain_a_later_semantic_child() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    _started(ledger)
+    result, physical = _independent_physical_failure_result()
+    ProposalAuditRecorder(ledger=ledger).record(result, _context())
+    before = ledger.project()
+    child_call_id = physical.semantic_model_call_ids[-1]
+    response_hash = _hash("forged-late-semantic-child-response")
+    child = ModelResultAudit(
+        model_call_id=child_call_id,
+        parent_model_call_id=physical.model_call_id,
+        semantic_stream_part="tail",
+        model_result_ref=(
+            "model-result:"
+            + _digest(
+                {
+                    "model_call_id": child_call_id,
+                    "response_hash": response_hash,
+                }
+            )
+        ),
+        attempt_id=physical.model_call_id + ":forged-child",
+        route=ModelRoute(
+            tier="flash",
+            reason_code="forged_late_child",
+            router_version="router.1",
+        ),
+        model_id=physical.model_id,
+        model_version=physical.model_version,
+        request_hash=physical.request_hash,
+        response_hash=response_hash,
+        status="candidate_returned",
+        slot="primary",
+        outcome="returned",
+    )
+    child_result = DeliberationResult(
+        result_id=(
+            "deliberation:"
+            + _digest(
+                {
+                    "capsule_id": result.capsule_id,
+                    "proposal_hash": None,
+                    "attempt_audits": [child.model_dump(mode="json")],
+                }
+            )
+        ),
+        capsule_id=result.capsule_id,
+        proposal=None,
+        audit=child,
+        attempt_audits=(child,),
+    )
+    forged_child_event = ProposalAuditRecorder(ledger=ledger).build_events(
+        child_result,
+        _context(deliberation_revision=before.deliberation_revision),
+    )[0]
+
+    with pytest.raises(ValueError, match="cannot gain a child"):
+        ledger.commit(
+            (forged_child_event,),
+            expected_world_revision=before.world_revision,
+            expected_deliberation_revision=before.deliberation_revision,
+        )
+
+    assert ledger.project().semantic_hash == before.semantic_hash
 
 
 def test_recall_query_and_results_are_pinned_through_cold_replay(tmp_path) -> None:
@@ -1450,7 +2416,7 @@ def test_v16_sqlite_head_migrates_to_v18_without_forged_audit_indexes(tmp_path) 
     connection.close()
 
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.53"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.56"
     assert migrated.project().semantic_hash == before.semantic_hash
     assert migrated.project().model_result_audits == ()
 
@@ -1491,7 +2457,7 @@ def test_v17_sqlite_head_migrates_to_v18_preserving_proposal_audit(tmp_path) -> 
             ),
         )
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.53"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.56"
     assert migrated.project().proposal_audits == before.proposal_audits
     assert migrated.project().acceptance_manifests_v2 == ()
 

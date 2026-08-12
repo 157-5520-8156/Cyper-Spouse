@@ -30,6 +30,7 @@ from .expression_episode_lifecycle import (
     expression_episode_has_authorized_action,
     expression_episode_open_event,
     expression_episode_repin_reservation_event,
+    expression_episode_retry_reclaim_is_authorized,
     expression_episode_technical_failure_count,
     expression_episode_trigger_id,
     expression_episode_work_due,
@@ -69,8 +70,13 @@ from .fact_draft_adapter import FactObservationProposalAdapter
 from .fact_memory_candidate_lifecycle import FactMemoryCandidateLifecycle
 from .fact_v2_acceptance_runtime import FactV2AcceptanceRuntime
 from .interaction_fact_trigger_runtime import FactTriggerRunResult, InteractionFactTriggerRuntime
+from .interaction_act_worker import InteractionActWorker, InteractionActWorkResult
 from .character_interior import CharacterInterior
 from .character_interior.inbound_relationship import InboundRelationshipSignalWorker
+from .relationship_commitment_worker import (
+    RelationshipCommitmentWorker,
+    RelationshipCommitmentWorkResult,
+)
 from .batch_invariants import interaction_appraisal_trigger_identity
 from .appraisal_acceptance_runtime import (
     AppraisalAcceptanceError,
@@ -217,6 +223,8 @@ class WorldRuntime:
         appraisal_worker: AppraisalProposalWorker | None = None,
         immediate_emotion_worker: ImmediateEmotionProposalWorker | None = None,
         inbound_relationship_worker: InboundRelationshipSignalWorker | None = None,
+        relationship_commitment_worker: RelationshipCommitmentWorker | None = None,
+        interaction_act_worker: InteractionActWorker | None = None,
         outcome_deliberation_turn: OutcomeDeliberationTurn | None = None,
         outcome_worker: OutcomeProposalWorker | None = None,
         outcome_deliberation_owner: str | None = None,
@@ -308,6 +316,20 @@ class WorldRuntime:
         ):
             raise ValueError("inbound relationship worker must own this exact ledger")
         self._inbound_relationship_worker = inbound_relationship_worker
+        if (
+            relationship_commitment_worker is not None
+            and relationship_commitment_worker.ledger is not self._ledger
+        ):
+            raise ValueError(
+                "relationship commitment worker must own this exact ledger"
+            )
+        self._relationship_commitment_worker = relationship_commitment_worker
+        if (
+            interaction_act_worker is not None
+            and interaction_act_worker.ledger is not self._ledger
+        ):
+            raise ValueError("interaction act worker must own this exact ledger")
+        self._interaction_act_worker = interaction_act_worker
         if outcome_deliberation_owner is not None and not outcome_deliberation_owner:
             raise ValueError("outcome deliberation owner must not be empty")
         if outcome_worker is not None and outcome_worker.ledger is not self._ledger:
@@ -543,6 +565,8 @@ class WorldRuntime:
         self,
     ) -> (
         OutcomeTriggerRunResult
+        | RelationshipCommitmentWorkResult
+        | InteractionActWorkResult
         | FactTriggerRunResult
         | PerceptionTriggerRunResult
         | SocialActionRunResult
@@ -591,6 +615,14 @@ class WorldRuntime:
                 proactive = await self._character_interior._drain_proactive_once()  # noqa: SLF001
                 if proactive is not None:
                     return proactive
+            if self._relationship_commitment_worker is not None:
+                commitment = await self._relationship_commitment_worker.drain_one()
+                if commitment is not None:
+                    return commitment
+            if self._interaction_act_worker is not None:
+                interaction_act = await self._interaction_act_worker.drain_one()
+                if interaction_act is not None:
+                    return interaction_act
             if self._outcome_deliberation_turn is not None:
                 assert self._outcome_worker is not None
                 assert self._outcome_deliberation_owner is not None
@@ -1521,20 +1553,27 @@ class WorldRuntime:
             process,
             owner_id=self._expression_episode_owner,
         )
+        early_retry_reclaim = expression_episode_retry_reclaim_is_authorized(
+            projection,
+            process,
+            at=at,
+        )
         if work_due is not None and at < work_due:
             # The short provider lease may already have expired while a
             # recorded technical failure is still inside its independent
-            # 10/30/120-minute backoff. Neither duplicate ingress nor another
-            # continuation path may reclaim early.
+            # 30-second/30-minute/120-minute schedule. Neither duplicate
+            # ingress nor another continuation path may reclaim early.
             return process, None
         if process.state == "claimed":
             if (
                 process.claim_lease is None
                 or at < process.claim_lease.expires_at
-            ):
+            ) and not early_retry_reclaim:
                 # A duplicate ingress joins the durable failure state but may
-                # not bypass its retry schedule.  The background worker
-                # reclaims the process after the lease expires.
+                # not bypass its retry schedule. An exact current-attempt
+                # terminal failure is the sole exception: its installed due
+                # rotates a new attempt even while the old in-flight lease is
+                # still open.
                 return process, None
         event, claimed = expression_episode_claim_event(
             world_id=self._world_id,
@@ -1546,6 +1585,7 @@ class WorldRuntime:
             technical_failure_count=expression_episode_technical_failure_count(
                 projection, process
             ),
+            retry_projection=projection,
         )
         committed = await self._commit(
             [event],
@@ -1864,6 +1904,11 @@ class WorldRuntime:
             process,
             owner_id=self._expression_episode_owner,
         )
+        early_retry_reclaim = expression_episode_retry_reclaim_is_authorized(
+            projection,
+            process,
+            at=at,
+        )
         local_no_result = (
             process.state == "claimed"
             and process.claim_lease is not None
@@ -1874,7 +1919,9 @@ class WorldRuntime:
                 for item in projection.model_result_audits
             )
         )
-        if (
+        if early_retry_reclaim:
+            claimed, cursor = await self._claim_expression_episode(observation)
+        elif (
             local_no_result
             or (
                 process.state == "claimed"

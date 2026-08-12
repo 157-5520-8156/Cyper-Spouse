@@ -52,8 +52,8 @@ from companion_daemon.qq_outbound_owner import (
 from companion_daemon.world_v2.isolated_daemon_acceptance import (
     deterministic_acceptance_exit_code,
     evaluate_deterministic_invariants,
-    qualified_full_review_route_models,
     qualified_inventory_route_models,
+    qualified_visible_source_guard_models,
 )
 from companion_daemon.world_v2.qq_c2c_host import qq_c2c_world_id
 from companion_daemon.world_v2.qq_c2c_onebot_app import create_qq_c2c_onebot_app
@@ -69,6 +69,13 @@ from companion_daemon.world_v2.structured_source_review_model import (
 )
 from companion_daemon.world_v2.structured_expression_reselection_model import (
     expression_reselection_tool_contract,
+)
+from companion_daemon.world_v2.visible_source_closure_protocol import (
+    VISIBLE_SOURCE_CLOSURE_CONTRACT,
+)
+from companion_daemon.world_v2.visible_source_review_model import (
+    visible_source_verdict_provider_request_contract,
+    visible_source_verdict_schema_digest,
 )
 
 
@@ -441,6 +448,27 @@ def _valid_expression_transport_carrier(value: object) -> bool:
     )
 
 
+def _compact_visible_source_guard_contract(
+    payload: dict[str, object],
+) -> dict[str, str] | None:
+    """Recognize the exact compact guard tool sent through the capture hop."""
+
+    canonical = visible_source_verdict_provider_request_contract()
+    if (
+        payload.get("tools") != canonical.get("tools")
+        or payload.get("tool_choice") != canonical.get("tool_choice")
+    ):
+        return None
+    contract = canonical.get("contract")
+    schema_digest = canonical.get("schema_digest")
+    if not isinstance(contract, str) or not isinstance(schema_digest, str):
+        return None
+    return {
+        "contract": contract,
+        "schema_digest": schema_digest,
+    }
+
+
 def _forced_tool_request_hashes(payload: dict[str, object]) -> list[str]:
     """Reconstruct local forced-tool identities without sending them upstream.
 
@@ -467,6 +495,20 @@ def _forced_tool_request_hashes(payload: dict[str, object]) -> list[str]:
     temperature = payload.get("temperature")
     if not isinstance(messages, list) or not isinstance(temperature, (int, float)):
         return []
+
+    compact_visible_contract = _compact_visible_source_guard_contract(payload)
+    if compact_visible_contract is not None:
+        return [
+            _canonical_hash(
+                {
+                    "messages": messages,
+                    "temperature": temperature,
+                    "tools": raw_tools,
+                    "tool_choice": payload.get("tool_choice"),
+                    "tool_contract_identity": compact_visible_contract,
+                }
+            )
+        ]
 
     if tool_name == "character_expression_reselection_v1":
         # Expression-only correction carries the exact canonical output
@@ -794,6 +836,7 @@ def _provider_request_evidence(
     source_closure = (
         "Audit only factual source closure" in system_joined
         or "Audit factual source closure" in system_joined
+        or _compact_visible_source_guard_contract(payload) is not None
     )
     authoritative_role_request = (
         "COMBINED OUTPUT ENVELOPE" in system_joined
@@ -808,6 +851,7 @@ def _provider_request_evidence(
     )
     source_event_ids = _presented_source_event_ids(trusted_material)
     forced_tool_request_hashes = _forced_tool_request_hashes(payload)
+    compact_visible_contract = _compact_visible_source_guard_contract(payload)
     if emitted_request_hash is not None and re.fullmatch(
         r"[0-9a-f]{64}", emitted_request_hash
     ) is None:
@@ -836,6 +880,26 @@ def _provider_request_evidence(
         "recall_context_hash": recall_hash,
         "emotion_context_hash": emotion_hash,
         "source_closure_request": source_closure,
+        "source_closure_contract": (
+            compact_visible_contract.get("contract")
+            if compact_visible_contract is not None
+            else None
+        ),
+        "source_closure_schema_digest": (
+            compact_visible_contract.get("schema_digest")
+            if compact_visible_contract is not None
+            else None
+        ),
+        "source_closure_semantic_authority_relation": (
+            "correlated_same_checkpoint"
+            if compact_visible_contract is not None
+            else None
+        ),
+        "source_closure_capture_scope": (
+            "isolated_test_only_correlated_capture"
+            if compact_visible_contract is not None
+            else None
+        ),
         "authoritative_role_request": authoritative_role_request,
         "contains_interruption_marker": _INTERRUPTION_MARKER in joined,
         "contains_second_interruption_marker": (_INTERRUPTION_SECOND_MARKER in joined),
@@ -1206,6 +1270,16 @@ class _ProviderCaptureState:
                     "recall_context_hash": record.get("recall_context_hash"),
                     "emotion_context_hash": record.get("emotion_context_hash"),
                     "source_closure_request": record["source_closure_request"],
+                    "source_closure_contract": record.get("source_closure_contract"),
+                    "source_closure_schema_digest": record.get(
+                        "source_closure_schema_digest"
+                    ),
+                    "source_closure_semantic_authority_relation": record.get(
+                        "source_closure_semantic_authority_relation"
+                    ),
+                    "source_closure_capture_scope": record.get(
+                        "source_closure_capture_scope"
+                    ),
                 }
                 for record in records
                 if isinstance(record.get("model_invocation_request_hash"), str)
@@ -1738,9 +1812,9 @@ def _daemon_environment(
         {
             # OneBot and the DeepSeek hash-capture hop are exact loopback.
             # Explicitly clear ambient proxy variables so neither can be
-            # redirected off-host.  The production source-authority opt-in
-            # uses its configured HTTPS base URLs directly and is reported as
-            # uncaptured external reviewer traffic.
+            # redirected off-host.  The source-guard opt-in keeps both the
+            # Character author and its correlated Flash guard behind the same
+            # hash-only capture boundary.
             "NO_PROXY": "127.0.0.1,localhost",
             "no_proxy": "127.0.0.1,localhost",
             "HTTP_PROXY": "",
@@ -1776,6 +1850,22 @@ def _daemon_environment(
             "ATTACHMENT_CACHE_PATH": str(attachment_cache),
             # Never inherit a stale acceptance-only authority across modes.
             "WORLD_V2_TEST_ONLY_PROVIDER_CAPTURE_AUTHORITY_ID": "",
+            # Acceptance never exercises the retired visible-chat GPT/Qwen
+            # route.  The explicit opt-in enables only the compact correlated
+            # Flash guard; Life review is outside this isolated chat proof.
+            "OPENAI_API_KEY": "",
+            "OPENROUTER_API_KEY": "",
+            "QWEN_API_KEY": "",
+            "OPENAI_PROXY_URL": "",
+            "WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED": "false",
+            "WORLD_V2_CHAT_SOURCE_REVIEW_ENABLED": (
+                "true" if model_mode in _PROVIDER_MODES else "false"
+            ),
+            "WORLD_V2_SELECTIVE_SOURCE_REVIEW_ENABLED": (
+                "true" if model_mode in _PROVIDER_MODES else "false"
+            ),
+            "WORLD_V2_SELECTIVE_SOURCE_REVIEW_MODEL": original_deepseek_model,
+            "WORLD_V2_LIFE_SOURCE_REVIEW_ENABLED": "false",
         }
     )
     if deepseek_model is not None:
@@ -1788,18 +1878,6 @@ def _daemon_environment(
         # never a production Settings field and cannot grant an unknown route.
         environment["WORLD_V2_TEST_ONLY_PROVIDER_CAPTURE_AUTHORITY_ID"] = (
             capture_authority_id
-        )
-    if not production_source_authority:
-        # Every default mode is hermetic with respect to external reviewer
-        # providers, including ``--fake``.  Ambient shell credentials or a
-        # production redundancy flag must never silently widen this manual
-        # acceptance's network boundary.
-        environment.update(
-            {
-                "OPENAI_API_KEY": "",
-                "OPENROUTER_API_KEY": "",
-                "WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED": "false",
-            }
         )
     if model_mode in _PROVIDER_MODES:
         if provider_capture_url is None or not _is_exact_ipv4_loopback_http_url(
@@ -1816,17 +1894,9 @@ def _daemon_environment(
                 "ALLOW_AUTO_IMAGE_GENERATION": "false",
                 "ALLOW_AUTO_VISION": "false",
                 "ALLOW_AUTO_TRANSCRIPTION": "false",
-                "WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED": (
-                    "true" if production_source_authority else "false"
-                ),
+                "WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED": "false",
             }
         )
-        if production_source_authority:
-            # Keep the two explicitly authorized source-authority
-            # credentials/base URLs inherited from the manual shell.  Clear
-            # the optional client-specific proxy so the report's "direct"
-            # network claim remains true.
-            environment["OPENAI_PROXY_URL"] = ""
         if model_mode == "loopback-stub":
             environment.update(
                 {
@@ -2689,9 +2759,10 @@ def _source_authority_acceptance_report(
     requested: bool,
     first_health: dict[str, object],
     restart_health: dict[str, object],
+    provider_audit: dict[str, object] | None = None,
     final_replay: dict[str, object],
 ) -> dict[str, object]:
-    """Bind each terminal review-eligible choice to its durable Inventory call."""
+    """Bind each terminal visible choice to one exact compact guard request."""
 
     first_source_health = _source_authority_health(first_health)
     restart_source_health = _source_authority_health(restart_health)
@@ -2704,10 +2775,46 @@ def _source_authority_acceptance_report(
         restart_source_health
     )
     inventory_models = set(inventory_model_order)
-    full_review_model_order = qualified_full_review_route_models(
+    visible_guard_model_order = qualified_visible_source_guard_models(
         restart_source_health
     )
-    full_review_models = set(full_review_model_order)
+    visible_guard_models = set(visible_guard_model_order)
+    capture = provider_audit if isinstance(provider_audit, dict) else {}
+    capture_header_valid = (
+        capture.get("contract") == "provider-presentation-capture.3"
+        and capture.get("capture_mode") == "real-provider"
+    )
+    captured_guard_requests: dict[str, dict[str, object]] = {}
+    ambiguous_capture_hashes: set[str] = set()
+    raw_request_evidence = capture.get("request_evidence")
+    if capture_header_valid and isinstance(raw_request_evidence, list):
+        for raw_item in raw_request_evidence:
+            if not isinstance(raw_item, dict):
+                continue
+            exact_hash = raw_item.get("exact_emitted_request_hash")
+            forced_hashes = raw_item.get("forced_tool_request_hashes")
+            if not (
+                isinstance(exact_hash, str)
+                and re.fullmatch(r"[0-9a-f]{64}", exact_hash)
+                and isinstance(forced_hashes, list)
+                and forced_hashes.count(exact_hash) == 1
+                and raw_item.get("source_closure_request") is True
+                and raw_item.get("source_closure_contract")
+                == VISIBLE_SOURCE_CLOSURE_CONTRACT
+                and raw_item.get("source_closure_schema_digest")
+                == visible_source_verdict_schema_digest()
+                and raw_item.get("source_closure_semantic_authority_relation")
+                == "correlated_same_checkpoint"
+                and raw_item.get("source_closure_capture_scope")
+                == "isolated_test_only_correlated_capture"
+            ):
+                continue
+            if exact_hash in captured_guard_requests:
+                ambiguous_capture_hashes.add(exact_hash)
+                continue
+            captured_guard_requests[exact_hash] = raw_item
+    for request_hash in ambiguous_capture_hashes:
+        captured_guard_requests.pop(request_hash, None)
     terminal_choices = [
         item
         for item in final_replay.get("accepted_character_choices", [])
@@ -2731,6 +2838,7 @@ def _source_authority_acceptance_report(
         model_call_id = candidate.get("model_call_id")
         if isinstance(model_call_id, str):
             related_author_ids.add(model_call_id)
+        candidate_request_hash = candidate.get("request_hash")
         proposal_sequence = candidate.get("proposal_event_sequence")
         matches = [
             record
@@ -2747,18 +2855,23 @@ def _source_authority_acceptance_report(
             and isinstance(proposal_sequence, int)
             and int(record["event_sequence"]) < proposal_sequence
         ]
-        full_review_matches = [
+        compact_matches = [
             record
             for record in model_result_records
-            if record.get("parent_model_call_id") in related_author_ids
+            if isinstance(model_call_id, str)
+            and isinstance(candidate_request_hash, str)
+            and bool(candidate_request_hash)
+            and record.get("parent_model_call_id") == model_call_id
             and record.get("trigger_ref") == candidate.get("trigger_ref")
             and record.get("attempt_id") == candidate.get("attempt_id")
-            and record.get("model_id") in full_review_models
+            and record.get("model_id") in visible_guard_models
             and record.get("route_reason_code")
-            == "validation.source_closure_review_v7"
+            == "validation.visible_source_closure_proof_v1"
             and record.get("router_version") == "provider-subcall-audit.1"
             and record.get("status") == "proposal_validated"
             and record.get("outcome") == "winner"
+            and isinstance(record.get("request_hash"), str)
+            and record.get("request_hash") in captured_guard_requests
             and isinstance(record.get("event_sequence"), int)
             and isinstance(proposal_sequence, int)
             and int(record["event_sequence"]) < proposal_sequence
@@ -2786,38 +2899,55 @@ def _source_authority_acceptance_report(
                     ),
                 }
             )
-        winning_matches = matches or full_review_matches
-        if not winning_matches:
+        if len(compact_matches) != 1:
             continue
-        winning_protocol = (
-            "inventory_v5" if matches else "full_source_closure_review.7"
-        )
+        compact_match = compact_matches[0]
+        parent_model_call_id = compact_match.get("parent_model_call_id")
+        parent_matches = [
+            record
+            for record in model_result_records
+            if record.get("model_call_id") == parent_model_call_id
+            and parent_model_call_id == model_call_id
+            and record.get("request_hash") == candidate_request_hash
+            and record.get("trigger_ref") == candidate.get("trigger_ref")
+            and record.get("attempt_id") == candidate.get("attempt_id")
+            and record.get("model_id") == "deepseek-v4-flash"
+            and record.get("status") == "proposal_validated"
+            and record.get("outcome") == "winner"
+            and isinstance(record.get("event_sequence"), int)
+            and int(record["event_sequence"])
+            < int(compact_match["event_sequence"])
+        ]
+        if len(parent_matches) != 1:
+            continue
+        parent = parent_matches[0]
         source_authority_evidence.append(
             {
                 "proposal_id": candidate.get("proposal_id"),
-                "winning_protocol": winning_protocol,
-                "model_call_ids": [
-                    str(record["model_call_id"])
-                    for record in winning_matches
-                    if isinstance(record.get("model_call_id"), str)
-                ],
-                "model_result_event_refs": [
-                    str(record["event_ref"])
-                    for record in winning_matches
-                    if isinstance(record.get("event_ref"), str)
-                ],
-                "models": list(
-                    dict.fromkeys(
-                        str(record["model_id"])
-                        for record in winning_matches
-                        if isinstance(record.get("model_id"), str)
-                    )
+                "winning_protocol": "visible_beat_source_verdict.1",
+                "model_call_id": compact_match.get("model_call_id"),
+                "model_result_event_ref": compact_match.get("event_ref"),
+                "model": compact_match.get("model_id"),
+                "request_hash": compact_match.get("request_hash"),
+                "parent_model_call_id": parent_model_call_id,
+                "parent_request_hash": parent.get("request_hash"),
+                "schema_digest": visible_source_verdict_schema_digest(),
+                "evidence_revision": (
+                    "visible-beat-verdict-deepseek-v4-flash-20260810.3"
                 ),
+                "semantic_authority_relation": "correlated_same_checkpoint",
+                "capture_scope": "isolated_test_only_correlated_capture",
             }
         )
     return {
-        "contract": "isolated-source-authority-acceptance.2",
+        "contract": "isolated-source-authority-acceptance.3",
         "requested": requested,
+        "qualification_scope": (
+            "isolated_test_only_correlated_capture"
+            if capture_header_valid
+            else "unavailable"
+        ),
+        "production_qualification_claimed": False,
         "first_start_health": first_source_health,
         "after_restart_health": restart_source_health,
         "terminal_candidate_inventory": {
@@ -2841,15 +2971,17 @@ def _source_authority_acceptance_report(
         },
         "terminal_candidate_source_authority": {
             "scope": "terminal_source_review_eligible_character_choices",
+            "proof_contract": VISIBLE_SOURCE_CLOSURE_CONTRACT,
             "source_review_eligible_terminal_candidate_count": len(inventory_eligible),
             "source_authority_proven_terminal_candidate_count": len(
                 source_authority_evidence
             ),
             "all_source_review_eligible_terminal_candidates_proven": (
-                len(source_authority_evidence) == len(inventory_eligible)
+                bool(inventory_eligible)
+                and len(source_authority_evidence) == len(inventory_eligible)
             ),
             "qualified_inventory_models": list(inventory_model_order),
-            "qualified_full_review_models": list(full_review_model_order),
+            "qualified_visible_guard_models": list(visible_guard_model_order),
             "evidence": source_authority_evidence,
         },
         "inventory_evidence_basis": (
@@ -3187,8 +3319,6 @@ def _network_topology(
     model_mode: _ModelMode,
     upstream_base_url: str | None,
     production_source_authority: bool = False,
-    openai_base_url: str | None = None,
-    openrouter_base_url: str | None = None,
 ) -> dict[str, object]:
     """Describe each network boundary without conflating daemon and model I/O."""
 
@@ -3226,28 +3356,17 @@ def _network_topology(
     }
     if not production_source_authority:
         return topology
-    if openai_base_url is None or openrouter_base_url is None:
-        raise ValueError("production source authority topology requires OpenAI and OpenRouter URLs")
-    openai_scope = _provider_endpoint_scope(openai_base_url)
-    openrouter_scope = _provider_endpoint_scope(openrouter_base_url)
-    reviewer_external = openai_scope == "external_https" and openrouter_scope == "external_https"
     topology.update(
         {
-            "model_hash_capture_coverage": "partial_deepseek_only",
+            "model_hash_capture_coverage": "all_deepseek_requests",
             "source_authority_network": {
                 "enabled": True,
-                "reviewer_transport_scope": (
-                    "direct_external_https" if reviewer_external else "direct_configured_routes"
-                ),
-                "captured_by_deepseek_hash_proxy": False,
-                "openai_endpoint_scope": openai_scope,
-                "openrouter_endpoint_scope": openrouter_scope,
+                "reviewer_transport_scope": "shared_deepseek_loopback_hash_proxy",
+                "captured_by_deepseek_hash_proxy": True,
+                "semantic_authority_relation": "correlated_same_checkpoint",
+                "independent_reviewer": False,
+                "qualification_scope": "isolated_test_only_correlated_capture",
             },
-            "external_model_network": (
-                external_model_network
-                or openai_scope == "external_https"
-                or openrouter_scope == "external_https"
-            ),
         }
     )
     topology["aggregate_loopback_only"] = not bool(topology["external_model_network"])
@@ -3300,18 +3419,10 @@ def _validated_provider_settings(
         base_url=settings.deepseek_base_url,
     )
     if production_source_authority:
-        if not settings.openai_api_key:
-            raise ValueError("production source authority requires OPENAI_API_KEY")
-        if not settings.openrouter_api_key:
-            raise ValueError("production source authority requires OPENROUTER_API_KEY")
-        _validate_provider_base_url(
-            label="production source authority OPENAI_BASE_URL",
-            base_url=settings.openai_base_url,
-        )
-        _validate_provider_base_url(
-            label="production source authority OPENROUTER_BASE_URL",
-            base_url=settings.openrouter_base_url,
-        )
+        if settings.deepseek_model != "deepseek-v4-flash":
+            raise ValueError(
+                "compact source guard requires DEEPSEEK_MODEL=deepseek-v4-flash"
+            )
     return settings
 
 
@@ -3344,8 +3455,6 @@ def run(
         model_mode=model_mode,
         upstream_base_url=upstream_base_url,
         production_source_authority=production_source_authority,
-        openai_base_url=(settings.openai_base_url if production_source_authority else None),
-        openrouter_base_url=(settings.openrouter_base_url if production_source_authority else None),
     )
     with tempfile.TemporaryDirectory(prefix="girl-agent-daemon-acceptance-") as raw_temp:
         temporary_root = Path(raw_temp).resolve()
@@ -3570,11 +3679,13 @@ def run(
                 if production_source_authority:
                     provider_audit = {
                         **provider_audit,
-                        "model_traffic_capture_coverage": ("partial_deepseek_only"),
-                        "all_model_traffic_hash_captured": False,
-                        "uncaptured_model_traffic": (
-                            "OpenRouter/OpenAI source-authority calls use "
-                            "direct configured provider routes"
+                        "model_traffic_capture_coverage": (
+                            "all_enabled_acceptance_model_routes"
+                        ),
+                        "all_model_traffic_hash_captured": True,
+                        "uncaptured_model_traffic": None,
+                        "capture_scope": (
+                            "isolated_test_only_correlated_capture"
                         ),
                     }
                 causal_audit = build_causal_audit(
@@ -3586,6 +3697,7 @@ def run(
                         requested=True,
                         first_health=first_health,
                         restart_health=second_health,
+                        provider_audit=provider_audit,
                         final_replay=final_replay,
                     )
                     if production_source_authority
@@ -3640,7 +3752,10 @@ def run(
                     "fake": "in_process_fake",
                     "loopback-stub": "loopback_stub",
                     "real-provider": (
-                        ("mixed_deepseek_via_loopback_hash_proxy_and_direct_source_authority")
+                        (
+                            "deepseek_author_and_correlated_guard_via_"
+                            "loopback_hash_proxy"
+                        )
                         if production_source_authority
                         else (
                             "external_provider_via_loopback_hash_proxy"
@@ -3864,9 +3979,9 @@ def main() -> int:
         "--production-source-authority",
         action="store_true",
         help=(
-            "add the production OpenRouter/OpenAI Inventory/Coverage authority "
-            "lanes; reviewer traffic is direct external and is not captured by "
-            "the DeepSeek hash proxy"
+            "exercise the compact DeepSeek Flash visible-source guard behind "
+            "the hash capture; evidence is correlated and isolated-test-only, "
+            "not a production qualification claim"
         ),
     )
     args = parser.parse_args()

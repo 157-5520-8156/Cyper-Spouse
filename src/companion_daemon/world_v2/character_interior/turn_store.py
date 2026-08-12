@@ -74,6 +74,7 @@ class _CharacterInteriorTurnStore(Protocol):
         authored_state_json: str,
         authored_state_hash: str,
         now: datetime,
+        expected_authored_state_hash: str | None = None,
     ) -> _TurnCoordinationRecord: ...
 
     def complete(
@@ -218,17 +219,21 @@ class _InMemoryCharacterInteriorTurnStore:
         authored_state_json: str,
         authored_state_hash: str,
         now: datetime,
+        expected_authored_state_hash: str | None = None,
     ) -> _TurnCoordinationRecord:
         now = _utc(now)
         with self._lock:
             row = self._owned(request, owner_id, lease_token, attempt_ordinal, now)
             if row.authored_state_json is not None:
                 if (
-                    row.authored_state_json != authored_state_json
-                    or row.authored_state_hash != authored_state_hash
+                    row.authored_state_json == authored_state_json
+                    and row.authored_state_hash == authored_state_hash
                 ):
-                    raise ValueError("CharacterInterior authored checkpoint bytes changed")
-                return row
+                    return row
+                if row.authored_state_hash != expected_authored_state_hash:
+                    raise RuntimeError("CharacterInterior checkpoint CAS lost")
+            elif expected_authored_state_hash is not None:
+                raise RuntimeError("CharacterInterior checkpoint CAS lost")
             row = replace(
                 row,
                 state="checkpointed",
@@ -504,6 +509,7 @@ class _SQLiteCharacterInteriorTurnStore:
         authored_state_json: str,
         authored_state_hash: str,
         now: datetime,
+        expected_authored_state_hash: str | None = None,
     ) -> _TurnCoordinationRecord:
         return self._write_owned(
             request=request,
@@ -517,10 +523,16 @@ class _SQLiteCharacterInteriorTurnStore:
                          WHERE world_id = ? AND actor_ref = ? AND inner_turn_id = ?
                            AND state != 'terminal' AND lease_owner = ? AND lease_token = ?
                            AND attempt_ordinal = ? AND lease_expires_at > ?
-                           AND (authored_state_json IS NULL OR
-                                (authored_state_json = ? AND authored_state_hash = ?))""",
+                           AND ((authored_state_json = ? AND authored_state_hash = ?)
+                                OR ((? IS NULL AND authored_state_hash IS NULL)
+                                    OR authored_state_hash = ?))""",
             values=(authored_state_json, authored_state_hash),
-            repeated=(authored_state_json, authored_state_hash),
+            repeated=(
+                authored_state_json,
+                authored_state_hash,
+                expected_authored_state_hash,
+                expected_authored_state_hash,
+            ),
         )
 
     def complete(

@@ -127,6 +127,60 @@ def test_sqlite_checkpoint_recovered_after_lease_expiry_without_second_model_cal
     second_store.close()
 
 
+def test_sqlite_checkpoint_advances_only_from_the_exact_previous_stage(tmp_path) -> None:
+    path = tmp_path / "turn-stages.sqlite"
+    store = open_sqlite_character_interior_turn_store(path=path, world_id="world:one")
+    request = _request()
+    now = datetime(2026, 8, 8, tzinfo=UTC)
+    claimed = store.acquire(
+        request=request,
+        owner_id="runtime:first",
+        now=now,
+        lease_seconds=30,
+    )
+
+    recall_choice = store.checkpoint(
+        request=request,
+        owner_id="runtime:first",
+        lease_token=claimed.record.lease_token or "",
+        attempt_ordinal=claimed.record.attempt_ordinal,
+        authored_state_json='{"stage":"recall_choice"}',
+        authored_state_hash="d" * 64,
+        expected_authored_state_hash=None,
+        now=now,
+    )
+    recall_resolved = store.checkpoint(
+        request=request,
+        owner_id="runtime:first",
+        lease_token=recall_choice.lease_token or "",
+        attempt_ordinal=recall_choice.attempt_ordinal,
+        authored_state_json='{"stage":"recall_resolved"}',
+        authored_state_hash="e" * 64,
+        expected_authored_state_hash="d" * 64,
+        now=now,
+    )
+
+    assert recall_resolved.authored_state_json == '{"stage":"recall_resolved"}'
+    assert recall_resolved.authored_state_hash == "e" * 64
+
+    try:
+        store.checkpoint(
+            request=request,
+            owner_id="runtime:first",
+            lease_token=recall_resolved.lease_token or "",
+            attempt_ordinal=recall_resolved.attempt_ordinal,
+            authored_state_json='{"stage":"stale_writer"}',
+            authored_state_hash="f" * 64,
+            expected_authored_state_hash="d" * 64,
+            now=now,
+        )
+    except RuntimeError as exc:
+        assert "checkpoint CAS lost" in str(exc)
+    else:
+        raise AssertionError("a stale checkpoint stage replaced newer durable bytes")
+    store.close()
+
+
 def test_sqlite_prune_is_world_scoped(tmp_path) -> None:
     path = tmp_path / "turns.sqlite"
     first_store = open_sqlite_character_interior_turn_store(path=path, world_id="world:one")

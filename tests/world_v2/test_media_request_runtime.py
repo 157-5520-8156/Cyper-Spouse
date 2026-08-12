@@ -13,6 +13,13 @@ from companion_daemon.world_v2.media_request_runtime import (
     media_request_trigger_id,
 )
 from companion_daemon.world_v2.minimal_reply_events import ExpressionPlanAcceptedPayload
+from companion_daemon.world_v2.private_turn_state import PrivateTurnState
+from companion_daemon.world_v2.proposal_envelope import (
+    CanonicalTypedPayload,
+    DecisionProposal,
+    ProposalEvidenceRef,
+    TypedChange,
+)
 from companion_daemon.world_v2.reducers import ReducerState, reduce_event
 from companion_daemon.world_v2.schemas import (
     Action,
@@ -69,6 +76,73 @@ def _accepted_plan_event() -> WorldEvent:
     )
 
 
+def _proposal_audit(
+    *, attended_source_ref: str, authorize_media_source: bool = True
+) -> SimpleNamespace:
+    proposal = DecisionProposal(
+        proposal_id="proposal:reply",
+        trigger_ref="event:observation:reply",
+        evaluated_world_revision=1,
+        evidence_refs=(
+            ProposalEvidenceRef(
+                ref_id=attended_source_ref,
+                evidence_kind="settled_world_event",
+                source_world_revision=1,
+                immutable_hash="sha256:" + "b" * 64,
+            ),
+        ),
+        proposed_changes=(
+            TypedChange(
+                change_id="change:reply",
+                kind="expression_plan_transition",
+                target_id="plan:reply",
+                transition="accept",
+                evidence_refs=(attended_source_ref,),
+                payload=CanonicalTypedPayload.from_value(
+                    payload_schema="expression_plan_transition.v1",
+                    value={
+                        "plan_id": "plan:reply",
+                        "overall_intent": "expression:now",
+                        "ordering_policy": "dependencies",
+                        "terminal_policy": "settle",
+                        "beat_drafts": [
+                            {
+                                "beat_id": "beat:reply",
+                                "inline_text": "I may share this moment.",
+                                "materialized_payload_ref": "payload:reply",
+                                "payload_hash": "sha256:" + "c" * 64,
+                                "content_type": "text/plain",
+                                "dependency_beat_ids": [],
+                                "delay_window": None,
+                                "cancel_policy": "cancel-before-dispatch",
+                                "reconsider_policy": "reconsider-on-new-observation",
+                                "merge_policy": "model-reconsider",
+                            }
+                        ],
+                        "media_request": "consider_available_candidate",
+                        "media_source_refs": (
+                            [attended_source_ref] if authorize_media_source else []
+                        ),
+                    },
+                ),
+            ),
+        ),
+        confidence=8_000,
+        brief_rationale="the current lived moment is worth considering visually",
+        behavior_tendency="share_if_a_real_candidate_is_available",
+        stance="interested",
+        display_strategy="ordinary_reply",
+        private_turn_state=PrivateTurnState(
+            inner_state_summary="I want to consider sharing this exact moment.",
+            attended_source_refs=(attended_source_ref,),
+        ),
+    )
+    return SimpleNamespace(
+        proposal_id=proposal.proposal_id,
+        proposal_json=json.dumps(proposal.model_dump(mode="json")),
+    )
+
+
 class _Conductor:
     def __init__(
         self,
@@ -103,11 +177,28 @@ class _Conductor:
         return self._result
 
 
+class _CandidateSupplier:
+    def __init__(self) -> None:
+        self.calls: list[tuple[tuple[str, ...], str, str]] = []
+
+    def request_once(
+        self,
+        *,
+        source_refs: tuple[str, ...],
+        trace_id: str,
+        correlation_id: str,
+    ) -> object:
+        self.calls.append((source_refs, trace_id, correlation_id))
+        return SimpleNamespace(status="declared")
+
+
 class _Ledger:
     blocks_event_loop = False
     world_id = WORLD
 
-    def __init__(self, source: WorldEvent) -> None:
+    def __init__(
+        self, source: WorldEvent, *, proposal_audits: tuple[SimpleNamespace, ...] = ()
+    ) -> None:
         lease = ClaimLease(
             owner_id="worker:action",
             attempt_id="attempt:action",
@@ -158,6 +249,7 @@ class _Ledger:
             ),
             trigger_processes=(),
             completed_trigger_ids=(),
+            proposal_audits=proposal_audits,
         )
         self._events: list[WorldEvent] = [source]
         self.fail_completion_once = False
@@ -269,6 +361,79 @@ async def test_role_owned_media_request_is_durable_and_effect_once_across_restar
     assert repeated.status == "idle"
     assert conductor.calls == 1
 
+
+@pytest.mark.asyncio
+async def test_media_request_supplies_only_the_exact_role_attended_visual_source() -> None:
+    source = _accepted_plan_event()
+    attended = "event:life:settlement:attended"
+    ledger = _Ledger(source, proposal_audits=(_proposal_audit(attended_source_ref=attended),))
+    conductor = _Conductor(ledger=ledger)
+    supplier = _CandidateSupplier()
+    runtime = MediaRequestRuntime(
+        ledger=ledger,
+        conductor=conductor,  # type: ignore[arg-type]
+        candidate_supplier=supplier,
+    )
+
+    result = await runtime.advance_once(
+        logical_time=NOW,
+        trace_id="trace:media-request",
+        correlation_id="correlation:reply",
+    )
+
+    assert result.status == "completed"
+    assert len(supplier.calls) == 1
+    supplied_refs, supplied_trace, supplied_correlation = supplier.calls[0]
+    assert supplied_refs == (attended,)
+    assert supplied_trace == "trace:media-request"
+    assert supplied_correlation.startswith("correlation:media-request:")
+    assert conductor.calls == 1
+
+    restarted = MediaRequestRuntime(
+        ledger=ledger,
+        conductor=conductor,  # type: ignore[arg-type]
+        candidate_supplier=supplier,
+    )
+    repeated = await restarted.advance_once(
+        logical_time=NOW + timedelta(minutes=1),
+        trace_id="trace:restart",
+        correlation_id="correlation:restart",
+    )
+    assert repeated.handled is False
+    assert len(supplier.calls) == 1
+    assert conductor.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_private_turn_attention_alone_cannot_authorize_candidate_compilation() -> None:
+    source = _accepted_plan_event()
+    attended = "event:life:settlement:audit-only"
+    ledger = _Ledger(
+        source,
+        proposal_audits=(
+            _proposal_audit(
+                attended_source_ref=attended,
+                authorize_media_source=False,
+            ),
+        ),
+    )
+    conductor = _Conductor(ledger=ledger)
+    supplier = _CandidateSupplier()
+    runtime = MediaRequestRuntime(
+        ledger=ledger,
+        conductor=conductor,  # type: ignore[arg-type]
+        candidate_supplier=supplier,
+    )
+
+    result = await runtime.advance_once(
+        logical_time=NOW,
+        trace_id="trace:audit-only",
+        correlation_id="correlation:audit-only",
+    )
+
+    assert result.status == "completed"
+    assert supplier.calls == []
+    assert conductor.calls == 1
 
 @pytest.mark.asyncio
 async def test_restart_recovers_media_plan_without_a_second_selection() -> None:

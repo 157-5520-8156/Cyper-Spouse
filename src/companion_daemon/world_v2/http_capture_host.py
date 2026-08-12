@@ -903,6 +903,7 @@ def build_http_v2_capture_host(
             companion_actor_ref="agent:companion",
             reply_target=f"user:{primary_user_id}",
             action_pump_owner="pump:http-v2-capture",
+            expression_episode_mode=settings.world_v2_expression_episode_mode,
             expression_capabilities=PRODUCTION_TEXT_ONLY_EXPRESSION_CAPABILITIES,
             life_ecology=LifeEcologyComposition.production_v1(),
             media_selection_acceptance=(

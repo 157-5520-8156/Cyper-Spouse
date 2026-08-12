@@ -20,6 +20,7 @@ from companion_daemon.world_v2.character_interior.snapshot_compiler import (
     compile_inner_life_snapshot,
 )
 from companion_daemon.world_v2.relationship_events import (
+    RelationshipCommitmentAcceptedPayload,
     RelationshipSlowVariableAdjustedPayload,
     relationship_mutation_hash,
 )
@@ -36,6 +37,7 @@ from companion_daemon.world_v2.relationship_adjustment_trigger_runtime import (
 from companion_daemon.world_v2.relationship_adjustment_worker import (
     RelationshipAdjustmentWorker,
 )
+from companion_daemon.world_v2.relationship_reducers import relationship_primary_id
 from companion_daemon.world_v2.schemas import (
     CommitResult,
     CommittedWorldEventRef,
@@ -46,6 +48,9 @@ from companion_daemon.world_v2.schemas import (
     PlanStateProjection,
     ProjectionCursor,
     RelationshipHysteresisProjection,
+    RelationshipCommitmentDeliveryProof,
+    RelationshipCommitmentOrigin,
+    RelationshipCommitmentProjection,
     RelationshipStateOrigin,
     RelationshipStateProjection,
     RelationshipVariableDeltas,
@@ -151,7 +156,7 @@ def test_canonical_snapshot_keeps_both_relationship_directions_without_npc_priva
         _context_with_directional_relationships()
     ).model_view()
 
-    assert SNAPSHOT_COMPILER_VERSION == "inner-life-snapshot-compiler.6"
+    assert SNAPSHOT_COMPILER_VERSION == "inner-life-snapshot-compiler.7"
     assert snapshot["materials"]["protagonist_npc_relationships"][0] == {
         "relationship_id": "relationship:npc:lin",
         "direction": "protagonist_to_npc",
@@ -303,6 +308,171 @@ def _relationship_event_and_projection() -> tuple[WorldEvent, LedgerProjection]:
         semantic_hash="c" * 64,
     )
     return event, projection
+
+
+def _commitment_event_and_projection() -> tuple[WorldEvent, LedgerProjection]:
+    subject_ref = "npc:lin"
+    relationship_id = relationship_primary_id(subject_ref=subject_ref)
+    event_ref = "event:relationship-commitment:npc:lin"
+    evidence = (
+        EvidenceRef(
+            ref_id="event:observation:friendship",
+            evidence_type="committed_world_event",
+            claim_purpose="private_hypothesis",
+            source_world_revision=1,
+            immutable_hash="b" * 64,
+        ),
+    )
+    policy_refs = ("policy:relationship-v1",)
+    commitment = RelationshipCommitmentProjection(
+        commitment_id="relationship-commitment:npc:lin:friend",
+        relationship_id=relationship_id,
+        subject_ref=subject_ref,
+        stage_before="stranger",
+        committed_stage="friend",
+        commitment_code="mutual_friendship",
+        visible_text_span="你是我朋友了",
+        delivery_proof=RelationshipCommitmentDeliveryProof(
+            expression_proposal_id="proposal:expression:friendship",
+            expression_acceptance_id="acceptance:expression:friendship",
+            expression_plan_id="plan:expression:friendship",
+            plan_event_ref="event:expression-plan:friendship",
+            plan_event_payload_hash="1" * 64,
+            expression_beat_id="beat:expression:friendship",
+            beat_event_ref="event:expression-beat:friendship",
+            beat_event_payload_hash="2" * 64,
+            message_payload_ref="payload:expression:friendship",
+            message_payload_hash="sha256:" + "3" * 64,
+            stored_payload_event_ref="event:message-payload:friendship",
+            stored_payload_event_hash="4" * 64,
+            action_id="action:expression:friendship",
+            action_target_ref=subject_ref,
+            action_event_ref="event:action:expression:friendship",
+            action_event_payload_hash="5" * 64,
+            receipt_id="receipt:expression:friendship",
+            receipt_event_ref="event:receipt:expression:friendship",
+            receipt_event_payload_hash="6" * 64,
+            receipt_world_revision=1,
+        ),
+        evidence_refs=evidence,
+        origin=RelationshipCommitmentOrigin(
+            change_id="change:relationship-commitment:npc:lin",
+            transition_id="transition:relationship-commitment:npc:lin",
+            policy_refs=policy_refs,
+            accepted_event_ref=event_ref,
+        ),
+        committed_at=NOW,
+    )
+    raw: dict[str, object] = {
+        "change_id": commitment.origin.change_id,
+        "transition_id": commitment.origin.transition_id,
+        "expected_entity_revision": 0,
+        "evidence_refs": evidence,
+        "policy_refs": policy_refs,
+        "acceptance_id": "acceptance:relationship-commitment:npc:lin",
+        "proposal_id": "proposal:relationship-commitment:npc:lin",
+        "evaluated_world_revision": 1,
+        "accepted_change_hash": "0" * 64,
+        "relationship_id": relationship_id,
+        "subject_ref": subject_ref,
+        "stage_before": "stranger",
+        "stage_after": "friend",
+        "hysteresis_before": RelationshipHysteresisProjection(),
+        "hysteresis_after": RelationshipHysteresisProjection(),
+        "commitment_refs_before": (),
+        "commitment": commitment,
+        "policy_version": "relationship-policy.1",
+        "policy_digest": "a" * 64,
+    }
+    raw["accepted_change_hash"] = relationship_mutation_hash(raw)
+    payload = RelationshipCommitmentAcceptedPayload.model_validate(raw)
+    event = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id=event_ref,
+        world_id=WORLD_ID,
+        event_type="RelationshipCommitmentAccepted",
+        logical_time=NOW,
+        created_at=NOW,
+        actor="worker:relationship-commitment",
+        source="test",
+        trace_id="trace:relationship-commitment:npc:lin",
+        causation_id="event:relationship-commitment-acceptance:npc:lin",
+        correlation_id="correlation:relationship:npc:lin",
+        idempotency_key="idempotency:relationship-commitment:npc:lin",
+        payload=payload.model_dump(mode="json"),
+    )
+    state = RelationshipStateProjection(
+        relationship_id=relationship_id,
+        subject_ref=subject_ref,
+        entity_revision=1,
+        stage="friend",
+        policy_version=payload.policy_version,
+        policy_digest=payload.policy_digest,
+        hysteresis=payload.hysteresis_after,
+        commitment_refs=(commitment.commitment_id,),
+        origin=RelationshipStateOrigin(
+            change_id=payload.change_id,
+            transition_id=payload.transition_id,
+            policy_refs=payload.policy_refs,
+            accepted_event_ref=event_ref,
+        ),
+    )
+    projection = LedgerProjection(
+        world_id=WORLD_ID,
+        world_revision=2,
+        deliberation_revision=0,
+        ledger_sequence=1,
+        logical_time=NOW,
+        npcs=(
+            NpcProjection(
+                npc_id="lin",
+                entity_revision=1,
+                stable_identity_ref="identity:npc:lin",
+                privacy_class="shareable",
+            ),
+        ),
+        relationship_commitments=(commitment,),
+        relationship_states=(state,),
+        committed_world_event_refs=(
+            CommittedWorldEventRef(
+                event_id=event.event_id,
+                event_type=event.event_type,
+                world_revision=2,
+                payload_hash=event.payload_hash,
+                logical_time=NOW,
+            ),
+        ),
+        semantic_hash="c" * 64,
+    )
+    return event, projection
+
+
+@pytest.mark.asyncio
+async def test_relationship_context_accepts_commitment_as_exact_head_source() -> None:
+    event, projection = _commitment_event_and_projection()
+    cursor = ProjectionCursor(
+        world_revision=projection.world_revision,
+        deliberation_revision=projection.deliberation_revision,
+        ledger_sequence=projection.ledger_sequence,
+    )
+
+    join = await build_relationship_context_join(
+        ledger=_Ledger(event, projection),
+        projection=projection,
+        actor_ref=ACTOR_REF,
+        cursor=cursor,
+    )
+
+    assert len(join.protagonist_npc_items) == 1
+    value = join.protagonist_npc_items[0]["value"]
+    assert value["stage"] == "friend"
+    assert value["commitment_refs"] == [
+        "relationship-commitment:npc:lin:friend"
+    ]
+    envelope = next(iter(join.source_envelopes.values()))
+    assert envelope["source_bindings"][0]["authority_type"] == (
+        "RelationshipCommitmentAccepted"
+    )
 
 
 class _Ledger:

@@ -194,10 +194,65 @@ def _snapshot_cache_key(subject: InteriorStimulus | InteriorOpportunity) -> str:
 
 
 class _InteriorTechnicalError(RuntimeError):
-    def __init__(self, code: str, *, snapshot: InnerLifeSnapshot | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        snapshot: InnerLifeSnapshot | None = None,
+        role_failure_evidence: _RoleFacultyTechnicalEvidence | None = None,
+    ) -> None:
         super().__init__(code)
         self.code = code
         self.snapshot = snapshot
+        self.role_failure_evidence = role_failure_evidence
+
+
+@dataclass(frozen=True, slots=True)
+class _RoleFacultyTechnicalEvidence:
+    """Prompt/body-free provider evidence crossing the frozen Faculty seam."""
+
+    failure_code: str
+    model_call_id: str | None = None
+    request_hash: str | None = None
+    attempted_model_id: str | None = None
+    attempted_model_version: str | None = None
+    usage: object | None = None
+    provider_subcall_audits: tuple[object, ...] = ()
+    authored_candidate_audits: tuple[object, ...] = ()
+    physical_provider_audits: tuple[object, ...] = ()
+
+
+class _RoleFacultyTechnicalFailure(RuntimeError):
+    """Sanitized technical category crossing one installed Faculty port."""
+
+    __slots__ = ("evidence", "failure_code")
+
+    def __init__(
+        self,
+        failure_code: str,
+        *,
+        model_call_id: str | None = None,
+        request_hash: str | None = None,
+        attempted_model_id: str | None = None,
+        attempted_model_version: str | None = None,
+        usage: object | None = None,
+        provider_subcall_audits: tuple[object, ...] = (),
+        authored_candidate_audits: tuple[object, ...] = (),
+        physical_provider_audits: tuple[object, ...] = (),
+    ) -> None:
+        super().__init__("role_faculty_technical_failure")
+        self.failure_code = failure_code
+        self.evidence = _RoleFacultyTechnicalEvidence(
+            failure_code=failure_code,
+            model_call_id=model_call_id,
+            request_hash=request_hash,
+            attempted_model_id=attempted_model_id,
+            attempted_model_version=attempted_model_version,
+            usage=usage,
+            provider_subcall_audits=tuple(provider_subcall_audits),
+            authored_candidate_audits=tuple(authored_candidate_audits),
+            physical_provider_audits=tuple(physical_provider_audits),
+        )
 
 
 @dataclass
@@ -209,6 +264,18 @@ class _TurnCacheEntry:
     presented_prefetch_traces: list[PrefetchPresentationAudit] | None = None
     transition: InnerTransition | None = None
     decision: InnerDecision | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _RecallTurnCheckpoint:
+    """Durable progress after one completed external result in a Recall turn."""
+
+    stage: str
+    initial_result: _InteriorRoleResult
+    initial_snapshot: InnerLifeSnapshot
+    current_snapshot: InnerLifeSnapshot
+    correction_attempted: bool
+    presented_prefetch_traces: tuple[PrefetchPresentationAudit, ...]
 
 
 def _coordination_request(
@@ -267,10 +334,52 @@ def _prepared_turn_json(
         {
             "contract": "character-interior-prepared-turn.1",
             "result": result.model_dump(mode="json"),
-            "snapshot": snapshot.model_dump(mode="json"),
+            "snapshot": _durable_snapshot_value(snapshot),
             "private_self_lineage": private_self_lineage.model_dump(mode="json"),
             "presented_prefetch_traces": [
                 item.model_dump(mode="json") for item in (entry.presented_prefetch_traces or ())
+            ],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _durable_snapshot_value(snapshot: InnerLifeSnapshot) -> dict[str, object]:
+    """Retain recovery-only trusted traces excluded from ordinary model dumps."""
+
+    value = snapshot.model_dump(mode="json")
+    value["recall_trace_json"] = snapshot.recall_trace_json
+    value["prefetch_trace_json"] = snapshot.prefetch_trace_json
+    return value
+
+
+def _recall_turn_json(
+    *,
+    stage: str,
+    initial_result: _InteriorRoleResult,
+    initial_snapshot: InnerLifeSnapshot,
+    current_snapshot: InnerLifeSnapshot,
+    entry: _TurnCacheEntry,
+) -> str:
+    if stage not in {"recall_choice_recorded", "recall_resolved"}:
+        raise ValueError("CharacterInterior Recall checkpoint stage is invalid")
+    if initial_result.status != "recall_request":
+        raise ValueError("CharacterInterior Recall checkpoint lacks its role choice")
+    if stage == "recall_choice_recorded" and current_snapshot != initial_snapshot:
+        raise ValueError("Recall choice checkpoint cannot include unrecorded retrieval")
+    return json.dumps(
+        {
+            "contract": "character-interior-recall-checkpoint.1",
+            "stage": stage,
+            "initial_result": initial_result.model_dump(mode="json"),
+            "initial_snapshot": _durable_snapshot_value(initial_snapshot),
+            "current_snapshot": _durable_snapshot_value(current_snapshot),
+            "correction_attempted": entry.correction_attempted,
+            "presented_prefetch_traces": [
+                item.model_dump(mode="json")
+                for item in (entry.presented_prefetch_traces or ())
             ],
         },
         ensure_ascii=False,
@@ -304,6 +413,69 @@ def _restore_prepared_turn(
         return result, snapshot, lineage, traces
     except (KeyError, TypeError, ValueError, ValidationError, json.JSONDecodeError) as exc:
         raise _InteriorTechnicalError("invalid_durable_turn_checkpoint") from exc
+
+
+def _restore_recall_turn(raw: str) -> _RecallTurnCheckpoint:
+    try:
+        payload = json.loads(raw)
+        if payload.get("contract") != "character-interior-recall-checkpoint.1":
+            raise ValueError("Recall checkpoint contract is unsupported")
+        stage = payload.get("stage")
+        if stage not in {"recall_choice_recorded", "recall_resolved"}:
+            raise ValueError("Recall checkpoint stage is unsupported")
+        initial_result = _InteriorRoleResult.model_validate_json(
+            json.dumps(payload["initial_result"], ensure_ascii=False)
+        )
+        if initial_result.status != "recall_request":
+            raise ValueError("Recall checkpoint lacks its initial role choice")
+        initial_snapshot = InnerLifeSnapshot.model_validate_json(
+            json.dumps(payload["initial_snapshot"], ensure_ascii=False)
+        )
+        current_snapshot = InnerLifeSnapshot.model_validate_json(
+            json.dumps(payload["current_snapshot"], ensure_ascii=False)
+        )
+        if (
+            initial_snapshot.world_id != current_snapshot.world_id
+            or initial_snapshot.actor_ref != current_snapshot.actor_ref
+            or initial_snapshot.cursor != current_snapshot.cursor
+            or initial_snapshot.logical_time != current_snapshot.logical_time
+        ):
+            raise ValueError("Recall checkpoint changed its pinned snapshot identity")
+        if stage == "recall_choice_recorded" and current_snapshot != initial_snapshot:
+            raise ValueError("Recall choice checkpoint includes unrecorded retrieval")
+        correction_attempted = payload.get("correction_attempted")
+        if not isinstance(correction_attempted, bool):
+            raise ValueError("Recall checkpoint correction state is invalid")
+        traces = tuple(
+            PrefetchPresentationAudit.model_validate_json(
+                json.dumps(item, ensure_ascii=False)
+            )
+            for item in payload.get("presented_prefetch_traces", ())
+        )
+        return _RecallTurnCheckpoint(
+            stage=stage,
+            initial_result=initial_result,
+            initial_snapshot=initial_snapshot,
+            current_snapshot=current_snapshot,
+            correction_attempted=correction_attempted,
+            presented_prefetch_traces=traces,
+        )
+    except (KeyError, TypeError, ValueError, ValidationError, json.JSONDecodeError) as exc:
+        raise _InteriorTechnicalError("invalid_durable_turn_checkpoint") from exc
+
+
+def _checkpoint_contract(raw: str) -> str:
+    try:
+        value = json.loads(raw)
+        contract = value.get("contract") if isinstance(value, dict) else None
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise _InteriorTechnicalError("invalid_durable_turn_checkpoint") from exc
+    if contract not in {
+        "character-interior-prepared-turn.1",
+        "character-interior-recall-checkpoint.1",
+    }:
+        raise _InteriorTechnicalError("invalid_durable_turn_checkpoint")
+    return str(contract)
 
 
 class CharacterInterior:
@@ -358,6 +530,9 @@ class CharacterInterior:
         self._locks: dict[str, asyncio.Lock] = {}
         self._snapshot_cache: OrderedDict[str, InnerLifeSnapshot] = OrderedDict()
         self._snapshot_locks: dict[str, asyncio.Lock] = {}
+        self._role_failure_evidence: OrderedDict[
+            str, _RoleFacultyTechnicalEvidence
+        ] = OrderedDict()
         self._background_driver: object | None = None
         self._metrics: Counter[str] = Counter()
         self._snapshot_compile_ms: deque[float] = deque(maxlen=512)
@@ -454,9 +629,50 @@ class CharacterInterior:
                 authored_state_json=raw,
                 authored_state_hash=_digest(raw),
                 now=self._turn_now(),
+                expected_authored_state_hash=record.authored_state_hash,
             )
         except Exception as exc:
             raise _InteriorTechnicalError("turn_checkpoint_failed", snapshot=snapshot) from exc
+
+    def _checkpoint_recall_turn(
+        self,
+        *,
+        durable: tuple[_TurnCoordinationRequest, _TurnCoordinationRecord] | None,
+        stage: str,
+        initial_result: _InteriorRoleResult,
+        initial_snapshot: InnerLifeSnapshot,
+        current_snapshot: InnerLifeSnapshot,
+        entry: _TurnCacheEntry,
+    ) -> tuple[_TurnCoordinationRequest, _TurnCoordinationRecord] | None:
+        """CAS one completed Recall-stage external result into the sidecar."""
+
+        if durable is None or self._turn_store is None:
+            return durable
+        request, record = durable
+        raw = _recall_turn_json(
+            stage=stage,
+            initial_result=initial_result,
+            initial_snapshot=initial_snapshot,
+            current_snapshot=current_snapshot,
+            entry=entry,
+        )
+        try:
+            checkpointed = self._turn_store.checkpoint(
+                request=request,
+                owner_id=self._turn_owner_id,
+                lease_token=record.lease_token or "",
+                attempt_ordinal=record.attempt_ordinal,
+                authored_state_json=raw,
+                authored_state_hash=_digest(raw),
+                now=self._turn_now(),
+                expected_authored_state_hash=record.authored_state_hash,
+            )
+        except Exception as exc:
+            raise _InteriorTechnicalError(
+                "turn_checkpoint_failed",
+                snapshot=current_snapshot,
+            ) from exc
+        return request, checkpointed
 
     def _complete_turn(
         self,
@@ -571,6 +787,40 @@ class CharacterInterior:
         if not callable(operation):
             raise RuntimeError(f"CharacterInterior purpose has no output broker: {purpose}")
         return operation(output_ref=output_ref, output_hash=output_hash)
+
+    def _consume_role_failure_evidence(
+        self,
+        *,
+        inner_turn_id: str,
+        failure_code: str,
+    ) -> _RoleFacultyTechnicalEvidence | None:
+        """Consume the prompt/body-free evidence for one failed inner turn.
+
+        ``InnerDecision`` deliberately keeps its stable public terminal shape.
+        The Deliberation adapter consumes this bounded process-local sidecar
+        immediately after the failed decision and turns it into immutable
+        ``ModelResult`` audit material. A missing or mismatched sidecar fails
+        closed to the installed technical category alone.
+        """
+
+        evidence = self._role_failure_evidence.pop(inner_turn_id, None)
+        if evidence is None or evidence.failure_code != failure_code:
+            return None
+        return evidence
+
+    def _remember_role_failure_evidence(
+        self,
+        *,
+        inner_turn_id: str,
+        evidence: _RoleFacultyTechnicalEvidence | None,
+    ) -> None:
+        self._role_failure_evidence.pop(inner_turn_id, None)
+        if evidence is None:
+            return
+        self._role_failure_evidence[inner_turn_id] = evidence
+        self._role_failure_evidence.move_to_end(inner_turn_id)
+        while len(self._role_failure_evidence) > _CACHE_LIMIT:
+            self._role_failure_evidence.popitem(last=False)
 
     def _purpose_transport_available(
         self,
@@ -891,13 +1141,24 @@ class CharacterInterior:
                     )
                 else:
                     entry = self._cache.setdefault(cache_key, _TurnCacheEntry())
+                    prepared = False
+                    resume_recall: _RecallTurnCheckpoint | None = None
                     if durable is not None and durable[1].state == "checkpointed":
-                        result, snapshot, private_self_lineage, traces = _restore_prepared_turn(
-                            durable[1].authored_state_json or ""
-                        )
-                        entry.snapshot = snapshot
-                        entry.presented_prefetch_traces = list(traces)
-                    else:
+                        checkpoint_raw = durable[1].authored_state_json or ""
+                        if _checkpoint_contract(checkpoint_raw) == (
+                            "character-interior-prepared-turn.1"
+                        ):
+                            result, snapshot, private_self_lineage, traces = (
+                                _restore_prepared_turn(checkpoint_raw)
+                            )
+                            entry.snapshot = snapshot
+                            entry.presented_prefetch_traces = list(traces)
+                            prepared = True
+                        else:
+                            resume_recall = _restore_recall_turn(checkpoint_raw)
+                            snapshot = resume_recall.current_snapshot
+                            entry.snapshot = snapshot
+                    if not prepared and resume_recall is None:
                         snapshot = await self._snapshot_without_relocking(
                             stimulus,
                             cache_key,
@@ -910,6 +1171,7 @@ class CharacterInterior:
                             snapshot=snapshot,
                             entry=entry,
                         )
+                    if not prepared:
                         request = _InteriorRoleRequest(
                             inner_turn_id=turn_id,
                             phase="experience",
@@ -919,15 +1181,23 @@ class CharacterInterior:
                             context_note=stimulus.context_note,
                             subject_source_refs=stimulus.source_refs,
                             capability_manifest=stimulus.capability_manifest,
-                            snapshot=snapshot,
+                            snapshot=(
+                                resume_recall.initial_snapshot
+                                if resume_recall is not None
+                                else snapshot
+                            ),
                             recall_completed=entry.recall_attempted,
                         )
-                        result, snapshot, private_self_lineage = await self._run_role_phase(
-                            method_name="experience",
-                            request=request,
-                            snapshot=snapshot,
-                            entry=entry,
-                            final_statuses={"transition", "no_change"},
+                        result, snapshot, private_self_lineage, durable = (
+                            await self._run_role_phase(
+                                method_name="experience",
+                                request=request,
+                                snapshot=snapshot,
+                                entry=entry,
+                                final_statuses={"transition", "no_change"},
+                                durable=durable,
+                                resume_recall=resume_recall,
+                            )
                         )
                         durable_record = self._checkpoint_turn(
                             durable=durable,
@@ -1019,6 +1289,7 @@ class CharacterInterior:
         lock = self._locks.setdefault(cache_key, asyncio.Lock())
         async with lock:
             durable: tuple[_TurnCoordinationRequest, _TurnCoordinationRecord] | None = None
+            role_failure_evidence: _RoleFacultyTechnicalEvidence | None = None
             try:
                 canonical_snapshot = await self.project(opportunity)
                 turn_id = _inner_turn_id(
@@ -1049,13 +1320,24 @@ class CharacterInterior:
                     )
                 else:
                     entry = self._cache.setdefault(cache_key, _TurnCacheEntry())
+                    prepared = False
+                    resume_recall: _RecallTurnCheckpoint | None = None
                     if durable is not None and durable[1].state == "checkpointed":
-                        result, snapshot, private_self_lineage, traces = _restore_prepared_turn(
-                            durable[1].authored_state_json or ""
-                        )
-                        entry.snapshot = snapshot
-                        entry.presented_prefetch_traces = list(traces)
-                    else:
+                        checkpoint_raw = durable[1].authored_state_json or ""
+                        if _checkpoint_contract(checkpoint_raw) == (
+                            "character-interior-prepared-turn.1"
+                        ):
+                            result, snapshot, private_self_lineage, traces = (
+                                _restore_prepared_turn(checkpoint_raw)
+                            )
+                            entry.snapshot = snapshot
+                            entry.presented_prefetch_traces = list(traces)
+                            prepared = True
+                        else:
+                            resume_recall = _restore_recall_turn(checkpoint_raw)
+                            snapshot = resume_recall.current_snapshot
+                            entry.snapshot = snapshot
+                    if not prepared and resume_recall is None:
                         snapshot = await self._snapshot_without_relocking(
                             opportunity,
                             cache_key,
@@ -1068,6 +1350,7 @@ class CharacterInterior:
                             snapshot=snapshot,
                             entry=entry,
                         )
+                    if not prepared:
                         request = _InteriorRoleRequest(
                             inner_turn_id=turn_id,
                             phase="consider",
@@ -1077,15 +1360,23 @@ class CharacterInterior:
                             context_note=opportunity.context_note,
                             subject_source_refs=opportunity.source_refs,
                             capability_manifest=opportunity.capability_manifest,
-                            snapshot=snapshot,
+                            snapshot=(
+                                resume_recall.initial_snapshot
+                                if resume_recall is not None
+                                else snapshot
+                            ),
                             recall_completed=entry.recall_attempted,
                         )
-                        result, snapshot, private_self_lineage = await self._run_role_phase(
-                            method_name="consider",
-                            request=request,
-                            snapshot=snapshot,
-                            entry=entry,
-                            final_statuses={"decision", "silent"},
+                        result, snapshot, private_self_lineage, durable = (
+                            await self._run_role_phase(
+                                method_name="consider",
+                                request=request,
+                                snapshot=snapshot,
+                                entry=entry,
+                                final_statuses={"decision", "silent"},
+                                durable=durable,
+                                resume_recall=resume_recall,
+                            )
                         )
                         durable_record = self._checkpoint_turn(
                             durable=durable,
@@ -1128,6 +1419,7 @@ class CharacterInterior:
                     )
                     self._complete_turn(durable=durable, result=decision)
             except _InteriorTechnicalError as exc:
+                role_failure_evidence = exc.role_failure_evidence
                 turn_id = _inner_turn_id(
                     opportunity,
                     snapshot=exc.snapshot,
@@ -1164,6 +1456,11 @@ class CharacterInterior:
                 snapshot_hash=decision.snapshot_hash,
             )
             await self._finish_prefetch_turn(opportunity, turn_id=decision.inner_turn_id)
+            if decision.status == "technical_failure":
+                self._remember_role_failure_evidence(
+                    inner_turn_id=decision.inner_turn_id,
+                    evidence=role_failure_evidence,
+                )
             return decision
 
     async def _snapshot_without_relocking(
@@ -1651,7 +1948,14 @@ class CharacterInterior:
         snapshot: InnerLifeSnapshot,
         entry: _TurnCacheEntry,
         final_statuses: set[str],
-    ) -> tuple[_InteriorRoleResult, InnerLifeSnapshot, _PrivateSelfLineage]:
+        durable: tuple[_TurnCoordinationRequest, _TurnCoordinationRecord] | None,
+        resume_recall: _RecallTurnCheckpoint | None = None,
+    ) -> tuple[
+        _InteriorRoleResult,
+        InnerLifeSnapshot,
+        _PrivateSelfLineage,
+        tuple[_TurnCoordinationRequest, _TurnCoordinationRecord] | None,
+    ]:
         async def invoke(
             current_request: _InteriorRoleRequest,
             *,
@@ -1663,6 +1967,12 @@ class CharacterInterior:
             structural_failure_detail: str | None = None
             try:
                 raw = await _resolve(method(current_request))
+            except _RoleFacultyTechnicalFailure as exc:
+                raise _InteriorTechnicalError(
+                    exc.failure_code,
+                    snapshot=current_request.snapshot,
+                    role_failure_evidence=exc.evidence,
+                ) from None
             except _RoleResultContractError as exc:
                 if exc.code in _NON_RETRYABLE_ROLE_ERRORS:
                     raise _InteriorTechnicalError(
@@ -1675,11 +1985,9 @@ class CharacterInterior:
                 import logging
 
                 logging.getLogger(__name__).warning(
-                    "role faculty inner failure method=%s type=%s detail=%s",
+                    "role faculty inner failure method=%s type=%s",
                     method_name,
                     type(exc).__name__,
-                    str(exc)[:300],
-                    exc_info=True,
                 )
                 raise _InteriorTechnicalError(
                     "role_faculty_unavailable", snapshot=current_request.snapshot
@@ -1724,6 +2032,12 @@ class CharacterInterior:
             )
             try:
                 corrected_raw = await _resolve(method(corrected_request))
+            except _RoleFacultyTechnicalFailure as correction_exc:
+                raise _InteriorTechnicalError(
+                    correction_exc.failure_code,
+                    snapshot=current_request.snapshot,
+                    role_failure_evidence=correction_exc.evidence,
+                ) from None
             except _RoleResultContractError as correction_exc:
                 if correction_exc.code in _NON_RETRYABLE_ROLE_ERRORS:
                     raise _InteriorTechnicalError(
@@ -1761,10 +2075,20 @@ class CharacterInterior:
                     ) from correction_error
                 raise
 
-        result = await invoke(
-            request,
-            allowed_statuses={*final_statuses, "recall_request"},
-        )
+        if resume_recall is None:
+            result = await invoke(
+                request,
+                allowed_statuses={*final_statuses, "recall_request"},
+            )
+        else:
+            result = resume_recall.initial_result
+            snapshot = resume_recall.current_snapshot
+            entry.snapshot = snapshot
+            entry.recall_attempted = True
+            entry.correction_attempted = resume_recall.correction_attempted
+            entry.presented_prefetch_traces = list(
+                resume_recall.presented_prefetch_traces
+            )
         if result.status != "recall_request":
             private_self = _InstantPrivateSelf(
                 summary=result.summary,
@@ -1784,23 +2108,53 @@ class CharacterInterior:
                     final_snapshot_hash=snapshot.snapshot_hash,
                     final_author_lineage=result.author_lineage,
                 ),
+                durable,
             )
-        if entry.recall_attempted:
+        if resume_recall is None and entry.recall_attempted:
             raise _InteriorTechnicalError("repeated_recall_request", snapshot=snapshot)
-        initial_snapshot = snapshot
+        initial_snapshot = (
+            resume_recall.initial_snapshot
+            if resume_recall is not None
+            else snapshot
+        )
         initial_private_self = _InstantPrivateSelf(
             summary=result.summary,
             attended_source_refs=result.attended_source_refs,
         )
-        entry.recall_attempted = True
-        self._metrics["recall_attempt"] += 1
-        snapshot = await self._recall_once(
-            request=request,
-            query=result.recall_query or "",
-            snapshot=snapshot,
+        if resume_recall is None:
+            entry.recall_attempted = True
+            durable = self._checkpoint_recall_turn(
+                durable=durable,
+                stage="recall_choice_recorded",
+                initial_result=result,
+                initial_snapshot=initial_snapshot,
+                current_snapshot=initial_snapshot,
+                entry=entry,
+            )
+        if resume_recall is None or resume_recall.stage == "recall_choice_recorded":
+            self._metrics["recall_attempt"] += 1
+            snapshot = await self._recall_once(
+                request=request,
+                query=result.recall_query or "",
+                snapshot=initial_snapshot,
+            )
+            entry.snapshot = snapshot
+            durable = self._checkpoint_recall_turn(
+                durable=durable,
+                stage="recall_resolved",
+                initial_result=result,
+                initial_snapshot=initial_snapshot,
+                current_snapshot=snapshot,
+                entry=entry,
+            )
+        final_request = request.model_copy(
+            update={
+                "snapshot": snapshot,
+                "recall_completed": True,
+                "recall_parent_author_lineage": result.author_lineage,
+                "recall_parent_usage_json": result.author_usage_json,
+            }
         )
-        entry.snapshot = snapshot
-        final_request = request.model_copy(update={"snapshot": snapshot, "recall_completed": True})
         final = await invoke(
             final_request,
             allowed_statuses={*final_statuses, "recall_request"},
@@ -1835,6 +2189,7 @@ class CharacterInterior:
                     else None
                 ),
             ),
+            durable,
         )
 
     async def _record_prefetch_presentation(

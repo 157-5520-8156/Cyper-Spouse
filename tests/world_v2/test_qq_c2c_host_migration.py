@@ -45,7 +45,11 @@ from companion_daemon.world_v2.qq_c2c_onebot_app import (
 )
 from companion_daemon.world_v2.qq_ingress_policy import QQIngressFragment
 from companion_daemon.world_v2.qq_ingress_policy import SQLiteQQIngressStore
-from companion_daemon.world_v2.schemas import ProviderMediaGrantBinding
+from companion_daemon.world_v2.schemas import (
+    ClaimLease,
+    ProviderMediaGrantBinding,
+    TriggerProcess,
+)
 from companion_daemon.world_v2.random_authority import RandomAuthority
 from companion_daemon.world_v2.social_initiative import (
     SocialInitiativeContextPolicy,
@@ -76,14 +80,9 @@ class _NamedNoCallModel:
         raise AssertionError(f"unexpected composition-only model call: {self.model}")
 
 
-class _NamedStrictInventoryNoCallModel(_NamedNoCallModel):
+class _NamedCompactReviewNoCallModel(_NamedNoCallModel):
     def supports_strict_output_contract(self, contract: str) -> bool:
-        return contract == "candidate-external-proposition-inventory.5"
-
-
-class _NamedStrictCoverageNoCallModel(_NamedNoCallModel):
-    def supports_strict_output_contract(self, contract: str) -> bool:
-        return contract == "candidate-external-proposition-coverage.5"
+        return contract == "visible-beat-source-verdict.1"
 
 
 class _NamedStrictFullReviewNoCallModel(_NamedNoCallModel):
@@ -95,13 +94,12 @@ class _NamedStrictFullReviewNoCallModel(_NamedNoCallModel):
 
 
 @pytest.mark.asyncio
-async def test_qq_composition_wires_independent_proactive_source_authority(
+async def test_qq_composition_wires_compact_proactive_source_guard(
     tmp_path: Path,
 ) -> None:
     author = _NamedNoCallModel("qq-proactive-author")
-    reviewer = _NamedStrictCoverageNoCallModel("qq-independent-source-reviewer")
+    reviewer = _NamedCompactReviewNoCallModel("qq-independent-source-reviewer")
     life_reviewer = _NamedNoCallModel("qq-isolated-life-source-reviewer")
-    inventory = _NamedStrictInventoryNoCallModel("qq-candidate-inventory")
     host = build_qq_c2c_host(
         settings=Settings(database_path=tmp_path / "qq-proactive-source-authority.sqlite"),
         recipient_id="10001",
@@ -109,7 +107,6 @@ async def test_qq_composition_wires_independent_proactive_source_authority(
         model=author,
         source_closure_model=reviewer,
         life_source_closure_model=life_reviewer,
-        candidate_external_proposition_inventory_model=inventory,
         use_configured_recall_embedding=False,
     )
     try:
@@ -119,7 +116,7 @@ async def test_qq_composition_wires_independent_proactive_source_authority(
 
         assert adapter._identity_frame is not None  # noqa: SLF001
         assert adapter._source_closure_reviewer is reviewer  # noqa: SLF001
-        assert adapter._inventory_model is inventory  # noqa: SLF001
+        assert adapter._inventory_model is None  # noqa: SLF001
         development = (  # noqa: SLF001
             host._host._application._life_ecology._life_development_followup
         )
@@ -131,7 +128,12 @@ async def test_qq_composition_wires_independent_proactive_source_authority(
             development._source_closure_reviewer.authority_origin is life_reviewer
         )
         assert development._source_closure_reviewer_is_independent is True  # noqa: SLF001
-        assert host.proactive_source_authority_health()["status"] == "ready"
+        source_health = host.proactive_source_authority_health()
+        assert source_health["status"] == "ready"
+        assert source_health["visible_review_strategy"] == "visible_beat_verdict"
+        assert source_health["active_source_review_protocol"] == (
+            "visible_beat_source_verdict.1"
+        )
         assert host.life_source_authority_health()["status"] == ("operational_unqualified")
     finally:
         await host.aclose()
@@ -1110,10 +1112,10 @@ async def test_qq_scheduler_advances_all_exact_due_boundaries_before_expression_
     tmp_path: Path,
 ) -> None:
     action_due_times = (
-        NOW + timedelta(minutes=2),
-        NOW + timedelta(minutes=5),
+        NOW + timedelta(seconds=10),
+        NOW + timedelta(seconds=20),
     )
-    retry_due = NOW + timedelta(minutes=10)
+    retry_due = NOW + timedelta(seconds=30)
     attempt_id = "attempt:expression:one"
     observation_id = "observation:one"
     observation_event_id = "event:observation:one"
@@ -1217,7 +1219,7 @@ async def test_qq_scheduler_advances_all_exact_due_boundaries_before_expression_
     )
     try:
         drained = await host.scheduler_once(
-            observed_at=NOW + timedelta(minutes=11),
+            observed_at=NOW + timedelta(seconds=31),
             max_action_units=0,
             max_background_units=1,
         )
@@ -1307,7 +1309,7 @@ async def test_qq_scheduler_advances_exactly_to_proactive_technical_retry(
 async def test_qq_scheduler_preserves_retry_unit_when_slow_background_crosses_due(
     tmp_path: Path,
 ) -> None:
-    retry_due = NOW + timedelta(minutes=10)
+    retry_due = NOW + timedelta(seconds=30)
     observed_at = retry_due - timedelta(seconds=1)
     attempt_id = "attempt:expression:slow-crossing"
     observation_id = "observation:slow-crossing"
@@ -1574,6 +1576,111 @@ class _Delivery:
         return {"status": "ok", "data": {"message_id": f"typing-{len(self.sent)}"}}
 
 
+class _RetryPendingLifecycleHost:
+    """Projection with a durable second-attempt terminal for the Notice seam."""
+
+    def __init__(self) -> None:
+        first_attempt_id = "attempt:expression-episode:notice:1"
+        attempt_id = "attempt:expression-episode:notice:2"
+        self.process = TriggerProcess(
+            trigger_id="trigger:expression-episode:notice",
+            trigger_ref="expression-episode:observation:notice",
+            process_kind="expression_episode",
+            source_evidence_ref="observation:notice",
+            state="claimed",
+            claim_lease=ClaimLease(
+                owner_id="worker:notice",
+                attempt_id=attempt_id,
+                acquired_at=NOW,
+                expires_at=NOW + timedelta(minutes=2),
+            ),
+            attempt_ids=(first_attempt_id, attempt_id),
+        )
+        self.active = False
+        self.newer_inbound = False
+
+    async def inbound(self, _inbound):  # type: ignore[no-untyped-def]
+        self.active = True
+        return SimpleNamespace(
+            status="deferred",
+            observation_ref="observation:notice",
+            authorized_action_ids=(),
+            scheduled_action_ids=(),
+            deferred_refs=(
+                "character_interior.primary_timeout",
+                "expression_episode.technical_retry_pending",
+            ),
+            terminal_errors=(),
+        )
+
+    async def action_due_projection(self):  # type: ignore[no-untyped-def]
+        process = self.process
+        observations = (
+            SimpleNamespace(
+                observation_id="observation:notice",
+                source_event_id="qq-message:notice",
+                event_payload_hash="1" * 64,
+                world_revision=1,
+            ),
+        )
+        committed = (
+            SimpleNamespace(
+                event_id="event:observation:notice",
+                event_type="ObservationRecorded",
+                world_revision=1,
+                payload_hash="1" * 64,
+            ),
+        )
+        if self.newer_inbound:
+            observations = (
+                *observations,
+                SimpleNamespace(
+                    observation_id="observation:newer",
+                    source_event_id="qq-message:newer",
+                    event_payload_hash="2" * 64,
+                    world_revision=2,
+                ),
+            )
+            committed = (
+                *committed,
+                SimpleNamespace(
+                    event_id="event:observation:newer",
+                    event_type="ObservationRecorded",
+                    world_revision=2,
+                    payload_hash="2" * 64,
+                ),
+            )
+        audits = (
+            tuple(
+                SimpleNamespace(
+                    trigger_ref="event:observation:notice",
+                    proposal_hash=None,
+                    attempt_index=1,
+                    attempt_count=2,
+                    attempt_id=attempt_id,
+                )
+                for attempt_id in process.attempt_ids
+            )
+            if self.active
+            else ()
+        )
+        return SimpleNamespace(
+            logical_time=NOW,
+            trigger_processes=(process,) if self.active else (),
+            message_observations=observations if self.active else (),
+            committed_world_event_refs=committed if self.active else (),
+            model_result_audits=audits,
+            proposal_audits=(),
+            minimal_reply_manifests=(),
+            expression_plan_manifests=(),
+            acceptance_decisions=(),
+            actions=(),
+        )
+
+    def close(self) -> None:
+        return None
+
+
 @pytest.mark.asyncio
 async def test_qq_host_sends_distinct_system_notice_for_terminal_turn_failure(
     tmp_path: Path,
@@ -1581,11 +1688,22 @@ async def test_qq_host_sends_distinct_system_notice_for_terminal_turn_failure(
     class _TechnicalFailureHost:
         async def inbound(self, _inbound):  # type: ignore[no-untyped-def]
             return SimpleNamespace(
-                status="deferred",
+                status="failed_safe",
+                observation_ref="observation:current",
                 authorized_action_ids=(),
                 scheduled_action_ids=(),
-                deferred_refs=("expression_episode.technical_retry_pending",),
-                terminal_errors=(),
+                deferred_refs=(),
+                terminal_errors=("character_interior.invalid_role_result",),
+            )
+
+        async def action_due_projection(self):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                message_observations=(
+                    SimpleNamespace(
+                        observation_id="observation:current",
+                        world_revision=1,
+                    ),
+                )
             )
 
         def close(self) -> None:
@@ -1619,11 +1737,813 @@ async def test_qq_host_sends_distinct_system_notice_for_terminal_turn_failure(
             text="你还在吗？",
             observed_at=clock["now"],
         )
+        duplicate = await host.inbound_text(
+            message_id="message:technical-failure",
+            recipient_id="10001",
+            text="你还在吗？",
+            observed_at=clock["now"],
+        )
+    finally:
+        await host.aclose()
+
+    assert result.status == "failed_safe"
+    assert duplicate.status == "failed_safe"
+    assert delivery.sent == [("10001", SYSTEM_NOTICE_TEXT)]
+
+
+@pytest.mark.asyncio
+async def test_qq_host_does_not_send_system_notice_while_expression_retry_is_pending(
+    tmp_path: Path,
+) -> None:
+    class _RetryableFailureHost:
+        async def inbound(self, _inbound):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                status="deferred",
+                authorized_action_ids=(),
+                scheduled_action_ids=(),
+                deferred_refs=(
+                    "character_interior.primary_timeout",
+                    "expression_episode.technical_retry_pending",
+                ),
+                terminal_errors=(),
+            )
+
+        def close(self) -> None:
+            return None
+
+    clock = {"now": NOW}
+
+    async def advance(seconds: float) -> None:
+        clock["now"] += timedelta(seconds=seconds)
+
+    delivery = _Delivery()
+    notice = SQLiteSystemNoticeDispatcher(
+        path=str(tmp_path / "system-notice-retryable.sqlite"),
+        world_id="world:test",
+        delivery=delivery,
+        now=lambda: clock["now"],
+    )
+    host = QQC2CHost(
+        host=_RetryableFailureHost(),  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(tmp_path / "system-notice-retryable.sqlite"),
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=advance,
+        system_notice_dispatcher=notice,
+    )
+    try:
+        result = await host.inbound_text(
+            message_id="message:retryable-failure",
+            recipient_id="10001",
+            text="你还在吗？",
+            observed_at=clock["now"],
+        )
     finally:
         await host.aclose()
 
     assert result.status == "deferred"
+    assert delivery.sent == []
+
+
+@pytest.mark.asyncio
+async def test_qq_host_delays_pending_retry_notice_and_rebuilds_effect_once_after_restart(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "system-notice-delayed-retry.sqlite"
+    clock = {"now": NOW}
+    timer_started = asyncio.Event()
+    release_timer = asyncio.Event()
+    timer_delays: list[float] = []
+
+    async def ingress_advance(seconds: float) -> None:
+        clock["now"] += timedelta(seconds=seconds)
+
+    async def controlled_timer(seconds: float) -> None:
+        timer_delays.append(seconds)
+        timer_started.set()
+        await release_timer.wait()
+        clock["now"] += timedelta(seconds=seconds)
+
+    delivery = _Delivery()
+    lifecycle = _RetryPendingLifecycleHost()
+    first = QQC2CHost(
+        host=lifecycle,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(path),
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=ingress_advance,
+        action_due_now=lambda: clock["now"],
+        action_due_sleep=controlled_timer,
+        system_notice_dispatcher=SQLiteSystemNoticeDispatcher(
+            path=str(path),
+            world_id="world:test",
+            delivery=delivery,
+            now=lambda: clock["now"],
+        ),
+    )
+    try:
+        result = await first.inbound_text(
+            message_id="message:delayed-retry",
+            recipient_id="10001",
+            text="你还在吗？",
+            observed_at=clock["now"],
+        )
+        await asyncio.wait_for(timer_started.wait(), timeout=0.5)
+        assert result.status == "deferred"
+        assert delivery.sent == []
+        assert timer_delays and timer_delays[-1] >= 119
+
+        release_timer.set()
+        for _ in range(100):
+            if delivery.sent:
+                break
+            await asyncio.sleep(0)
+        assert delivery.sent == [("10001", SYSTEM_NOTICE_TEXT)]
+    finally:
+        await first.aclose()
+
+    async def restart_timer(seconds: float) -> None:
+        clock["now"] += timedelta(seconds=seconds)
+        await asyncio.sleep(0)
+
+    restarted_lifecycle = _RetryPendingLifecycleHost()
+    restarted_lifecycle.active = True
+    restarted = QQC2CHost(
+        host=restarted_lifecycle,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(path),
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=ingress_advance,
+        action_due_now=lambda: clock["now"],
+        action_due_sleep=restart_timer,
+        system_notice_dispatcher=SQLiteSystemNoticeDispatcher(
+            path=str(path),
+            world_id="world:test",
+            delivery=delivery,
+            now=lambda: clock["now"],
+        ),
+    )
+    try:
+        for _ in range(100):
+            await asyncio.sleep(0)
+        assert delivery.sent == [("10001", SYSTEM_NOTICE_TEXT)]
+    finally:
+        await restarted.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "terminal_outcome",
+    ("expression-episode:authorized", "expression-episode:silent"),
+)
+async def test_qq_host_cancels_delayed_retry_notice_after_role_turn_finishes(
+    tmp_path: Path,
+    terminal_outcome: str,
+) -> None:
+    clock = {"now": NOW}
+    timer_started = asyncio.Event()
+    release_timer = asyncio.Event()
+
+    async def ingress_advance(seconds: float) -> None:
+        clock["now"] += timedelta(seconds=seconds)
+
+    async def controlled_timer(seconds: float) -> None:
+        timer_started.set()
+        await release_timer.wait()
+        clock["now"] += timedelta(seconds=seconds)
+
+    delivery = _Delivery()
+    lifecycle = _RetryPendingLifecycleHost()
+    path = tmp_path / f"notice-finished-{terminal_outcome.rsplit(':', 1)[-1]}.sqlite"
+    host = QQC2CHost(
+        host=lifecycle,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(path),
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=ingress_advance,
+        action_due_now=lambda: clock["now"],
+        action_due_sleep=controlled_timer,
+        system_notice_dispatcher=SQLiteSystemNoticeDispatcher(
+            path=str(path),
+            world_id="world:test",
+            delivery=delivery,
+            now=lambda: clock["now"],
+        ),
+    )
+    try:
+        await host.inbound_text(
+            message_id=f"message:{terminal_outcome}",
+            recipient_id="10001",
+            text="这一轮稍后会终结。",
+            observed_at=clock["now"],
+        )
+        await asyncio.wait_for(timer_started.wait(), timeout=0.5)
+        lifecycle.process = lifecycle.process.model_copy(
+            update={"state": "terminal", "runtime_outcome_ref": terminal_outcome}
+        )
+        release_timer.set()
+        for _ in range(50):
+            await asyncio.sleep(0)
+        assert delivery.sent == []
+    finally:
+        await host.aclose()
+
+
+@pytest.mark.asyncio
+async def test_qq_host_cancels_delayed_retry_notice_after_newer_inbound(
+    tmp_path: Path,
+) -> None:
+    clock = {"now": NOW}
+    timer_started = asyncio.Event()
+    release_timer = asyncio.Event()
+
+    async def ingress_advance(seconds: float) -> None:
+        clock["now"] += timedelta(seconds=seconds)
+
+    async def controlled_timer(seconds: float) -> None:
+        timer_started.set()
+        await release_timer.wait()
+        clock["now"] += timedelta(seconds=seconds)
+
+    delivery = _Delivery()
+    lifecycle = _RetryPendingLifecycleHost()
+    path = tmp_path / "notice-superseded-before-grace.sqlite"
+    host = QQC2CHost(
+        host=lifecycle,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(path),
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=ingress_advance,
+        action_due_now=lambda: clock["now"],
+        action_due_sleep=controlled_timer,
+        system_notice_dispatcher=SQLiteSystemNoticeDispatcher(
+            path=str(path),
+            world_id="world:test",
+            delivery=delivery,
+            now=lambda: clock["now"],
+        ),
+    )
+    try:
+        await host.inbound_text(
+            message_id="message:superseded-before-grace",
+            recipient_id="10001",
+            text="旧的一轮。",
+            observed_at=clock["now"],
+        )
+        await asyncio.wait_for(timer_started.wait(), timeout=0.5)
+        lifecycle.newer_inbound = True
+        release_timer.set()
+        for _ in range(50):
+            await asyncio.sleep(0)
+        assert delivery.sent == []
+    finally:
+        await host.aclose()
+
+
+@pytest.mark.asyncio
+async def test_qq_host_does_not_send_terminal_notice_after_a_newer_inbound(
+    tmp_path: Path,
+) -> None:
+    class _SupersededTerminalFailureHost:
+        async def inbound(self, _inbound):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                status="failed_safe",
+                observation_ref="observation:old",
+                authorized_action_ids=(),
+                scheduled_action_ids=(),
+                deferred_refs=(),
+                terminal_errors=("character_interior.invalid_role_result",),
+            )
+
+        async def action_due_projection(self):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                message_observations=(
+                    SimpleNamespace(observation_id="observation:old", world_revision=1),
+                    SimpleNamespace(observation_id="observation:new", world_revision=2),
+                )
+            )
+
+        def close(self) -> None:
+            return None
+
+    clock = {"now": NOW}
+
+    async def advance(seconds: float) -> None:
+        clock["now"] += timedelta(seconds=seconds)
+
+    delivery = _Delivery()
+    notice = SQLiteSystemNoticeDispatcher(
+        path=str(tmp_path / "system-notice-superseded.sqlite"),
+        world_id="world:test",
+        delivery=delivery,
+        now=lambda: clock["now"],
+    )
+    host = QQC2CHost(
+        host=_SupersededTerminalFailureHost(),  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(tmp_path / "system-notice-superseded.sqlite"),
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=advance,
+        system_notice_dispatcher=notice,
+    )
+    try:
+        result = await host.inbound_text(
+            message_id="message:old-terminal-failure",
+            recipient_id="10001",
+            text="旧的一轮。",
+            observed_at=clock["now"],
+        )
+    finally:
+        await host.aclose()
+
+    assert result.status == "failed_safe"
+    assert delivery.sent == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_notice_rechecks_latest_inbound_after_dispatch_lock_wait(
+    tmp_path: Path,
+) -> None:
+    class _MutableTerminalFailureHost:
+        def __init__(self) -> None:
+            self.newer = False
+            self.post_inbound_read = asyncio.Event()
+            self.inbound_calls = 0
+
+        async def inbound(self, _inbound):  # type: ignore[no-untyped-def]
+            self.inbound_calls += 1
+            if self.inbound_calls > 1:
+                self.newer = True
+                return SimpleNamespace(
+                    status="observed_only",
+                    observation_ref="observation:new",
+                    authorized_action_ids=(),
+                    scheduled_action_ids=(),
+                    deferred_refs=(),
+                    terminal_errors=(),
+                )
+            return SimpleNamespace(
+                status="failed_safe",
+                observation_ref="observation:old",
+                authorized_action_ids=(),
+                scheduled_action_ids=(),
+                deferred_refs=(),
+                terminal_errors=("character_interior.invalid_role_result",),
+            )
+
+        async def action_due_projection(self):  # type: ignore[no-untyped-def]
+            observations = [
+                SimpleNamespace(observation_id="observation:old", world_revision=1)
+            ]
+            if self.newer:
+                observations.append(
+                    SimpleNamespace(observation_id="observation:new", world_revision=2)
+                )
+            if self.inbound_calls:
+                self.post_inbound_read.set()
+            return SimpleNamespace(message_observations=tuple(observations), actions=())
+
+        def close(self) -> None:
+            return None
+
+    class _BlockedNoticeDelivery(_Delivery):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def send_text(self, recipient_id: str, text: str) -> dict[str, object]:
+            self.sent.append((recipient_id, text))
+            self.started.set()
+            await self.release.wait()
+            return {"status": "ok", "data": {"message_id": f"qq-{len(self.sent)}"}}
+
+    path = tmp_path / "terminal-notice-lock-race.sqlite"
+    clock = {"now": NOW}
+    hold_newer_ingress = {"value": False}
+    release_newer_ingress = asyncio.Event()
+
+    async def advance(seconds: float) -> None:
+        if hold_newer_ingress["value"]:
+            await release_newer_ingress.wait()
+        clock["now"] += timedelta(seconds=seconds)
+
+    delivery = _BlockedNoticeDelivery()
+    dispatcher = SQLiteSystemNoticeDispatcher(
+        path=str(path),
+        world_id="world:test",
+        delivery=delivery,
+        now=lambda: clock["now"],
+        cooldown_seconds=0,
+    )
+    blocker = asyncio.create_task(
+        dispatcher.notify(
+            notice_key="notice:blocker",
+            recipient_id="10001",
+            failure_code="fixture_blocker",
+        )
+    )
+    await asyncio.wait_for(delivery.started.wait(), timeout=0.5)
+    projection_host = _MutableTerminalFailureHost()
+    host = QQC2CHost(
+        host=projection_host,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(path),
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=advance,
+        system_notice_dispatcher=dispatcher,
+    )
+    try:
+        pending = asyncio.create_task(
+            host.inbound_text(
+                message_id="message:old-terminal-lock-race",
+                recipient_id="10001",
+                text="旧的一轮。",
+                observed_at=NOW,
+            )
+        )
+        await asyncio.wait_for(projection_host.post_inbound_read.wait(), timeout=0.5)
+        hold_newer_ingress["value"] = True
+        newer = asyncio.create_task(
+            host.inbound_text(
+                message_id="message:newer-pending-lock-race",
+                recipient_id="10001",
+                text="新的一轮已经到达。",
+                observed_at=NOW + timedelta(seconds=1),
+            )
+        )
+        for _ in range(50):
+            submitted = host._ingress_store.submission(  # noqa: SLF001
+                "message:newer-pending-lock-race"
+            )
+            if submitted is not None:
+                break
+            await asyncio.sleep(0)
+        assert submitted is not None and submitted.state == "pending"
+        delivery.release.set()
+        result = await pending
+        await blocker
+        hold_newer_ingress["value"] = False
+        release_newer_ingress.set()
+        newer_result = await newer
+    finally:
+        await host.aclose()
+
+    assert result.status == "failed_safe"
+    assert newer_result.status == "observed_only"
     assert delivery.sent == [("10001", SYSTEM_NOTICE_TEXT)]
+
+
+@pytest.mark.asyncio
+async def test_terminal_notice_rechecks_pending_ingress_after_authority_read(
+    tmp_path: Path,
+) -> None:
+    class _AuthorityReadRaceHost:
+        def __init__(self) -> None:
+            self.projection_reads = 0
+            self.inbound_calls = 0
+            self.final_read_started = asyncio.Event()
+            self.release_final_read = asyncio.Event()
+
+        async def inbound(self, _inbound):  # type: ignore[no-untyped-def]
+            self.inbound_calls += 1
+            if self.inbound_calls > 1:
+                return SimpleNamespace(
+                    status="observed_only",
+                    observation_ref="observation:new",
+                    authorized_action_ids=(),
+                    scheduled_action_ids=(),
+                    deferred_refs=(),
+                    terminal_errors=(),
+                )
+            return SimpleNamespace(
+                status="failed_safe",
+                observation_ref="observation:old",
+                authorized_action_ids=(),
+                scheduled_action_ids=(),
+                deferred_refs=(),
+                terminal_errors=("character_interior.invalid_role_result",),
+            )
+
+        async def action_due_projection(self):  # type: ignore[no-untyped-def]
+            self.projection_reads += 1
+            if self.projection_reads >= 2:
+                self.final_read_started.set()
+                await self.release_final_read.wait()
+            return SimpleNamespace(
+                message_observations=(
+                    SimpleNamespace(
+                        observation_id="observation:old",
+                        world_revision=1,
+                    ),
+                ),
+                actions=(),
+            )
+
+        def close(self) -> None:
+            return None
+
+    path = tmp_path / "terminal-notice-authority-read-race.sqlite"
+    clock = {"now": NOW}
+    hold_newer_ingress = {"value": False}
+    release_newer_ingress = asyncio.Event()
+
+    async def advance(seconds: float) -> None:
+        if hold_newer_ingress["value"]:
+            await release_newer_ingress.wait()
+        clock["now"] += timedelta(seconds=seconds)
+
+    delivery = _Delivery()
+    dispatcher = SQLiteSystemNoticeDispatcher(
+        path=str(path),
+        world_id="world:test",
+        delivery=delivery,
+        now=lambda: clock["now"],
+        cooldown_seconds=0,
+    )
+    projection_host = _AuthorityReadRaceHost()
+    host = QQC2CHost(
+        host=projection_host,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(path),
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=advance,
+        system_notice_dispatcher=dispatcher,
+    )
+    try:
+        pending = asyncio.create_task(
+            host.inbound_text(
+                message_id="message:old-terminal-authority-read-race",
+                recipient_id="10001",
+                text="旧的一轮。",
+                observed_at=NOW,
+            )
+        )
+        await asyncio.wait_for(projection_host.final_read_started.wait(), timeout=0.5)
+        hold_newer_ingress["value"] = True
+        newer = asyncio.create_task(
+            host.inbound_text(
+                message_id="message:newer-authority-read-race",
+                recipient_id="10001",
+                text="新的一轮已经持久提交。",
+                observed_at=NOW + timedelta(seconds=1),
+            )
+        )
+        for _ in range(50):
+            submitted = host._ingress_store.submission(  # noqa: SLF001
+                "message:newer-authority-read-race"
+            )
+            if submitted is not None:
+                break
+            await asyncio.sleep(0)
+        assert submitted is not None and submitted.state == "pending"
+        projection_host.release_final_read.set()
+        result = await pending
+        hold_newer_ingress["value"] = False
+        release_newer_ingress.set()
+        newer_result = await newer
+    finally:
+        await host.aclose()
+
+    assert result.status == "failed_safe"
+    assert newer_result.status == "observed_only"
+    assert delivery.sent == []
+
+
+@pytest.mark.asyncio
+async def test_delayed_notice_rechecks_terminal_episode_after_dispatch_lock_wait(
+    tmp_path: Path,
+) -> None:
+    class _BlockedNoticeDelivery(_Delivery):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def send_text(self, recipient_id: str, text: str) -> dict[str, object]:
+            self.sent.append((recipient_id, text))
+            self.started.set()
+            await self.release.wait()
+            return {"status": "ok", "data": {"message_id": f"qq-{len(self.sent)}"}}
+
+    path = tmp_path / "delayed-notice-lock-race.sqlite"
+    delivery = _BlockedNoticeDelivery()
+    dispatcher = SQLiteSystemNoticeDispatcher(
+        path=str(path),
+        world_id="world:test",
+        delivery=delivery,
+        now=lambda: NOW + timedelta(minutes=2),
+        cooldown_seconds=0,
+    )
+    blocker = asyncio.create_task(
+        dispatcher.notify(
+            notice_key="notice:blocker",
+            recipient_id="10001",
+            failure_code="fixture_blocker",
+        )
+    )
+    await asyncio.wait_for(delivery.started.wait(), timeout=0.5)
+    lifecycle = _RetryPendingLifecycleHost()
+    lifecycle.active = True
+    host = QQC2CHost(
+        host=lifecycle,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(path),
+        ingress_now=lambda: NOW,
+        action_due_now=lambda: NOW,
+        system_notice_dispatcher=dispatcher,
+    )
+    projection = await lifecycle.action_due_projection()
+    try:
+        pending = asyncio.create_task(
+            host._notify_due_expression_technical_failures(  # noqa: SLF001
+                through=NOW + timedelta(minutes=2),
+                projection=projection,
+            )
+        )
+        await asyncio.sleep(0)
+        lifecycle.process = lifecycle.process.model_copy(
+            update={
+                "state": "terminal",
+                "runtime_outcome_ref": "expression-episode:authorized",
+            }
+        )
+        delivery.release.set()
+        await pending
+        await blocker
+    finally:
+        await host.aclose()
+
+    assert delivery.sent == [("10001", SYSTEM_NOTICE_TEXT)]
+
+
+@pytest.mark.asyncio
+async def test_delayed_notice_retries_after_transient_final_authority_read(
+    tmp_path: Path,
+) -> None:
+    class _TransientAuthorityReadHost(_RetryPendingLifecycleHost):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_next_projection = False
+            self.projection_calls = 0
+
+        async def action_due_projection(self):  # type: ignore[no-untyped-def]
+            self.projection_calls += 1
+            if self.fail_next_projection:
+                self.fail_next_projection = False
+                raise RuntimeError("transient authority read")
+            return await super().action_due_projection()
+
+    path = tmp_path / "delayed-notice-transient-authority-read.sqlite"
+    delivery = _Delivery()
+    lifecycle = _TransientAuthorityReadHost()
+    lifecycle.active = True
+    host = QQC2CHost(
+        host=lifecycle,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(path),
+        ingress_now=lambda: NOW,
+        action_due_now=lambda: NOW,
+        system_notice_dispatcher=SQLiteSystemNoticeDispatcher(
+            path=str(path),
+            world_id="world:test",
+            delivery=delivery,
+            now=lambda: NOW + timedelta(minutes=2),
+            cooldown_seconds=0,
+        ),
+    )
+    projection = await lifecycle.action_due_projection()
+    through = NOW + timedelta(minutes=2)
+    lifecycle.fail_next_projection = True
+    try:
+        await host._notify_due_expression_technical_failures(  # noqa: SLF001
+            through=through,
+            projection=projection,
+        )
+        assert delivery.sent == []
+        assert host._technical_notice_attempted_keys == set()  # noqa: SLF001
+
+        await host._notify_due_expression_technical_failures(  # noqa: SLF001
+            through=through,
+            projection=projection,
+        )
+    finally:
+        await host.aclose()
+
+    assert delivery.sent == [("10001", SYSTEM_NOTICE_TEXT)]
+    # Host construction may perform an independent ActionDueWake refresh; the
+    # authority read itself must nevertheless be retried after the transient.
+    assert lifecycle.projection_calls >= 3
+
+
+@pytest.mark.asyncio
+async def test_delayed_notice_waits_for_inflight_expression_retry(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "delayed-notice-inflight-retry.sqlite"
+    clock = {"now": NOW}
+    delivery = _Delivery()
+    lifecycle = _RetryPendingLifecycleHost()
+    lifecycle.active = True
+    host = QQC2CHost(
+        host=lifecycle,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(path),
+        ingress_now=lambda: clock["now"],
+        action_due_now=lambda: clock["now"],
+        system_notice_dispatcher=SQLiteSystemNoticeDispatcher(
+            path=str(path),
+            world_id="world:test",
+            delivery=delivery,
+            now=lambda: clock["now"],
+        ),
+    )
+    recovery_started = asyncio.Event()
+    release_recovery = asyncio.Event()
+
+    async def finish_retry() -> None:
+        async with host._scheduled_work_lock:  # noqa: SLF001
+            recovery_started.set()
+            await release_recovery.wait()
+            lifecycle.process = lifecycle.process.model_copy(
+                update={
+                    "state": "terminal",
+                    "runtime_outcome_ref": "expression-episode:authorized",
+                }
+            )
+
+    recovery = asyncio.create_task(finish_retry())
+    await asyncio.wait_for(recovery_started.wait(), timeout=0.5)
+    clock["now"] = NOW + timedelta(minutes=2)
+    wake = asyncio.create_task(host._wake_due_actions())  # noqa: SLF001
+    await asyncio.sleep(0)
+    assert not wake.done()
+    release_recovery.set()
+    try:
+        await recovery
+        await wake
+    finally:
+        await host.aclose()
+
+    assert delivery.sent == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_notice_latest_inbound_check_retries_one_transient_read(
+    tmp_path: Path,
+) -> None:
+    class _TransientProjectionHost:
+        def __init__(self) -> None:
+            self.armed = False
+            self.armed_calls = 0
+
+        async def action_due_projection(self):  # type: ignore[no-untyped-def]
+            if self.armed:
+                self.armed_calls += 1
+                if self.armed_calls == 1:
+                    raise RuntimeError("transient projection failure")
+            return SimpleNamespace(
+                message_observations=(
+                    SimpleNamespace(
+                        observation_id="observation:current",
+                        world_revision=1,
+                    ),
+                ),
+                actions=(),
+            )
+
+        def close(self) -> None:
+            return None
+
+    projection_host = _TransientProjectionHost()
+    host = QQC2CHost(
+        host=projection_host,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(tmp_path / "transient-latest-read.sqlite"),
+    )
+    try:
+        # Let the restart timer perform its unrelated initial projection read,
+        # then inject the failure only into the terminal Notice authority check.
+        await asyncio.sleep(0)
+        projection_host.armed = True
+        assert await host._outcome_owns_latest_inbound(  # noqa: SLF001
+            SimpleNamespace(observation_ref="observation:current")
+        )
+        assert projection_host.armed_calls == 2
+    finally:
+        await host.aclose()
 
 
 class _CanonicalStreamingFixture:
@@ -2282,7 +3202,9 @@ async def test_qq_production_composition_ticks_life_from_plan_through_experience
 ) -> None:
     """The actual QQ host installs and advances the complete life vertical."""
 
-    conversation_reviewer = _SupportingLifeSourceReviewer()
+    conversation_reviewer = _NamedCompactReviewNoCallModel(
+        "qq-life-vertical-compact-reviewer"
+    )
     life_reviewer = _SupportingLifeSourceReviewer()
     host = build_qq_c2c_host(
         settings=Settings(database_path=tmp_path / "qq-life-vertical.sqlite"),
@@ -2698,6 +3620,10 @@ async def test_qq_restart_scheduler_retries_a_deferred_expression_failure_once(
         model=primary,
         world_support_model=FakeCompanionModel(),
         delivery=first_delivery,
+        # Keep the timer authority in the same deterministic epoch as the
+        # replayed Observation; otherwise real wall time makes a 30-second
+        # projection deadline appear months overdue inside this fixture.
+        action_due_now=lambda: NOW,
         interactive_turn_budget_policy=budget,
         use_configured_recall_embedding=False,
     )
@@ -2713,7 +3639,7 @@ async def test_qq_restart_scheduler_retries_a_deferred_expression_failure_once(
         await first.aclose()
 
     assert failed.status == "deferred"
-    assert _visible(first_delivery) == [("10001", SYSTEM_NOTICE_TEXT)]
+    assert _visible(first_delivery) == []
     assert any(
         "failed the private-turn-state causal contract" in prompt for prompt in primary.prompts
     )
@@ -2727,7 +3653,7 @@ async def test_qq_restart_scheduler_retries_a_deferred_expression_failure_once(
         "waiting_count": 1,
         "due_count": 0,
         "overdue_count": 0,
-        "earliest_due_at": (NOW + timedelta(minutes=10)).isoformat(),
+        "earliest_due_at": (NOW + timedelta(seconds=30)).isoformat(),
         "max_attempt_ordinal": 1,
         "consecutive_technical_failures": 1,
         "pending_source_observation_refs": waiting_retry["pending_source_observation_refs"],
@@ -2748,10 +3674,11 @@ async def test_qq_restart_scheduler_retries_a_deferred_expression_failure_once(
             WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
         ),
         recipient_id="10001",
-        bootstrap_at=NOW + timedelta(minutes=10, seconds=1),
+        bootstrap_at=NOW + timedelta(seconds=31),
         model=primary,
         world_support_model=FakeCompanionModel(),
         delivery=retry_delivery,
+        action_due_now=lambda: NOW,
         interactive_turn_budget_policy=budget,
         use_configured_recall_embedding=False,
     )
@@ -2761,7 +3688,10 @@ async def test_qq_restart_scheduler_retries_a_deferred_expression_failure_once(
             waiting_after_restart["mechanisms"]["expression_retry"]
             == waiting_before_restart["mechanisms"]["expression_retry"]
         )
-        overdue_at = NOW + timedelta(minutes=12, seconds=1)
+        # The first same-model retry is due before the two-minute Notice
+        # boundary.  Recover at that first due boundary, before any platform
+        # prompt can become eligible.
+        overdue_at = NOW + timedelta(seconds=31)
         await restarted.tick(
             tick_id="tick:expression-technical-retry-overdue",
             logical_time_from=NOW,
@@ -2776,9 +3706,9 @@ async def test_qq_restart_scheduler_retries_a_deferred_expression_failure_once(
             "state": "due",
             "waiting_count": 0,
             "due_count": 1,
-            "overdue_count": 1,
-            "warning": True,
-            "warning_reasons": ["expression_retry_overdue"],
+            "overdue_count": 0,
+            "warning": False,
+            "warning_reasons": [],
         }
         await restarted.scheduler_once(
             observed_at=overdue_at,
@@ -2841,6 +3771,7 @@ async def test_restart_waits_for_foreign_reclaimed_attempt_that_crashed_before_m
         model=primary,
         world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
+        action_due_now=lambda: NOW + timedelta(seconds=31),
         use_configured_recall_embedding=False,
     )
     try:
@@ -2858,10 +3789,11 @@ async def test_restart_waits_for_foreign_reclaimed_attempt_that_crashed_before_m
     crashed = build_qq_c2c_host(
         settings=settings,
         recipient_id="10001",
-        bootstrap_at=NOW + timedelta(minutes=10, seconds=1),
+        bootstrap_at=NOW + timedelta(seconds=31),
         model=primary,
         world_support_model=FakeCompanionModel(),
         delivery=_Delivery(),
+        action_due_now=lambda: NOW + timedelta(seconds=31),
         use_configured_recall_embedding=False,
     )
     runtime = crashed._host._application._turns._runtime  # noqa: SLF001
@@ -2876,7 +3808,7 @@ async def test_restart_waits_for_foreign_reclaimed_attempt_that_crashed_before_m
     )
     try:
         crashed_result = await crashed.scheduler_once(
-            observed_at=NOW + timedelta(minutes=10, seconds=1),
+            observed_at=NOW + timedelta(seconds=31),
             max_action_units=8,
             max_background_units=1,
         )
@@ -2888,15 +3820,16 @@ async def test_restart_waits_for_foreign_reclaimed_attempt_that_crashed_before_m
     resumed = build_qq_c2c_host(
         settings=settings,
         recipient_id="10001",
-        bootstrap_at=NOW + timedelta(minutes=10, seconds=2),
+        bootstrap_at=NOW + timedelta(seconds=32),
         model=primary,
         world_support_model=FakeCompanionModel(),
         delivery=delivered,
+        action_due_now=lambda: NOW + timedelta(seconds=32),
         use_configured_recall_embedding=False,
     )
     try:
         await resumed.scheduler_once(
-            observed_at=NOW + timedelta(minutes=10, seconds=2),
+            observed_at=NOW + timedelta(seconds=32),
             max_action_units=8,
             max_background_units=1,
         )
@@ -2959,6 +3892,7 @@ async def test_newer_qq_inbound_supersedes_older_technical_expression_retry_afte
         model=primary,
         world_support_model=FakeCompanionModel(),
         delivery=first_delivery,
+        action_due_now=lambda: NOW,
         interactive_turn_budget_policy=budget,
         use_configured_recall_embedding=False,
     )
@@ -2970,7 +3904,7 @@ async def test_newer_qq_inbound_supersedes_older_technical_expression_retry_afte
             observed_at=NOW,
         )
         assert failed.status == "deferred"
-        assert _visible(first_delivery) == [("10001", SYSTEM_NOTICE_TEXT)]
+        assert _visible(first_delivery) == []
 
         retry_state["ready"] = True
         newer = await first.inbound_text(
@@ -2983,10 +3917,7 @@ async def test_newer_qq_inbound_supersedes_older_technical_expression_retry_afte
         await first.aclose()
 
     assert newer.status == "action_authorized"
-    assert _visible(first_delivery) == [
-        ("10001", SYSTEM_NOTICE_TEXT),
-        ("10001", "这次接住了。"),
-    ]
+    assert _visible(first_delivery) == [("10001", "这次接住了。")]
 
     def expression_prompt_count() -> int:
         return sum(
@@ -3012,6 +3943,7 @@ async def test_newer_qq_inbound_supersedes_older_technical_expression_retry_afte
         model=primary,
         world_support_model=FakeCompanionModel(),
         delivery=restarted_delivery,
+        action_due_now=lambda: NOW + timedelta(minutes=10, seconds=1),
         interactive_turn_budget_policy=budget,
         use_configured_recall_embedding=False,
     )
@@ -3442,7 +4374,7 @@ async def test_napcat_typing_only_choice_cannot_become_a_silent_expression_plan(
     assert result.status == "deferred"
     assert projection.actions == ()
     assert projection.expression_plans == ()
-    assert delivery.sent == [("10001", SYSTEM_NOTICE_TEXT)]
+    assert delivery.sent == []
 
 
 @pytest.mark.asyncio
@@ -3607,7 +4539,7 @@ def test_onebot_entry_accepts_explicit_distinct_test_authorities_without_provide
     tmp_path: Path,
 ) -> None:
     author = _NamedNoCallModel("isolated-explicit-author")
-    reviewer = _NamedStrictFullReviewNoCallModel("isolated-explicit-reviewer")
+    reviewer = _NamedCompactReviewNoCallModel("isolated-explicit-reviewer")
     life_reviewer = _NamedNoCallModel("isolated-explicit-life-reviewer")
 
     app = create_qq_c2c_onebot_app(
@@ -3638,10 +4570,10 @@ def test_onebot_entry_accepts_explicit_distinct_test_authorities_without_provide
         asyncio.run(app.state.qq_c2c_host.aclose())
 
 
-def test_onebot_test_authority_injection_rejects_non_rr3_v7_reviewer(
+def test_onebot_test_authority_injection_rejects_legacy_full_reviewer(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(ValueError, match="exact RR.3/V7 qualification"):
+    with pytest.raises(ValueError, match="compact visible-Beat contract"):
         create_qq_c2c_onebot_app(
             adapter="napcat",
             settings=Settings(
@@ -3653,7 +4585,9 @@ def test_onebot_test_authority_injection_rejects_non_rr3_v7_reviewer(
                 NAPCAT_ALLOWED_PRIVATE_USER_IDS="10001",
             ),
             _test_only_model=_NamedNoCallModel("isolated-explicit-author"),
-            _test_only_source_closure_model=_NamedStrictCoverageNoCallModel("unqualified-reviewer"),
+            _test_only_source_closure_model=_NamedStrictFullReviewNoCallModel(
+                "legacy-full-reviewer"
+            ),
         )
 
 
@@ -3769,10 +4703,10 @@ def test_qq_health_reports_a_running_scheduler_even_when_the_world_is_starved(
             "last_failure_code": None,
         },
         "inventory_call_timeout_seconds": None,
-        "visible_review_strategy": "full_source_review",
+        "visible_review_strategy": "unavailable",
         "inventory_qualification_state": "unavailable",
-        "active_source_review_protocol": "full_source_review.7",
-        "source_review_qualification_transition": ("unavailable -> full_source_review.7"),
+        "active_source_review_protocol": "unavailable",
+        "source_review_qualification_transition": ("unavailable -> unavailable"),
         "candidate_review_capabilities": {
             "ordinary": {
                 "inventory_v5": False,

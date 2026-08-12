@@ -12,6 +12,11 @@ from companion_daemon.llm import (
     OpenAICompatibleChatModel,
     ProviderCapacityGate,
 )
+from companion_daemon.world_v2.character_interior import CharacterInterior
+from companion_daemon.world_v2.character_interior.inbound_turn import (
+    CharacterInteriorInboundDeliberationAdapter,
+    InboundTurnFaculty,
+)
 from companion_daemon.world_v2.character_interior.inbound_wire import (
     _ExpressionDraftWire,
 )
@@ -27,15 +32,18 @@ from companion_daemon.world_v2.context_resolver import (
     context_query_hash,
 )
 from companion_daemon.world_v2.deliberation import (
+    AuthoredCandidateInvocationAudit,
     Deliberation,
     ModelInput,
     ModelOutput,
     ModelRoute,
     ModelUsageProvenance,
     PhysicalProviderInvocationAudit,
+    ProviderSubcallAudit,
     RouteRequest,
     TriggerMessage,
     ValidationTechnicalFailure,
+    ValidationTechnicalFailureCode,
     begin_validation_reselection_recovery,
     claim_secondary_provider_slot,
     claim_validation_corrective_provider_slot,
@@ -51,6 +59,7 @@ from companion_daemon.world_v2.interactive_turn_budget import (
     InteractiveTurnBudgetPolicy,
 )
 from companion_daemon.world_v2.proposal_envelope import MinimalProposal, ProposalEvidenceRef
+from companion_daemon.world_v2.proposal_audit import ProposalAuditRecorder
 from companion_daemon.world_v2.proposal_audit_schemas import RecordedModelResultAudit
 from companion_daemon.world_v2.recall_index import (
     FeatureHashRecallEmbedding,
@@ -64,7 +73,13 @@ from companion_daemon.world_v2.recall_runtime import (
     PresentedPrefetchTrace,
     RecallCoordinator,
 )
+from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from test_context_capsule import HASH_B, NOW, _bound, _request
+from test_proposal_audit import (
+    WORLD as AUDIT_WORLD,
+    _context as _proposal_audit_context,
+    _started as _start_audit_world,
+)
 from test_proposal_envelope import (
     _decision,
     _evidence,
@@ -112,6 +127,105 @@ def _capsule():
         logical_time=request.logical_time,
     )
     return ContextCapsuleCompiler(resolver=_Resolver(request)).compile_for_deliberation(query)
+
+
+_INBOUND_FAILURE_FACETS = (
+    "private_self",
+    "selective_memory",
+    "appraisal_affect",
+    "emotional_continuity",
+    "subjective_relationship",
+    "aspirations_conflicts",
+    "autonomous_impulses",
+    "expression_stance",
+)
+
+
+class _InboundFailureProjection:
+    async def project(self, *, subject):  # type: ignore[no-untyped-def]
+        return {
+            "world_id": subject.world_id,
+            "actor_ref": subject.actor_ref,
+            "cursor": subject.cursor,
+            "logical_time": subject.logical_time,
+            "situation": {
+                "availability": "available",
+                "content": {"activity": "reading the current message"},
+                "source_refs": (subject.trigger_ref,),
+            },
+            "continuity": {
+                "availability": "available",
+                "content": {"open_thread": "the current conversation"},
+                "source_refs": (subject.trigger_ref,),
+            },
+            "facets": {
+                name: {
+                    "availability": "available",
+                    "content": {"summary": name},
+                    "source_refs": (subject.trigger_ref,),
+                }
+                for name in _INBOUND_FAILURE_FACETS
+            },
+        }
+
+
+class _SourceReviewFailingInboundAuthor:
+    _recall = None
+
+    def __init__(self, failure_code: ValidationTechnicalFailureCode) -> None:
+        self.failure_code = failure_code
+
+    async def propose(self, _request: ModelInput) -> ModelOutput:
+        raise ValidationTechnicalFailure(self.failure_code)
+
+    def source_closure_review_enabled(self) -> bool:
+        return True
+
+
+class _ReselectionFailingInboundAuthor:
+    _recall = None
+
+    async def propose(self, request: ModelInput) -> ModelOutput:
+        return ModelOutput(
+            model_id="inbound-role",
+            model_version="inbound-role.1",
+            raw_proposal=MinimalProposal.model_validate(
+                _minimal_raw(trigger_ref=request.trigger_ref)
+            ).model_dump(mode="json"),
+            winning_model_call_id="model-call:missing-private-state",
+            winning_request_hash="a" * 64,
+        )
+
+    async def correct_role_result(
+        self,
+        _request: ModelInput,
+        failure_code: str,
+    ) -> ModelOutput:
+        assert failure_code == "private_turn_state_missing"
+        raise ValidationTechnicalFailure("authored_expression_reselection_invalid")
+
+    def source_closure_review_enabled(self) -> bool:
+        return True
+
+
+class _UnavailableInboundAuthor:
+    _recall = None
+
+    async def propose(self, _request: ModelInput) -> ModelOutput:
+        raise RuntimeError("provider response body must not enter the durable audit")
+
+
+def _inbound_failure_adapter(author: object) -> CharacterInteriorInboundDeliberationAdapter:
+    faculty = InboundTurnFaculty(author=author)
+    interior = CharacterInterior(
+        projection=_InboundFailureProjection(),
+        role=faculty,
+    )
+    return CharacterInteriorInboundDeliberationAdapter(
+        interior=interior,
+        world_id="world:capsule",
+        actor_ref="actor:companion",
+    )
 
 
 def _authority_evidence(ref: str = "event:source:1"):
@@ -909,6 +1023,388 @@ async def test_terminal_review_retry_preserves_the_last_reviewer_invocation_audi
     assert caught.value.attempted_model_id == "independent-source-reviewer"
     assert caught.value.attempted_model_version == "review-wire.5"
     assert caught.value.usage == usage
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_code", "expected_status"),
+    (
+        ("source_review_exception", "main_exception"),
+        ("source_review_timeout", "main_timeout"),
+    ),
+)
+async def test_inbound_character_interior_preserves_source_review_failure_in_audit(
+    failure_code: ValidationTechnicalFailureCode,
+    expected_status: str,
+) -> None:
+    deliberation = Deliberation(
+        router=_Router(),
+        main_model=_inbound_failure_adapter(_SourceReviewFailingInboundAuthor(failure_code)),
+        technical_recovery_enabled=False,
+    )
+    try:
+        result = await deliberation.deliberate(
+            _capsule(),
+            attempt_id=f"attempt:inbound-{failure_code}",
+            budget=InteractiveTurnBudgetPolicy().start(),
+        )
+    finally:
+        await deliberation.aclose()
+
+    assert result.proposal is None
+    assert result.audit.status == expected_status
+    assert result.audit.failure_code == failure_code
+
+
+@pytest.mark.asyncio
+async def test_inbound_character_interior_preserves_sanitized_technical_audit_evidence() -> None:
+    usage_material = {
+        "usage_contract": "model-usage.1",
+        "route_class": "expressive",
+        "input_tokens": 13,
+        "output_tokens": 3,
+        "thinking_tokens": 1,
+        "token_provenance": "provider_reported",
+        "transport": "provider_api",
+        "provider": "independent-source-reviewer",
+        "provider_usage_ref": "usage:inbound-review:terminal",
+    }
+    usage = ModelUsageProvenance(
+        **usage_material,
+        provider_usage_hash=sha256(
+            json.dumps(
+                usage_material,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
+    )
+    authored_candidate = AuthoredCandidateInvocationAudit(
+        purpose="primary_initial",
+        model_call_id="model-call:inbound-author-candidate",
+        request_hash="b" * 64,
+        response_hash="c" * 64,
+        model_id="inbound-role",
+        model_version="inbound-role.5",
+        outcome="validation_unresolved",
+        usage=usage,
+    )
+    reviewer = ProviderSubcallAudit(
+        purpose="source_closure_review",
+        parent_model_call_id=authored_candidate.model_call_id,
+        model_call_id="model-call:inbound-reviewer",
+        request_hash="d" * 64,
+        model_id="independent-source-reviewer",
+        model_version="source-review.5",
+        lane="direct",
+        outcome="exception",
+        failure_code="source_review_exception",
+    )
+    physical = PhysicalProviderInvocationAudit(
+        model_call_id="model-call:inbound-physical-stream",
+        request_hash="e" * 64,
+        model_id="inbound-role",
+        model_version="inbound-role.5",
+        outcome="unresolved",
+        failure_code="stream_tail_unresolved",
+        usage_status="unresolved",
+        semantic_model_call_ids=(
+            "model-call:inbound-stream-head",
+            "model-call:inbound-stream-tail",
+        ),
+    )
+    technical = ValidationTechnicalFailure(
+        "source_review_exception",
+        model_call_id="model-call:inbound-terminal-review",
+        request_hash="f" * 64,
+        attempted_model_id="independent-source-reviewer",
+        attempted_model_version="source-review.5",
+        usage=usage,
+        provider_subcall_audits=(reviewer,),
+        authored_candidate_audits=(authored_candidate,),
+        physical_provider_audits=(physical,),
+    )
+
+    class AuditedFailureAuthor:
+        _recall = None
+
+        async def propose(self, _request: ModelInput) -> ModelOutput:
+            raise technical from RuntimeError(
+                "SECRET provider response body and exception detail"
+            )
+
+        def source_closure_review_enabled(self) -> bool:
+            return True
+
+    deliberation = Deliberation(
+        router=_Router(),
+        main_model=_inbound_failure_adapter(AuditedFailureAuthor()),
+        technical_recovery_enabled=False,
+    )
+    try:
+        result = await deliberation.deliberate(
+            _capsule(),
+            attempt_id="attempt:inbound-audited-technical-failure",
+            budget=InteractiveTurnBudgetPolicy().start(),
+        )
+        replayed = await deliberation.deliberate(
+            _capsule(),
+            attempt_id="attempt:inbound-audited-technical-failure",
+            budget=InteractiveTurnBudgetPolicy().start(),
+        )
+    finally:
+        await deliberation.aclose()
+
+    assert result.proposal is None
+    assert result.audit.status == "main_exception"
+    assert result.audit.failure_code == "source_review_exception"
+    assert result.audit.model_call_id == "model-call:inbound-terminal-review"
+    assert result.audit.request_hash == "f" * 64
+    assert result.audit.attempted_model_id == "independent-source-reviewer"
+    assert result.audit.attempted_model_version == "source-review.5"
+    assert result.audit.usage == usage
+    assert result.audit.provider_subcall_audits == (reviewer,)
+    assert result.audit.authored_candidate_audits == (authored_candidate,)
+    assert result.audit.physical_provider_audits == (physical,)
+    assert "SECRET provider response body" not in repr(result)
+    assert replayed == result
+
+
+@pytest.mark.asyncio
+async def test_inbound_character_interior_normalizes_untrusted_nested_failure_codes() -> None:
+    reviewer = ProviderSubcallAudit(
+        purpose="source_closure_review",
+        parent_model_call_id="model-call:untrusted-nested-author",
+        model_call_id="model-call:untrusted-nested-reviewer",
+        request_hash="a" * 64,
+        model_id="independent-source-reviewer",
+        model_version="source-review.5",
+        lane="direct",
+        outcome="exception",
+        failure_code="sk_live_SECRET_reviewer_body",
+    )
+    physical = PhysicalProviderInvocationAudit(
+        model_call_id="model-call:untrusted-nested-physical",
+        request_hash="b" * 64,
+        model_id="inbound-role",
+        model_version="inbound-role.5",
+        outcome="unresolved",
+        failure_code="sk_live_SECRET_provider_body",
+        usage_status="unresolved",
+        semantic_model_call_ids=(
+            "model-call:untrusted-nested-head",
+            "model-call:untrusted-nested-tail",
+        ),
+    )
+    technical = ValidationTechnicalFailure(
+        "source_review_exception",
+        provider_subcall_audits=(reviewer,),
+        physical_provider_audits=(physical,),
+    )
+
+    class UntrustedNestedFailureAuthor:
+        _recall = None
+
+        async def propose(self, _request: ModelInput) -> ModelOutput:
+            raise technical
+
+        def source_closure_review_enabled(self) -> bool:
+            return True
+
+    deliberation = Deliberation(
+        router=_Router(),
+        main_model=_inbound_failure_adapter(UntrustedNestedFailureAuthor()),
+        technical_recovery_enabled=False,
+    )
+    try:
+        result = await deliberation.deliberate(
+            _capsule(),
+            attempt_id="attempt:untrusted-nested-technical-failure",
+            budget=InteractiveTurnBudgetPolicy().start(),
+        )
+    finally:
+        await deliberation.aclose()
+
+    assert result.proposal is None
+    assert result.audit.failure_code == "source_review_exception"
+    assert result.audit.provider_subcall_audits[0].failure_code == "provider_exception"
+    assert result.audit.physical_provider_audits[0].failure_code == (
+        "stream_provider_unresolved"
+    )
+    assert "SECRET" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_character_interior_validation_failure_with_physical_evidence_survives_sqlite(
+    tmp_path,
+) -> None:
+    """A failed validation keeps the Character-authored candidate and transport audit."""
+
+    physical = PhysicalProviderInvocationAudit(
+        model_call_id="model-call:inbound-durable-physical",
+        request_hash="1" * 64,
+        model_id="inbound-role",
+        model_version="inbound-role.8",
+        outcome="unresolved",
+        failure_code="stream_tail_unresolved",
+        usage_status="unresolved",
+        semantic_model_call_ids=(
+            "model-call:inbound-durable-head",
+            "model-call:inbound-durable-tail",
+        ),
+    )
+
+    class LineagedPhysicalAuthor:
+        _recall = None
+
+        async def propose(self, _request: ModelInput) -> ModelOutput:
+            raw = MinimalProposal.model_validate(_minimal_raw()).model_dump(mode="json")
+            raw["private_turn_state"] = {
+                "inner_state_summary": "I formed a reply, but its validation did not finish.",
+                "attended_source_refs": ["event:source:1"],
+            }
+            return ModelOutput(
+                model_id="inbound-role",
+                model_version="inbound-role.8",
+                raw_proposal=raw,
+                winning_model_call_id="model-call:inbound-durable-author",
+                winning_request_hash="2" * 64,
+                physical_provider_audits=(physical,),
+            )
+
+        def source_closure_review_enabled(self) -> bool:
+            return True
+
+    class FailingValidationGrammar:
+        def validate(self, _proposal: object) -> None:
+            raise ValidationTechnicalFailure("source_review_exception") from RuntimeError(
+                "SECRET raw reviewer body"
+            )
+
+    deliberation = Deliberation(
+        router=_Router(),
+        main_model=_inbound_failure_adapter(LineagedPhysicalAuthor()),
+        proposal_grammar=FailingValidationGrammar(),
+        technical_recovery_enabled=False,
+    )
+    try:
+        result = await deliberation.deliberate(
+            _capsule(),
+            attempt_id="attempt:inbound-durable-lineage-failure",
+            budget=InteractiveTurnBudgetPolicy().start(),
+        )
+    finally:
+        await deliberation.aclose()
+
+    assert result.proposal is None
+    assert result.audit.status == "main_exception"
+    assert result.audit.character_interior_lineage is not None
+    assert result.audit.physical_provider_audits == (physical,)
+
+    path = tmp_path / "inbound-durable-technical-audit.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=AUDIT_WORLD)
+    _start_audit_world(ledger)
+    ProposalAuditRecorder(ledger=ledger).record(result, _proposal_audit_context())
+    projection = ledger.project()
+    root = RecordedModelResultAudit.model_validate_json(
+        projection.model_result_audits[0].audit_json
+    )
+    assert projection.model_result_audits[0].audit_contract == "model-result-audit.8"
+    assert root.character_interior_lineage == result.audit.character_interior_lineage
+    assert root.physical_provider_audits[0].model_call_id == physical.model_call_id
+    assert "SECRET raw reviewer body" not in projection.model_result_audits[0].audit_json
+    ledger.close()
+
+    reopened = SQLiteWorldLedger(path=path, world_id=AUDIT_WORLD)
+    rebuilt = reopened.rebuild()
+    assert rebuilt.semantic_hash == reopened.project().semantic_hash
+    replayed = RecordedModelResultAudit.model_validate_json(
+        rebuilt.model_result_audits[0].audit_json
+    )
+    assert replayed.character_interior_lineage == result.audit.character_interior_lineage
+    assert replayed.physical_provider_audits == root.physical_provider_audits
+    reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_inbound_character_interior_preserves_reselection_failure_after_shape_repair() -> (
+    None
+):
+    deliberation = Deliberation(
+        router=_Router(),
+        main_model=_inbound_failure_adapter(_ReselectionFailingInboundAuthor()),
+        technical_recovery_enabled=False,
+    )
+    try:
+        result = await deliberation.deliberate(
+            _capsule(),
+            attempt_id="attempt:inbound-reselection-failure",
+            budget=InteractiveTurnBudgetPolicy().start(),
+        )
+    finally:
+        await deliberation.aclose()
+
+    assert result.proposal is None
+    assert result.audit.status == "main_exception"
+    assert result.audit.failure_code == "authored_expression_reselection_invalid"
+
+
+@pytest.mark.asyncio
+async def test_inbound_character_interior_keeps_true_faculty_outage_distinct(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    deliberation = Deliberation(
+        router=_Router(),
+        main_model=_inbound_failure_adapter(_UnavailableInboundAuthor()),
+        technical_recovery_enabled=False,
+    )
+    try:
+        result = await deliberation.deliberate(
+            _capsule(),
+            attempt_id="attempt:inbound-faculty-outage",
+            budget=InteractiveTurnBudgetPolicy().start(),
+        )
+    finally:
+        await deliberation.aclose()
+
+    assert result.proposal is None
+    assert result.audit.status == "main_exception"
+    assert result.audit.failure_code == "role_faculty_unavailable"
+    assert "provider response body" not in result.audit.model_dump_json()
+    assert "provider response body" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_inbound_character_interior_rejects_uninstalled_failure_detail() -> None:
+    class UninstalledFailureAuthor:
+        _recall = None
+
+        async def propose(self, _request: ModelInput) -> ModelOutput:
+            raise ValidationTechnicalFailure(  # type: ignore[arg-type]
+                "provider_http_500_SECRET_body"
+            )
+
+        def source_closure_review_enabled(self) -> bool:
+            return True
+
+    deliberation = Deliberation(
+        router=_Router(),
+        main_model=_inbound_failure_adapter(UninstalledFailureAuthor()),
+        technical_recovery_enabled=False,
+    )
+    try:
+        result = await deliberation.deliberate(
+            _capsule(),
+            attempt_id="attempt:inbound-uninstalled-technical-failure",
+            budget=InteractiveTurnBudgetPolicy().start(),
+        )
+    finally:
+        await deliberation.aclose()
+
+    assert result.proposal is None
+    assert result.audit.failure_code == "role_faculty_unavailable"
+    assert "provider_http_500_SECRET_body" not in repr(result)
 
 
 @pytest.mark.asyncio

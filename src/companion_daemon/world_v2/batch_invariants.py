@@ -23,7 +23,23 @@ from .relationship_acceptance_manifest import (
     RelationshipAcceptanceManifest,
     canonical_relationship_acceptance_value_hash,
 )
-from .relationship_events import RelationshipSignalAcceptedPayload
+from .relationship_commitment_acceptance_manifest import (
+    RELATIONSHIP_COMMITMENT_ACCEPTANCE_MANIFEST_VERSION,
+    RelationshipCommitmentAcceptanceManifest,
+    canonical_relationship_commitment_acceptance_value_hash,
+)
+from .relationship_events import (
+    RelationshipCommitmentAcceptedPayload,
+    RelationshipSignalAcceptedPayload,
+)
+from .interaction_act_acceptance_manifest import (
+    INTERACTION_ACT_ACCEPTANCE_MANIFEST_VERSION,
+    InteractionActAcceptanceManifest,
+)
+from .interaction_act_events import (
+    InteractionActAcceptedPayload,
+    canonical_interaction_act_accepted_payload_hash,
+)
 from .relationship_adjustment_acceptance_manifest import (
     RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION,
     RelationshipAdjustmentAcceptanceManifest,
@@ -96,6 +112,7 @@ from .proposal_audit_schemas import (
     ModelResultRecordedPayload,
     ProposalRecordedV2Payload,
     RecordedModelResultAudit,
+    physical_provider_terminal_matches,
 )
 from .acceptance_manifest import parse_acceptance_manifest_v2
 from .minimal_reply_events import (
@@ -262,6 +279,8 @@ def validate_commit_batch(
         reject_appraisal_acceptance_manifest_without_recorder(events)
         reject_affect_acceptance_manifest_without_recorder(events)
         reject_relationship_acceptance_manifest_without_recorder(events)
+        reject_relationship_commitment_acceptance_manifest_without_recorder(events)
+        reject_interaction_act_acceptance_manifest_without_recorder(events)
         reject_relationship_adjustment_acceptance_manifest_without_recorder(events)
         reject_activity_lifecycle_acceptance_manifest_without_recorder(events)
         reject_media_selection_acceptance_manifest_without_recorder(events)
@@ -308,6 +327,16 @@ def validate_commit_batch(
         authorized=accepted_manifest_v3_authorized,
     )
     _validate_authorized_relationship_acceptance_manifest_batch(
+        events,
+        expected_world_revision=expected_world_revision,
+        authorized=accepted_manifest_v3_authorized,
+    )
+    _validate_authorized_relationship_commitment_acceptance_manifest_batch(
+        events,
+        expected_world_revision=expected_world_revision,
+        authorized=accepted_manifest_v3_authorized,
+    )
+    _validate_authorized_interaction_act_acceptance_manifest_batch(
         events,
         expected_world_revision=expected_world_revision,
         authorized=accepted_manifest_v3_authorized,
@@ -444,6 +473,7 @@ def validate_commit_batch(
     for acceptance_index, acceptance in acceptances:
         if acceptance.get("manifest_version") in {
             MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
+            INTERACTION_ACT_ACCEPTANCE_MANIFEST_VERSION,
             ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
             *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
             MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION,
@@ -704,6 +734,17 @@ def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> No
         ModelResultRecordedPayload.model_validate_json(events[index].payload_json)
         for index in expected_model_indexes
     ]
+    recorded_attempts = tuple(
+        RecordedModelResultAudit.model_validate_json(attempt.audit_json)
+        for attempt in attempts
+    )
+    if any(
+        audit.route.router_version == "physical-provider-audit.1"
+        for audit in recorded_attempts
+    ):
+        raise ValueError(
+            "physical provider terminal must be adjacent to its owning model attempt"
+        )
     for index, attempt in enumerate(attempts):
         if (
             attempt.attempt_index != index
@@ -721,8 +762,17 @@ def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> No
         ModelResultRecordedPayload.model_validate_json(events[index].payload_json)
         for index in model_indexes[first.attempt_count :]
     ]
+    batch_model_call_ids = {
+        candidate.model_call_id for candidate in (*attempts, *nested_provider_records)
+    }
     all_call_ids = {attempt.model_call_id for attempt in attempts}
     authored_call_ids = set(all_call_ids)
+    embedded_physical = tuple(
+        (candidate, terminal)
+        for candidate in recorded_attempts
+        for terminal in candidate.physical_provider_audits
+    )
+    consumed_embedded_physical: set[int] = set()
     for nested in nested_provider_records:
         recorded = RecordedModelResultAudit.model_validate_json(nested.audit_json)
         if (
@@ -761,19 +811,48 @@ def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> No
                 for candidate in attempts
                 if candidate.parent_model_call_id == recorded.model_call_id
             )
+            bound_stream_terminal = bool(semantic_children) and all(
+                child.model_call_id in recorded.semantic_model_call_ids
+                and child.request_hash == recorded.request_hash
+                for child in semantic_children
+            )
+            matching_embedded = tuple(
+                index
+                for index, (candidate, terminal) in enumerate(embedded_physical)
+                if nested.attempt_id == candidate.attempt_id
+                and physical_provider_terminal_matches(
+                    expected=terminal,
+                    recorded=recorded,
+                    attempt_id=candidate.attempt_id,
+                )
+            )
+            independent_failed_main_terminal = (
+                not semantic_children
+                and len(matching_embedded) == 1
+                and matching_embedded[0] not in consumed_embedded_physical
+            )
+            if independent_failed_main_terminal and not set(
+                recorded.semantic_model_call_ids
+            ).isdisjoint(batch_model_call_ids):
+                raise ValueError(
+                    "independent physical provider semantic identities overlap "
+                    "another model result"
+                )
             if (
                 recorded.parent_model_call_id is not None
-                or not semantic_children
-                or any(
-                    child.model_call_id not in recorded.semantic_model_call_ids
-                    or child.request_hash != recorded.request_hash
-                    for child in semantic_children
+                or not (
+                    bound_stream_terminal or independent_failed_main_terminal
                 )
             ):
                 raise ValueError("physical provider terminal has invalid stream lineage")
+            if independent_failed_main_terminal:
+                consumed_embedded_physical.add(matching_embedded[0])
         else:
             raise ValueError("nested provider record uses an unknown audit contract")
         all_call_ids.add(nested.model_call_id)
+
+    if len(consumed_embedded_physical) != len(embedded_physical):
+        raise ValueError("embedded physical provider terminal must be adjacent")
 
     if first.proposal_hash is None:
         if len(events) != len(model_indexes) or v2_proposal_indexes:
@@ -1551,6 +1630,8 @@ def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None
             APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
             AFFECT_ACCEPTANCE_MANIFEST_VERSION,
             RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION,
+            RELATIONSHIP_COMMITMENT_ACCEPTANCE_MANIFEST_VERSION,
+            INTERACTION_ACT_ACCEPTANCE_MANIFEST_VERSION,
             RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION,
             ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
             *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
@@ -2563,6 +2644,198 @@ def reject_relationship_acceptance_manifest_without_recorder(events: Sequence[Wo
         for event in events
     ):
         raise ValueError("relationship_acceptance.recorder_capability_required")
+
+
+def _validate_authorized_relationship_commitment_acceptance_manifest_batch(
+    events: Sequence[WorldEvent], *, expected_world_revision: int, authorized: bool
+) -> None:
+    manifests = [
+        event
+        for event in events
+        if event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version")
+        == RELATIONSHIP_COMMITMENT_ACCEPTANCE_MANIFEST_VERSION
+    ]
+    if not manifests:
+        return
+    if not authorized:
+        raise ValueError(
+            "relationship_commitment_acceptance.recorder_capability_required"
+        )
+    if len(manifests) != 1 or len(events) != 2:
+        raise ValueError(
+            "relationship_commitment_acceptance.accepted_batch_must_be_exact"
+        )
+    acceptance, mutation = events
+    try:
+        manifest = RelationshipCommitmentAcceptanceManifest.model_validate_json(
+            acceptance.payload_json
+        )
+        payload = RelationshipCommitmentAcceptedPayload.model_validate_json(
+            mutation.payload_json
+        )
+    except Exception as exc:
+        raise ValueError(
+            "relationship_commitment_acceptance.accepted_batch_payload_is_invalid"
+        ) from exc
+    if (
+        manifest.evaluated_world_revision != expected_world_revision
+        or tuple(event.event_type for event in events)
+        != ("AcceptanceRecorded", "RelationshipCommitmentAccepted")
+        or acceptance.causation_id != manifest.proposal_event_ref
+        or mutation.causation_id != acceptance.event_id
+        or mutation.event_id != manifest.mutation_event_id
+        or mutation.payload_hash != manifest.mutation_payload_hash
+    ):
+        raise ValueError(
+            "relationship_commitment_acceptance.batch_does_not_match_manifest"
+        )
+    if any(
+        (
+            mutation.world_id != acceptance.world_id,
+            mutation.logical_time != acceptance.logical_time,
+            mutation.created_at != acceptance.created_at,
+            mutation.actor != acceptance.actor,
+            mutation.source != acceptance.source,
+            mutation.trace_id != acceptance.trace_id,
+            mutation.correlation_id != acceptance.correlation_id,
+        )
+    ):
+        raise ValueError(
+            "relationship_commitment_acceptance.envelope_metadata_mismatch"
+        )
+    if (
+        payload.acceptance_id != manifest.acceptance_id
+        or payload.proposal_id != manifest.proposal_id
+        or payload.change_id != manifest.accepted_change_id
+        or payload.accepted_change_hash != manifest.accepted_change_hash
+        or payload.evaluated_world_revision != manifest.evaluated_world_revision
+        or payload.commitment.origin.accepted_event_ref != mutation.event_id
+        or canonical_relationship_commitment_acceptance_value_hash(
+            payload.model_dump(mode="json")
+        )
+        != manifest.mutation_payload_hash
+    ):
+        raise ValueError(
+            "relationship_commitment_acceptance.mutation_does_not_match_manifest"
+        )
+    for item in (acceptance, mutation):
+        expected = domain_idempotency_key(
+            event_type=item.event_type,
+            world_id=item.world_id,
+            payload=item.payload(),
+        )
+        if expected is None or item.idempotency_key != expected:
+            raise ValueError(
+                "relationship_commitment_acceptance.event_identity_is_not_deterministic"
+            )
+
+
+def reject_relationship_commitment_acceptance_manifest_without_recorder(
+    events: Sequence[WorldEvent],
+) -> None:
+    if any(
+        event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version")
+        == RELATIONSHIP_COMMITMENT_ACCEPTANCE_MANIFEST_VERSION
+        for event in events
+    ):
+        raise ValueError(
+            "relationship_commitment_acceptance.recorder_capability_required"
+        )
+
+
+def _validate_authorized_interaction_act_acceptance_manifest_batch(
+    events: Sequence[WorldEvent], *, expected_world_revision: int, authorized: bool
+) -> None:
+    manifests = [
+        event
+        for event in events
+        if event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version")
+        == INTERACTION_ACT_ACCEPTANCE_MANIFEST_VERSION
+    ]
+    if not manifests:
+        return
+    if not authorized:
+        raise ValueError("interaction_act_acceptance.recorder_capability_required")
+    if len(manifests) != 1 or len(events) != 2:
+        raise ValueError("interaction_act_acceptance.accepted_batch_must_be_exact")
+    acceptance, effect = events
+    try:
+        manifest = InteractionActAcceptanceManifest.model_validate_json(
+            acceptance.payload_json,
+            strict=True,
+        )
+        payload = InteractionActAcceptedPayload.model_validate_json(
+            effect.payload_json,
+            strict=True,
+        )
+    except Exception as exc:
+        raise ValueError(
+            "interaction_act_acceptance.accepted_batch_payload_is_invalid"
+        ) from exc
+    if (
+        manifest.evaluated_world_revision != expected_world_revision
+        or tuple(event.event_type for event in events)
+        != ("AcceptanceRecorded", "InteractionActTransitionAccepted")
+        or acceptance.causation_id != manifest.source_proposal_event_ref
+        or effect.causation_id != acceptance.event_id
+        or effect.event_id != manifest.effect_event_id
+        or effect.payload_hash != manifest.effect_payload_hash
+    ):
+        raise ValueError("interaction_act_acceptance.batch_does_not_match_manifest")
+    if any(
+        (
+            effect.world_id != acceptance.world_id,
+            effect.logical_time != acceptance.logical_time,
+            effect.created_at != acceptance.created_at,
+            effect.actor != acceptance.actor,
+            effect.source != acceptance.source,
+            effect.trace_id != acceptance.trace_id,
+            effect.correlation_id != acceptance.correlation_id,
+        )
+    ):
+        raise ValueError("interaction_act_acceptance.envelope_metadata_mismatch")
+    if (
+        payload.world_id != manifest.world_id
+        or payload.acceptance_id != manifest.acceptance_id
+        or payload.source_proposal_event_ref != manifest.source_proposal_event_ref
+        or payload.source_proposal_event_payload_hash
+        != manifest.source_proposal_event_payload_hash
+        or payload.proposal_id != manifest.proposal_id
+        or payload.proposal_hash != manifest.proposal_hash
+        or payload.change_id != manifest.accepted_change_id
+        or payload.accepted_change_hash != manifest.accepted_change_hash
+        or payload.evaluated_world_revision != manifest.evaluated_world_revision
+        or payload.mutation_payload_hash != manifest.mutation_payload_hash
+        or payload.accepted_event_ref != effect.event_id
+        or canonical_interaction_act_accepted_payload_hash(payload)
+        != manifest.effect_payload_hash
+    ):
+        raise ValueError("interaction_act_acceptance.effect_does_not_match_manifest")
+    for item in (acceptance, effect):
+        expected = domain_idempotency_key(
+            event_type=item.event_type,
+            world_id=item.world_id,
+            payload=item.payload(),
+        )
+        if expected is None or item.idempotency_key != expected:
+            raise ValueError(
+                "interaction_act_acceptance.event_identity_is_not_deterministic"
+            )
+
+
+def reject_interaction_act_acceptance_manifest_without_recorder(
+    events: Sequence[WorldEvent],
+) -> None:
+    if any(
+        event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version")
+        == INTERACTION_ACT_ACCEPTANCE_MANIFEST_VERSION
+        for event in events
+    ):
+        raise ValueError("interaction_act_acceptance.recorder_capability_required")
 
 
 def _validate_authorized_relationship_adjustment_acceptance_manifest_batch(

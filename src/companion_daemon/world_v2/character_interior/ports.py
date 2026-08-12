@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from typing import Any, Literal, Mapping, Protocol
 
 from pydantic import Field, field_validator, model_validator
@@ -128,6 +129,8 @@ class _InteriorRoleRequest(FrozenModel):
     capability_manifest: _InteriorCapabilityManifest | None = None
     snapshot: InnerLifeSnapshot
     recall_completed: bool = False
+    recall_parent_author_lineage: _InteriorAuthorLineage | None = None
+    recall_parent_usage_json: str | None = Field(default=None, max_length=8_192)
     # One bounded, same-author structural correction.  These fields describe
     # a rejected wire result; they never prescribe the character's semantic
     # choice and never expose a second provider route.
@@ -149,6 +152,16 @@ class _InteriorRoleRequest(FrozenModel):
             raise ValueError("role correction lineage is incomplete")
         if self.correction_ordinal == 0 and self.correction_failure_detail is not None:
             raise ValueError("role correction detail requires a correction attempt")
+        if not self.recall_completed and (
+            self.recall_parent_author_lineage is not None
+            or self.recall_parent_usage_json is not None
+        ):
+            raise ValueError("Recall parent audit requires a completed Recall")
+        if (
+            self.recall_parent_usage_json is not None
+            and self.recall_parent_author_lineage is None
+        ):
+            raise ValueError("Recall parent usage lacks its author lineage")
         return self
 
 
@@ -160,6 +173,7 @@ class _InteriorRoleResult(FrozenModel):
     recall_query: str | None = Field(default=None, min_length=1, max_length=1_024)
     proposals: tuple[dict[str, Any], ...] = Field(default=(), max_length=32)
     author_lineage: _InteriorAuthorLineage | None = None
+    author_usage_json: str | None = Field(default=None, max_length=8_192)
 
     @model_validator(mode="after")
     def decision_payload_matches_status(self) -> "_InteriorRoleResult":
@@ -173,6 +187,15 @@ class _InteriorRoleResult(FrozenModel):
             raise ValueError("only a role recall request may carry a query")
         if self.status == "recall_request" and self.proposals:
             raise ValueError("role recall request cannot submit effects before recall")
+        if self.author_usage_json is not None and self.author_lineage is None:
+            raise ValueError("role author usage lacks its invocation lineage")
+        if self.author_usage_json is not None:
+            try:
+                usage = json.loads(self.author_usage_json)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError("role author usage is not JSON") from exc
+            if not isinstance(usage, dict):
+                raise ValueError("role author usage must be one JSON object")
         if len(self.attended_source_refs) != len(set(self.attended_source_refs)):
             raise ValueError("role attention refs must be unique")
         return self

@@ -114,11 +114,16 @@ def message_payload(observation_id: str) -> dict[str, object]:
 
 def prepare_claimed_interaction(
     ledger: Ledger | None = None,
+    *,
+    reply_target: str | None = None,
 ) -> tuple[Ledger, TriggerProcess, EvidenceRef]:
     ledger = ledger or WorldLedger.in_memory(world_id=WORLD_ID)
+    observation_payload = message_payload("message:1")
+    if reply_target is not None:
+        observation_payload["reply_context"] = {"target": reply_target}
     commit(
         ledger,
-        [event("message-event:1", "ObservationRecorded", message_payload("message:1"))],
+        [event("message-event:1", "ObservationRecorded", observation_payload)],
     )
     opened = TriggerProcess(
         trigger_id=interaction_appraisal_trigger_identity(WORLD_ID, "message:1"),

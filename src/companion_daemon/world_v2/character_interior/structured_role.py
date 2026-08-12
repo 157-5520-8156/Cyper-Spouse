@@ -26,7 +26,11 @@ from pydantic import (
     model_validator,
 )
 
-from companion_daemon.llm import model_call_scope
+from companion_daemon.llm import (
+    model_call_scope,
+    model_provider_request_identity_scope,
+    provider_invocation_request_hash,
+)
 
 from ..model_completion import ChatCompletionModel
 from ..character_outcome_contract import CharacterLifeDirectionDraft
@@ -1109,12 +1113,18 @@ class StructuredCharacterRoleFaculty:
         contract = self._resolve_contract(request)
         messages = self._messages(request, contract=contract)
         tool_contract = self._tool_contract(request)
-        request_json = _canonical(
-            self._request_identity_value(messages=messages, tool_contract=tool_contract)
+        request_hash = self._provider_request_hash(
+            messages=messages,
+            tool_contract=tool_contract,
         )
-        request_hash = _hash_text(request_json)
-        with model_call_scope("world_v2_character_interior"):
-            raw = await complete_json_object(
+        identity_extras = self._provider_identity_extras(tool_contract=tool_contract)
+        with model_call_scope(
+            "world_v2_character_interior"
+        ), model_provider_request_identity_scope(
+            request_hash=request_hash,
+            identity_extras=identity_extras,
+        ):
+            provider_raw = await complete_json_object(
                 self._model,
                 messages,
                 temperature=self._temperature,
@@ -1123,11 +1133,26 @@ class StructuredCharacterRoleFaculty:
                     tool_contract.provider_tool_choice if tool_contract is not None else None
                 ),
             )
+        raw = provider_raw
+        if tool_contract is not None:
+            try:
+                raw = tool_contract.unwrap(provider_raw)
+            except ValueError as exc:
+                raise StructuredRoleResultError(
+                    "role_result_schema_invalid",
+                    detail=str(exc),
+                    response_hash=(
+                        _hash_text(provider_raw)
+                        if isinstance(provider_raw, str)
+                        else None
+                    ),
+                ) from exc
         try:
             result, response_hash = self._parse_and_validate(
                 raw,
                 request=request,
                 contract=contract,
+                response_hash_source=provider_raw,
             )
         except StructuredRoleResultError as exc:
             import logging
@@ -1156,13 +1181,9 @@ class StructuredCharacterRoleFaculty:
             initial_contract = self._resolve_contract(initial)
             initial_messages = self._messages(initial, contract=initial_contract)
             initial_tool_contract = self._tool_contract(initial)
-            initial_hash = _hash_text(
-                _canonical(
-                    self._request_identity_value(
-                        messages=initial_messages,
-                        tool_contract=initial_tool_contract,
-                    )
-                )
+            initial_hash = self._provider_request_hash(
+                messages=initial_messages,
+                tool_contract=initial_tool_contract,
             )
             parent_model_call_id = self._model_call_id(
                 request=initial,
@@ -1245,6 +1266,11 @@ class StructuredCharacterRoleFaculty:
                 return compiler.proactive_contact(
                     capability_payload=manifest.payload,
                     recall_allowed=not request.recall_completed,
+                    schema_dialect=(
+                        "deepseek-strict"
+                        if bool(getattr(self._model, "supports_strict_tool_choice", False))
+                        else "standard"
+                    ),
                 )
             if request.purpose == "world_stimulus_appraisal":
                 return compiler.world_stimulus_appraisal(
@@ -1302,19 +1328,32 @@ class StructuredCharacterRoleFaculty:
             ) from exc
 
     @staticmethod
-    def _request_identity_value(
+    def _provider_identity_extras(
+        *,
+        tool_contract: StructuredRoleToolContract | None,
+    ) -> dict[str, object] | None:
+        if tool_contract is None:
+            return None
+        return {
+            "tool_contract_identity": (tool_contract.identity.request_identity_material()),
+        }
+
+    def _provider_request_hash(
+        self,
         *,
         messages: list[dict[str, str]],
         tool_contract: StructuredRoleToolContract | None,
-    ) -> object:
-        if tool_contract is None:
-            return messages
-        return {
-            "messages": messages,
-            "tools": list(tool_contract.provider_tools),
-            "tool_choice": tool_contract.provider_tool_choice,
-            "tool_contract_identity": (tool_contract.identity.request_identity_material()),
-        }
+    ) -> str:
+        digest = provider_invocation_request_hash(
+            messages=messages,
+            temperature=self._temperature,
+            tools=(list(tool_contract.provider_tools) if tool_contract is not None else None),
+            tool_choice=(
+                tool_contract.provider_tool_choice if tool_contract is not None else None
+            ),
+            identity_extras=self._provider_identity_extras(tool_contract=tool_contract),
+        )
+        return "sha256:" + digest
 
     def _messages(
         self,
@@ -1346,7 +1385,10 @@ class StructuredCharacterRoleFaculty:
                 "result_status": "recall_request",
             },
             "capability_manifest": capability,
-            "purpose_contract": self._contract_view(contract),
+            "purpose_contract": self._contract_view(
+                contract,
+                capability_manifest=request.capability_manifest,
+            ),
             "wire_contract": {
                 "allowed_statuses": allowed_statuses,
                 "fields": [
@@ -1453,13 +1495,16 @@ class StructuredCharacterRoleFaculty:
         *,
         request: _InteriorRoleRequest,
         contract: PurposeDecisionContract,
+        response_hash_source: object | None = None,
     ) -> tuple[_WireRoleResult, str]:
         if not isinstance(raw, str):
             raise StructuredRoleResultError(
                 "role_result_not_text",
                 detail=_FAILURE_DETAILS["role_result_not_text"],
             )
-        response_hash = _hash_text(raw)
+        response_hash = _hash_text(
+            response_hash_source if isinstance(response_hash_source, str) else raw
+        )
         try:
             decoded = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -1529,14 +1574,62 @@ class StructuredCharacterRoleFaculty:
         DeepSeek's JSON mode occasionally emits a complete purpose payload in
         the generic ``decision`` slot while omitting the envelope.  This
         adapter only moves an object when its own explicit source binding is
-        already present; it must never promote attention refs or invent
-        summary, refs, timing, silence, or any semantic field.  Proposal contracts have the inverse legacy
+        already present; it must never promote attention refs into decision
+        evidence or invent summary, refs, timing, silence, or any semantic
+        field.  Proposal contracts have the inverse legacy
         shape: a duplicate semantic decision string appears beside an already
         complete typed proposal.  It is safe to discard that duplicate only
         when it exactly agrees with the typed proposal.
         """
 
         normalized = dict(decoded)
+        if contract.purpose == "private_impression_reflection":
+            # Reflection evidence is exposed to the provider through short
+            # tokens.  Translate an attended token only when both its semantic
+            # source binding and its pinned authority binding close over the
+            # exact manifest. Unknown or ambiguous tokens remain unchanged and
+            # fail the ordinary attended-source validation below.
+            manifest = request.capability_manifest
+            raw_attention = normalized.get("attended_source_refs")
+            if manifest is not None and isinstance(raw_attention, list):
+                raw_sources = manifest.payload.get("reflection_sources")
+                raw_token_map = manifest.payload.get("token_map")
+                raw_short_tokens = manifest.payload.get("short_tokens")
+                installed_tokens = (
+                    {item for item in raw_short_tokens if isinstance(item, str)}
+                    if isinstance(raw_short_tokens, list)
+                    else set()
+                )
+                attention_token_map: dict[str, str] = {}
+                ambiguous_tokens: set[str] = set()
+                if isinstance(raw_sources, list) and isinstance(raw_token_map, dict):
+                    for raw_source in raw_sources:
+                        if not isinstance(raw_source, Mapping):
+                            continue
+                        short_token = raw_source.get("short_token")
+                        semantic_source_ref = raw_source.get("source_ref")
+                        authority_source_ref = raw_source.get("authority_event_ref")
+                        if (
+                            not isinstance(short_token, str)
+                            or short_token not in installed_tokens
+                            or not isinstance(semantic_source_ref, str)
+                            or raw_token_map.get(short_token) != semantic_source_ref
+                            or not isinstance(authority_source_ref, str)
+                            or authority_source_ref not in manifest.source_refs
+                            or authority_source_ref not in request.snapshot.source_refs
+                        ):
+                            continue
+                        previous = attention_token_map.get(short_token)
+                        if previous is not None and previous != authority_source_ref:
+                            ambiguous_tokens.add(short_token)
+                            continue
+                        attention_token_map[short_token] = authority_source_ref
+                normalized["attended_source_refs"] = [
+                    attention_token_map.get(item, item)
+                    if isinstance(item, str) and item not in ambiguous_tokens
+                    else item
+                    for item in raw_attention
+                ]
         raw_decision = normalized.get("decision")
         proposals = normalized.get("proposals")
 
@@ -2394,7 +2487,11 @@ class StructuredCharacterRoleFaculty:
         }
 
     @staticmethod
-    def _contract_view(contract: PurposeDecisionContract) -> dict[str, object]:
+    def _contract_view(
+        contract: PurposeDecisionContract,
+        *,
+        capability_manifest: _InteriorCapabilityManifest | None,
+    ) -> dict[str, object]:
         view: dict[str, object] = {
             "purpose": contract.purpose,
             "payload_contract": contract.payload_contract,
@@ -2462,16 +2559,28 @@ class StructuredCharacterRoleFaculty:
                 "disposition": "continue|cancel|defer|merge|supersede|new_beat"
             }
         if contract.purpose == "private_impression_reflection":
+            existing_impression_tokens = (
+                capability_manifest.payload.get("existing_impression_short_tokens")
+                if capability_manifest is not None
+                else None
+            )
+            replacement_available = bool(existing_impression_tokens)
             view["status_schema"] = {
                 "no_change": "proposals must be []",
                 "transition": "exactly one private_impression_transition proposal",
             }
             view["proposal_schema"] = {
                 "proposal_type": "private_impression_transition",
-                "decision": "retain|consolidate|supersede",
+                "decision": (
+                    "retain|consolidate|supersede"
+                    if replacement_available
+                    else "retain"
+                ),
                 "predecessor_refs": (
                     "selected existing-impression short tokens from "
                     "capability_manifest.payload.existing_impression_short_tokens"
+                    if replacement_available
+                    else "must be []"
                 ),
                 "source_refs": (
                     "selected offered short tokens from "
@@ -2482,6 +2591,8 @@ class StructuredCharacterRoleFaculty:
                     "predecessor_refs are existing-impression short tokens, every "
                     "predecessor must also be listed in source_refs, retain has no "
                     "predecessors, and consolidate/supersede has at least one"
+                    if replacement_available
+                    else "retain is the only installed transition and has no predecessors"
                 ),
                 "reflection_summary": "free tentative private reading",
                 "confidence_bp": "integer 0..10000",
@@ -2614,7 +2725,15 @@ class StructuredCharacterRoleFaculty:
                         "pause|resume|abandon an offered head; creating a Goal is unavailable "
                         "because no Goal content authority is installed"
                     ),
-                    "thread": "open from the current source, or update|resolve|cancel an offered head",
+                    "thread": (
+                        "open a source-bound private unfinished thought from the current "
+                        "experience, or update|resolve|cancel an offered head. Choose "
+                        "thread_kind=reply_reconsideration only when you genuinely want to "
+                        "revisit possible future contact; choose its due_at, expires_at and "
+                        "importance yourself. Opening it records an inner intention only: it "
+                        "does not send or schedule a message. At due time the proactive lane "
+                        "must ask you again to choose now, later, or silent"
+                    ),
                     "commitment": (
                         "open only against an offered open Thread fulfillment contract, or "
                         "release an offered commitment head"

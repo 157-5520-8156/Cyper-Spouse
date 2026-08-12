@@ -7,6 +7,7 @@ crash recovery and the afterthought mutex projection-visible.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 import hashlib
 import json
@@ -21,6 +22,7 @@ from .proposal_audit_schemas import (
     ModelResultAuditProjection,
     ProposalAuditProjection,
 )
+from .proposal_envelope import DecisionProposal, validate_proposal_envelope
 from .schemas import (
     AcceptanceDecisionRef,
     Action,
@@ -38,8 +40,19 @@ from .schemas import (
 
 PROCESS_KIND = "expression_episode"
 EXPRESSION_INFLIGHT_LEASE_SECONDS = 120
-EXPRESSION_RETRY_DELAYS_SECONDS = (600, 1_800, 7_200)
+# One bounded same-model retry must happen before the platform declares a
+# visible liveness failure. Later failures retain the conservative outage
+# backoff so a provider incident cannot turn into an unbounded retry loop.
+EXPRESSION_RETRY_DELAYS_SECONDS = (30, 1_800, 7_200)
 EXPRESSION_FRESH_CONTEXT_REPIN_LIMIT = 2
+# Platform liveness is a hard boundary, not a character decision.  Version the
+# boundary explicitly so replay and a restarted transport derive the same due
+# instant from the durable in-flight lease instead of from process-local sleep
+# state. ModelResult event logical time is pinned World time, not provider
+# completion wall time, so it cannot truthfully authorize a post-failure grace.
+EXPRESSION_TECHNICAL_NOTICE_POLICY_ID = (
+    "expression-technical-notice-at-inflight-lease.1"
+)
 _QUICK_REACTION_PROPOSAL_PREFIX = "proposal:quick-reaction:"
 _INBOUND_EXPRESSION_PROPOSAL_PREFIXES = (
     "proposal:expression:",
@@ -60,6 +73,28 @@ class _ExpressionRetryProjection(Protocol):
     actions: tuple[Action, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ExpressionTechnicalNoticeCandidate:
+    """One projection-derived platform liveness deadline.
+
+    This is deliberately not a World event or Character Expression.  The
+    transport may use it only to emit its fixed technical System Notice after
+    the same latest inbound remains inside a durable technical retry state.
+    """
+
+    trigger_id: str
+    observation_id: str
+    due_at: datetime
+    policy_id: str = EXPRESSION_TECHNICAL_NOTICE_POLICY_ID
+
+    @property
+    def notice_key(self) -> str:
+        return (
+            "system-notice:expression-technical-pending:"
+            f"{self.policy_id}:{self.trigger_id}"
+        )
+
+
 def _digest(value: object) -> str:
     return hashlib.sha256(
         json.dumps(
@@ -77,6 +112,14 @@ def expression_episode_trigger_id(world_id: str, observation_id: str) -> str:
         raise ValueError("expression episode identity requires world and observation")
     return "trigger:expression-episode:" + _digest(
         {"world_id": world_id, "observation_id": observation_id}
+    )
+
+
+def expression_episode_attempt_id(*, trigger_id: str, attempt_ordinal: int) -> str:
+    if not trigger_id or attempt_ordinal < 1:
+        raise ValueError("expression attempt identity requires trigger and ordinal")
+    return "attempt:expression-episode:" + _digest(
+        {"trigger_id": trigger_id, "attempt": attempt_ordinal}
     )
 
 
@@ -129,19 +172,28 @@ def expression_episode_claim_event(
     trace_id: str,
     correlation_id: str,
     technical_failure_count: int | None = None,
+    retry_projection: _ExpressionRetryProjection | None = None,
 ) -> tuple[WorldEvent, TriggerProcess]:
     if process.process_kind != PROCESS_KIND or process.state == "terminal":
         raise ValueError("only an active expression episode can be claimed")
     if process.state == "claimed":
         if process.claim_lease is None:
             raise ValueError("claimed expression episode is missing its active lease")
-        if at < process.claim_lease.expires_at:
+        if at < process.claim_lease.expires_at and not (
+            retry_projection is not None
+            and expression_episode_retry_reclaim_is_authorized(
+                retry_projection,
+                process,
+                at=at,
+            )
+        ):
             raise ValueError(
                 "expression episode cannot be reclaimed before its active lease expires"
             )
     attempt_ordinal = len(process.attempt_ids) + 1
-    attempt_id = "attempt:expression-episode:" + _digest(
-        {"trigger_id": process.trigger_id, "attempt": attempt_ordinal}
+    attempt_id = expression_episode_attempt_id(
+        trigger_id=process.trigger_id,
+        attempt_ordinal=attempt_ordinal,
     )
     if technical_failure_count is not None and technical_failure_count < 0:
         raise ValueError("expression technical failure count cannot be negative")
@@ -420,6 +472,120 @@ def _current_attempt_acceptance_decisions(
     )
 
 
+def _current_attempt_is_role_owned_non_immediate_choice(
+    projection: _ExpressionRetryProjection,
+    *,
+    process: TriggerProcess,
+    observation_event_ref: str,
+) -> bool:
+    """Keep a recorded ``later``/``silent`` choice out of technical notices.
+
+    A crash may leave the lifecycle claimed after the Proposal audit landed
+    but before its deterministic terminal continuation.  The fixed platform
+    Notice must not reinterpret that already-authored timing choice as an
+    infrastructure failure.
+    """
+
+    if process.claim_lease is None:
+        return False
+    current_attempt_id = process.claim_lease.attempt_id
+    for audit in reversed(projection.proposal_audits):
+        if (
+            audit.trigger_ref != observation_event_ref
+            or audit.attempt_id != current_attempt_id
+            or getattr(audit, "proposal_kind", "decision") != "decision"
+        ):
+            continue
+        proposal_json = getattr(audit, "proposal_json", None)
+        if not isinstance(proposal_json, str):
+            continue
+        try:
+            proposal = validate_proposal_envelope(json.loads(proposal_json))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            # Immutable proposal validation owns corruption handling.  This
+            # read-only liveness projection fails closed instead of inferring a
+            # role choice from malformed audit bytes.
+            continue
+        if isinstance(proposal, DecisionProposal):
+            return proposal.timing_choice in {"later", "silent"}
+    return False
+
+
+def expression_episode_technical_notice_candidates(
+    projection: _ExpressionRetryProjection,
+) -> tuple[ExpressionTechnicalNoticeCandidate, ...]:
+    """Project delayed technical Notices for the one current conversation head.
+
+    Eligibility is intentionally narrow and semantic-free: the exact current
+    second-or-later attempt must have immutable technical-failure/
+    failed-Acceptance evidence, the process must still be active, no external
+    reply Action may already be authorized, and its source Observation must
+    remain the latest inbound. Success, supersession, an in-flight first retry,
+    and role-owned ``later``/``silent`` choices therefore remove the candidate
+    before the transport crosses its Notice seam.
+    """
+
+    observations = tuple(getattr(projection, "message_observations", ()) or ())
+    processes = tuple(getattr(projection, "trigger_processes", ()) or ())
+    if not observations or not processes:
+        return ()
+    latest = max(
+        observations,
+        key=lambda item: (
+            int(getattr(item, "world_revision", 0) or 0),
+            str(getattr(item, "observation_id", "")),
+        ),
+    )
+    latest_observation_id = getattr(latest, "observation_id", None)
+    if not isinstance(latest_observation_id, str) or not latest_observation_id:
+        return ()
+
+    candidates: list[ExpressionTechnicalNoticeCandidate] = []
+    for process in processes:
+        if (
+            process.process_kind != PROCESS_KIND
+            or process.state != "claimed"
+            or process.claim_lease is None
+            or len(process.attempt_ids) < 2
+            or process.source_evidence_ref != latest_observation_id
+        ):
+            continue
+        observation_event_ref = _observation_event_ref(projection, process)
+        if observation_event_ref is None:
+            continue
+        failed_acceptances = _current_attempt_acceptance_decisions(
+            projection,
+            process=process,
+            observation_event_ref=observation_event_ref,
+        )
+        has_technical_terminal = _current_attempt_has_terminal_technical_failure(
+            projection,
+            process=process,
+            observation_event_ref=observation_event_ref,
+        ) or any(
+            decision.status in {"rejected", "stale"}
+            for decision in failed_acceptances
+        )
+        if not has_technical_terminal:
+            continue
+        if expression_episode_has_authorized_action(projection, process):
+            continue
+        if _current_attempt_is_role_owned_non_immediate_choice(
+            projection,
+            process=process,
+            observation_event_ref=observation_event_ref,
+        ):
+            continue
+        candidates.append(
+            ExpressionTechnicalNoticeCandidate(
+                trigger_id=process.trigger_id,
+                observation_id=latest_observation_id,
+                due_at=process.claim_lease.expires_at,
+            )
+        )
+    return tuple(sorted(candidates, key=lambda item: (item.due_at, item.trigger_id)))
+
+
 def expression_episode_technical_failure_count(
     projection: _ExpressionRetryProjection,
     process: TriggerProcess,
@@ -497,9 +663,11 @@ def expression_episode_work_due(
     global scheduling therefore waits for expiry.  Same-runtime continuation
     is an owner-aware Runtime operation and does not use this projection-only
     deadline. A terminal technical result bound to the *current* claim waits
-    for a separate 10/30/120-minute deadline projected from its recorded
+    for a separate 30-second/30-minute/120-minute deadline projected from its recorded
     failure ordinal; the short ownership lease never weakens that backoff.
-    A durable reply Proposal is also immediate work: the scheduler must
+    The first terminal technical result receives one 30-second same-model
+    retry before the two-minute platform Notice boundary; later failures keep
+    the 30/120-minute outage backoff. A durable reply Proposal is also immediate work: the scheduler must
     continue that exact ``now/later/silent`` result without regenerating it.
     """
 
@@ -538,7 +706,7 @@ def expression_episode_work_due(
     if any(decision.status == "stale" for decision in failed_acceptances):
         # Staleness already proves that the old wording cannot be authorized.
         # Re-pin the model at the current World immediately; it is not a
-        # provider outage and therefore does not earn a 10-minute wait.
+        # provider outage and therefore does not earn an outage backoff.
         return process.claim_lease.acquired_at
     if _current_attempt_has_terminal_technical_failure(
         projection,
@@ -732,6 +900,58 @@ def expression_episode_has_authorized_action(
     )
 
 
+def expression_episode_retry_reclaim_is_authorized(
+    projection: _ExpressionRetryProjection,
+    process: TriggerProcess,
+    *,
+    at: datetime,
+) -> bool:
+    """Prove that one failed attempt may rotate before its lease expires.
+
+    The two-minute lease protects an invocation whose result is still unknown.
+    Once the *current* attempt has immutable terminal technical evidence, or
+    its exact reply Proposal has a rejected Acceptance, no provider work can
+    still be hidden behind that lease.  Only then may the installed retry due
+    rotate a fresh attempt before the platform Notice boundary.
+
+    The proof is projection-derived on purpose.  A caller-supplied failure
+    count is diagnostic input and can never authorize an early reclaim.
+    """
+
+    if (
+        process.process_kind != PROCESS_KIND
+        or process.state != "claimed"
+        or process.claim_lease is None
+        or at >= process.claim_lease.expires_at
+    ):
+        return False
+    observation_event_ref = _observation_event_ref(projection, process)
+    if observation_event_ref is None:
+        return False
+    # A still-live reply Proposal must be continued exactly, not regenerated.
+    if _reply_proposal_audits(
+        projection,
+        process=process,
+        observation_event_ref=observation_event_ref,
+    ):
+        return False
+    failed_acceptances = _current_attempt_acceptance_decisions(
+        projection,
+        process=process,
+        observation_event_ref=observation_event_ref,
+    )
+    current_attempt_is_terminal = _current_attempt_has_terminal_technical_failure(
+        projection,
+        process=process,
+        observation_event_ref=observation_event_ref,
+    ) or any(decision.status == "rejected" for decision in failed_acceptances)
+    if not current_attempt_is_terminal:
+        return False
+    if expression_episode_has_authorized_action(projection, process):
+        return False
+    return at >= _technical_retry_due(projection, process)
+
+
 def expression_episode_cancel_events(
     *,
     world_id: str,
@@ -898,14 +1118,19 @@ def expression_episode_cancel_events(
 
 __all__ = [
     "EXPRESSION_RETRY_DELAYS_SECONDS",
+    "EXPRESSION_TECHNICAL_NOTICE_POLICY_ID",
+    "ExpressionTechnicalNoticeCandidate",
     "PROCESS_KIND",
     "due_expression_retry_processes",
+    "expression_episode_attempt_id",
     "expression_episode_claim_event",
     "expression_episode_cancel_events",
     "expression_episode_complete_event",
     "expression_episode_has_authorized_action",
     "expression_episode_open_event",
+    "expression_episode_retry_reclaim_is_authorized",
     "expression_episode_retry_due",
     "expression_episode_trigger_id",
+    "expression_episode_technical_notice_candidates",
     "next_expression_retry_due",
 ]

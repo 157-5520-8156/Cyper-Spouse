@@ -57,8 +57,7 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
     settings = get_settings()
     now = datetime.now(UTC)
     transport = CaptureSimulatorTransport(received_at=now)
-    owned_models: list[DeepSeekChatModel] = []
-    source_reviewer: ChatCompletionModel | None = None
+    owned_models: list[ChatCompletionModel] = []
     life_source_reviewer: ChatCompletionModel | None = None
     if fake:
         flash_model: ChatCompletionModel = FakeCompanionModel()
@@ -75,10 +74,10 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
         owned_models.append(flash_model)
         if settings.openai_api_key:
             # The World Author may invent proposal-scoped life material, but
-            # it cannot review its own existing-world claims.  The simulator
-            # installs the independently configured OpenAI lane when present;
-            # without it, factful life proposals fail closed while no-op
-            # ecology remains available.
+            # it cannot review its own existing-world claims.  This independent
+            # lane is Life-only. Visible chat always receives the compact
+            # DeepSeek Flash guard from semantic composition and can never
+            # reactivate the historical paid full-review route.
             reviewer_options = {
                 "api_key": settings.openai_api_key,
                 "base_url": settings.openai_base_url,
@@ -89,14 +88,9 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
                 "max_completion_tokens": 1_200,
                 "proxy_url": settings.openai_proxy_url,
             }
-            # These are separate semantic authorities even when they use the
-            # same provider/model configuration. Sharing one client here made
-            # simulator validation violate the production self-review boundary.
-            source_reviewer_client = OpenAICompatibleChatModel(**reviewer_options)
             life_source_reviewer_client = OpenAICompatibleChatModel(**reviewer_options)
-            source_reviewer = source_reviewer_client
             life_source_reviewer = life_source_reviewer_client
-            owned_models.extend((source_reviewer_client, life_source_reviewer_client))
+            owned_models.append(life_source_reviewer_client)
         thinking_model = None
         if thinking:
             thinking_model = DeepSeekChatModel(
@@ -111,7 +105,6 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
         settings=settings,
         flash_model=flash_model,
         thinking_model=thinking_model,
-        source_closure_model=source_reviewer,
         life_source_closure_model=life_source_reviewer,
         model_id_prefix="world-v2-simulator",
     )

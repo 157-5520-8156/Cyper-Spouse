@@ -13,9 +13,10 @@ from dataclasses import dataclass
 from functools import lru_cache
 from hashlib import sha256
 import json
-from typing import Mapping
+from typing import Literal, Mapping
 
 from ..schema_core import canonicalize_json_value
+from .inbound_tool_contract import deepseek_strict_tool_schema
 
 _CONTRACT_VERSION = "1"
 _MEDIA_SELECTION_TOOL_NAME = "character_role_media_selection_v1"
@@ -30,6 +31,7 @@ _EXPRESSION_RECONSIDERATION_TOOL_NAME = "character_role_expression_reconsiderati
 _FACT_MEMORY_RETENTION_TOOL_NAME = "character_role_fact_memory_retention_v1"
 _EXPERIENCE_MEMORY_RETENTION_TOOL_NAME = "character_role_experience_memory_retention_v1"
 _MEMORY_WITHDRAWAL_REVIEW_TOOL_NAME = "character_role_memory_withdrawal_review_v1"
+StructuredRoleToolSchemaDialect = Literal["standard", "deepseek-strict"]
 
 
 def _canonical_json(value: object) -> str:
@@ -394,6 +396,26 @@ class StructuredRoleToolContract:
     provider_tools: tuple[dict[str, object], ...]
     provider_tool_choice: dict[str, object]
     identity: StructuredRoleToolContractIdentity
+    result_wrapper_key: str | None = None
+
+    def unwrap(self, raw: object) -> object:
+        """Remove only the declared provider transport wrapper."""
+
+        if self.result_wrapper_key is None:
+            return raw
+        if not isinstance(raw, str):
+            raise ValueError("structured role tool result must be JSON text")
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("structured role tool result must be one JSON object") from exc
+        if (
+            not isinstance(decoded, dict)
+            or set(decoded) != {self.result_wrapper_key}
+            or not isinstance(decoded[self.result_wrapper_key], dict)
+        ):
+            raise ValueError("structured role tool result wrapper is invalid")
+        return _canonical_json(decoded[self.result_wrapper_key])
 
 
 def _compile_generic_decision_contract(
@@ -614,14 +636,16 @@ class StructuredRoleToolContracts:
         """
 
         payload = _canonical_json(expression_capabilities)
-        cls._cached_proactive_contact(payload, True)
-        cls._cached_proactive_contact(payload, False)
+        for schema_dialect in ("standard", "deepseek-strict"):
+            cls._cached_proactive_contact(payload, True, schema_dialect)
+            cls._cached_proactive_contact(payload, False, schema_dialect)
 
     def proactive_contact(
         self,
         *,
         capability_payload: Mapping[str, object],
         recall_allowed: bool,
+        schema_dialect: StructuredRoleToolSchemaDialect = "standard",
     ) -> StructuredRoleToolContract:
         expression_capabilities = capability_payload.get("expression_capabilities")
         if not isinstance(expression_capabilities, dict):
@@ -629,6 +653,7 @@ class StructuredRoleToolContracts:
         return self._cached_proactive_contact(
             _canonical_json(expression_capabilities),
             recall_allowed,
+            schema_dialect,
         )
 
     def media_selection(
@@ -952,6 +977,7 @@ class StructuredRoleToolContracts:
     def _cached_proactive_contact(
         expression_capabilities_json: str,
         recall_allowed: bool,
+        schema_dialect: StructuredRoleToolSchemaDialect,
     ) -> StructuredRoleToolContract:
         # Runtime invocation happens only after structured_role is fully
         # imported, so this local reference keeps one canonical wire without
@@ -1047,7 +1073,40 @@ class StructuredRoleToolContracts:
                     "additionalProperties": False,
                 }
             )
-        parameters = {"anyOf": branches}
+        if schema_dialect == "standard":
+            parameters: dict[str, object] = {"anyOf": branches}
+            result_wrapper_key = None
+        elif schema_dialect == "deepseek-strict":
+            # The canonical role wire uses ``list[dict[str, Any]]`` for the
+            # generic proposal carrier, but proactive_contact forbids that
+            # carrier semantically and requires ``proposals=[]``. DeepSeek
+            # rejects an unconstrained empty object schema and does not
+            # support maxItems=0, so expose an inert scalar item type here;
+            # any non-empty array still fails the canonical host validator.
+            for branch in branches:
+                branch_properties = branch.get("properties")
+                if not isinstance(branch_properties, dict):
+                    raise ValueError("proactive strict branch has no properties")
+                branch_properties["proposals"] = {
+                    "type": "array",
+                    "items": {"type": "string"},
+                }
+            result_wrapper_key = "result"
+            strict_parameters = deepseek_strict_tool_schema(
+                {
+                    "type": "object",
+                    "properties": {
+                        result_wrapper_key: {"anyOf": branches},
+                    },
+                    "required": [result_wrapper_key],
+                    "additionalProperties": False,
+                }
+            )
+            if not isinstance(strict_parameters, dict):
+                raise ValueError("DeepSeek proactive tool parameters must be an object")
+            parameters = strict_parameters
+        else:
+            raise ValueError("unsupported proactive tool schema dialect")
         function = {
             "name": _PROACTIVE_TOOL_NAME,
             "description": (
@@ -1056,10 +1115,18 @@ class StructuredRoleToolContracts:
                 "than delay_seconds. "
                 "The function constrains transport shape only; whether to act now, "
                 "act later, stay silent, request recall, and every private or visible "
-                "semantic field remain the character's choice."
+                "semantic field remain the character's choice. "
+                + (
+                    "Return the complete role result under the transport-only result key. "
+                    "Use JSON null, never the string 'null'."
+                    if result_wrapper_key is not None
+                    else ""
+                )
             ),
             "parameters": parameters,
         }
+        if schema_dialect == "deepseek-strict":
+            function["strict"] = True
         provider_tools = ({"type": "function", "function": function},)
         schema_digest = "sha256:" + sha256(_canonical_json(parameters).encode("utf-8")).hexdigest()
         capabilities_digest = (
@@ -1076,6 +1143,8 @@ class StructuredRoleToolContracts:
                         "schema_sha256": schema_digest,
                         "capabilities_sha256": capabilities_digest,
                         "recall_allowed": recall_allowed,
+                        "schema_dialect": schema_dialect,
+                        "result_wrapper_key": result_wrapper_key,
                     }
                 ).encode("utf-8")
             ).hexdigest()
@@ -1098,6 +1167,7 @@ class StructuredRoleToolContracts:
                 "function": {"name": _PROACTIVE_TOOL_NAME},
             },
             identity=identity,
+            result_wrapper_key=result_wrapper_key,
         )
 
     @staticmethod
@@ -1285,6 +1355,18 @@ class StructuredRoleToolContracts:
             "type": "string",
             "enum": ["private_impression_transition"],
         }
+        decision_field = proposal_properties.get("decision")
+        if not isinstance(decision_field, dict):
+            raise ValueError("private impression decision schema is incomplete")
+        installed_decisions = (
+            ("retain", "consolidate", "supersede")
+            if existing_impression_short_tokens
+            else ("retain",)
+        )
+        proposal_properties["decision"] = {
+            **deepcopy(decision_field),
+            "enum": list(installed_decisions),
+        }
         for field_name in ("source_refs", "predecessor_refs"):
             field = proposal_properties.get(field_name)
             if not isinstance(field, dict) or not isinstance(field.get("items"), dict):
@@ -1412,7 +1494,7 @@ class StructuredRoleToolContracts:
             "name": _PRIVATE_IMPRESSION_TOOL_NAME,
             "description": (
                 "Return the complete source-bound private impression reflection. "
-                "The character may form one tentative retain/consolidate/supersede "
+                f"The character may form one tentative {'/'.join(installed_decisions)} "
                 "proposal, make no change, or request one bounded recall. The function "
                 "constrains tokens and transport shape only; the character owns the "
                 "interpretation and whether to form it."

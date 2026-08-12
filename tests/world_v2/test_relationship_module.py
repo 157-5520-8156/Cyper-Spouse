@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from companion_daemon.world_v2 import relationship_reducers
 from companion_daemon.world_v2.relationship_events import (
     BoundaryChangedPayload,
     RelationshipSignalAcceptedPayload,
@@ -11,6 +12,7 @@ from companion_daemon.world_v2.relationship_events import (
     relationship_mutation_hash,
 )
 from companion_daemon.world_v2.relationship_reducers import (
+    RELATIONSHIP_COMMITMENT_STAGE_TRANSITIONS,
     RELATIONSHIP_POLICY_DIGEST,
     accept_relationship_signal,
     adjust_relationship_slow_variables,
@@ -136,6 +138,51 @@ def adjustment_payload(
         policy_digest=RELATIONSHIP_POLICY_DIGEST,
         adjusted_at=adjusted_at,
     )
+
+
+def test_relationship_policy_digest_binds_commitment_transition_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy_digest_without_commitment_graph = (
+        "64d8b7ffc6f38f79d31bb8a83212c5668ff908ab3f6d7c924dd75ad71fb94e95"
+    )
+    changed_transitions = dict(RELATIONSHIP_COMMITMENT_STAGE_TRANSITIONS)
+    changed_transitions["friend"] = frozenset({"acquaintance", "close_friend"})
+    monkeypatch.setattr(
+        relationship_reducers,
+        "RELATIONSHIP_COMMITMENT_STAGE_TRANSITIONS",
+        changed_transitions,
+    )
+
+    assert relationship_reducers.relationship_policy_digest() != (
+        RELATIONSHIP_POLICY_DIGEST
+    )
+    assert RELATIONSHIP_POLICY_DIGEST != legacy_digest_without_commitment_graph
+
+    source = signal(
+        "signal:legacy-policy",
+        code="legacy_policy",
+        contradiction_group_ref="group:legacy-policy",
+    )
+    before = RelationshipVariablesProjection()
+    after = RelationshipVariablesProjection(trust_bp=1)
+    legacy_payload = adjustment_payload(
+        source,
+        adjustment_id="adjustment:legacy-policy",
+        expected_revision=0,
+        before=before,
+        after=after,
+        accepted=RelationshipVariableDeltas(trust_bp=1),
+    ).model_copy(update={"policy_digest": legacy_digest_without_commitment_graph})
+
+    with pytest.raises(ValueError, match="policy digest is not installed"):
+        adjust_relationship_slow_variables(
+            (),
+            (),
+            (source,),
+            legacy_payload,
+            logical_time=NOW,
+        )
 
 
 def test_relationship_signals_accumulate_inside_a_contradiction_group() -> None:

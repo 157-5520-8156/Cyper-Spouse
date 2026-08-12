@@ -3,9 +3,9 @@
 The broad ``DecisionProposal`` envelope is not generic mutation authority.
 Ordinary inbound cognition may carry at most one ExpressionPlan, one
 Appraisal, the Affect exactly derived from that Appraisal, and one optional
-role-authored relationship signal. This helper is shared by proposal grammar,
-specialized acceptance, and replay validation so those boundaries cannot
-silently disagree about the unified shape.
+candidate for each installed role-authored semantic authority. This helper is
+shared by proposal grammar, specialized acceptance, and replay validation so
+those boundaries cannot silently disagree about the unified shape.
 """
 
 from __future__ import annotations
@@ -29,6 +29,8 @@ class UnifiedInboundDecisionShape:
     appraisal: TypedChange | None
     affect: TypedChange | None
     relationship: TypedChange | None
+    relationship_commitment: TypedChange | None
+    interaction_act: TypedChange | None
 
 
 def inspect_unified_inbound_decision(
@@ -40,6 +42,8 @@ def inspect_unified_inbound_decision(
     appraisals: list[TypedChange] = []
     affects: list[TypedChange] = []
     relationships: list[TypedChange] = []
+    relationship_commitments: list[TypedChange] = []
+    interaction_acts: list[TypedChange] = []
     for change in proposal.proposed_changes:
         if change.kind == "expression_plan_transition" and change.transition == "accept":
             expressions.append(change)
@@ -54,6 +58,16 @@ def inspect_unified_inbound_decision(
             affects.append(change)
         elif change.kind == "relationship_signal" and change.transition == "suggest":
             relationships.append(change)
+        elif (
+            change.kind == "relationship_commitment"
+            and change.transition == "commit"
+        ):
+            relationship_commitments.append(change)
+        elif change.kind == "interaction_act" and change.transition in {
+            "declare",
+            "revise",
+        }:
+            interaction_acts.append(change)
         else:
             raise UnifiedInboundDecisionError("change_not_reachable")
 
@@ -65,11 +79,19 @@ def inspect_unified_inbound_decision(
         raise UnifiedInboundDecisionError("affect_count_invalid")
     if len(relationships) > 1:
         raise UnifiedInboundDecisionError("relationship_count_invalid")
+    if len(relationship_commitments) > 1:
+        raise UnifiedInboundDecisionError("relationship_commitment_count_invalid")
+    if len(interaction_acts) > 1:
+        raise UnifiedInboundDecisionError("interaction_act_count_invalid")
 
     expression = expressions[0] if expressions else None
     appraisal = appraisals[0] if appraisals else None
     affect = affects[0] if affects else None
     relationship = relationships[0] if relationships else None
+    relationship_commitment = (
+        relationship_commitments[0] if relationship_commitments else None
+    )
+    interaction_act = interaction_acts[0] if interaction_acts else None
     if affect is not None and appraisal is None:
         raise UnifiedInboundDecisionError("affect_without_appraisal")
     if affect is not None:
@@ -80,6 +102,35 @@ def inspect_unified_inbound_decision(
             raise UnifiedInboundDecisionError("affect_appraisal_binding_invalid")
     elif proposal.affect_decision != "no_change":
         raise UnifiedInboundDecisionError("affect_decision_invalid")
+
+    if relationship_commitment is not None and expression is None:
+        raise UnifiedInboundDecisionError("relationship_commitment_without_expression")
+    if interaction_act is not None:
+        act_payload = interaction_act.payload.value()
+        status_code = act_payload.get("status_code")
+        if (
+            not isinstance(status_code, str)
+            or not status_code
+            or len(status_code) > 128
+            or status_code != status_code.strip()
+        ):
+            raise UnifiedInboundDecisionError("interaction_act_status_invalid")
+        if interaction_act.transition == "declare":
+            if (
+                act_payload.get("interaction_act_ref") is not None
+                or act_payload.get("object_ref") is not None
+            ):
+                raise UnifiedInboundDecisionError("interaction_act_declare_refs_invalid")
+        elif (
+            act_payload.get("interaction_act_ref") is None
+            or act_payload.get("object_label") is not None
+        ):
+            raise UnifiedInboundDecisionError("interaction_act_revise_refs_invalid")
+        if (
+            act_payload.get("source_scope") == "delivered_expression"
+            and expression is None
+        ):
+            raise UnifiedInboundDecisionError("interaction_act_without_expression")
 
     if expression is None:
         if proposal.action_intents:
@@ -97,6 +148,8 @@ def inspect_unified_inbound_decision(
         appraisal=appraisal,
         affect=affect,
         relationship=relationship,
+        relationship_commitment=relationship_commitment,
+        interaction_act=interaction_act,
     )
 
 

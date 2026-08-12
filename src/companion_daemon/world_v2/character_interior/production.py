@@ -34,6 +34,10 @@ from ..expression_plan_acceptance import ExpressionPlanBudgetPolicy
 from ..expression_reconsideration_runtime import ExpressionReconsiderationRuntime
 from ..interactive_turn_budget import InteractiveTurnBudgetPolicy
 from ..ledger import LedgerPort
+from ..interaction_act_context_builder import (
+    InteractionActContextBuilder,
+    install_interaction_act_context,
+)
 from ..private_impression_producer import (
     PrivateImpressionTriggerOpener,
     PrivateImpressionTriggerRuntime,
@@ -155,11 +159,24 @@ class _LedgerCapsuleInteriorProjection:
             cursor=subject.cursor,
         )
         context = install_relationship_context(context, relationship_join)
+        interaction_act_join = await InteractionActContextBuilder(
+            ledger=self.ledger
+        ).build(
+            projection=projection,
+            actor_ref=subject.actor_ref,
+            cursor=subject.cursor,
+        )
+        context = install_interaction_act_context(context, interaction_act_join)
         source_envelopes = source_envelopes_from_capsule(capsule)
         for item_ref, envelope in relationship_join.source_envelopes.items():
             existing = source_envelopes.get(item_ref)
             if existing is not None and existing != envelope:
                 raise ValueError("relationship context reused a Capsule source ref")
+            source_envelopes[item_ref] = dict(envelope)
+        for item_ref, envelope in interaction_act_join.source_envelopes.items():
+            existing = source_envelopes.get(item_ref)
+            if existing is not None and existing != envelope:
+                raise ValueError("interaction act context reused a Capsule source ref")
             source_envelopes[item_ref] = dict(envelope)
         snapshot = compile_inner_life_snapshot(
             context,

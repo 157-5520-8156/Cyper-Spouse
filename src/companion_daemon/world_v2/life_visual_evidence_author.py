@@ -276,6 +276,131 @@ class LifeVisualEvidenceAuthor:
             status="idle", reason_code="visual_evidence.nothing_selected"
         )
 
+    def request_once(
+        self,
+        *,
+        source_refs: tuple[str, ...],
+        trace_id: str,
+        correlation_id: str,
+    ) -> VisualEvidenceAuthorResult:
+        """Compile one role-requested candidate from exact attended life evidence.
+
+        The ordinary ecology uses a recorded chance draw to decide whether an
+        already-settled moment becomes photographable.  An accepted
+        CharacterInterior media request is itself the missing selection
+        authority, so this entry point does not draw again.  It still cannot
+        invent a scene or a camera: the selected source must be one of the
+        exact refs attended by the role and must carry an already-reviewed
+        visual annex with a self-capture capability.  Daily rhythm, privacy,
+        relationship and source-closure boundaries remain unchanged.
+        """
+
+        requested = tuple(dict.fromkeys(source_refs))
+        if not requested:
+            return VisualEvidenceAuthorResult(
+                status="idle", reason_code="visual_evidence.request_source_missing"
+            )
+        projection: _ProjectionLike = self._ledger.project()
+        logical_time = getattr(projection, "logical_time", None)
+        if not isinstance(logical_time, datetime):
+            return VisualEvidenceAuthorResult(
+                status="unavailable", reason_code="visual_evidence.logical_time_unavailable"
+            )
+        declared_sources, recent = self._declaration_ledger_view(
+            projection=projection,
+            logical_time=logical_time,
+        )
+        daily = sum(1 for _lane, at in recent if logical_time - at <= timedelta(days=1))
+        if daily >= self._policy.max_declarations_per_day:
+            return VisualEvidenceAuthorResult(
+                status="idle", reason_code="visual_evidence.daily_budget_exhausted"
+            )
+        if recent and logical_time - max(at for _lane, at in recent) < self._policy.min_gap:
+            return VisualEvidenceAuthorResult(
+                status="idle", reason_code="visual_evidence.min_gap_not_elapsed"
+            )
+        private_today = sum(
+            1
+            for lane, at in recent
+            if lane == "private" and logical_time - at <= timedelta(days=1)
+        )
+        requested_set = frozenset(requested)
+        eligible = self._eligible_occurrences(
+            projection=projection,
+            logical_time=logical_time,
+            declared_sources=declared_sources,
+        )
+        for occurrence, opening, annex, lane in eligible:
+            attended_aliases = self._requested_source_aliases(
+                projection=projection,
+                occurrence=occurrence,
+            )
+            if not requested_set.intersection(attended_aliases) or not annex.self_capture:
+                continue
+            if lane == "private" and (
+                private_today >= self._policy.max_private_declarations_per_day
+                or not self._recipient_relationship_ready(projection)
+            ):
+                continue
+            result = self._declare(
+                occurrence=occurrence,
+                opening=opening,
+                annex=annex,
+                lane=lane,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+            )
+            if result.opened_candidate_ids:
+                return result.model_copy(
+                    update={"reason_code": "visual_evidence.role_requested_candidate_declared"}
+                )
+        return VisualEvidenceAuthorResult(
+            status="idle",
+            reason_code="visual_evidence.no_requested_capture_source",
+        )
+
+    @staticmethod
+    def _requested_source_aliases(
+        *, projection: _ProjectionLike, occurrence: object
+    ) -> frozenset[str]:
+        """Resolve only ledger-proven aliases for one settled lived moment.
+
+        Chat snapshots commonly present the committed Experience authority and
+        its LifeContent descriptor rather than the underlying settlement event.
+        Those are not guesses: the Experience carries a typed
+        ``occurrence_settlement`` binding, and each descriptor is pinned to the
+        same occurrence or Experience.  No free text participates in this
+        mapping.
+        """
+
+        occurrence_id = getattr(occurrence, "occurrence_id", None)
+        settlement_ref = getattr(occurrence, "settlement_event_ref", None)
+        aliases = {settlement_ref} if isinstance(settlement_ref, str) else set()
+        experience_ids: set[str] = set()
+        for experience in getattr(projection, "experiences", ()):
+            bindings = getattr(getattr(experience, "values", None), "source_bindings", ())
+            if not any(
+                getattr(binding, "source_kind", None) == "occurrence_settlement"
+                and getattr(binding, "occurrence_id", None) == occurrence_id
+                and getattr(binding, "authority_event_ref", None) == settlement_ref
+                for binding in bindings
+            ):
+                continue
+            experience_id = getattr(experience, "experience_id", None)
+            accepted_ref = getattr(getattr(experience, "origin", None), "accepted_event_ref", None)
+            if isinstance(experience_id, str):
+                experience_ids.add(experience_id)
+            if isinstance(accepted_ref, str):
+                aliases.add(accepted_ref)
+        for descriptor in getattr(projection, "life_content_descriptors", ()):
+            source_entity_id = getattr(descriptor, "source_entity_id", None)
+            if source_entity_id != occurrence_id and source_entity_id not in experience_ids:
+                continue
+            descriptor_ref = getattr(descriptor, "descriptor_event_ref", None)
+            if isinstance(descriptor_ref, str):
+                aliases.add(descriptor_ref)
+        return frozenset(aliases)
+
     # -- discovery -------------------------------------------------------
 
     def _eligible_occurrences(

@@ -449,7 +449,7 @@ async def test_content_free_technical_result_rebases_after_unrelated_head_advanc
     assert process.state == "claimed"
     assert process.claim_lease is not None
     assert process.claim_lease.attempt_id == claimed.claim_lease.attempt_id
-    assert next_expression_retry_due(projection) == NOW + timedelta(minutes=10)
+    assert next_expression_retry_due(projection) == NOW + timedelta(seconds=30)
 
 
 @pytest.mark.asyncio
@@ -825,7 +825,7 @@ async def test_runtime_defers_an_audited_reply_when_the_budget_is_unavailable() 
         if item.process_kind == "expression_episode"
     )
     assert episode.state == "claimed"
-    assert next_expression_retry_due(projection) == NOW + timedelta(minutes=10)
+    assert next_expression_retry_due(projection) == NOW + timedelta(seconds=30)
 
 
 @pytest.mark.asyncio

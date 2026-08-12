@@ -15,7 +15,9 @@ from companion_daemon.world_v2.proposal_envelope import (
     CanonicalTypedPayload,
     ContinuationProposal,
     DecisionProposal,
+    InteractionActPayload,
     MinimalProposal,
+    PAYLOAD_CONTRACTS,
     ProposalActionIntent,
     ProposalEvidenceRef,
     ReferencedSummary,
@@ -205,6 +207,16 @@ def test_decision_is_frozen_extra_forbid_and_has_stable_canonical_hash() -> None
         DecisionProposal.model_validate({**proposal.model_dump(), "secret_reasoning": "chain"})
     with pytest.raises(ValidationError):
         DecisionProposal.model_validate({**proposal.model_dump(), "brief_rationale": "x" * 241})
+
+
+def test_interaction_act_registry_matches_the_typed_payload_fields() -> None:
+    contract = PAYLOAD_CONTRACTS["interaction_act"]
+
+    assert set(contract.required) | set(contract.optional) == set(
+        InteractionActPayload.model_fields
+    )
+    assert "status_code" in contract.required
+    assert "status" not in contract.required
 
 
 def test_private_turn_state_preserves_legacy_bytes_and_changes_only_new_proposal_identity() -> None:

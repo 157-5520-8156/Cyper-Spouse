@@ -50,6 +50,12 @@ from .recall_runtime import (
     verify_trusted_recall_trace,
 )
 from .route_hints import RouteHints, derive_route_hints
+from .validation_failure_codes import (
+    VALIDATION_MAIN_EXCEPTION_FAILURE_CODES as _VALIDATION_MAIN_EXCEPTION_FAILURE_CODES,
+    VALIDATION_MAIN_TIMEOUT_FAILURE_CODES as _VALIDATION_MAIN_TIMEOUT_FAILURE_CODES,
+    ValidationTechnicalFailureCode,
+    sanitize_validation_technical_failure_code,
+)
 
 
 MAX_MODEL_OUTPUT_BYTES = 512_000
@@ -341,18 +347,6 @@ def mark_first_role_provider_token(provider_call_id: str) -> None:
         _LOG.warning("role-provider first-token latency marker failed", exc_info=True)
 
 
-ValidationTechnicalFailureCode = Literal[
-    "source_review_timeout",
-    "source_review_exception",
-    "authored_subcall_timeout",
-    "authored_subcall_exception",
-    "recall_choice_reselection_invalid",
-    "authored_expression_reselection_invalid",
-    "proactive_claim_binding_invalid",
-    "affect_target_reselection_invalid",
-    "inventory_invalid",
-    "coverage_invalid",
-]
 _SOURCE_VALIDATION_INVALID_FAILURE_CODES = frozenset(
     {
         "inventory_invalid",
@@ -1054,11 +1048,13 @@ class ModelUsageProvenance(_FrozenModel):
 
 
 class AuthoredCandidateInvocationAudit(_FrozenModel):
-    """One returned role-author invocation recorded outside the terminal audit.
+    """One returned non-final role-author invocation outside the terminal audit.
 
     On success the final author remains the owning :class:`ModelResultAudit`.
     When later validation ends technically, even that returned candidate is
     recorded here while the owning audit describes the orchestration failure.
+    A bounded Recall choice is likewise a valid authored control transfer,
+    not a validation provider subcall and not the final Expression result.
     This keeps response identity and provider usage truthful without claiming
     that an unresolved candidate was accepted.
     """
@@ -1073,6 +1069,7 @@ class AuthoredCandidateInvocationAudit(_FrozenModel):
         "superseded",
         "validation_rejected",
         "validation_unresolved",
+        "control_transfer",
     ]
     usage: ModelUsageProvenance | None = Field(
         default=None,
@@ -1370,7 +1367,7 @@ def _map_terminal_validation_failure(
     return _TerminalValidationAudit(
         status=(
             "main_timeout"
-            if failure_code in {"source_review_timeout", "authored_subcall_timeout"}
+            if failure_code in _VALIDATION_MAIN_TIMEOUT_FAILURE_CODES
             else "main_exception"
         ),
         failure_code=failure_code,
@@ -1551,8 +1548,7 @@ class ModelResultAudit(_FrozenModel):
                 "main_timeout",
                 "primary_timeout",
                 "corrective_timeout",
-                "source_review_timeout",
-                "authored_subcall_timeout",
+                *_VALIDATION_MAIN_TIMEOUT_FAILURE_CODES,
             },
             "main_invalid": {
                 "main_invalid_output",
@@ -1562,14 +1558,7 @@ class ModelResultAudit(_FrozenModel):
             "main_exception": {
                 "main_exception",
                 "primary_exception",
-                "source_review_exception",
-                "authored_subcall_exception",
-                "recall_choice_reselection_invalid",
-                "authored_expression_reselection_invalid",
-                "proactive_claim_binding_invalid",
-                "affect_target_reselection_invalid",
-                "inventory_invalid",
-                "coverage_invalid",
+                *_VALIDATION_MAIN_EXCEPTION_FAILURE_CODES,
                 "stream_superseded_by_newer_input",
                 "stream_tail_cancelled",
                 "stream_tail_unresolved",
@@ -1578,8 +1567,7 @@ class ModelResultAudit(_FrozenModel):
                 "main_timeout",
                 "primary_timeout",
                 "corrective_timeout",
-                "source_review_timeout",
-                "authored_subcall_timeout",
+                *_VALIDATION_MAIN_TIMEOUT_FAILURE_CODES,
             },
             "main_invalid_recovered": {
                 "main_invalid_output",
@@ -1589,14 +1577,7 @@ class ModelResultAudit(_FrozenModel):
             "main_exception_recovered": {
                 "main_exception",
                 "primary_exception",
-                "source_review_exception",
-                "authored_subcall_exception",
-                "recall_choice_reselection_invalid",
-                "authored_expression_reselection_invalid",
-                "proactive_claim_binding_invalid",
-                "affect_target_reselection_invalid",
-                "inventory_invalid",
-                "coverage_invalid",
+                *_VALIDATION_MAIN_EXCEPTION_FAILURE_CODES,
             },
         }.get(self.status)
         provider_failure_type, separator, provider_failure_detail = (
@@ -1634,7 +1615,11 @@ class ModelResultAudit(_FrozenModel):
                     "returned candidate audit requires output without semantic acceptance"
                 )
         elif self.status in {"main_timeout", "main_exception"}:
-            if has_output or (
+            terminal_validation_candidate = self.failure_code in {
+                *_VALIDATION_MAIN_TIMEOUT_FAILURE_CODES,
+                *_VALIDATION_MAIN_EXCEPTION_FAILURE_CODES,
+            }
+            if (has_output and not terminal_validation_candidate) or (
                 self.failure_code not in (required_failures or set())
                 and not typed_provider_subcall_failure
             ):
@@ -1654,6 +1639,23 @@ class ModelResultAudit(_FrozenModel):
         if (self.slot is None) != (self.outcome is None):
             raise ValueError("slot and outcome audit metadata must appear together")
         return self
+
+
+def _model_result_identity_material(audit: ModelResultAudit) -> dict[str, object]:
+    """Bind independent physical failure evidence into DeliberationResult identity."""
+
+    material = audit.model_dump(mode="json")
+    if (
+        audit.physical_provider_audits
+        and audit.semantic_stream_part is None
+        and audit.parent_model_call_id is None
+        and audit.status in {"main_timeout", "main_exception"}
+        and audit.outcome in {"timeout", "exception"}
+    ):
+        material["physical_provider_audits"] = [
+            item.model_dump(mode="json") for item in audit.physical_provider_audits
+        ]
+    return material
 
 
 class ProviderHealth(_FrozenModel):
@@ -1737,8 +1739,7 @@ class DeliberationResult(_FrozenModel):
                             "main_timeout",
                             "primary_timeout",
                             "corrective_timeout",
-                            "source_review_timeout",
-                            "authored_subcall_timeout",
+                            *_VALIDATION_MAIN_TIMEOUT_FAILURE_CODES,
                         },
                         "main_timeout_recovered",
                     ),
@@ -1750,14 +1751,7 @@ class DeliberationResult(_FrozenModel):
                         {
                             "main_exception",
                             "primary_exception",
-                            "source_review_exception",
-                            "authored_subcall_exception",
-                            "recall_choice_reselection_invalid",
-                            "authored_expression_reselection_invalid",
-                            "proactive_claim_binding_invalid",
-                            "affect_target_reselection_invalid",
-                            "inventory_invalid",
-                            "coverage_invalid",
+                            *_VALIDATION_MAIN_EXCEPTION_FAILURE_CODES,
                         },
                         "main_exception_recovered",
                     ),
@@ -1785,7 +1779,9 @@ class DeliberationResult(_FrozenModel):
         identity = {
             "capsule_id": self.capsule_id,
             "proposal_hash": self.proposal.proposal_hash if self.proposal is not None else None,
-            "attempt_audits": tuple(value.model_dump(mode="json") for value in self.attempt_audits),
+            "attempt_audits": tuple(
+                _model_result_identity_material(value) for value in self.attempt_audits
+            ),
         }
         if self.result_id != f"deliberation:{_digest(identity)}":
             raise ValueError("deliberation result identity is invalid")
@@ -3433,23 +3429,24 @@ class Deliberation:
                             slot=main_slot,
                             outcome=main_outcome,
                         )
-                        recovered_status: AuditStatus = {
-                            "primary_invalid": "main_invalid_recovered",
-                            "corrective_invalid": "main_invalid_recovered",
-                            "primary_exception": "main_exception_recovered",
-                            "primary_timeout": "main_timeout_recovered",
-                            "corrective_timeout": "main_timeout_recovered",
-                            "source_review_timeout": "main_timeout_recovered",
-                            "authored_subcall_timeout": "main_timeout_recovered",
-                            "source_review_exception": "main_exception_recovered",
-                            "authored_subcall_exception": ("main_exception_recovered"),
-                            "recall_choice_reselection_invalid": ("main_exception_recovered"),
-                            "authored_expression_reselection_invalid": ("main_exception_recovered"),
-                            "proactive_claim_binding_invalid": ("main_exception_recovered"),
-                            "affect_target_reselection_invalid": ("main_exception_recovered"),
-                            "inventory_invalid": "main_exception_recovered",
-                            "coverage_invalid": "main_exception_recovered",
-                        }[main_failure_code]
+                        installed_failure = sanitize_validation_technical_failure_code(
+                            main_failure_code
+                        )
+                        recovered_status: AuditStatus = (
+                            (
+                                "main_timeout_recovered"
+                                if installed_failure in _VALIDATION_MAIN_TIMEOUT_FAILURE_CODES
+                                else "main_exception_recovered"
+                            )
+                            if installed_failure is not None
+                            else {
+                                "primary_invalid": "main_invalid_recovered",
+                                "corrective_invalid": "main_invalid_recovered",
+                                "primary_exception": "main_exception_recovered",
+                                "primary_timeout": "main_timeout_recovered",
+                                "corrective_timeout": "main_timeout_recovered",
+                            }[main_failure_code]
+                        )
                         assert backup_call_id is not None and backup_request_hash is not None
                         winner_slot = (
                             "corrective"
@@ -4215,7 +4212,9 @@ class Deliberation:
         identity = {
             "capsule_id": capsule.capsule_id,
             "proposal_hash": proposal.proposal_hash if proposal is not None else None,
-            "attempt_audits": tuple(value.model_dump(mode="json") for value in attempt_audits),
+            "attempt_audits": tuple(
+                _model_result_identity_material(value) for value in attempt_audits
+            ),
         }
         return DeliberationResult(
             result_id=f"deliberation:{_digest(identity)}",

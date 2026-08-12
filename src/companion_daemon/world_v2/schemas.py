@@ -44,6 +44,11 @@ from .proposal_audit_schemas import ModelResultAuditProjection, ProposalAuditPro
 from .acceptance_manifest import AcceptanceManifestRefV2
 from .schema_core import EvidenceRef, FrozenModel, PrivacyClass
 from .interaction_fact_decision import InteractionFactDecisionRecordedPayload
+from .interaction_act_schemas import (
+    InteractionActMutation,
+    InteractionActProjection,
+    InteractionActTransitionProjection,
+)
 from .appearance_state import AppearanceStateProjection
 from .visible_physical_state import VisiblePhysicalStateProjection
 from .media_v2 import (
@@ -1015,6 +1020,16 @@ class MessageObservationRef(FrozenModel):
     actor: str | None = None
     channel: str | None = None
     payload_ref: str | None = None
+    # Reducer .54 retains only the normalized text digest needed to re-prove
+    # exact-span source closure without exposing message text in projections.
+    normalized_text_hash: str | None = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    # Reply routing is a host-bound coordinate, distinct from the message
+    # actor (for example ``user:*`` vs ``conversation:qq:c2c:*``).
+    reply_context_present: bool = False
+    reply_target: str | None = Field(default=None, min_length=1)
 
 
 class AcceptanceDecisionRef(FrozenModel):
@@ -1033,6 +1048,8 @@ class AcceptanceDecisionRef(FrozenModel):
             "appraisal-acceptance.1",
             "affect-acceptance.1",
             "relationship-acceptance.1",
+            "relationship-commitment-acceptance.1",
+            "interaction-act-acceptance.1",
             "relationship-adjustment-acceptance.1",
             "outcome-acceptance.1",
             "activity-lifecycle-acceptance.2",
@@ -1069,6 +1086,20 @@ class AcceptanceDecisionRef(FrozenModel):
         if self.manifest_version is not None and any(value is None for value in manifest_fields):
             raise ValueError("manifest-backed decision requires complete manifest audit")
         return self
+
+
+class InteractionActProposalProjection(FrozenModel):
+    """Pending, audit-bound proposal for one generic interaction-act transition."""
+
+    proposal_id: str = Field(min_length=1, max_length=256)
+    proposal_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    change_id: str = Field(min_length=1, max_length=256)
+    accepted_change_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    evaluated_world_revision: int = Field(ge=0)
+    mutation_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    mutation: InteractionActMutation
+    recorded_event_ref: str = Field(min_length=1)
+    recorded_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class MinimalReplyManifestRef(FrozenModel):
@@ -4431,6 +4462,81 @@ class RelationshipSignalOrigin(FrozenModel):
     accepted_event_ref: str = Field(min_length=1)
 
 
+class RelationshipCommitmentOrigin(FrozenModel):
+    """Exact role-authored transition accepted by relationship authority."""
+
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    accepted_event_ref: str = Field(min_length=1)
+
+
+class RelationshipCommitmentDeliveryProof(FrozenModel):
+    """Exact delivered expression authority for a visible commitment."""
+
+    expression_proposal_id: str = Field(min_length=1)
+    expression_acceptance_id: str = Field(min_length=1)
+    expression_plan_id: str = Field(min_length=1)
+    plan_event_ref: str = Field(min_length=1)
+    plan_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expression_beat_id: str = Field(min_length=1)
+    beat_event_ref: str = Field(min_length=1)
+    beat_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    message_payload_ref: str = Field(min_length=1)
+    message_payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    stored_payload_event_ref: str = Field(min_length=1)
+    stored_payload_event_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    action_id: str = Field(min_length=1)
+    action_target_ref: str = Field(min_length=1)
+    action_event_ref: str = Field(min_length=1)
+    action_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    receipt_id: str = Field(min_length=1)
+    receipt_event_ref: str = Field(min_length=1)
+    receipt_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    receipt_world_revision: int = Field(ge=1)
+
+
+class RelationshipCommitmentProjection(FrozenModel):
+    """One explicit relationship-stage commitment authored by the character.
+
+    This projection records the typed decision; it is never inferred from
+    visible wording or from a relationship signal.
+    """
+
+    commitment_id: str = Field(min_length=1)
+    relationship_id: str = Field(min_length=1)
+    subject_ref: str = Field(min_length=1)
+    stage_before: RelationshipStage
+    committed_stage: Literal["acquaintance", "friend", "close_friend"]
+    status: Literal["active"] = "active"
+    commitment_code: str = Field(min_length=1, max_length=128)
+    persistence: Literal["durable"] = "durable"
+    visible_text_span: str = Field(min_length=1, max_length=1_200)
+    delivery_proof: RelationshipCommitmentDeliveryProof
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    origin: RelationshipCommitmentOrigin
+    committed_at: datetime
+
+    @field_validator("committed_stage", mode="before")
+    @classmethod
+    def stage_uses_installed_commitment_protocol(cls, value: object) -> object:
+        if value not in {"acquaintance", "friend", "close_friend"}:
+            raise ValueError("relationship commitment requires an ordinary installed stage")
+        return value
+
+    @model_validator(mode="after")
+    def commitment_is_a_real_transition(self) -> RelationshipCommitmentProjection:
+        if self.stage_before == self.committed_stage:
+            raise ValueError("relationship commitment must change stage")
+        if self.commitment_code != self.commitment_code.strip():
+            raise ValueError("relationship commitment code must be trimmed")
+        if self.visible_text_span != self.visible_text_span.strip():
+            raise ValueError("relationship commitment visible text span must be trimmed")
+        if self.committed_at.tzinfo is None or self.committed_at.utcoffset() is None:
+            raise ValueError("relationship commitment time must be timezone-aware")
+        return self
+
+
 def relationship_signal_fingerprint(
     *,
     subject_ref: str,
@@ -4495,6 +4601,7 @@ class RelationshipSignalProjection(FrozenModel):
 class RelationshipProposedMutation(FrozenModel):
     event_type: Literal[
         "RelationshipSignalAccepted",
+        "RelationshipCommitmentAccepted",
         "RelationshipSlowVariableAdjusted",
         "BoundaryChanged",
     ]
@@ -4535,6 +4642,7 @@ class RelationshipProposalProjection(FrozenModel):
     authority_contract_ref: Literal["proposal-contract:relationship.1"]
     transition_kind: Literal[
         "signal",
+        "commitment",
         "adjust",
         "compensate",
         "boundary_open",
@@ -4557,6 +4665,7 @@ class RelationshipProposalProjection(FrozenModel):
     def transition_matches_event(self) -> RelationshipProposalProjection:
         expected = {
             "signal": "RelationshipSignalAccepted",
+            "commitment": "RelationshipCommitmentAccepted",
             "adjust": "RelationshipSlowVariableAdjusted",
             "compensate": "RelationshipSlowVariableAdjusted",
             "boundary_open": "BoundaryChanged",
@@ -5797,7 +5906,7 @@ from .external_perception_acceptance_manifest import (  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.53"
+    reducer_bundle_version: str = "world-v2-reducers.56"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -5906,6 +6015,10 @@ class LedgerProjection(FrozenModel):
     affect_proposals: tuple[AffectProposalProjection, ...] = ()
     affect_proposal_ids: tuple[str, ...] = ()
     relationship_signals: tuple[RelationshipSignalProjection, ...] = ()
+    relationship_commitments: tuple[RelationshipCommitmentProjection, ...] = ()
+    interaction_acts: tuple[InteractionActProjection, ...] = ()
+    interaction_act_transitions: tuple[InteractionActTransitionProjection, ...] = ()
+    interaction_act_proposals: tuple[InteractionActProposalProjection, ...] = ()
     relationship_adjustments: tuple[RelationshipAdjustmentProjection, ...] = ()
     relationship_states: tuple[RelationshipStateProjection, ...] = ()
     boundaries: tuple[BoundaryProjection, ...] = ()

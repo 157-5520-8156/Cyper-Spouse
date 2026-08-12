@@ -153,7 +153,7 @@ class _Ledger:
 
     def __init__(
         self, *events: WorldEvent, plans=(), occurrences=(), affect_episodes=(),
-        relationship_states=(), life_arcs=(),
+        relationship_states=(), life_arcs=(), experiences=(), life_content_descriptors=(),
     ) -> None:
         self._events: dict[str, WorldEvent] = {}
         self._refs: list[CommittedWorldEventRef] = []
@@ -163,6 +163,8 @@ class _Ledger:
         self.affect_episodes = tuple(affect_episodes)
         self.relationship_states = tuple(relationship_states)
         self.life_arcs = tuple(life_arcs)
+        self.experiences = tuple(experiences)
+        self.life_content_descriptors = tuple(life_content_descriptors)
         for event in events:
             self._append(event)
 
@@ -184,7 +186,8 @@ class _Ledger:
             affect_episodes=self.affect_episodes,
             relationship_states=self.relationship_states,
             life_arcs=self.life_arcs,
-            photo_candidates=(), experiences=(), facts=(),
+            photo_candidates=(), experiences=self.experiences, facts=(),
+            life_content_descriptors=self.life_content_descriptors,
         )
 
     def project(self) -> SimpleNamespace:
@@ -502,6 +505,78 @@ def test_author_declares_public_evidence_and_opens_character_candidates(
     assert candidate["family"] == "character_media"
     assert candidate["character_media_contract"]["kind"] == "selfie"
     assert result.opened_candidate_ids == (candidate["candidate_id"],)
+
+
+def test_role_requested_visual_source_opens_candidate_without_a_second_random_choice(
+    tmp_path: Path,
+) -> None:
+    ledger, settlement = _walk_world()
+
+    result = _author(ledger, tmp_path).request_once(
+        source_refs=(settlement.event_id,),
+        trace_id="trace:role-request",
+        correlation_id="correlation:role-request",
+    )
+
+    assert result.status == "declared"
+    assert result.reason_code == "visual_evidence.role_requested_candidate_declared"
+    assert result.declared_source_ref == settlement.event_id
+    assert len(ledger.events_of_type("ImageEvidenceDeclared")) == 1
+    assert len(ledger.events_of_type("PhotoCandidateOpened")) == 1
+    assert len(result.opened_candidate_ids) == 1
+
+
+def test_role_requested_visual_source_never_substitutes_a_different_recent_event(
+    tmp_path: Path,
+) -> None:
+    ledger, _settlement = _walk_world()
+
+    result = _author(ledger, tmp_path).request_once(
+        source_refs=("event:not-attended",),
+        trace_id="trace:role-request",
+        correlation_id="correlation:role-request",
+    )
+
+    assert result.status == "idle"
+    assert result.reason_code == "visual_evidence.no_requested_capture_source"
+    assert ledger.events_of_type("ImageEvidenceDeclared") == ()
+    assert ledger.events_of_type("PhotoCandidateOpened") == ()
+
+
+def test_role_requested_experience_authority_resolves_to_its_exact_settlement(
+    tmp_path: Path,
+) -> None:
+    experience_event = _event(
+        event_id="event:experience:walk",
+        event_type="ExperienceCommitted",
+        at=NOW - timedelta(minutes=30),
+    )
+    experience = SimpleNamespace(
+        experience_id="experience:walk",
+        origin=SimpleNamespace(accepted_event_ref=experience_event.event_id),
+        values=SimpleNamespace(
+            source_bindings=(
+                SimpleNamespace(
+                    source_kind="occurrence_settlement",
+                    occurrence_id="occurrence:walk",
+                    authority_event_ref="event:settlement:walk",
+                ),
+            )
+        ),
+    )
+    ledger, _settlement = _walk_world(experiences=(experience,))
+    ledger._append(experience_event)  # noqa: SLF001 - source-bound ledger fixture
+
+    result = _author(ledger, tmp_path).request_once(
+        source_refs=(experience_event.event_id,),
+        trace_id="trace:experience-request",
+        correlation_id="correlation:experience-request",
+    )
+
+    assert result.status == "declared"
+    assert result.reason_code == "visual_evidence.role_requested_candidate_declared"
+    assert result.declared_source_ref == "event:settlement:walk"
+    assert len(ledger.events_of_type("PhotoCandidateOpened")) == 1
 
 
 def test_author_copies_current_season_calendar_residence_and_life_arc_context(

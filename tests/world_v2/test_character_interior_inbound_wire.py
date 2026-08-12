@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import UTC, datetime
 from hashlib import sha256
 import threading
@@ -18,6 +19,7 @@ from companion_daemon.world_v2.character_interior.inbound_wire import (
     _incremental_first_expression,
     _stream_first_expression,
     _stream_tail_expression,
+    _normalize_source_review_attempt_failure_code,
     expression_draft_shape_contract,
     review_candidate_external_proposition_coverage,
     review_expression_source_closure,
@@ -36,6 +38,7 @@ from companion_daemon.world_v2.expression_draft import (
     TEXT_ONLY_EXPRESSION_CAPABILITIES,
     build_source_ref_alias_table,
     current_counterpart_report_source_refs,
+    materialize_expression_draft,
     qq_expression_capabilities,
     _world_claim_evidence,
     world_source_scope_boundary,
@@ -155,6 +158,67 @@ def test_qq_media_request_capability_is_enabled_only_by_a_real_deployment() -> N
     assert available.media_request_mode == "candidate_only"
     assert available.prompt_value()["media_request_mode"] == "candidate_only"
     assert available.prompt_value()["media_request_timing"] == "now_only"
+
+
+def test_media_source_selection_becomes_durable_event_evidence_not_private_audit() -> None:
+    source_ref = "event:life-aftermath:experience:walk"
+    request = _qq_request().model_copy(
+        update={
+            "model_content_json": json.dumps(
+                {
+                    "logical_time": "2026-08-11T12:00:00+00:00",
+                    "slices": {
+                        "recent_experiences": {
+                            "availability": "available",
+                            "items": [
+                                {
+                                    "source_ref": source_ref,
+                                    "source_bindings": [
+                                        {
+                                            "ref": source_ref,
+                                            "source_kind": "committed_event",
+                                            "authority_type": "ExperienceCommitted",
+                                            "source_world_revision": 2,
+                                            "immutable_hash": "c" * 64,
+                                        }
+                                    ],
+                                    "value": {"experience_id": "experience:walk"},
+                                }
+                            ],
+                        }
+                    },
+                }
+            )
+        }
+    )
+    proposal = materialize_expression_draft(
+        value={
+            "private_turn_state": {
+                "contract": "private-turn-state.1",
+                "inner_state_summary": "I want to consider sharing this lived moment.",
+                "attended_source_refs": [source_ref],
+            },
+            "timing_choice": "now",
+            "beats": [{"modality": "text", "text": "刚才那一刻，我有点想拍下来。"}],
+            "stance": "considering",
+            "brief_rationale": "The exact lived moment may be worth sharing.",
+            "confidence": 7_500,
+            "world_claims": [],
+            "media_request": "consider_available_candidate",
+            "media_source_refs": [source_ref],
+        },
+        request=request,
+        capabilities=qq_expression_capabilities(
+            "napcat", media_request_available=True
+        ),
+        private_state_context_json=request.model_content_json,
+    )
+
+    evidence = next(item for item in proposal.evidence_refs if item.ref_id == source_ref)
+    assert evidence.evidence_kind == "committed_experience"
+    assert proposal.private_turn_state is not None
+    change = proposal.proposed_changes[0]
+    assert change.payload.value()["media_source_refs"] == [source_ref]
 
 
 def test_private_turn_state_contract_does_not_license_invented_life_context() -> None:
@@ -922,6 +986,263 @@ def test_strict_forced_stream_removes_only_null_union_siblings() -> None:
     assert first["appraisal_draft"]["affect"] == "no_change"
     assert first["expression_draft"]["beats"][0]["text"] == "先说一句。"
     assert tail["expression_draft"]["timing_choice"] == "silent"
+
+
+def _compact_full_turn_event_envelope() -> dict[str, object]:
+    return {
+        "protocol": "character-interior-events.1",
+        "appraisal_draft": {"appraise": False, "affect": "no_change"},
+        "events": [
+            {
+                "type": "head",
+                "timing_choice": "now",
+                "beat": {"modality": "text", "text": "完整能力仍在同一次调用里。"},
+                "stance": "自然",
+                "brief_rationale": "我选择了完整表达能力。",
+                "confidence": 7000,
+                "world_claims": [],
+            },
+            {"type": "end"},
+        ],
+    }
+
+
+def test_compact_gate_recall_control_transfer_waits_for_complete_exact_object() -> None:
+    value: dict[str, object] = {
+        "result_kind": "recall",
+        "protocol": None,
+        "appraisal_draft": None,
+        "events": None,
+        "full_turn_json": None,
+        "private_turn_state": {
+            "contract": "private-turn-state.1",
+            "inner_state_summary": "我想先使用另一项角色能力。",
+            "attended_source_refs": [],
+        },
+        "recall_request": {
+            "query_text": "此前相关记忆",
+            "memory_kinds": ["episodic"],
+            "limit": 4,
+        },
+    }
+    raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    assert _incremental_first_expression(raw[:-1], forced_tool=True) is None
+    first = json.loads(_stream_first_expression(raw))
+    tail = json.loads(_stream_tail_expression(raw))
+
+    assert set(first) == {"private_turn_state", "recall_request"}
+    assert tail == first
+
+
+def test_compact_full_turn_recursively_uses_existing_event_parser() -> None:
+    envelope = _compact_full_turn_event_envelope()
+    raw = json.dumps(
+        {
+            "result_kind": "full_turn",
+            "protocol": None,
+            "appraisal_draft": None,
+            "events": None,
+            "full_turn_json": json.dumps(
+                envelope,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "private_turn_state": None,
+            "recall_request": None,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+    first = json.loads(_stream_first_expression(raw))
+    tail = json.loads(_stream_tail_expression(raw))
+
+    assert first["appraisal_draft"] == envelope["appraisal_draft"]
+    assert first["expression_draft"]["beats"][0]["text"] == (
+        "完整能力仍在同一次调用里。"
+    )
+    assert tail["expression_draft"]["timing_choice"] == "silent"
+
+
+def test_compact_full_turn_unescapes_inner_head_before_outer_string_finishes() -> None:
+    envelope = _compact_full_turn_event_envelope()
+    raw = json.dumps(
+        {
+            "result_kind": "full_turn",
+            "full_turn_json": json.dumps(
+                envelope,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    end_marker = ',{\\"type\\":\\"end\\"}'
+    prefix = raw[: raw.index(end_marker)]
+
+    assert (
+        _incremental_first_expression(
+            prefix,
+            forced_tool=True,
+            compact_gate=True,
+        )
+        is None
+    )
+    first_raw = _incremental_first_expression(prefix, forced_tool=True)
+
+    assert first_raw is not None
+    first = json.loads(first_raw)
+    assert first["expression_draft"]["beats"][0]["text"] == (
+        "完整能力仍在同一次调用里。"
+    )
+
+
+def _compact_reply_only_outer() -> dict[str, object]:
+    return {
+        "result_kind": "reply_only",
+        "protocol": "character-interior-events.1",
+        "appraisal_draft": {
+            "appraise": False,
+            "affect": "no_change",
+            "brief_rationale": "这句不形成持久评价。",
+            "behavior_tendency": "自由接话",
+            "stance": "自然",
+            "display_strategy": "直接说",
+            "confidence": 7000,
+        },
+        "events": [
+            {
+                "type": "head",
+                "private_turn_state": {
+                    "contract": "private-turn-state.1",
+                    "inner_state_summary": "我想直接接住这句话。",
+                    "attended_source_refs": [],
+                },
+                "timing_choice": "now",
+                "turn_posture": "continue",
+                "cadence": "conversational",
+                "beat": {"modality": "text", "text": "我在听。"},
+                "stance": "自然",
+                "brief_rationale": "这句已经完整。",
+                "confidence": 7000,
+                "response_expectation": None,
+                "response_expectation_assessment": None,
+                "world_claims": [],
+                "media_request": "none",
+                "media_source_refs": [],
+            },
+            {"type": "end"},
+        ],
+        "full_turn_json": None,
+        "private_turn_state": None,
+        "recall_request": None,
+    }
+
+
+def test_compact_reply_waits_for_complete_outer_union_before_head_authority() -> None:
+    raw = json.dumps(
+        _compact_reply_only_outer(),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+    assert (
+        _incremental_first_expression(
+            raw[:-1],
+            forced_tool=True,
+            compact_gate=True,
+        )
+        is None
+    )
+    assert (
+        _incremental_first_expression(
+            raw,
+            forced_tool=True,
+            compact_gate=True,
+        )
+        is not None
+    )
+
+
+@pytest.mark.parametrize("result_kind", ("reply_only", "full_turn"))
+def test_compact_visible_branch_rejects_late_cross_branch_sibling(
+    result_kind: str,
+) -> None:
+    if result_kind == "reply_only":
+        value = _compact_reply_only_outer()
+        value["full_turn_json"] = json.dumps(
+            _compact_full_turn_event_envelope(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    else:
+        value = {
+            "result_kind": "full_turn",
+            "protocol": None,
+            "appraisal_draft": {"appraise": False},
+            "events": None,
+            "full_turn_json": json.dumps(
+                _compact_full_turn_event_envelope(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "private_turn_state": None,
+            "recall_request": None,
+        }
+    raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    with pytest.raises(ValueError, match="compact gate|reply-only"):
+        _incremental_first_expression(
+            raw,
+            forced_tool=True,
+            compact_gate=True,
+        )
+
+
+def test_compact_gate_control_transfer_rejects_cross_branch_payload() -> None:
+    raw = json.dumps(
+        {
+            "result_kind": "full_turn",
+            "protocol": None,
+            "appraisal_draft": {"appraise": False},
+            "events": None,
+            "full_turn_json": json.dumps(_compact_full_turn_event_envelope()),
+            "private_turn_state": None,
+            "recall_request": None,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+    with pytest.raises(ValueError, match="compact gate"):
+        _stream_first_expression(raw)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "raw_code", "expected"),
+    (
+        ("timeout", "sk_live_SECRET", "provider_timeout"),
+        ("exception", "RemoteTransport:http_401", "provider_http_401"),
+        ("exception", "source_review_exception", "source_review_exception"),
+        ("exception", "authored_subcall_exception", "authored_subcall_exception"),
+        ("exception", "sk_live_SECRET", "provider_exception"),
+        ("winner", "sk_live_SECRET", None),
+    ),
+)
+def test_source_review_attempt_failure_code_never_persists_provider_content(
+    outcome: str,
+    raw_code: str,
+    expected: str | None,
+) -> None:
+    normalized = _normalize_source_review_attempt_failure_code(
+        raw_code,
+        outcome=outcome,
+    )
+
+    assert normalized == expected
+    assert "SECRET" not in (normalized or "")
 
 
 def test_strict_forced_stream_accepts_empty_sibling_beat_transport_padding() -> None:
@@ -9009,6 +9330,139 @@ async def test_v5_coverage_can_cite_current_relationship_authority_and_reclassif
     assert result.review.decision == "supported"
     assert result.visible_authority_exhaustive is True
     assert len(narrow.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_v5_interaction_act_authority_preserves_typed_frame_and_rejects_unset_outcome() -> (
+    None
+):
+    """One generic typed act can support its frame without fabricating its outcome."""
+
+    proposed_span = "你说要把那本旧书寄给我"
+    received_span = "我已经收到那本旧书了"
+    text = f"{proposed_span}，{received_span}。"
+    interaction_ref = "interior:interaction-act:book-transfer"
+    interaction_value = {
+        "frame": {
+            "subject_ref": "user:primary",
+            "counterparty_refs": ["agent:companion"],
+            "act_kind": "提出把书寄给对方",
+            "object": {
+                "object_ref": "interaction-object:sha256:" + "a" * 64,
+                "object_label": "那本旧书",
+                "epistemic_scope": "report_only",
+            },
+        },
+        "participant_statuses": [
+            {
+                "actor_ref": "user:primary",
+                "status_code": "已提出",
+                "source_ref": {
+                    "authority_kind": "observed_message",
+                    "source_event_ref": "event:observation:book-transfer",
+                    "source_actor_ref": "user:primary",
+                },
+                "source_text_span": "我把那本旧书寄给你",
+                "updated_at": "2026-08-11T12:00:00+00:00",
+            }
+        ],
+        "external_outcome": "not_established",
+    }
+    request = _qq_request_with_recent_dialogue(
+        trigger_text="那本书的事你还记得吗？",
+        records=[
+            {
+                "dialogue_ref": f"dialogue:observation:unrelated:{index}",
+                "speaker": "counterpart" if index % 2 else "companion",
+                "text": f"第 {index} 条无关消息",
+                "occurred_at": f"2026-08-11T11:0{index}:00+00:00",
+                "sequence": index,
+            }
+            for index in range(1, 5)
+        ],
+    )
+    context = json.loads(request.model_content_json)
+    context["slices"]["interaction_acts"] = {
+        "availability": "available",
+        "items": [
+            {
+                "item_ref": interaction_ref,
+                "privacy_class": "private",
+                "value": interaction_value,
+            }
+        ],
+    }
+    request = request.model_copy(
+        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
+    )
+
+    class _InteractionActAwareAuthority(_StrictCoverageSequenceJsonModel):
+        async def complete_json(  # type: ignore[override]
+            self,
+            messages: list[dict[str, str]],
+            *,
+            temperature: float = 0.8,
+        ) -> str:
+            self.calls.append((messages, temperature))
+            packet = json.loads(messages[-1]["content"])
+            source_refs = [item["source_ref"] for item in packet["source_ref_table"]]
+            act_entry = next(
+                entry
+                for entry in packet["source_evidence"]["entries"]
+                if entry.get("kind") == "pinned_context_item"
+                and entry.get("lane") == "interaction_acts"
+            )
+            assert act_entry["authority"] == ("typed_interaction_act_projection_exact_value_only")
+            assert act_entry["source_refs"] == [interaction_ref]
+            assert act_entry["item"]["value"] == interaction_value
+            return _coverage_wire_v5(
+                [
+                    _indexed_coverage_finding(
+                        0,
+                        decision="closed",
+                        relation="pinned_context_authority_coverage",
+                        source_ref_indexes=[source_refs.index(interaction_ref)],
+                    ),
+                    _indexed_coverage_finding(
+                        1,
+                        decision="unclosed",
+                        relation="unclosed",
+                    ),
+                ]
+            )
+
+    authority = _InteractionActAwareAuthority([])
+    result = await review_candidate_external_proposition_coverage(
+        inventory_model=_SequenceJsonModel(
+            [
+                _inventory_v5(
+                    [
+                        {
+                            "locator": _coverage_locator(proposed_span),
+                            "semantic_role": "standalone_external_proposition",
+                        },
+                        {
+                            "locator": _coverage_locator(
+                                received_span,
+                                char_start=text.index(received_span),
+                            ),
+                            "semantic_role": "standalone_external_proposition",
+                        },
+                    ]
+                )
+            ]
+        ),
+        authority_reviewer=authority,
+        request=request,
+        raw=_candidate_coverage_raw(text),
+        identity_frame=None,
+    )
+
+    assert result.review is not None
+    assert result.review.decision == "unsupported"
+    assert [finding.visible_span for finding in result.review.visible_findings] == [received_span]
+    assert result.visible_authority_exhaustive is True
+    assert len(authority.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -18420,6 +18874,71 @@ async def test_compact_source_authority_closes_complete_source_free_surface_in_o
 
 
 @pytest.mark.asyncio
+async def test_compact_source_authority_never_adds_full_v7_for_declared_claims() -> None:
+    text = "我现在确实有点想你。"
+
+    class _CompactAuthority(_SequenceJsonModel):
+        def supports_strict_output_contract(self, contract: str) -> bool:
+            return contract in {
+                "visible-beat-source-verdict.1",
+                "source-closure-review.7",
+                "report-relative-entailment-adjudication.3",
+            }
+
+    reviewer = _CompactAuthority(
+        [
+            json.dumps(
+                {
+                    "contract": "visible-beat-source-verdict.1",
+                    "decisions": [
+                        {
+                            "beat_index": 0,
+                            "verdict": "source_free",
+                            "semantic_role": "private_state",
+                            "subject_role": "companion",
+                            "source_ref_indexes": [],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+    raw = json.dumps(
+        {
+            "timing_choice": "now",
+            "beats": [{"modality": "text", "text": text}],
+            "stance": "direct",
+            "brief_rationale": "State a present private feeling.",
+            "confidence": 9000,
+            "world_claims": [
+                {
+                    "claim_text": "我现在有点想你",
+                    "scope": "subjective_or_hypothetical",
+                    "source_refs": [],
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    result = await review_expression_with_candidate_external_coverage(
+        reviewer=reviewer,
+        inventory_model=_StrictInventorySequenceJsonModel([]),
+        request=_qq_request(),
+        raw=raw,
+        identity_frame=None,
+    )
+
+    assert result.review is None
+    assert result.visible_authority_exhaustive is True
+    assert len(reviewer.calls) == 1
+    assert json.loads(reviewer.calls[0][0][-1]["content"])["output_contract"][
+        "contract"
+    ] == "visible-beat-source-verdict.1"
+
+
+@pytest.mark.asyncio
 async def test_compact_source_authority_reviews_text_without_serializing_opaque_beats() -> None:
     text = "我在听。"
 
@@ -18525,7 +19044,7 @@ async def test_compact_source_authority_rejects_unclosed_external_segment() -> N
 
 
 @pytest.mark.asyncio
-async def test_compact_source_authority_falls_back_to_full_v7_after_wire_retry() -> None:
+async def test_compact_source_authority_never_falls_back_to_full_v7_after_wire_retry() -> None:
     text = "你这么一问，我忽然有点想你。"
 
     class _SelectiveAuthority(_SequenceJsonModel):
@@ -18540,21 +19059,19 @@ async def test_compact_source_authority_falls_back_to_full_v7_after_wire_retry()
         [
             '{"contract":"visible-beat-source-verdict.1","decisions":[]}',
             '{"contract":"visible-beat-source-verdict.1","decisions":[]}',
-            _source_closure_review(),
         ]
     )
 
-    result = await review_expression_with_candidate_external_coverage(
-        reviewer=reviewer,
-        inventory_model=_StrictInventorySequenceJsonModel([]),
-        request=_qq_request(),
-        raw=_candidate_coverage_raw(text),
-        identity_frame=None,
-    )
+    with pytest.raises(ValidationTechnicalFailure) as raised:
+        await review_expression_with_candidate_external_coverage(
+            reviewer=reviewer,
+            inventory_model=_StrictInventorySequenceJsonModel([]),
+            request=_qq_request(),
+            raw=_candidate_coverage_raw(text),
+            identity_frame=None,
+        )
 
-    assert result.review is not None
-    assert result.review.decision == "supported"
-    assert len(reviewer.calls) == 3
+    assert len(reviewer.calls) == 2
     contracts = [
         json.loads(call[0][-1]["content"])["output_contract"]["contract"]
         for call in reviewer.calls
@@ -18562,8 +19079,91 @@ async def test_compact_source_authority_falls_back_to_full_v7_after_wire_retry()
     assert contracts == [
         "visible-beat-source-verdict.1",
         "visible-beat-source-verdict.1",
-        "source-closure-review.7",
     ]
+    correction = json.loads(reviewer.calls[1][0][-1]["content"])
+    assert correction["failure"] == {
+        "code": "beat_coverage_invalid",
+        "field": "decisions",
+    }
+    assert correction["structural_constraints"]["expected_beat_indexes"] == [0]
+    assert correction["structural_constraints"]["source_ref_count"] >= 0
+    assert correction["structural_constraints"]["verdict_role_ref_matrix"] == {
+        "source_free": {
+            "semantic_roles": [
+                "private_state",
+                "commitment",
+                "generalization",
+                "question",
+            ],
+            "source_ref_indexes": "empty",
+        },
+        "closed": {
+            "semantic_roles": ["external_proposition", "mixed"],
+            "source_ref_indexes": "one_to_eight_unique_in_range",
+        },
+        "unclosed": {
+            "semantic_roles": ["external_proposition", "mixed"],
+            "source_ref_indexes": "empty",
+        },
+    }
+    assert '"decisions":[]' not in reviewer.calls[1][0][-1]["content"]
+    assert raised.value.failure_code == "source_review_exception"
+
+
+@pytest.mark.asyncio
+async def test_compact_source_authority_exact_wire_repair_can_converge(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    text = "你这么一问，我忽然有点想你。"
+
+    class _SelectiveAuthority(_SequenceJsonModel):
+        def supports_strict_output_contract(self, contract: str) -> bool:
+            return contract == "visible-beat-source-verdict.1"
+
+    reviewer = _SelectiveAuthority(
+        [
+            '{"contract":"visible-beat-source-verdict.1","decisions":[]}',
+            json.dumps(
+                {
+                    "contract": "visible-beat-source-verdict.1",
+                    "decisions": [
+                        {
+                            "beat_index": 0,
+                            "verdict": "source_free",
+                            "semantic_role": "private_state",
+                            "subject_role": "companion",
+                            "source_ref_indexes": [],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="companion_daemon.world_v2.character_interior.inbound_wire",
+    ):
+        result = await review_expression_with_candidate_external_coverage(
+            reviewer=reviewer,
+            inventory_model=_StrictInventorySequenceJsonModel([]),
+            request=_qq_request(),
+            raw=_candidate_coverage_raw(text),
+            identity_frame=None,
+        )
+
+    assert result.review is None
+    assert result.visible_authority_exhaustive is True
+    assert len(reviewer.calls) == 2
+    correction = json.loads(reviewer.calls[1][0][-1]["content"])
+    assert correction["failure"] == {
+        "code": "beat_coverage_invalid",
+        "field": "decisions",
+    }
+    assert "code=beat_coverage_invalid" in caplog.text
+    assert "field=decisions" in caplog.text
+    assert text not in caplog.text
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ import httpx
 from jsonschema import Draft202012Validator, ValidationError
 import pytest
 
-from companion_daemon.llm import DeepSeekChatModel
+from companion_daemon.llm import DeepSeekChatModel, provider_invocation_request_hash
 from companion_daemon.world_v2.character_interior import CharacterInterior, InteriorOpportunity
 from companion_daemon.world_v2.character_interior.contracts import (
     FACET_NAMES,
@@ -263,14 +263,17 @@ def _world_stimulus_manifest() -> _InteriorCapabilityManifest:
     )
 
 
-def _private_impression_manifest() -> _InteriorCapabilityManifest:
+def _private_impression_manifest(
+    *,
+    existing_impression_short_tokens: tuple[str, ...] = ("s2",),
+) -> _InteriorCapabilityManifest:
     payload_json = json.dumps(
         {
             "contract": "character-interior-private-impression-capability.1",
             "offered_tokens": ["s0", "s1", "s2"],
             "short_tokens": ["s0", "s1", "s2"],
             "anchor_short_tokens": ["s0"],
-            "existing_impression_short_tokens": ["s2"],
+            "existing_impression_short_tokens": list(existing_impression_short_tokens),
             "expiry_conditions": [
                 "until_appraisal_contradicted",
                 "until_counter_evidence",
@@ -288,6 +291,46 @@ def _private_impression_manifest() -> _InteriorCapabilityManifest:
         payload_json=payload_json,
         payload_hash="sha256:" + hashlib.sha256(payload_json.encode()).hexdigest(),
         source_refs=("source:private_self", "source:appraisal"),
+    )
+
+
+def _tokenized_private_impression_manifest() -> _InteriorCapabilityManifest:
+    semantic_source_ref = "appraisal:source:0"
+    authority_source_ref = "source:private_self"
+    payload_json = json.dumps(
+        {
+            "contract": "character-interior-private-impression-capability.1",
+            "reflection_sources": [
+                {
+                    "source_ref": semantic_source_ref,
+                    "authority_event_ref": authority_source_ref,
+                    "source_kind": "appraisal",
+                    "short_token": "s0",
+                    "value_json": json.dumps(
+                        {"summary": "A source-bound tentative appraisal."},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                }
+            ],
+            "short_tokens": ["s0"],
+            "existing_impression_short_tokens": [],
+            "anchor_short_tokens": ["s0"],
+            "token_map": {"s0": semantic_source_ref},
+            "anchor_source_refs": [semantic_source_ref],
+            "expiry_conditions": ["until_counter_evidence"],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return _InteriorCapabilityManifest(
+        capability_ref="capability:private-impression:tokenized",
+        capability_kind="private_impression_reflection",
+        payload_json=payload_json,
+        payload_hash="sha256:" + hashlib.sha256(payload_json.encode()).hexdigest(),
+        source_refs=(authority_source_ref,),
     )
 
 
@@ -1574,6 +1617,10 @@ async def test_private_impression_reflection_uses_one_versioned_forced_tool() ->
 
     assert result["status"] == "transition"
     assert result["proposals"][0]["payload"]["source_refs"] == ["s0"]
+    provider_request = json.loads(model.calls[0][0][1]["content"])
+    assert provider_request["purpose_contract"]["proposal_schema"]["decision"] == (
+        "retain|consolidate|supersede"
+    )
     assert len(model.tool_calls) == 1
     tools, tool_choice = model.tool_calls[0]
     assert tool_choice == {
@@ -1670,6 +1717,13 @@ def test_private_impression_tool_schema_preserves_no_change_tokens_and_expiry() 
         if branch["properties"]["status"]["enum"] == ["transition"]
     )
     proposal = transition["properties"]["proposals"]["items"]
+    assert proposal["properties"]["decision"]["enum"] == [
+        "retain",
+        "consolidate",
+        "supersede",
+    ]
+    description = contract.provider_tools[0]["function"]["description"]
+    assert "retain/consolidate/supersede" in description
     assert proposal["properties"]["source_refs"]["items"]["enum"] == ["s0", "s1", "s2"]
     assert proposal["properties"]["predecessor_refs"]["items"]["enum"] == ["s2"]
     assert proposal["properties"]["expiry_condition"]["enum"] == [
@@ -1684,6 +1738,90 @@ def test_private_impression_tool_schema_preserves_no_change_tokens_and_expiry() 
         if branch["properties"]["status"]["enum"] == ["no_change"]
     )
     assert no_change["properties"]["proposals"]["maxItems"] == 0
+
+
+def test_private_impression_tool_schema_removes_unavailable_replacement_choices() -> None:
+    contract = StructuredRoleToolContracts().private_impression_reflection(
+        capability_payload=_private_impression_manifest(
+            existing_impression_short_tokens=()
+        ).payload,
+        recall_allowed=False,
+    )
+    parameters = contract.provider_tools[0]["function"]["parameters"]
+    transition = next(
+        branch
+        for branch in parameters["anyOf"]
+        if branch["properties"]["status"]["enum"] == ["transition"]
+    )
+    proposal = transition["properties"]["proposals"]["items"]
+
+    assert proposal["properties"]["decision"]["enum"] == ["retain"]
+    description = contract.provider_tools[0]["function"]["description"]
+    assert "consolidate" not in description
+    assert "supersede" not in description
+
+
+@pytest.mark.asyncio
+async def test_private_impression_correction_names_only_installed_transition_choices() -> None:
+    model = _RequiredToolQueueModel(_private_impression_result(status="transition"))
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-v4-flash")
+
+    await role.experience(
+        await _request(
+            phase="experience",
+            purpose="private_impression_reflection",
+            capability_manifest=_private_impression_manifest(
+                existing_impression_short_tokens=()
+            ),
+            correction_ordinal=1,
+            correction_failure_code="role_result_schema_invalid",
+            correction_failure_detail=(
+                "consolidate/supersede require predecessor refs"
+            ),
+        )
+    )
+
+    provider_request = json.loads(model.calls[0][0][1]["content"])
+    proposal_schema = provider_request["purpose_contract"]["proposal_schema"]
+    assert proposal_schema["decision"] == "retain"
+    assert proposal_schema["predecessor_refs"] == "must be []"
+
+
+@pytest.mark.asyncio
+async def test_private_impression_attention_token_maps_to_its_pinned_authority_source() -> None:
+    raw_result = json.loads(_private_impression_result())
+    raw_result["attended_source_refs"] = ["s0"]
+    model = _RequiredToolQueueModel(json.dumps(raw_result, ensure_ascii=False))
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-v4-flash")
+
+    result = await role.experience(
+        await _request(
+            phase="experience",
+            purpose="private_impression_reflection",
+            capability_manifest=_tokenized_private_impression_manifest(),
+        )
+    )
+
+    assert result["attended_source_refs"] == ("source:private_self",)
+
+
+@pytest.mark.asyncio
+async def test_private_impression_unknown_attention_token_still_fails_closed() -> None:
+    raw_result = json.loads(_private_impression_result())
+    raw_result["attended_source_refs"] = ["s9"]
+    model = _RequiredToolQueueModel(json.dumps(raw_result, ensure_ascii=False))
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-v4-flash")
+
+    with pytest.raises(StructuredRoleResultError) as raised:
+        await role.experience(
+            await _request(
+                phase="experience",
+                purpose="private_impression_reflection",
+                capability_manifest=_tokenized_private_impression_manifest(),
+            )
+        )
+
+    assert raised.value.code == "attended_source_unpinned"
 
 
 def test_private_impression_tool_schema_rejects_nonexistent_predecessor_token() -> None:
@@ -1877,25 +2015,44 @@ def test_world_stimulus_tool_schema_keeps_no_change_and_transition_open() -> Non
 @pytest.mark.asyncio
 async def test_proactive_contact_uses_one_versioned_forced_tool_at_http_boundary() -> None:
     captured: dict[str, object] = {}
+    captured_headers: dict[str, str] = {}
+    captured_paths: list[str] = []
     raw_result = _result(
         status="decision",
         decision={
             "source_refs": ["source:private_self"],
-            "payload": {
-                "timing_choice": "silent",
-                "cadence": "conversational",
-                "beats": [],
-                "stance": "keeping the thought private",
-                "brief_rationale": "she does not want to send it now",
-                "impulse_summary": "the conversation crossed her mind",
-                "confidence": 6400,
-                "world_claims": [],
-            },
+                "payload": {
+                    "timing_choice": "silent",
+                    "turn_posture": None,
+                    "cadence": "conversational",
+                    "beats": [],
+                    "delay_seconds": None,
+                    "expires_after_seconds": None,
+                    "stance": "keeping the thought private",
+                    "brief_rationale": "she does not want to send it now",
+                    "impulse_summary": "the conversation crossed her mind",
+                    "confidence": 6400,
+                    "variation_profile": None,
+                    "response_expectation": None,
+                    "response_expectation_assessment": None,
+                    "world_claims": [],
+                    "media_request": "none",
+                    "media_source_refs": [],
+                },
         },
+    )
+    arguments_json = json.dumps(
+        {"result": json.loads(raw_result)},
+        ensure_ascii=False,
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.update(json.loads(request.content))
+        captured_headers.update(request.headers)
+        captured_paths.append(request.url.path)
+        function = captured["tools"][0]["function"]
+        arguments = json.loads(arguments_json)
+        Draft202012Validator(function["parameters"]).validate(arguments)
         return httpx.Response(
             200,
             json={
@@ -1907,7 +2064,7 @@ async def test_proactive_contact_uses_one_versioned_forced_tool_at_http_boundary
                                     "type": "function",
                                     "function": {
                                         "name": "character_role_proactive_contact_v1",
-                                        "arguments": raw_result,
+                                        "arguments": arguments_json,
                                     },
                                 }
                             ]
@@ -1919,11 +2076,12 @@ async def test_proactive_contact_uses_one_versioned_forced_tool_at_http_boundary
 
     model = DeepSeekChatModel(
         "key",
-        "https://api.deepseek.com",
+        "http://127.0.0.1:32124",
         "deepseek-v4-flash",
         thinking_enabled=False,
         transport=httpx.MockTransport(handler),
     )
+    object.__setattr__(model, "_test_only_capture_exact_request_identity", True)
     try:
         result = await StructuredCharacterRoleFaculty(
             model=model,
@@ -1938,6 +2096,13 @@ async def test_proactive_contact_uses_one_versioned_forced_tool_at_http_boundary
         await model.aclose()
 
     assert result["decision"]["payload"]["timing_choice"] == "silent"
+    assert captured_paths == ["/beta/chat/completions"]
+    assert captured_headers["x-girl-agent-request-identity"] == result["author_lineage"][
+        "request_hash"
+    ].removeprefix("sha256:")
+    assert result["author_lineage"]["response_hash"] == (
+        "sha256:" + hashlib.sha256(arguments_json.encode()).hexdigest()
+    )
     assert "response_format" not in captured
     assert captured["tool_choice"] == {
         "type": "function",
@@ -1947,7 +2112,12 @@ async def test_proactive_contact_uses_one_versioned_forced_tool_at_http_boundary
     assert isinstance(tools, list) and len(tools) == 1
     function = tools[0]["function"]
     assert function["name"] == "character_role_proactive_contact_v1"
-    branches = function["parameters"]["anyOf"]
+    assert function["strict"] is True
+    parameters = function["parameters"]
+    assert parameters["type"] == "object"
+    assert set(parameters["required"]) == set(parameters["properties"])
+    assert set(parameters["properties"]) == {"result"}
+    branches = parameters["properties"]["result"]["anyOf"]
     decision = branches[0]
     assert decision["properties"]["status"]["enum"] == ["decision"]
     assert {
@@ -1971,7 +2141,9 @@ async def test_proactive_contact_uses_one_versioned_forced_tool_at_http_boundary
     } <= set(payload["required"])
     assert len(branches) == 2
     assert branches[1]["properties"]["status"]["enum"] == ["recall_request"]
-    assert decision["properties"]["proposals"]["maxItems"] == 0
+    assert "maxItems" not in json.dumps(parameters)
+    assert "allOf" not in json.dumps(parameters)
+    assert "prefixItems" not in json.dumps(parameters)
 
 
 @pytest.mark.parametrize(
@@ -2433,22 +2605,17 @@ async def test_proactive_request_audit_binds_exact_tool_schema_and_identity() ->
         capability_payload=manifest.payload,
         recall_allowed=True,
     )
-    request_identity = {
-        "messages": model.calls[0][0],
-        "tools": list(contract.provider_tools),
-        "tool_choice": contract.provider_tool_choice,
-        "tool_contract_identity": contract.identity.request_identity_material(),
-    }
     expected_hash = (
         "sha256:"
-        + hashlib.sha256(
-            json.dumps(
-                request_identity,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-        ).hexdigest()
+        + provider_invocation_request_hash(
+            messages=model.calls[0][0],
+            temperature=model.calls[0][1],
+            tools=list(contract.provider_tools),
+            tool_choice=contract.provider_tool_choice,
+            identity_extras={
+                "tool_contract_identity": contract.identity.request_identity_material()
+            },
+        )
     )
 
     assert result["author_lineage"]["request_hash"] == expected_hash

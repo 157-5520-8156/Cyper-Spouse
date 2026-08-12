@@ -674,6 +674,111 @@ async def test_two_character_interior_instances_join_terminal_sidecar_turn(tmp_p
     second_store.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("crash_after_checkpoint", [1, 2])
+async def test_recall_stage_recovery_never_repeats_a_completed_external_result(
+    tmp_path,
+    crash_after_checkpoint: int,
+) -> None:
+    """A reclaimed InnerTurn resumes after the last durable external result."""
+
+    class _CrashAfterCheckpoint:
+        def __init__(self, delegate, *, ordinal: int) -> None:  # type: ignore[no-untyped-def]
+            self._delegate = delegate
+            self._ordinal = ordinal
+            self._calls = 0
+
+        def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
+            return getattr(self._delegate, name)
+
+        def checkpoint(self, **kwargs):  # type: ignore[no-untyped-def]
+            recorded = self._delegate.checkpoint(**kwargs)
+            self._calls += 1
+            if self._calls == self._ordinal:
+                raise RuntimeError("simulated crash after durable checkpoint")
+            return recorded
+
+    class _RecallRole(_Role):
+        async def consider(self, request):  # type: ignore[no-untyped-def]
+            self.consider_requests.append(request)
+            if not request.recall_completed:
+                return {
+                    "status": "recall_request",
+                    "summary": "She chose to retrieve one related memory.",
+                    "attended_source_refs": ("source:private_self",),
+                    "recall_query": "the related rainy walk",
+                    "proposals": (),
+                    "author_lineage": _author_lineage(request),
+                }
+            return {
+                "status": "decision",
+                "summary": "She integrated the recalled detail and decided.",
+                "attended_source_refs": ("experience:rainy-walk",),
+                "decision": {"expression_mode": "reply"},
+                "proposals": (),
+                "author_lineage": _author_lineage(request),
+            }
+
+    class _TracedRecall(_Recall):
+        async def recall(self, request):  # type: ignore[no-untyped-def]
+            recalled = await super().recall(request)
+            recalled["recall_trace_json"] = json.dumps(
+                {"trusted_recall_trace": "exact-stage-result"},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            return recalled
+
+    path = tmp_path / f"recall-stage-{crash_after_checkpoint}.sqlite"
+    first_delegate = open_sqlite_character_interior_turn_store(
+        path=path,
+        world_id="world:test",
+    )
+    second_store = open_sqlite_character_interior_turn_store(
+        path=path,
+        world_id="world:test",
+    )
+    recall = _TracedRecall()
+    first_role = _RecallRole()
+    second_role = _RecallRole()
+    first = CharacterInterior(
+        projection=_Projection(),
+        role=first_role,
+        recall=recall,
+        turn_store=_CrashAfterCheckpoint(
+            first_delegate,
+            ordinal=crash_after_checkpoint,
+        ),
+        turn_owner_id="runtime:first",
+        turn_lease_seconds=30,
+        turn_clock=lambda: _NOW,
+    )
+    second = CharacterInterior(
+        projection=_Projection(),
+        role=second_role,
+        recall=recall,
+        turn_store=second_store,
+        turn_owner_id="runtime:second",
+        turn_lease_seconds=30,
+        turn_clock=lambda: _NOW.replace(second=_NOW.second + 31),
+    )
+
+    interrupted = await first.consider(_opportunity())
+    recovered = await second.consider(_opportunity())
+
+    assert interrupted.status == "technical_failure"
+    assert recovered.status == "decided", recovered.failure_code
+    assert len(first_role.consider_requests) == 1
+    assert len(second_role.consider_requests) == 1
+    assert second_role.consider_requests[0].recall_completed is True
+    assert second_role.consider_requests[0].snapshot.recall_trace_json == (
+        '{"trusted_recall_trace":"exact-stage-result"}'
+    )
+    assert len(recall.requests) == 1
+    first_delegate.close()
+    second_store.close()
+
+
 def test_runtime_health_derives_topology_from_the_frozen_registry() -> None:
     class _PurposeFaculty:
         name = "bounded-purpose-faculty"

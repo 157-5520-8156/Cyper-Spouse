@@ -261,7 +261,41 @@ class ScenarioVerificationError(AssertionError):
 # .53 hash was stale (the per-case verification predicates and replay checks
 # still pass, but the aggregate request/room/replay manifest moved), so this
 # is an explicit audited rebaseline rather than weakening the drift guard.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.61"
+# ``.64`` binds StructuredCharacterRole provider calls to the exact emitted
+# request identity, including temperature, tools/tool choice, and the canonical
+# tool-contract identity. Scenario behavior and predicates are unchanged;
+# durable ModelResult/replay hashes intentionally move with the corrected audit
+# identity.
+# ``.65`` composes the staging ``.64`` provider-emission identity with reducer
+# .54 atomic relationship commitments and generic InteractionAct ``.2``
+# projection/context contracts. Scenario behavior and predicates remain
+# unchanged; durable request, reducer, snapshot and replay identities
+# intentionally move together on the migrated staging baseline.
+# ``.66`` adds the cursor-pinned relationship-stage and InteractionAct identity
+# preflight to the same role wire. The frozen suite emits neither typed choice,
+# so its behavioral predicates remain unchanged; the provider request and
+# durable audit identities intentionally move with the corrected hard-boundary
+# instructions.
+# ``.67`` binds the canonical relationship commitment transition graph into
+# the installed relationship policy digest. Scenario choices and predicates
+# remain unchanged; policy-bearing Context and replay identities intentionally
+# move with the corrected hard-boundary authority.
+# ``.68`` records reducer .55, which makes an effect-free relationship
+# commitment terminal advisory authoritative only for the exact installed
+# compiler reason and only when the pinned current-state transition is truly
+# unavailable. The frozen suite emits no such advisory; its predicates remain
+# unchanged while reducer, snapshot, and replay identities move together.
+# ``.69`` composes reducer .56 exact failed-main physical-provider audit
+# preservation with the one-request ``reply_only`` strict role schema.  The
+# complete fixed corpus keeps every existing per-case predicate enabled while
+# request, reducer, snapshot, and replay identities move together.
+# ``.70`` records the completed compact one-request role transport, durable
+# Recall control-transfer checkpoint/audit recovery, and evidence-bound early
+# retry authority.  The compact branch still preserves the existing role,
+# source-review, acceptance, Action, and receipt boundaries; the frozen suite
+# keeps every existing per-case predicate enabled while request, audit,
+# scheduler, snapshot, and replay identities intentionally move together.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.70"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
@@ -338,8 +372,49 @@ FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.61"
 # The frozen suite has no media deployment or request, so every visible/event/
 # action predicate is unchanged; the authenticated reducer identity and
 # versioned contract material intentionally move the aggregate replay manifest.
+# 2026-08-11 2nd: expression media intent gains a dedicated source-authority
+# coordinate. PrivateTurnState attention remains audit-only; only explicit
+# media_source_refs that are also immutable proposal evidence may compile a
+# candidate. The world-stimulus contract also explains that a role-authored
+# reply_reconsideration Thread is an inner intention, not a scheduled message.
+# Frozen visible outputs, event/action predicates and per-case replay checks
+# remain unchanged; request/audit identities intentionally move.
+# 2026-08-11 3rd: the provider-only strict timing branches now require the
+# canonical non-null world_claims array instead of admitting ``null`` and then
+# paying for a same-role correction. Canonical defaults, Character decisions,
+# all 120 visible/event/action predicates, and per-case replay checks remain
+# unchanged; only strict tool/request audit identities move.
+# 2026-08-11 4th: StructuredCharacterRole request identity now uses the exact
+# provider-emission contract (temperature + rendered tools/tool choice +
+# versioned tool identity), and the guarded loopback header is verified against
+# that same durable hash. All scenario predicates remain unchanged; only
+# request/audit-derived replay identities move.
+# 2026-08-11 5th: reducer .54 installs atomic relationship commitments and the
+# generic InteractionAct projection. CharacterInterior advertises the optional
+# typed wires and carries committed InteractionAct heads in snapshot .7. The
+# frozen suite produces neither effect, and all per-case visible/event/action/
+# replay predicates remain enforced; prompt, reducer and snapshot identities
+# intentionally move the aggregate manifest.
+# 2026-08-11 6th: InteractionAct .2 replaces the offer/response lifecycle with
+# generic declare/revise operations and source-attributed participant status
+# marks. The frozen suite still emits no InteractionAct, so its per-case
+# visible/event/action/replay predicates remain unchanged; the role wire and
+# snapshot contract identities intentionally move the aggregate manifest.
+# ``.67`` composes that migrated baseline with the complete relationship
+# transition-policy identity. Two independent complete frozen-suite processes
+# produced the same aggregate manifest before the new hash was installed.
+# ``.68`` composes the exact relationship-commitment terminal authority with
+# reducer .55. Two independent complete frozen-suite processes must produce
+# the same aggregate manifest before the new hash is installed.
+# ``.69`` composes the single physical role-request path and reducer .56's
+# durable exact physical-terminal binding. Two independent complete 120-case
+# processes must produce the same aggregate manifest before installation.
+# ``.70`` composes the compact single-request role transport with durable
+# Recall control-transfer recovery and the evidence-bound 30-second retry
+# authority. Two independent complete 120-case processes must produce the
+# same aggregate manifest before installation.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "0c841ebe07e534b9c039fef1ec2b7fd06b8ca68e5015ab493ceec4d713a73e4e"
+    "f9bdcaa4c656bfb0c8c8aa277daeeaa6ef44b113a403e3be769f3f272f310d1d"
 )
 
 
